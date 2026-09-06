@@ -28,7 +28,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
           .order("attempted_at", { ascending: false }),
         sb
           .from("publer_analytics")
-          .select("phone_slot,captured_at,video_views,reach,engagement,post_id")
+          .select("phone_slot,captured_at,video_views,reach,engagement,publer_post_id")
           .gte("captured_at", sevenAgoIso),
       ]);
       if (devicesRes.error) throw devicesRes.error;
@@ -46,7 +46,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       // publer_analytics rows are per-capture; the last capture per post is the current metric.
       const latestByPost = new Map<string, any>();
       (analyticsRes.data ?? []).forEach((row: any) => {
-        const key = `${row.phone_slot}::${row.post_id ?? row.id ?? row.captured_at}`;
+        const key = `${row.phone_slot}::${row.publer_post_id ?? row.captured_at}`;
         const prev = latestByPost.get(key);
         if (!prev || new Date(row.captured_at) > new Date(prev.captured_at)) latestByPost.set(key, row);
       });
