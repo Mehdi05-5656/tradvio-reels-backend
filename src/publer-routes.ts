@@ -163,76 +163,88 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
       const slot = slots.find((s) => s.phone_slot === phone);
       if (!slot) return res.status(404).json({ error: "slot not found" });
 
-      // Pull all logged publer posts + latest analytics snapshot
+      // Source of truth: publer_analytics (populated by the analytics cron
+      // from Publer's /post_insights endpoint). This includes EVERY post on
+      // the account that Publer knows about, not just posts our pipeline
+      // published. Rationale: the dashboard should reflect real account
+      // performance, not just our pipeline's slice.
       const since = new Date(Date.now() - days * 86400_000).toISOString();
-      const { data: postsRaw } = await sb()
-        .from("publer_publish_log")
-        .select("publer_post_id,publer_post_link,attempted_at,slot_local_date")
+      const { data: snapsRaw } = await sb()
+        .from("publer_analytics")
+        .select("*")
         .eq("phone_slot", phone)
-        .eq("status", "published")
-        .gte("attempted_at", since)
-        .order("attempted_at", { ascending: false });
+        .gte("captured_at", since)
+        .order("captured_at", { ascending: false });
+      const snaps = snapsRaw ?? [];
 
-      const posts = postsRaw ?? [];
-      // Join analytics by post_link (stable across /posts + /post_insights).
-      // Fall back to publer_post_id when link isn't set yet (e.g. TikTok).
-      const keys = Array.from(new Set(
-        posts
-          .flatMap((p: any) => [p.publer_post_link, p.publer_post_id])
-          .filter(Boolean),
-      ));
-
-      let snaps: any[] = [];
-      if (keys.length) {
-        const { data } = await sb()
-          .from("publer_analytics")
-          .select("*")
-          .in("publer_post_id", keys)
-          .order("captured_at", { ascending: false });
-        snaps = data ?? [];
-      }
-
-      // Latest snapshot indexed by any join key
-      const latestByKey = new Map<string, any>();
+      // For each unique post (keyed by publer_post_id, which stores the
+      // post_link URL), keep only the most recent snapshot.
+      const latestByPost = new Map<string, any>();
       for (const s of snaps) {
-        if (!latestByKey.has(s.publer_post_id)) latestByKey.set(s.publer_post_id, s);
+        if (!latestByPost.has(s.publer_post_id)) latestByPost.set(s.publer_post_id, s);
       }
-      const latestFor = (p: any) =>
-        latestByKey.get(p.publer_post_link) || latestByKey.get(p.publer_post_id) || {};
+      const posts = Array.from(latestByPost.values());
 
-      // Per-day rollup (LA date) for charts
+      // Metric normalization:
+      // - IG returns video_views; TikTok doesn't. For TikTok, use reach as
+      //   the view proxy (TikTok's reach is view-based for videos).
+      // - Publer doesn't return a scalar `engagement` field, only
+      //   engagement_rate. Compute engagement = likes+comments+shares+saves.
+      const isTikTok = slot.provider === "tiktok";
+      const viewsOf = (a: any) => (isTikTok ? (a.reach || 0) : (a.video_views || 0));
+      const engagementOf = (a: any) =>
+        (a.likes || 0) + (a.comments || 0) + (a.shares || 0) + (a.saves || 0);
+
+      // Per-day rollup by LA date. Extract from raw.scheduled_at
+      // (format: '2026-09-06T06:03:57.000-07:00' — already LA offset).
       const perDay: Record<string, { date: string; views: number; likes: number; comments: number; shares: number; saves: number; reach: number; engagement: number; posts: number }> = {};
-      for (const p of posts) {
-        const d = p.slot_local_date;
+      for (const a of posts) {
+        const sched: string | undefined = a?.raw?.scheduled_at;
+        const d = sched ? sched.slice(0, 10) : (a.captured_at || "").slice(0, 10);
+        if (!d) continue;
         perDay[d] ||= { date: d, views: 0, likes: 0, comments: 0, shares: 0, saves: 0, reach: 0, engagement: 0, posts: 0 };
-        const a = latestFor(p);
-        perDay[d].views += a.video_views || 0;
+        perDay[d].views += viewsOf(a);
         perDay[d].likes += a.likes || 0;
         perDay[d].comments += a.comments || 0;
         perDay[d].shares += a.shares || 0;
         perDay[d].saves += a.saves || 0;
         perDay[d].reach += a.reach || 0;
-        perDay[d].engagement += a.engagement || 0;
+        perDay[d].engagement += engagementOf(a);
         perDay[d].posts += 1;
       }
 
-      // Top posts by engagement
+      // Top posts by computed engagement. Include convenience fields so
+      // the UI can render "YYYY-MM-DD · N views" and open the post link.
       const top = posts
-        .map((p: any) => ({ ...p, ...latestFor(p) }))
+        .map((a: any) => {
+          const sched: string | undefined = a?.raw?.scheduled_at;
+          return {
+            publer_post_id: a.publer_post_id,
+            publer_post_link: a.publer_post_id,
+            slot_local_date: sched ? sched.slice(0, 10) : (a.captured_at || "").slice(0, 10),
+            attempted_at: sched || a.captured_at,
+            video_views: viewsOf(a),
+            likes: a.likes || 0,
+            comments: a.comments || 0,
+            shares: a.shares || 0,
+            saves: a.saves || 0,
+            reach: a.reach || 0,
+            engagement: engagementOf(a),
+          };
+        })
         .sort((a: any, b: any) => (b.engagement || 0) - (a.engagement || 0))
         .slice(0, 10);
 
-      // Totals
-      let totals = { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, reach: 0, engagement: 0, posts: posts.length };
-      for (const p of posts) {
-        const a = latestFor(p);
-        totals.views += a.video_views || 0;
+      // Totals across the whole window.
+      const totals = { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, reach: 0, engagement: 0, posts: posts.length };
+      for (const a of posts) {
+        totals.views += viewsOf(a);
         totals.likes += a.likes || 0;
         totals.comments += a.comments || 0;
         totals.shares += a.shares || 0;
         totals.saves += a.saves || 0;
         totals.reach += a.reach || 0;
-        totals.engagement += a.engagement || 0;
+        totals.engagement += engagementOf(a);
       }
 
       res.json({
