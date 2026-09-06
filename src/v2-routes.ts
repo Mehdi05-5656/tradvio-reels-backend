@@ -722,9 +722,9 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.post("/api/v2/templates/:phone", async (req: Request, res: Response) => {
     try {
-      // Requires APP_WRITE_SECRET
-      const secret = req.header("x-app-write-secret");
-      if (!secret || secret !== process.env.APP_WRITE_SECRET) {
+      // Requires APP_WRITE_SECRET (uses same x-app-secret header as other mutations)
+      const secret = process.env.APP_WRITE_SECRET || "";
+      if (secret && req.header("x-app-secret") !== secret) {
         return res.status(401).json({ error: "unauthorized" });
       }
       const phone = req.params.phone;
@@ -752,8 +752,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.post("/api/v2/harvest/:phone", async (req: Request, res: Response) => {
     try {
-      const secret = req.header("x-app-write-secret");
-      if (!secret || secret !== process.env.APP_WRITE_SECRET) {
+      const secret = process.env.APP_WRITE_SECRET || "";
+      if (secret && req.header("x-app-secret") !== secret) {
         return res.status(401).json({ error: "unauthorized" });
       }
       const phone = req.params.phone;
