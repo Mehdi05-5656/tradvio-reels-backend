@@ -144,7 +144,9 @@ export async function publishNow(input: PublishInput): Promise<{ jobId: string }
         type: "video",
         text,
         media: [media],
-        details: { type: "reel", feed: false },
+        // feed:true makes the Reel also appear in the profile Posts grid,
+        // not just the Reels tab. Requested by owner 2026-09-06.
+        details: { type: "reel", feed: true },
       },
     };
   } else if (provider === "tiktok") {
