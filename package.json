@@ -8,7 +8,8 @@
     "start": "node dist/index.cjs",
     "publisher-tick": "node dist/publisher-tick.cjs",
     "analytics-tick": "node dist/analytics-tick.cjs",
-    "build-ticks": "esbuild src/publisher-tick.ts --bundle --platform=node --format=cjs --outfile=dist/publisher-tick.cjs --minify && esbuild src/analytics-tick.ts --bundle --platform=node --format=cjs --outfile=dist/analytics-tick.cjs --minify"
+    "alert-tick": "node dist/alert-tick.cjs",
+    "build-ticks": "esbuild src/publisher-tick.ts --bundle --platform=node --format=cjs --outfile=dist/publisher-tick.cjs --minify && esbuild src/analytics-tick.ts --bundle --platform=node --format=cjs --outfile=dist/analytics-tick.cjs --minify && esbuild src/alert-tick.ts --bundle --platform=node --format=cjs --outfile=dist/alert-tick.cjs --minify"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.58.0",

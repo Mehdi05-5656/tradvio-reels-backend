@@ -3,6 +3,10 @@
 import express, { type Request, type Response } from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes.js";
+import { registerV2Routes } from "./v2-routes.js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import WebSocket from "ws";
+if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
 
 function cors(req: Request, res: Response, next: (err?: any) => void) {
   const origin = req.header("origin") || "*";
@@ -29,6 +33,21 @@ async function main() {
 
   const http = createServer(app);
   await registerRoutes(http, app);
+
+  // v2 routes: devices, alerts, overview. Auth middleware from routes.ts applies to POSTs.
+  let sb: SupabaseClient | null = null;
+  registerV2Routes(app, () => {
+    if (!sb) {
+      const url = process.env.SUPABASE_URL;
+      const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (!url || !key) throw new Error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set");
+      sb = createClient(url, key, {
+        auth: { persistSession: false, autoRefreshToken: false },
+        realtime: { params: { eventsPerSecond: 0 } },
+      });
+    }
+    return sb;
+  });
 
   app.get("/", (_req, res) => res.json({ ok: true, service: "tradvio-reels-backend" }));
   app.get("/healthz", (_req, res) => res.status(200).send("ok"));
