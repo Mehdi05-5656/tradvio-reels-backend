@@ -1,0 +1,25 @@
+{
+  "name": "tradvio-reels-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cardinal --external:@babel/preset-typescript --minify",
+    "start": "node dist/index.cjs",
+    "publisher-tick": "node dist/publisher-tick.cjs",
+    "analytics-tick": "node dist/analytics-tick.cjs",
+    "build-ticks": "esbuild src/publisher-tick.ts --bundle --platform=node --format=cjs --outfile=dist/publisher-tick.cjs --minify && esbuild src/analytics-tick.ts --bundle --platform=node --format=cjs --outfile=dist/analytics-tick.cjs --minify"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.58.0",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.3"
+  }
+}
