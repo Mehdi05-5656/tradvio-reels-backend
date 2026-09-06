@@ -291,16 +291,32 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       if (!VALID_SLOTS.has(phone)) {
         return res.status(400).json({ error: "invalid phone slot" });
       }
-      const days = Math.min(Number(req.query.days ?? 30), 90);
-      const since = new Date(Date.now() - days * 86400_000).toISOString();
+      // Support ?days=N or ?from=YYYY-MM-DD&to=YYYY-MM-DD (min 2026-09-05)
+      const MIN_DATE = "2026-09-05";
+      let sinceISO: string;
+      let untilISO: string | null = null;
+      let windowLabel: string;
+      if (req.query.from) {
+        let from = String(req.query.from);
+        if (from < MIN_DATE) from = MIN_DATE;
+        const to = String(req.query.to ?? new Date().toISOString().slice(0, 10));
+        sinceISO = `${from}T00:00:00-07:00`;
+        untilISO = `${to}T23:59:59-07:00`;
+        windowLabel = `${from} to ${to}`;
+      } else {
+        const days = Math.min(Number(req.query.days ?? 30), 90);
+        sinceISO = new Date(Date.now() - days * 86400_000).toISOString();
+        windowLabel = `last ${days} days`;
+      }
 
       const sb = sbFn();
-      const { data, error } = await sb
+      let q = sb
         .from("publer_analytics")
         .select("*")
         .eq("phone_slot", phone)
-        .gte("captured_at", since)
-        .order("captured_at", { ascending: false });
+        .gte("captured_at", sinceISO);
+      if (untilISO) q = q.lte("captured_at", untilISO);
+      const { data, error } = await q.order("captured_at", { ascending: false });
       if (error) throw error;
 
       // Group by publer_post_id, keep latest snapshot per post
@@ -347,22 +363,32 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         .sort((a, b) => Number(a.video_views ?? 0) - Number(b.video_views ?? 0))
         .slice(0, 5);
 
-      const totalViews = posts.reduce((a, p) => a + Number(p.video_views ?? 0), 0);
-      const totalReach = posts.reduce((a, p) => a + Number(p.reach ?? 0), 0);
-      const totalLikes = posts.reduce((a, p) => a + Number(p.likes ?? 0), 0);
-      const totalEng = posts.reduce((a, p) => a + Number(p.engagement ?? 0), 0);
+      const sum = (k: string) => posts.reduce((a, p) => a + Number((p as any)[k] ?? 0), 0);
+      const avg = (k: string) => {
+        const vals = posts.map((p) => Number((p as any)[k] ?? 0)).filter((n) => n > 0);
+        return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+      };
       const medianViews = median(posts.map((p) => Number(p.video_views ?? 0)));
 
       res.json({
         phone_slot: phone,
-        window_days: days,
+        window: windowLabel,
+        min_date: MIN_DATE,
         posts_count: posts.length,
         totals: {
-          views: totalViews,
-          reach: totalReach,
-          likes: totalLikes,
-          engagement: totalEng,
+          views: sum("video_views"),
+          reach: sum("reach"),
+          likes: sum("likes"),
+          comments: sum("comments"),
+          shares: sum("shares"),
+          saves: sum("saves"),
+          engagement: sum("engagement"),
+          link_clicks: sum("link_clicks"),
+          post_clicks: sum("post_clicks"),
           median_views_per_post: medianViews,
+          avg_engagement_rate: Number(avg("engagement_rate").toFixed(2)),
+          avg_ctr: Number(avg("click_through_rate").toFixed(4)),
+          avg_reach_rate: Number(avg("reach_rate").toFixed(2)),
         },
         heatmap,
         top_performers: topPerformers.map(publicPost),
@@ -447,9 +473,314 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ==================== TODAY ====================
+  // Every post published today (or in a custom date range) with all snapshots
+
+  app.get("/api/v2/today", async (req: Request, res: Response) => {
+    try {
+      // ?date=YYYY-MM-DD (default: today PT). ?from=YYYY-MM-DD&to=YYYY-MM-DD for range.
+      // Minimum start date is 2026-09-05.
+      const MIN_DATE = "2026-09-05";
+      const now = new Date();
+      const ptToday = new Date(now.getTime() - 7 * 3600_000).toISOString().slice(0, 10);
+      let from = String(req.query.from ?? req.query.date ?? ptToday);
+      let to = String(req.query.to ?? req.query.date ?? ptToday);
+      if (from < MIN_DATE) from = MIN_DATE;
+      if (to < from) to = from;
+
+      const fromISO = `${from}T00:00:00-07:00`;
+      const toISO = `${to}T23:59:59-07:00`;
+
+      // Get all publish log entries in range that succeeded
+      const { data: logs, error: logsErr } = await sbFn()
+        .from("publer_publish_log")
+        .select("id, phone_slot, planned_at, attempted_at, publer_post_id, publer_post_link, status, caption_used, hashtags_used")
+        .gte("attempted_at", fromISO)
+        .lte("attempted_at", toISO)
+        .order("attempted_at", { ascending: false });
+      if (logsErr) throw logsErr;
+
+      // Bulk-fetch analytics for these posts
+      const postIds = (logs ?? []).map((l: any) => l.publer_post_link).filter(Boolean);
+      let latestByPost: Record<string, any> = {};
+      let historyByPost: Record<string, any[]> = {};
+      if (postIds.length) {
+        const { data: snaps } = await sbFn()
+          .from("publer_analytics")
+          .select("publer_post_id, captured_at, reach, engagement, engagement_rate, likes, comments, shares, saves, video_views, link_clicks, post_clicks, click_through_rate, reach_rate, raw")
+          .in("publer_post_id", postIds)
+          .order("captured_at", { ascending: true });
+        for (const s of snaps ?? []) {
+          historyByPost[s.publer_post_id] = historyByPost[s.publer_post_id] || [];
+          historyByPost[s.publer_post_id].push(s);
+          latestByPost[s.publer_post_id] = s; // last wins due to asc order
+        }
+      }
+
+      // Group by phone_slot
+      const bySlot: Record<string, any> = {};
+      for (const l of logs ?? []) {
+        const key = l.phone_slot;
+        if (!bySlot[key]) bySlot[key] = { phone_slot: key, posts: [] };
+        const link = l.publer_post_link;
+        const latest = link ? latestByPost[link] : null;
+        const history = link ? historyByPost[link] || [] : [];
+        const raw = latest?.raw ?? {};
+        const captionSource = raw.text ?? l.caption_used ?? null;
+        bySlot[key].posts.push({
+          id: l.id,
+          publer_post_id: l.publer_post_id,
+          post_link: l.publer_post_link,
+          status: l.status,
+          planned_at: l.planned_at,
+          attempted_at: l.attempted_at,
+          caption: captionSource,
+          hashtags: l.hashtags_used ?? extractHashtags(captionSource || ""),
+          source_handle: raw?.notes ? extractHandle(raw.notes) : null,
+          thumbnail: raw?.media?.[0]?.thumbnails?.[0]?.real ?? raw?.medias?.[0]?.thumbnail ?? null,
+          metrics: latest ? {
+            video_views: latest.video_views,
+            reach: latest.reach,
+            likes: latest.likes,
+            comments: latest.comments,
+            shares: latest.shares,
+            saves: latest.saves,
+            engagement: latest.engagement,
+            engagement_rate: Number(latest.engagement_rate ?? 0),
+            link_clicks: latest.link_clicks,
+            post_clicks: latest.post_clicks,
+            click_through_rate: Number(latest.click_through_rate ?? 0),
+            reach_rate: Number(latest.reach_rate ?? 0),
+            captured_at: latest.captured_at,
+          } : null,
+          sparkline: history.map((s: any) => ({
+            t: s.captured_at,
+            views: Number(s.video_views ?? 0),
+            reach: Number(s.reach ?? 0),
+            likes: Number(s.likes ?? 0),
+          })),
+        });
+      }
+
+      res.json({
+        from,
+        to,
+        min_date: MIN_DATE,
+        slots: Object.values(bySlot),
+        total_posts: (logs ?? []).length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== POST DETAIL ====================
+
+  app.get("/api/v2/post/:postLink(*)", async (req: Request, res: Response) => {
+    try {
+      // Route param is URL-encoded post link
+      const postLink = decodeURIComponent(req.params.postLink);
+      const { data: snaps, error } = await sbFn()
+        .from("publer_analytics")
+        .select("*")
+        .eq("publer_post_id", postLink)
+        .order("captured_at", { ascending: true });
+      if (error) throw error;
+      if (!snaps || !snaps.length) return res.status(404).json({ error: "not found" });
+
+      const latest = snaps[snaps.length - 1];
+      const raw = latest.raw ?? {};
+
+      // Look up the publish log row for this link
+      const { data: log } = await sbFn()
+        .from("publer_publish_log")
+        .select("phone_slot, planned_at, attempted_at, caption_used, hashtags_used, status")
+        .eq("publer_post_link", postLink)
+        .maybeSingle();
+
+      const captionText = raw.text ?? log?.caption_used ?? "";
+      res.json({
+        post_link: postLink,
+        phone_slot: log?.phone_slot ?? latest.phone_slot,
+        planned_at: log?.planned_at ?? null,
+        attempted_at: log?.attempted_at ?? null,
+        status: log?.status ?? "unknown",
+        caption: captionText,
+        hashtags: log?.hashtags_used ?? extractHashtags(captionText),
+        source_handle: raw?.notes ? extractHandle(raw.notes) : null,
+        thumbnail: raw?.media?.[0]?.thumbnails?.[0]?.real ?? raw?.medias?.[0]?.thumbnail ?? null,
+        media_url: raw?.media?.[0]?.path ?? raw?.medias?.[0]?.path ?? null,
+        latest_metrics: {
+          video_views: latest.video_views,
+          reach: latest.reach,
+          likes: latest.likes,
+          comments: latest.comments,
+          shares: latest.shares,
+          saves: latest.saves,
+          engagement: latest.engagement,
+          engagement_rate: Number(latest.engagement_rate ?? 0),
+          link_clicks: latest.link_clicks,
+          post_clicks: latest.post_clicks,
+          click_through_rate: Number(latest.click_through_rate ?? 0),
+          reach_rate: Number(latest.reach_rate ?? 0),
+        },
+        timeline: snaps.map((s: any) => ({
+          t: s.captured_at,
+          video_views: s.video_views,
+          reach: s.reach,
+          likes: s.likes,
+          comments: s.comments,
+          shares: s.shares,
+          saves: s.saves,
+          engagement: s.engagement,
+          engagement_rate: Number(s.engagement_rate ?? 0),
+        })),
+        snapshot_count: snaps.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== HASHTAG ANALYTICS ====================
+
+  app.get("/api/v2/hashtags", async (req: Request, res: Response) => {
+    try {
+      const phoneFilter = req.query.phone ? String(req.query.phone) : null;
+      const MIN_DATE = "2026-09-05";
+      const from = String(req.query.from ?? MIN_DATE);
+      const fromISO = `${from < MIN_DATE ? MIN_DATE : from}T00:00:00-07:00`;
+
+      // Get latest snapshot per post so we don't double-count
+      let q = sbFn()
+        .from("publer_analytics")
+        .select("publer_post_id, phone_slot, video_views, reach, likes, engagement_rate, captured_at, raw")
+        .gte("captured_at", fromISO);
+      if (phoneFilter) q = q.eq("phone_slot", phoneFilter);
+      const { data: snaps, error } = await q;
+      if (error) throw error;
+
+      // Reduce to latest per publer_post_id
+      const latestByPost: Record<string, any> = {};
+      for (const s of snaps ?? []) {
+        const prev = latestByPost[s.publer_post_id];
+        if (!prev || new Date(s.captured_at) > new Date(prev.captured_at)) {
+          latestByPost[s.publer_post_id] = s;
+        }
+      }
+
+      // Extract hashtags per post and aggregate
+      const tagStats: Record<string, { count: number; total_views: number; total_reach: number; total_likes: number; er_sum: number; er_n: number; posts: string[] }> = {};
+      for (const s of Object.values(latestByPost)) {
+        const text = s.raw?.text ?? "";
+        const tags = extractHashtags(text);
+        for (const tag of tags) {
+          if (!tagStats[tag]) tagStats[tag] = { count: 0, total_views: 0, total_reach: 0, total_likes: 0, er_sum: 0, er_n: 0, posts: [] };
+          tagStats[tag].count++;
+          tagStats[tag].total_views += Number(s.video_views ?? 0);
+          tagStats[tag].total_reach += Number(s.reach ?? 0);
+          tagStats[tag].total_likes += Number(s.likes ?? 0);
+          const er = Number(s.engagement_rate ?? 0);
+          if (er > 0) { tagStats[tag].er_sum += er; tagStats[tag].er_n++; }
+          if (tagStats[tag].posts.length < 5) tagStats[tag].posts.push(s.publer_post_id);
+        }
+      }
+
+      const items = Object.entries(tagStats).map(([tag, s]) => ({
+        hashtag: tag,
+        posts_count: s.count,
+        avg_views: s.count ? Math.round(s.total_views / s.count) : 0,
+        avg_reach: s.count ? Math.round(s.total_reach / s.count) : 0,
+        avg_likes: s.count ? Math.round(s.total_likes / s.count) : 0,
+        avg_engagement_rate: s.er_n ? Number((s.er_sum / s.er_n).toFixed(2)) : 0,
+        total_views: s.total_views,
+        sample_posts: s.posts,
+      }));
+      items.sort((a, b) => b.avg_views - a.avg_views);
+
+      res.json({ from, total_hashtags: items.length, items });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== CAPTION TEMPLATES ====================
+
+  app.get("/api/v2/templates", async (_req: Request, res: Response) => {
+    try {
+      const { data, error } = await sbFn()
+        .from("device_content_templates")
+        .select("*")
+        .order("phone_slot");
+      if (error) throw error;
+      res.json({ templates: data ?? [] });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/v2/templates/:phone", async (req: Request, res: Response) => {
+    try {
+      // Requires APP_WRITE_SECRET
+      const secret = req.header("x-app-write-secret");
+      if (!secret || secret !== process.env.APP_WRITE_SECRET) {
+        return res.status(401).json({ error: "unauthorized" });
+      }
+      const phone = req.params.phone;
+      const body = req.body ?? {};
+      const patch: any = { updated_at: new Date().toISOString() };
+      if (Array.isArray(body.caption_hooks)) patch.caption_hooks = body.caption_hooks;
+      if (Array.isArray(body.hashtag_pool)) patch.hashtag_pool = body.hashtag_pool.map((t: string) => t.replace(/^#/, ""));
+      if (typeof body.hashtag_count_per_post === "number") patch.hashtag_count_per_post = body.hashtag_count_per_post;
+      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+
+      const { data, error } = await sbFn()
+        .from("device_content_templates")
+        .upsert({ phone_slot: phone, ...patch }, { onConflict: "phone_slot" })
+        .select()
+        .single();
+      if (error) throw error;
+      res.json({ template: data });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== HARVEST FROM PUBLER HISTORY ====================
+  // Mine existing captions/hashtags from a Publer account and seed template
+
+  app.post("/api/v2/harvest/:phone", async (req: Request, res: Response) => {
+    try {
+      const secret = req.header("x-app-write-secret");
+      if (!secret || secret !== process.env.APP_WRITE_SECRET) {
+        return res.status(401).json({ error: "unauthorized" });
+      }
+      const phone = req.params.phone;
+      const { harvestCaptions } = await import("./publer-schedule.js");
+      const result = await harvestCaptions(sbFn(), phone);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+
 }
 
 // ==================== HELPERS ====================
+
+function extractHashtags(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/#[a-z0-9_]+/gi) || [];
+  return [...new Set(matches.map((t) => t.slice(1).toLowerCase()))];
+}
+
+function extractHandle(notes: string): string | null {
+  if (!notes) return null;
+  const m = notes.match(/@?([a-z0-9_.]+)/i);
+  return m ? m[1] : null;
+}
 
 function median(nums: number[]): number {
   if (nums.length === 0) return 0;

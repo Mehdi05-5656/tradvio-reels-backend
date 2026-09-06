@@ -19,6 +19,137 @@ import {
 
 const BUCKET = "reels";
 
+// -------- Caption harvester --------
+// Mines historical captions from Publer's post_insights for a given phone_slot,
+// extracts unique hooks + hashtag frequencies, and upserts the template.
+export async function harvestCaptions(
+  sb: SupabaseClient,
+  phoneSlot: string,
+): Promise<{ posts_scanned: number; unique_hooks: number; unique_hashtags: number; template: any }> {
+  const cfg = await loadConfig(sb);
+  const { data: slot } = await sb
+    .from("publer_slot_config")
+    .select("phone_slot, publer_account_id")
+    .eq("phone_slot", phoneSlot)
+    .maybeSingle();
+  if (!slot) throw new Error(`no slot for ${phoneSlot}`);
+
+  // Pull last 120 days of posts
+  const now = new Date();
+  const to = ptNow(now).ymd;
+  const from = ptNow(new Date(now.getTime() - 120 * 86400_000)).ymd;
+
+  const captions: string[] = [];
+  for (let page = 0; page < 20; page++) {
+    const resp = await postInsights(cfg.workspaceId, slot.publer_account_id, from, to, {
+      page,
+      sortBy: "scheduled_at",
+      sortType: "DESC",
+    });
+    const posts = resp?.posts ?? [];
+    if (!posts.length) break;
+    for (const p of posts) if (p.text) captions.push(p.text);
+    if (posts.length < 10) break;
+  }
+
+  // Extract hooks (text before first hashtag) and hashtag frequency
+  const hookSet = new Set<string>();
+  const tagFreq: Record<string, number> = {};
+  for (const cap of captions) {
+    const hashIdx = cap.indexOf("#");
+    const hook = (hashIdx >= 0 ? cap.slice(0, hashIdx) : cap).trim();
+    if (hook.length >= 2 && hook.length <= 120) hookSet.add(hook);
+    const tags = (cap.match(/#[a-z0-9_]+/gi) || []).map((t) => t.slice(1).toLowerCase());
+    for (const t of new Set(tags)) tagFreq[t] = (tagFreq[t] || 0) + 1;
+  }
+
+  const hooks = [...hookSet];
+  // Top hashtags by frequency, keep top 30
+  const sortedTags = Object.entries(tagFreq).sort((a, b) => b[1] - a[1]).slice(0, 30).map(([t]) => t);
+
+  // Upsert template (preserve existing values if we found nothing new)
+  const { data: existing } = await sb
+    .from("device_content_templates")
+    .select("*")
+    .eq("phone_slot", phoneSlot)
+    .maybeSingle();
+
+  const mergedHooks = hooks.length ? Array.from(new Set([...(existing?.caption_hooks || []), ...hooks])) : (existing?.caption_hooks || []);
+  const mergedTags = sortedTags.length ? Array.from(new Set([...(existing?.hashtag_pool || []), ...sortedTags])) : (existing?.hashtag_pool || []);
+
+  const { data: tpl, error } = await sb
+    .from("device_content_templates")
+    .upsert({
+      phone_slot: phoneSlot,
+      caption_hooks: mergedHooks,
+      hashtag_pool: mergedTags,
+      hashtag_count_per_post: existing?.hashtag_count_per_post ?? 4,
+      enabled: existing?.enabled ?? true,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "phone_slot" })
+    .select()
+    .single();
+  if (error) throw error;
+
+  return {
+    posts_scanned: captions.length,
+    unique_hooks: hooks.length,
+    unique_hashtags: sortedTags.length,
+    template: tpl,
+  };
+}
+
+// -------- Caption composer --------
+// Loads the device template + hashtag pool, picks 1 hook + N unique hashtags.
+// If no template exists, falls back to empty (previous behavior, but logs the miss).
+// Hashtag selection avoids reusing the same set from the previous post to reduce
+// IG/TikTok "same hashtag spam" flags.
+async function composeCaption(
+  sb: SupabaseClient,
+  phoneSlot: string,
+): Promise<{ caption: string; hashtags: string[] }> {
+  const { data: tpl } = await sb
+    .from("device_content_templates")
+    .select("caption_hooks, hashtag_pool, hashtag_count_per_post, enabled")
+    .eq("phone_slot", phoneSlot)
+    .maybeSingle();
+
+  if (!tpl || !tpl.enabled || !(tpl.caption_hooks?.length)) {
+    console.log("[caption] no active template for", phoneSlot);
+    return { caption: "", hashtags: [] };
+  }
+
+  // Pull the last N caption+hashtag sets we used on this slot so we can rotate
+  const { data: recent } = await sb
+    .from("publer_publish_log")
+    .select("caption_used, hashtags_used")
+    .eq("phone_slot", phoneSlot)
+    .not("caption_used", "is", null)
+    .order("attempted_at", { ascending: false })
+    .limit(5);
+  const recentHooks = new Set((recent ?? []).map((r: any) => (r.caption_used || "").split(/\s+#/)[0].trim()));
+  const recentTagSets = (recent ?? []).map((r: any) => new Set<string>(r.hashtags_used ?? []));
+
+  // Pick a hook not used in last 5 posts if possible
+  const hooks: string[] = tpl.caption_hooks;
+  const freshHooks = hooks.filter((h) => !recentHooks.has(h.trim()));
+  const hookPool = freshHooks.length ? freshHooks : hooks;
+  const hook = hookPool[Math.floor(Math.random() * hookPool.length)];
+
+  // Pick N hashtags with least recent overlap
+  const pool: string[] = (tpl.hashtag_pool || []).map((t: string) => t.replace(/^#/, ""));
+  const want = Math.max(1, Math.min(tpl.hashtag_count_per_post || 4, pool.length));
+  // Score each tag by how many of the last 5 posts it appeared in (lower = better)
+  const scored = pool.map((tag) => ({ tag, score: recentTagSets.filter((s) => s.has(tag)).length + Math.random() * 0.1 }));
+  scored.sort((a, b) => a.score - b.score);
+  const chosen = scored.slice(0, want).map((s) => s.tag);
+
+  const hashPart = chosen.map((t) => `#${t}`).join(" ");
+  const caption = hashPart ? `${hook} ${hashPart}` : hook;
+  return { caption, hashtags: chosen };
+}
+
+
 // Publer serializes media-from-url per workspace: parallel uploads get 403.
 // A single in-process mutex is enough (single node instance).
 let uploadMutex: Promise<void> = Promise.resolve();
@@ -259,9 +390,8 @@ export async function publishOne(
       publer_job_id: uploadJob,
     }).eq("id", log.id);
 
-    // 3) Publish
-    // Default caption for now — user can extend later; keep it non-empty and non-spammy.
-    const caption = ""; // empty caption is allowed; we can layer captions later
+    // 3) Publish — pull caption template + hashtag pool for this slot
+    const { caption, hashtags } = await composeCaption(sb, slot.phone_slot);
     const { jobId: publishJob } = await publishNow({
       workspaceId: cfg.workspaceId,
       accountId: slot.publer_account_id,
@@ -271,6 +401,12 @@ export async function publishOne(
       mediaPath: mediaObj.path,
       thumbnailPath: mediaObj.thumbnails?.[0]?.real,
     });
+
+    // Record what we actually posted so analytics can correlate later
+    await sb.from("publer_publish_log").update({
+      caption_used: caption,
+      hashtags_used: hashtags,
+    }).eq("id", log.id);
     const publishPayload = await waitForJob(publishJob, {
       timeoutMs: 120_000,
       intervalMs: 2500,
