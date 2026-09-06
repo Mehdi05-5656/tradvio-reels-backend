@@ -324,7 +324,9 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
   );
 
   // Admin: manual sync trigger. Requires x-app-secret (same auth as other write endpoints).
-  app.post("/api/creatorvault/sync/accounts", requireAppSecret, async (_req: Request, res: Response) => {
+  // Note: sync + reconcile endpoints are POSTs to /api/* and inherit the blanket
+  // x-app-secret guard installed by registerRoutes(). No per-route auth needed here.
+  app.post("/api/creatorvault/sync/accounts", async (_req: Request, res: Response) => {
     try {
       const r = await syncAccounts(sbFn());
       res.json({ ok: true, ...r });
@@ -333,7 +335,7 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
     }
   });
 
-  app.post("/api/creatorvault/sync/videos/:cvAccountId", requireAppSecret, async (req: Request, res: Response) => {
+  app.post("/api/creatorvault/sync/videos/:cvAccountId", async (req: Request, res: Response) => {
     try {
       const since = typeof req.query.since === "string" ? req.query.since : undefined;
       const r = await syncVideosForAccount(sbFn(), req.params.cvAccountId, { since });
@@ -343,7 +345,7 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
     }
   });
 
-  app.post("/api/creatorvault/reconcile", requireAppSecret, async (_req: Request, res: Response) => {
+  app.post("/api/creatorvault/reconcile", async (_req: Request, res: Response) => {
     try {
       const r = await reconcilePublerToCreatorVault(sbFn());
       res.json({ ok: true, ...r });
@@ -399,11 +401,4 @@ function express_raw_json_middleware() {
   };
 }
 
-function requireAppSecret(req: Request, res: Response, next: (err?: any) => void) {
-  const expected = process.env.APP_WRITE_SECRET;
-  const given = req.header("x-app-secret");
-  if (!expected || given !== expected) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-  next();
-}
+

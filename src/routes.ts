@@ -44,6 +44,9 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
     if (!req.path.startsWith("/api/")) return next();
+    // Exempt paths that carry their own auth (e.g. HMAC-signed webhooks).
+    // Route handler MUST verify its own auth before doing anything sensitive.
+    if (req.path === "/api/creatorvault/webhook") return next();
     return requireWriteAuth(req, res, next);
   });
 
