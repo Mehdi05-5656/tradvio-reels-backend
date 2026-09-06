@@ -4,6 +4,7 @@ import express, { type Request, type Response } from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes.js";
 import { registerV2Routes } from "./v2-routes.js";
+import { registerCreatorVaultRoutes } from "./creatorvault.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -16,7 +17,7 @@ function cors(req: Request, res: Response, next: (err?: any) => void) {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "content-type,x-app-secret,authorization",
+    "content-type,x-app-secret,authorization,x-creatorvault-signature",
   );
   if (req.method === "OPTIONS") {
     res.status(204).end();
@@ -36,7 +37,7 @@ async function main() {
 
   // v2 routes: devices, alerts, overview. Auth middleware from routes.ts applies to POSTs.
   let sb: SupabaseClient | null = null;
-  registerV2Routes(app, () => {
+  const getSb = () => {
     if (!sb) {
       const url = process.env.SUPABASE_URL;
       const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -47,7 +48,9 @@ async function main() {
       });
     }
     return sb;
-  });
+  };
+  registerV2Routes(app, getSb);
+  registerCreatorVaultRoutes(app, getSb);
 
   app.get("/", (_req, res) => res.json({ ok: true, service: "tradvio-reels-backend" }));
   app.get("/healthz", (_req, res) => res.status(200).send("ok"));
