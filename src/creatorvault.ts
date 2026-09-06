@@ -240,23 +240,16 @@ function verifySignature(rawBody: string, headerValue: string | undefined): bool
 // ---------- Route registration ----------
 
 export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseClient) {
-  // Inbound webhook. Uses raw body for signature verification.
-  //
-  // IMPORTANT: express.json() has already parsed the body before this handler,
-  // so we need to re-serialize it for signature check. That is deterministic
-  // because CreatorVault's HMAC is computed on the JSON body they sent, which
-  // we round-trip via JSON.stringify with the same shape. To avoid stringify
-  // drift we mount a raw-body middleware on this specific path.
+  // Inbound webhook. HMAC verification needs the raw request body, which is
+  // captured globally by the express.json verify fn in index.ts (req.rawBody).
   app.post(
     "/api/creatorvault/webhook",
-    express_raw_json_middleware(),
     async (req: Request, res: Response) => {
-      const raw = (req as any).rawBody as string;
+      const raw = ((req as any).rawBody as string) || "";
       const sig = req.header("x-creatorvault-signature");
       const valid = verifySignature(raw, sig);
 
-      let payload: any = null;
-      try { payload = JSON.parse(raw); } catch { /* fall through */ }
+      const payload: any = req.body ?? null;
 
       const sb = sbFn();
       const { data: eventRow } = await sb
@@ -377,28 +370,4 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
 }
 
 // ---------- helpers ----------
-
-// Raw-body-aware JSON middleware: captures the raw string on req.rawBody,
-// still parses to req.body. Used for the webhook route only, since HMAC
-// verification requires the exact byte stream.
-function express_raw_json_middleware() {
-  return (req: Request, _res: Response, next: (err?: any) => void) => {
-    let data = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => { data += chunk; });
-    req.on("end", () => {
-      (req as any).rawBody = data;
-      if (data) {
-        try {
-          req.body = JSON.parse(data);
-        } catch (e: any) {
-          return next(new Error("invalid_json"));
-        }
-      }
-      next();
-    });
-    req.on("error", next);
-  };
-}
-
 

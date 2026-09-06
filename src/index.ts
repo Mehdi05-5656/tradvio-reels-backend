@@ -30,7 +30,13 @@ async function main() {
   const app = express();
   app.disable("x-powered-by");
   app.use(cors);
-  app.use(express.json({ limit: "5mb" }));
+  // Capture raw body for HMAC verification (needed by the CreatorVault webhook).
+  // Attaching a verify fn to express.json makes rawBody available on req without
+  // installing a separate body-consuming middleware, which would hang after json parsed.
+  app.use(express.json({
+    limit: "5mb",
+    verify: (req: any, _res, buf) => { req.rawBody = buf.toString("utf8"); },
+  }));
 
   const http = createServer(app);
   await registerRoutes(http, app);
