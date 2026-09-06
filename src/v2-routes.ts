@@ -16,15 +16,21 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
   app.get("/api/v2/devices", async (_req: Request, res: Response) => {
     try {
       const sb = sbFn();
-      const [devicesRes, summaryRes, settingsRes, logRes] = await Promise.all([
+      const sevenAgoIso = new Date(Date.now() - 7 * 86400_000).toISOString();
+      const [devicesRes, summaryRes, settingsRes, logRes, analyticsRes] = await Promise.all([
         sb.from("reels_devices").select("*").eq("active", true).order("created_at"),
         sb.from("reels_dashboard_summary").select("*"),
         sb.from("reels_settings").select("*"),
         sb
           .from("publer_publish_log")
           .select("phone_slot,status,attempted_at,error")
-          .gte("attempted_at", new Date(Date.now() - 7 * 86400_000).toISOString())
+          .gte("attempted_at", sevenAgoIso)
           .order("attempted_at", { ascending: false }),
+        sb
+          .from("publer_publish_log")
+          .select("phone_slot,views,reach,engagement")
+          .gte("attempted_at", sevenAgoIso)
+          .eq("status", "posted"),
       ]);
       if (devicesRes.error) throw devicesRes.error;
 
@@ -37,6 +43,15 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         logsBySlot.set(row.phone_slot, arr);
       });
 
+      const analyticsBySlot = new Map<string, { views: number; reach: number; engagement: number }>();
+      (analyticsRes.data ?? []).forEach((row: any) => {
+        const cur = analyticsBySlot.get(row.phone_slot) ?? { views: 0, reach: 0, engagement: 0 };
+        cur.views += Number(row.views ?? 0);
+        cur.reach += Number(row.reach ?? 0);
+        cur.engagement += Number(row.engagement ?? 0);
+        analyticsBySlot.set(row.phone_slot, cur);
+      });
+
       const devices = (devicesRes.data ?? []).map((d: any) => {
         const s = summary.get(d.phone_slot) ?? {};
         const setting = settings.get(d.phone_slot) ?? {};
@@ -44,8 +59,11 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         const total = logs.length;
         const failed = logs.filter((l) => l.status === "failed").length;
         const lastAttempt = logs[0];
+        const an = analyticsBySlot.get(d.phone_slot) ?? { views: 0, reach: 0, engagement: 0 };
+        const status = d.paused ? "paused" : d.active ? "active" : "inactive";
         return {
           ...d,
+          status,
           daily_target: setting.daily_target ?? 8,
           pending_count: Number(s.pending_count ?? 0),
           posted_count: Number(s.posted_count ?? 0),
@@ -57,6 +75,9 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
           publish_failures_7d: failed,
           last_publish_attempt_at: lastAttempt?.attempted_at ?? null,
           last_publish_error: lastAttempt?.error ?? null,
+          views_7d: an.views,
+          reach_7d: an.reach,
+          engagement_7d: an.engagement,
         };
       });
 
