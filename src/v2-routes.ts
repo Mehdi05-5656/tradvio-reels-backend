@@ -579,30 +579,53 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.get("/api/v2/post/:postLink(*)", async (req: Request, res: Response) => {
     try {
-      // Route param is URL-encoded post link
-      const postLink = decodeURIComponent(req.params.postLink);
+      // Route param is URL-encoded post link (URL) OR raw publer_post_id
+      const paramValue = decodeURIComponent(req.params.postLink);
+
+      // Look up the publish log row first — accept either the URL or the internal ID.
+      // Try URL first (most common from /today), then fall back to internal id.
+      let { data: log } = await sbFn()
+        .from("publer_publish_log")
+        .select("phone_slot, planned_at, attempted_at, caption_used, hashtags_used, status, publer_post_id, publer_post_link")
+        .eq("publer_post_link", paramValue)
+        .order("attempted_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!log) {
+        const r = await sbFn()
+          .from("publer_publish_log")
+          .select("phone_slot, planned_at, attempted_at, caption_used, hashtags_used, status, publer_post_id, publer_post_link")
+          .eq("publer_post_id", paramValue)
+          .order("attempted_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        log = r.data;
+      }
+
+      // Resolve the internal id used by publer_analytics
+      const internalId = log?.publer_post_id ?? paramValue;
+
       const { data: snaps, error } = await sbFn()
         .from("publer_analytics")
         .select("*")
-        .eq("publer_post_id", postLink)
+        .eq("publer_post_id", internalId)
         .order("captured_at", { ascending: true });
       if (error) throw error;
-      if (!snaps || !snaps.length) return res.status(404).json({ error: "not found" });
 
-      const latest = snaps[snaps.length - 1];
-      const raw = latest.raw ?? {};
+      // If we have neither snapshots nor a log record, this post is unknown
+      if ((!snaps || !snaps.length) && !log) {
+        return res.status(404).json({ error: "not found", tried_id: internalId, tried_link: paramValue });
+      }
 
-      // Look up the publish log row for this link
-      const { data: log } = await sbFn()
-        .from("publer_publish_log")
-        .select("phone_slot, planned_at, attempted_at, caption_used, hashtags_used, status")
-        .eq("publer_post_link", postLink)
-        .maybeSingle();
+      const latest = snaps && snaps.length ? snaps[snaps.length - 1] : null;
+      const raw = latest?.raw ?? {};
 
       const captionText = raw.text ?? log?.caption_used ?? "";
+      const postLink = log?.publer_post_link ?? paramValue;
       res.json({
         post_link: postLink,
-        phone_slot: log?.phone_slot ?? latest.phone_slot,
+        publer_post_id: internalId,
+        phone_slot: log?.phone_slot ?? latest?.phone_slot ?? null,
         planned_at: log?.planned_at ?? null,
         attempted_at: log?.attempted_at ?? null,
         status: log?.status ?? "unknown",
@@ -611,7 +634,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         source_handle: raw?.notes ? extractHandle(raw.notes) : null,
         thumbnail: raw?.media?.[0]?.thumbnails?.[0]?.real ?? raw?.medias?.[0]?.thumbnail ?? null,
         media_url: raw?.media?.[0]?.path ?? raw?.medias?.[0]?.path ?? null,
-        latest_metrics: {
+        latest_metrics: latest ? {
           video_views: latest.video_views,
           reach: latest.reach,
           likes: latest.likes,
@@ -624,8 +647,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
           post_clicks: latest.post_clicks,
           click_through_rate: Number(latest.click_through_rate ?? 0),
           reach_rate: Number(latest.reach_rate ?? 0),
-        },
-        timeline: snaps.map((s: any) => ({
+        } : null,
+        timeline: (snaps ?? []).map((s: any) => ({
           t: s.captured_at,
           video_views: s.video_views,
           reach: s.reach,
@@ -636,7 +659,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
           engagement: s.engagement,
           engagement_rate: Number(s.engagement_rate ?? 0),
         })),
-        snapshot_count: snaps.length,
+        snapshot_count: snaps?.length ?? 0,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
