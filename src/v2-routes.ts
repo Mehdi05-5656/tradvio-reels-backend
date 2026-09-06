@@ -382,6 +382,71 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ==================== ARCHIVE (enriched) ====================
+
+  app.get("/api/v2/archive", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Number(req.query.limit ?? 100), 500);
+      const offset = Number(req.query.offset ?? 0);
+      const phoneFilter = req.query.phone ? String(req.query.phone) : null;
+
+      let q = sbFn()
+        .from("reels_manual_queue")
+        .select("*")
+        .in("status", ["posted", "archived"])
+        .order("posted_at", { ascending: false, nullsFirst: false })
+        .range(offset, offset + limit - 1);
+      if (phoneFilter) q = q.eq("phone_slot", phoneFilter);
+      const { data: archiveRows, error: err1 } = await q;
+      if (err1) throw err1;
+      const rows = archiveRows ?? [];
+
+      const phoneSlots = Array.from(new Set(rows.map((r: any) => r.phone_slot).filter(Boolean)));
+      const analyticsByPostLink = new Map<string, any>();
+      const analyticsByFilename = new Map<string, any>();
+      if (phoneSlots.length > 0) {
+        const { data: analytics } = await sbFn()
+          .from("publer_analytics")
+          .select("publer_post_id, phone_slot, video_views, reach, likes, comments, engagement_rate, captured_at, raw")
+          .in("phone_slot", phoneSlots as string[])
+          .order("captured_at", { ascending: false })
+          .limit(2000);
+        for (const a of analytics ?? []) {
+          const raw = (a as any).raw || {};
+          const link = raw.post_link || raw.postLink || null;
+          if (link && !analyticsByPostLink.has(link)) analyticsByPostLink.set(link, a);
+          const media = raw.medias?.[0];
+          const path = media?.path || media?.thumbnail || "";
+          if (path) {
+            const parts = String(path).split("/");
+            const fname = parts[parts.length - 1] || "";
+            if (fname && !analyticsByFilename.has(fname)) analyticsByFilename.set(fname, a);
+          }
+        }
+      }
+
+      const enriched = rows.map((r: any) => {
+        const link = r.posted_ig_url || null;
+        let a: any = link ? analyticsByPostLink.get(link) : null;
+        if (!a && r.filename) a = analyticsByFilename.get(r.filename);
+        return {
+          ...r,
+          post_link: r.posted_ig_url ?? null,
+          caption: r.notes ?? null,
+          views: a ? Number(a.video_views ?? 0) : null,
+          reach: a ? Number(a.reach ?? 0) : null,
+          likes: a ? Number(a.likes ?? 0) : null,
+          engagement_rate: a ? Number(a.engagement_rate ?? 0) : null,
+          thumbnail_url: a?.raw?.medias?.[0]?.thumbnail ?? null,
+        };
+      });
+
+      res.json({ items: enriched, total: enriched.length });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }
 
 // ==================== HELPERS ====================
