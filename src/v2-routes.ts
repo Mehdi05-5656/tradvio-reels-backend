@@ -27,10 +27,9 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
           .gte("attempted_at", sevenAgoIso)
           .order("attempted_at", { ascending: false }),
         sb
-          .from("publer_publish_log")
-          .select("phone_slot,views,reach,engagement")
-          .gte("attempted_at", sevenAgoIso)
-          .eq("status", "posted"),
+          .from("publer_analytics")
+          .select("phone_slot,captured_at,video_views,reach,engagement,post_id")
+          .gte("captured_at", sevenAgoIso),
       ]);
       if (devicesRes.error) throw devicesRes.error;
 
@@ -43,14 +42,22 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         logsBySlot.set(row.phone_slot, arr);
       });
 
-      const analyticsBySlot = new Map<string, { views: number; reach: number; engagement: number }>();
+      // For each (phone_slot, post) keep the latest snapshot to avoid double-counting.
+      // publer_analytics rows are per-capture; the last capture per post is the current metric.
+      const latestByPost = new Map<string, any>();
       (analyticsRes.data ?? []).forEach((row: any) => {
+        const key = `${row.phone_slot}::${row.post_id ?? row.id ?? row.captured_at}`;
+        const prev = latestByPost.get(key);
+        if (!prev || new Date(row.captured_at) > new Date(prev.captured_at)) latestByPost.set(key, row);
+      });
+      const analyticsBySlot = new Map<string, { views: number; reach: number; engagement: number }>();
+      for (const row of latestByPost.values()) {
         const cur = analyticsBySlot.get(row.phone_slot) ?? { views: 0, reach: 0, engagement: 0 };
-        cur.views += Number(row.views ?? 0);
+        cur.views += Number(row.video_views ?? 0);
         cur.reach += Number(row.reach ?? 0);
         cur.engagement += Number(row.engagement ?? 0);
         analyticsBySlot.set(row.phone_slot, cur);
-      });
+      }
 
       const devices = (devicesRes.data ?? []).map((d: any) => {
         const s = summary.get(d.phone_slot) ?? {};
