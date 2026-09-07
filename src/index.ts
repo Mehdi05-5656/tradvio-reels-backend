@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { registerRoutes } from "./routes.js";
 import { registerV2Routes } from "./v2-routes.js";
 import { registerCreatorVaultRoutes } from "./creatorvault.js";
+import { registerReelsScheduleRoutes } from "./reels-schedule.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -57,6 +58,7 @@ async function main() {
   };
   registerV2Routes(app, getSb);
   registerCreatorVaultRoutes(app, getSb);
+  registerReelsScheduleRoutes(app, getSb);
 
   app.get("/", (_req, res) => res.json({ ok: true, service: "tradvio-reels-backend" }));
   app.get("/healthz", (_req, res) => res.status(200).send("ok"));

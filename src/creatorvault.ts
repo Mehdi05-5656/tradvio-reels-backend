@@ -352,6 +352,54 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
             console.log("[creatorvault]", payload.event, ca.platform, ca.platform_handle,
               "external_user_id=", externalUserId, "bridge_source=", bridgeSource);
           }
+        } else if (
+          payload?.event === "reel.container_created" ||
+          payload?.event === "reel.published" ||
+          payload?.event === "reel.failed"
+        ) {
+          // WO-05 write side. Map to scheduled_reels row via cv_reel_id.
+          const cvReelId = typeof payload.cv_reel_id === "string" ? payload.cv_reel_id : null;
+          if (!cvReelId) {
+            if (eventRow?.id) {
+              await sb.from("creatorvault_webhook_events")
+                .update({
+                  processing_status: "failed",
+                  processing_error: "missing_cv_reel_id",
+                  processed_at: new Date().toISOString(),
+                })
+                .eq("id", eventRow.id);
+            }
+          } else {
+            const patch: Record<string, unknown> = {};
+            if (payload.event === "reel.container_created") {
+              patch.status = "container_created";
+            } else if (payload.event === "reel.published") {
+              patch.status = "published";
+              patch.ig_media_id = payload.ig_media_id ?? null;
+              patch.permalink = payload.permalink ?? null;
+              patch.published_at = payload.published_at ?? new Date().toISOString();
+              patch.last_error = null;
+              patch.failure_reason = null;
+            } else if (payload.event === "reel.failed") {
+              patch.status = "failed";
+              patch.failure_reason = payload.reason ?? "unknown";
+              patch.last_error = payload.error_message ?? payload.reason ?? "unknown";
+            }
+            const { error: rErr } = await sb
+              .from("scheduled_reels")
+              .update(patch)
+              .eq("cv_reel_id", cvReelId);
+            if (eventRow?.id) {
+              await sb.from("creatorvault_webhook_events")
+                .update({
+                  processing_status: rErr ? "failed" : "processed",
+                  processing_error: rErr ? rErr.message : null,
+                  processed_at: new Date().toISOString(),
+                })
+                .eq("id", eventRow.id);
+            }
+            console.log("[creatorvault]", payload.event, "cv_reel_id=", cvReelId, "->", patch.status);
+          }
         } else {
           if (eventRow?.id) {
             await sb.from("creatorvault_webhook_events")
