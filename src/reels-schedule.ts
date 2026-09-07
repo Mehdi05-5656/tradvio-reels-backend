@@ -90,6 +90,12 @@ export function registerReelsScheduleRoutes(app: Express, sbFn: () => SupabaseCl
         if (typeof r.scheduled_for !== "string" || Number.isNaN(Date.parse(r.scheduled_for))) {
           return res.status(400).json({ error: "bad_scheduled_for", detail: "ISO 8601 UTC required" });
         }
+        // Clamp scheduled_for to at least +5min from now. CV's pg_cron publisher fires every
+        // minute, so a near-past or too-soon timestamp risks publishing before the user is
+        // done editing / before we've persisted the row.
+        const MIN_LEAD_MS = 5 * 60 * 1000;
+        const scheduledMs = Date.parse(r.scheduled_for);
+        const clampedMs = Math.max(scheduledMs, Date.now() + MIN_LEAD_MS);
         if (r.cover_url && (typeof r.cover_url !== "string" || !/^https:\/\//i.test(r.cover_url))) {
           return res.status(400).json({ error: "bad_cover_url" });
         }
@@ -97,10 +103,11 @@ export function registerReelsScheduleRoutes(app: Express, sbFn: () => SupabaseCl
           return res.status(400).json({ error: "missing_client_ref" });
         }
         normalized.push({
+          connected_account_id: "", // filled in below after account lookup
           video_url: r.video_url,
           caption: r.caption,
-          scheduled_for: new Date(r.scheduled_for).toISOString(),
-          cover_url: r.cover_url ?? null,
+          scheduled_for: new Date(clampedMs).toISOString(),
+          cover_url: r.cover_url || undefined,
           share_to_feed: r.share_to_feed !== false,
           client_ref: r.client_ref,
         });
@@ -140,6 +147,11 @@ export function registerReelsScheduleRoutes(app: Express, sbFn: () => SupabaseCl
         });
       }
 
+      // Now that we know the account, fill connected_account_id into each normalized reel.
+      for (const n of normalized) {
+        n.connected_account_id = account.cv_account_id;
+      }
+
       // Call CV (stub or live).
       let cvResponse;
       try {
@@ -176,8 +188,8 @@ export function registerReelsScheduleRoutes(app: Express, sbFn: () => SupabaseCl
           ...base,
           cv_reel_id: null,
           status: "failed" as const,
-          failure_reason: rej?.reason ?? "unknown_rejection",
-          last_error: rej?.reason ?? "unknown_rejection",
+          failure_reason: rej?.error ?? "unknown_rejection",
+          last_error: rej?.detail ?? rej?.error ?? "unknown_rejection",
         };
       });
 

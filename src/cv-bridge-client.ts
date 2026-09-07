@@ -1,32 +1,40 @@
-// CreatorVault bridge write-side client. Wraps /v1/bridge/reels/* endpoints.
+// CreatorVault WO-05 bridge client.
 //
-// When CV_STUB_MODE=1 (default while CV's WO-05 endpoints are not live),
-// the client returns canned success responses and schedules fake webhook
-// events on a delay so the Tradvio side can be developed and tested end
-// to end. When CV_STUB_MODE=0, it calls the real endpoints.
+// When CV_STUB_MODE=1 the client runs a local in-memory stub so we can develop
+// the Tradvio-side end-to-end before CV's real routes are live.
 //
-// Both modes share the same public surface, so switching is a single env var flip.
-
-import crypto from "node:crypto";
+// When CV_STUB_MODE=0 the client calls CV's v5 /bridge/reels/* routes.
+//
+// CV v5 contract (as of 2026-09-07):
+//   POST /v1/bridge/reels/schedule
+//     body { connected_account_id, video_url, scheduled_for, caption?, cover_url?, share_to_feed?, client_ref? }
+//     201 -> reel DTO
+//   GET  /v1/bridge/reels/:id                                 -> reel DTO (404 not_found)
+//   GET  /v1/bridge/reels?connected_account_id&status&limit&cursor  -> { reels[], next_cursor }
+//   POST /v1/bridge/reels/:id/cancel                          -> {}  (409 already_terminal)
+//   Auth: Authorization: Bearer <bridge-scoped api key>
+//   Errors: { error, message, request_id }
 
 export type ReelScheduleInput = {
-  video_url: string;
-  caption: string;
-  scheduled_for: string;
-  cover_url?: string | null;
-  share_to_feed?: boolean;
   client_ref: string;
+  connected_account_id: string;
+  video_url: string;
+  scheduled_for: string; // ISO 8601 UTC
+  caption?: string;
+  cover_url?: string;
+  share_to_feed?: boolean;
 };
 
 export type ReelScheduleAccepted = {
   client_ref: string;
   cv_reel_id: string;
-  status: "pending";
+  status: string;
 };
 
 export type ReelScheduleRejected = {
   client_ref: string;
-  reason: string;
+  error: string;
+  detail?: string;
 };
 
 export type ReelScheduleResponse = {
@@ -37,62 +45,89 @@ export type ReelScheduleResponse = {
 export type ReelStatus = {
   cv_reel_id: string;
   client_ref?: string | null;
-  external_user_id: string;
-  status:
-    | "pending"
-    | "container_created"
-    | "container_ready"
-    | "published"
-    | "failed"
-    | "cancelled";
+  connected_account_id?: string | null;
+  external_user_id?: string | null;
+  status: "pending" | "submitted" | "container_created" | "container_ready" | "published" | "failed" | "cancelled";
+  scheduled_for?: string | null;
   ig_media_id?: string | null;
-  scheduled_for: string;
+  permalink?: string | null;
   published_at?: string | null;
   last_error?: string | null;
-  attempts: number;
+  failure_reason?: string | null;
+  attempts?: number;
 };
 
-const CV_BASE = process.env.CREATORVAULT_BRIDGE_API_URL ?? "https://txoojazdivnmgstunpic.supabase.co/functions/v1/cv-api/v1";
+// ---------- Config ----------
+
+const CV_BASE = (process.env.CREATORVAULT_BRIDGE_API_URL ?? "https://txoojazdivnmgstunpic.supabase.co/functions/v1/cv-api/v1").replace(/\/+$/, "");
 const CV_KEY = process.env.CREATORVAULT_BRIDGE_API_KEY ?? "";
 const CV_STUB = (process.env.CV_STUB_MODE ?? "1") === "1";
 
-// In-memory stub store: cv_reel_id -> row. Only used when CV_STUB=1.
+// ---------- Stub state ----------
+
 type StubRow = {
   cv_reel_id: string;
   client_ref: string;
   external_user_id: string;
+  connected_account_id: string;
   status: ReelStatus["status"];
   scheduled_for: string;
+  video_url: string;
+  caption?: string;
   ig_media_id: string | null;
+  permalink: string | null;
   published_at: string | null;
   last_error: string | null;
   attempts: number;
-  video_url: string;
-  caption: string;
 };
+
 const stubStore = new Map<string, StubRow>();
 
 function newCvReelId(): string {
-  // ULID-like: 26 chars. Not a real ULID, but visually similar for logs.
-  const t = Date.now().toString(36).padStart(10, "0");
-  const r = crypto.randomBytes(9).toString("base64url").slice(0, 16);
-  return `${t}${r}`.slice(0, 26).toUpperCase();
+  // Stub uses ULID-shaped ids so downstream code that already stored these still works.
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  let s = "";
+  for (let i = 0; i < 26; i++) s += alphabet[Math.floor(Math.random() * 32)];
+  return s;
 }
 
+// ---------- HTTP ----------
+
 async function cvFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`${CV_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Authorization": `Bearer ${CV_KEY}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-  });
+  const headers: Record<string, string> = {
+    "Authorization": `Bearer ${CV_KEY}`,
+    "content-type": "application/json",
+    "accept": "application/json",
+    ...((init.headers as Record<string, string>) ?? {}),
+  };
+  return fetch(`${CV_BASE}${path}`, { ...init, headers });
 }
+
+async function readCvError(res: Response): Promise<{ error: string; message: string; request_id?: string; raw: string }> {
+  const raw = await res.text().catch(() => "");
+  try {
+    const j = JSON.parse(raw);
+    return {
+      error: String(j.error ?? `http_${res.status}`),
+      message: String(j.message ?? raw.slice(0, 300)),
+      request_id: j.request_id,
+      raw,
+    };
+  } catch {
+    return { error: `http_${res.status}`, message: raw.slice(0, 300), raw };
+  }
+}
+
+// ---------- Public API ----------
 
 export const cvBridge = {
   isStub: () => CV_STUB,
 
+  /**
+   * Schedule N reels. CV v5 exposes single-reel POST, so we loop client-side
+   * and build our own {accepted, rejected} envelope so the Tradvio route
+   * contract stays stable regardless of CV's fan-out shape.
+   */
   async scheduleReels(
     externalUserId: string,
     reels: ReelScheduleInput[],
@@ -105,9 +140,11 @@ export const cvBridge = {
           cv_reel_id: id,
           client_ref: r.client_ref,
           external_user_id: externalUserId,
+          connected_account_id: r.connected_account_id,
           status: "pending",
           scheduled_for: r.scheduled_for,
           ig_media_id: null,
+          permalink: null,
           published_at: null,
           last_error: null,
           attempts: 0,
@@ -119,15 +156,47 @@ export const cvBridge = {
       return { accepted, rejected: [] };
     }
 
-    const res = await cvFetch("/bridge/reels/schedule", {
-      method: "POST",
-      body: JSON.stringify({ external_user_id: externalUserId, reels }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`cv_bridge_schedule_failed status=${res.status} body=${body.slice(0, 400)}`);
+    // Real mode: CV v5 accepts one reel per POST. Loop and collect results.
+    const accepted: ReelScheduleAccepted[] = [];
+    const rejected: ReelScheduleRejected[] = [];
+    for (const r of reels) {
+      const body = {
+        connected_account_id: r.connected_account_id,
+        video_url: r.video_url,
+        scheduled_for: r.scheduled_for,
+        caption: r.caption ?? "",
+        cover_url: r.cover_url,
+        share_to_feed: r.share_to_feed ?? true,
+        client_ref: r.client_ref,
+      };
+      let res: Response;
+      try {
+        res = await cvFetch("/bridge/reels/schedule", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      } catch (e: any) {
+        rejected.push({ client_ref: r.client_ref, error: "network_error", detail: String(e?.message ?? e) });
+        continue;
+      }
+      if (res.status === 201 || res.status === 200) {
+        const dto = (await res.json().catch(() => ({}))) as Partial<ReelStatus>;
+        const id = String(dto.cv_reel_id ?? "");
+        if (!id) {
+          rejected.push({ client_ref: r.client_ref, error: "bad_response", detail: "missing cv_reel_id" });
+          continue;
+        }
+        accepted.push({ client_ref: r.client_ref, cv_reel_id: id, status: String(dto.status ?? "pending") });
+      } else {
+        const err = await readCvError(res);
+        rejected.push({
+          client_ref: r.client_ref,
+          error: err.error,
+          detail: err.request_id ? `${err.message} (request_id=${err.request_id})` : err.message,
+        });
+      }
     }
-    return (await res.json()) as ReelScheduleResponse;
+    return { accepted, rejected };
   },
 
   async getReel(cvReelId: string): Promise<ReelStatus | null> {
@@ -138,9 +207,11 @@ export const cvBridge = {
         cv_reel_id: row.cv_reel_id,
         client_ref: row.client_ref,
         external_user_id: row.external_user_id,
+        connected_account_id: row.connected_account_id,
         status: row.status,
         scheduled_for: row.scheduled_for,
         ig_media_id: row.ig_media_id,
+        permalink: row.permalink,
         published_at: row.published_at,
         last_error: row.last_error,
         attempts: row.attempts,
@@ -149,21 +220,26 @@ export const cvBridge = {
     const res = await cvFetch(`/bridge/reels/${encodeURIComponent(cvReelId)}`);
     if (res.status === 404) return null;
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`cv_bridge_get_failed status=${res.status} body=${body.slice(0, 400)}`);
+      const err = await readCvError(res);
+      throw new Error(`cv_bridge_get_failed status=${res.status} error=${err.error} msg=${err.message}`);
     }
     return (await res.json()) as ReelStatus;
   },
 
+  /**
+   * List reels. CV v5 filters by connected_account_id (per IG), NOT external_user_id.
+   * We resolve external_user_id -> a set of account ids at the call site (reconcile
+   * tick), then loop this per account and merge.
+   */
   async listReels(params: {
-    external_user_id?: string;
+    connected_account_id?: string;
     status?: string;
     limit?: number;
     cursor?: string;
   }): Promise<{ items: ReelStatus[]; next_cursor?: string | null }> {
     if (CV_STUB) {
       const items = Array.from(stubStore.values())
-        .filter((r) => !params.external_user_id || r.external_user_id === params.external_user_id)
+        .filter((r) => !params.connected_account_id || r.connected_account_id === params.connected_account_id)
         .filter((r) => {
           if (!params.status) return true;
           const wanted = params.status.split(",");
@@ -173,9 +249,11 @@ export const cvBridge = {
           cv_reel_id: r.cv_reel_id,
           client_ref: r.client_ref,
           external_user_id: r.external_user_id,
+          connected_account_id: r.connected_account_id,
           status: r.status,
           scheduled_for: r.scheduled_for,
           ig_media_id: r.ig_media_id,
+          permalink: r.permalink,
           published_at: r.published_at,
           last_error: r.last_error,
           attempts: r.attempts,
@@ -183,16 +261,19 @@ export const cvBridge = {
       return { items, next_cursor: null };
     }
     const qs = new URLSearchParams();
-    if (params.external_user_id) qs.set("external_user_id", params.external_user_id);
+    if (params.connected_account_id) qs.set("connected_account_id", params.connected_account_id);
     if (params.status) qs.set("status", params.status);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const res = await cvFetch(`/bridge/reels?${qs.toString()}`);
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`cv_bridge_list_failed status=${res.status} body=${body.slice(0, 400)}`);
+      const err = await readCvError(res);
+      throw new Error(`cv_bridge_list_failed status=${res.status} error=${err.error} msg=${err.message}`);
     }
-    return (await res.json()) as { items: ReelStatus[]; next_cursor?: string | null };
+    // CV v5 returns { reels, next_cursor }. Map to our internal {items, next_cursor}.
+    const json = (await res.json()) as { reels?: ReelStatus[]; items?: ReelStatus[]; next_cursor?: string | null };
+    const items = json.reels ?? json.items ?? [];
+    return { items, next_cursor: json.next_cursor ?? null };
   },
 
   async cancelReel(cvReelId: string): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -205,20 +286,20 @@ export const cvBridge = {
       row.status = "cancelled";
       return { ok: true };
     }
-    const res = await cvFetch(`/bridge/reels/${encodeURIComponent(cvReelId)}`, {
-      method: "DELETE",
+    // CV v5 uses POST /:id/cancel, not DELETE.
+    const res = await cvFetch(`/bridge/reels/${encodeURIComponent(cvReelId)}/cancel`, {
+      method: "POST",
     });
     if (res.status === 409) return { ok: false, reason: "already_terminal" };
     if (res.status === 404) return { ok: false, reason: "not_found" };
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`cv_bridge_cancel_failed status=${res.status} body=${body.slice(0, 400)}`);
+      const err = await readCvError(res);
+      throw new Error(`cv_bridge_cancel_failed status=${res.status} error=${err.error} msg=${err.message}`);
     }
     return { ok: true };
   },
 
   // Test helper: force-advance a stubbed reel to a terminal status. No-op when CV_STUB=0.
-  // Used by scheduled_reels reconcile cron + admin debug endpoints.
   _stubAdvance(cvReelId: string, to: ReelStatus["status"], extra?: Partial<StubRow>): boolean {
     if (!CV_STUB) return false;
     const row = stubStore.get(cvReelId);

@@ -3,7 +3,8 @@
 // Every 15 minutes on Render Cron. Safety net for missed webhooks:
 //   1. Find scheduled_reels rows in submitted/pending/container_created/container_ready
 //      whose updated_at > 30 min ago.
-//   2. Group by external_user_id and page through GET /v1/bridge/reels for each.
+//   2. Group by cv_account_id (CV's connected_account_id) and page through
+//      GET /v1/bridge/reels for each.
 //   3. Reconcile local status/ig_media_id/permalink/failure fields to CV's
 //      authoritative row.
 //
@@ -20,41 +21,42 @@ export async function reelsReconcileTick(sb: SupabaseClient) {
   const cutoff = new Date(Date.now() - STALE_MIN * 60 * 1000).toISOString();
   const { data: stale, error } = await sb
     .from("scheduled_reels")
-    .select("id, cv_reel_id, external_user_id, status")
+    .select("id, cv_reel_id, cv_account_id, status")
     .in("status", IN_FLIGHT as unknown as string[])
     .lt("updated_at", cutoff)
-    .not("cv_reel_id", "is", null);
+    .not("cv_reel_id", "is", null)
+    .not("cv_account_id", "is", null);
   if (error) throw error;
   if (!stale || stale.length === 0) {
     return { checked: 0, reconciled: 0, missing: 0 };
   }
 
-  // Group by external_user_id so we minimize CV calls.
-  const byUser = new Map<string, string[]>();
+  // Group by cv_account_id (CV's connected_account_id) so we minimize CV calls.
+  const byAccount = new Map<string, string[]>();
   const idByCvId = new Map<string, string>();
   for (const row of stale) {
-    if (!row.cv_reel_id) continue;
+    if (!row.cv_reel_id || !row.cv_account_id) continue;
     idByCvId.set(row.cv_reel_id, row.id);
-    const arr = byUser.get(row.external_user_id) ?? [];
+    const arr = byAccount.get(row.cv_account_id) ?? [];
     arr.push(row.cv_reel_id);
-    byUser.set(row.external_user_id, arr);
+    byAccount.set(row.cv_account_id, arr);
   }
 
   let reconciled = 0;
   let missing = 0;
 
-  for (const [extUid, cvIds] of byUser) {
+  for (const [cvAccountId, cvIds] of byAccount) {
     let cursor: string | null | undefined = undefined;
     const seen = new Set<string>();
-    // Page through in-flight reels for this user.
+    // Page through in-flight reels for this account.
     while (true) {
       const listArgs: {
-        external_user_id: string;
+        connected_account_id: string;
         status: string;
         limit: number;
         cursor?: string;
       } = {
-        external_user_id: extUid,
+        connected_account_id: cvAccountId,
         status: IN_FLIGHT.join(",") + ",published,failed,cancelled",
         limit: 100,
       };
@@ -63,7 +65,7 @@ export async function reelsReconcileTick(sb: SupabaseClient) {
       try {
         page = await cvBridge.listReels(listArgs);
       } catch (e: any) {
-        console.warn("[cron:reels-reconcile] list failed", extUid, e.message);
+        console.warn("[cron:reels-reconcile] list failed", cvAccountId, e.message);
         break;
       }
       for (const item of page.items) {
@@ -73,11 +75,13 @@ export async function reelsReconcileTick(sb: SupabaseClient) {
         const patch: Record<string, unknown> = { status: item.status };
         if (item.status === "published") {
           patch.ig_media_id = item.ig_media_id ?? null;
+          patch.permalink = item.permalink ?? null;
           patch.published_at = item.published_at ?? null;
         } else if (item.status === "failed") {
           patch.last_error = item.last_error ?? "unknown";
+          patch.failure_reason = item.failure_reason ?? "unknown";
         }
-        patch.attempts = item.attempts;
+        if (typeof item.attempts === "number") patch.attempts = item.attempts;
 
         const { error: uErr } = await sb
           .from("scheduled_reels")
