@@ -275,6 +275,15 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
       try {
         if (payload?.event === "account.matched") {
           const ca = payload.connected_account;
+          // Bridge-flow payloads include external_user_id + bridge_source at
+          // the top level of the payload (WO-04). Fall back to null for
+          // any legacy non-bridge account.matched events.
+          const externalUserId: string | null =
+            (typeof payload.external_user_id === "string" && payload.external_user_id) || null;
+          const bridgeSource: string | null =
+            (typeof payload.bridge_name === "string" && payload.bridge_name) ||
+            (typeof payload.bridge === "string" && payload.bridge) ||
+            null;
           await sb.from("creatorvault_accounts").upsert({
             cv_account_id: ca.id,
             platform: ca.platform,
@@ -283,6 +292,8 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
             connected_at: ca.connected_at,
             is_active: true,
             last_seen_at: new Date().toISOString(),
+            external_user_id: externalUserId,
+            bridge_source: bridgeSource,
           }, { onConflict: "cv_account_id" });
 
           if (eventRow?.id) {
@@ -290,7 +301,11 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
               .update({ processing_status: "processed", processed_at: new Date().toISOString() })
               .eq("id", eventRow.id);
           }
-          console.log("[creatorvault] account.matched:", ca.platform, ca.platform_handle);
+          console.log("[creatorvault] account.matched:", ca.platform, ca.platform_handle,
+            "external_user_id=", externalUserId, "bridge_source=", bridgeSource);
+          // Log full payload keys to aid debugging bridge integration.
+          console.log("[creatorvault] account.matched payload keys:",
+            Object.keys(payload).join(","));
         } else {
           if (eventRow?.id) {
             await sb.from("creatorvault_webhook_events")
@@ -366,6 +381,90 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
       counts: { accounts, videos },
       recent_webhook_events: recentEvents ?? [],
     });
+  });
+
+  // ---------- Bridge OAuth (WO-04) ----------
+
+  // Start a bridge OAuth flow for a Tradvio-side user.
+  // POST body: { platform: 'instagram' | 'tiktok', external_user_id?: string }
+  // Returns { authorize_url, state } from CV's cv-api/v1/bridge/oauth/start.
+  //
+  // The redirect_back_url is fixed to the Tradvio Reels dashboard's
+  // /oauth-return page. We never expose the CV bridge key to the browser.
+  app.post(
+    "/api/creatorvault/bridge/oauth/start",
+    async (req: Request, res: Response) => {
+      try {
+        const platform = String(req.body?.platform || "").toLowerCase();
+        if (platform !== "instagram" && platform !== "tiktok") {
+          return res.status(400).json({ error: "invalid_platform", detail: "platform must be 'instagram' or 'tiktok'" });
+        }
+        // For now, single-user Tradvio Reels: everything is 'tradvio-brand'.
+        // When multi-tenant lands, this will come from the authenticated user.
+        const externalUserId = String(req.body?.external_user_id || "tradvio-brand");
+
+        const dashboardOrigin =
+          process.env.TRADVIO_DASHBOARD_ORIGIN ||
+          "https://tradvio-reels-dashboard.onrender.com";
+        const redirectBackUrl = `${dashboardOrigin}/oauth-return`;
+
+        assertKey();
+        const url = new URL(CV_BASE + "/bridge/oauth/start");
+        const r = await fetch(url.toString(), {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${CV_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            platform,
+            external_user_id: externalUserId,
+            redirect_back_url: redirectBackUrl,
+          }),
+        });
+        const body = await r.text();
+        if (!r.ok) {
+          console.error("[creatorvault] bridge/oauth/start failed:", r.status, body.slice(0, 500));
+          return res.status(502).json({ error: "cv_start_failed", status: r.status, detail: body.slice(0, 500) });
+        }
+        try {
+          const parsed = JSON.parse(body);
+          return res.json(parsed);
+        } catch {
+          return res.status(502).json({ error: "cv_start_non_json", detail: body.slice(0, 500) });
+        }
+      } catch (e: any) {
+        console.error("[creatorvault] bridge/oauth/start exception:", e.message);
+        return res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
+  // Lookup connected accounts for a given external_user_id.
+  // GET /api/creatorvault/accounts?external_user_id=tradvio-brand
+  //   -> [{ cv_account_id, platform, platform_handle, connected_at, is_active,
+  //         external_user_id, bridge_source, last_seen_at }, ...]
+  //
+  // Public GET (matches the rest of the read surface). Used by /oauth-return
+  // for polling after a callback, and by the Accounts page for listing.
+  app.get("/api/creatorvault/accounts", async (req: Request, res: Response) => {
+    try {
+      const sb = sbFn();
+      const externalUserId = typeof req.query.external_user_id === "string" ? req.query.external_user_id : "";
+      let q = sb
+        .from("creatorvault_accounts")
+        .select("cv_account_id, platform, platform_user_id, platform_handle, connected_at, last_seen_at, is_active, external_user_id, bridge_source")
+        .order("last_seen_at", { ascending: false })
+        .limit(200);
+      if (externalUserId) {
+        q = q.eq("external_user_id", externalUserId);
+      }
+      const { data, error } = await q;
+      if (error) throw error;
+      res.json(data ?? []);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 }
 
