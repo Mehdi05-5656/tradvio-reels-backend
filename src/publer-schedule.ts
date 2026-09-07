@@ -419,38 +419,80 @@ export async function publishOne(
       throw new Error("publer publish failures: " + JSON.stringify(failures).slice(0, 400));
     }
 
-    // Publer's publish job payload doesn't include the created post id.
-    // We resolve it by listing recent posts for this account (state=published)
-    // and picking the newest. Small polling window because IG/TikTok take a few
-    // seconds to be listed.
+    // Log full payload shape once so we can build a proper post-id resolver.
+    // Diagnostic only; safe to leave on — payload is small.
+    console.log(
+      "[publer.publish]",
+      slot.phone_slot,
+      "job=" + publishJob,
+      "payload=" + JSON.stringify(publishPayload).slice(0, 800),
+    );
+
+    // Resolve the created post's ID and link.
+    //
+    // Publer's publish job payload MAY include post_ids depending on network.
+    // For IG the newest-in-list heuristic worked because IG shows up in
+    // /posts within seconds; for TikTok, propagation lag caused us to grab
+    // an unrelated older post. Fix: only accept a listed post if it was
+    // created within a small window around our job's completion AND its
+    // provider matches the account we published to.
     let postId: string | undefined;
     let postLink: string | undefined;
-    for (let i = 0; i < 6; i++) {
-      await new Promise((r) => setTimeout(r, 2500));
-      try {
-        // Note: Publer's `state=published` filter returns empty; omit it and
-        // rely on the default (which lists all recent posts newest first).
-        const listed = await listPosts(cfg.workspaceId, {
-          accountId: slot.publer_account_id,
-          page: 1,
-        });
-        const posts = (listed?.posts ?? []).filter(
-          (p: any) => p.state === "published" && p.post_link,
-        );
-        if (posts.length) {
-          const p = posts[0]; // newest
-          postId = p.id;
-          postLink = p.post_link || p.short_link || p.link;
-          break;
-        }
-      } catch {}
+
+    // 1) Preferred path: pull directly from job payload.
+    const payloadPostIds: string[] | undefined =
+      publishPayload?.post_ids ||
+      publishPayload?.posts?.map((p: any) => p?.id).filter(Boolean);
+    if (payloadPostIds && payloadPostIds.length) {
+      postId = payloadPostIds[0];
     }
 
-    // 4) Mark posted
+    // 2) Fallback: poll listPosts and match strictly on account, state,
+    //    and recency (created within the last 4 minutes of now).
+    if (!postId || !postLink) {
+      const cutoff = Date.now() - 4 * 60_000;
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 2500));
+        try {
+          const listed = await listPosts(cfg.workspaceId, {
+            accountId: slot.publer_account_id,
+            page: 1,
+          });
+          const posts = (listed?.posts ?? []).filter((p: any) => {
+            if (p.state !== "published") return false;
+            if (!p.post_link) return false;
+            // scheduled_at is when Publer marked the post; must be recent
+            const at = p.scheduled_at ? Date.parse(p.scheduled_at) : NaN;
+            if (isNaN(at) || at < cutoff) return false;
+            // if we already have an id from the payload, use it strictly
+            if (postId && p.id !== postId) return false;
+            return true;
+          });
+          if (posts.length) {
+            const p = posts[0];
+            postId = postId || p.id;
+            postLink = p.post_link || p.short_link || p.link;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    // If we still have no link, don't record a fake one — leave publer_post_link null.
+    if (!postLink) {
+      console.warn(
+        "[publer.publish] could not resolve fresh post link for job",
+        publishJob,
+        "slot=" + slot.phone_slot,
+      );
+    }
+
+    // 4) Mark posted (raw_publish_payload lets us diagnose without redeploying)
     await sb.from("publer_publish_log").update({
       publer_job_id: publishJob,
       publer_post_id: postId,
       publer_post_link: postLink,
+      raw_publish_payload: publishPayload,
       status: "published",
       updated_at: new Date().toISOString(),
     }).eq("id", log.id);
