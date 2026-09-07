@@ -286,25 +286,72 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
             (typeof payload.bridge_name === "string" && payload.bridge_name) ||
             (typeof payload.bridge === "string" && payload.bridge) ||
             null;
-          await sb.from("creatorvault_accounts").upsert({
-            cv_account_id: ca.id,
-            platform: ca.platform,
-            platform_user_id: ca.platform_user_id,
-            platform_handle: ca.platform_handle,
-            connected_at: ca.connected_at,
-            is_active: true,
-            last_seen_at: new Date().toISOString(),
-            external_user_id: externalUserId,
-            bridge_source: bridgeSource,
-          }, { onConflict: "cv_account_id" });
 
-          if (eventRow?.id) {
-            await sb.from("creatorvault_webhook_events")
-              .update({ processing_status: "processed", processed_at: new Date().toISOString() })
-              .eq("id", eventRow.id);
+          // Ownership guard: if the same cv_account_id was previously
+          // connected by a DIFFERENT external_user_id, do not overwrite
+          // ownership. We still mark last_seen_at (so admin monitoring is
+          // accurate) and log the anomaly; the caller webhook responds OK
+          // to CV but the account visually appears "already connected"
+          // to the second user via the ownership status endpoint that
+          // the OAuth-return poller now checks.
+          const { data: existing } = await sb
+            .from("creatorvault_accounts")
+            .select("external_user_id")
+            .eq("cv_account_id", ca.id)
+            .maybeSingle();
+
+          const isOwnershipConflict =
+            !!existing?.external_user_id &&
+            !!externalUserId &&
+            existing.external_user_id !== externalUserId;
+
+          if (isOwnershipConflict) {
+            // Refuse to change ownership. Bump last_seen_at only.
+            await sb
+              .from("creatorvault_accounts")
+              .update({
+                last_seen_at: new Date().toISOString(),
+                is_active: true,
+              })
+              .eq("cv_account_id", ca.id);
+            console.warn(
+              "[creatorvault] ownership_conflict:",
+              ca.platform,
+              ca.platform_handle,
+              "existing=", existing.external_user_id,
+              "attempted=", externalUserId,
+              "cv_account_id=", ca.id,
+            );
+            if (eventRow?.id) {
+              await sb.from("creatorvault_webhook_events")
+                .update({
+                  processing_status: "ownership_conflict",
+                  processing_error: `Existing owner ${existing.external_user_id} preserved; attempted ${externalUserId}`,
+                  processed_at: new Date().toISOString(),
+                })
+                .eq("id", eventRow.id);
+            }
+          } else {
+            await sb.from("creatorvault_accounts").upsert({
+              cv_account_id: ca.id,
+              platform: ca.platform,
+              platform_user_id: ca.platform_user_id,
+              platform_handle: ca.platform_handle,
+              connected_at: ca.connected_at,
+              is_active: true,
+              last_seen_at: new Date().toISOString(),
+              external_user_id: externalUserId,
+              bridge_source: bridgeSource,
+            }, { onConflict: "cv_account_id" });
+
+            if (eventRow?.id) {
+              await sb.from("creatorvault_webhook_events")
+                .update({ processing_status: "processed", processed_at: new Date().toISOString() })
+                .eq("id", eventRow.id);
+            }
+            console.log("[creatorvault]", payload.event, ca.platform, ca.platform_handle,
+              "external_user_id=", externalUserId, "bridge_source=", bridgeSource);
           }
-          console.log("[creatorvault]", payload.event, ca.platform, ca.platform_handle,
-            "external_user_id=", externalUserId, "bridge_source=", bridgeSource);
         } else {
           if (eventRow?.id) {
             await sb.from("creatorvault_webhook_events")
@@ -491,6 +538,53 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
       const { data, error } = await q;
       if (error) throw error;
       res.json(data ?? []);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Ownership status for a specific cv_account_id.
+  // Any authenticated caller may check. Never leaks who the other owner is.
+  //   { status: 'yours' | 'other_user' | 'unknown' }
+  //   yours       -> row exists and external_user_id matches the caller
+  //   other_user  -> row exists but is owned by a different external_user_id
+  //   unknown     -> row not found (webhook may not have landed yet)
+  // Admin (secret or JWT) always sees 'yours' for any owned row and 'unknown'
+  // for missing rows.
+  app.get("/api/creatorvault/account-status", async (req: Request, res: Response) => {
+    try {
+      const cvAccountId = typeof req.query.cv_account_id === "string" ? req.query.cv_account_id : "";
+      if (!cvAccountId) {
+        return res.status(400).json({ error: "missing_cv_account_id" });
+      }
+
+      const isAdminSecret = !!(req.auth && "admin_secret" in req.auth && req.auth.admin_secret);
+      const isAdminUser = req.profile?.role === "admin";
+      const isUser = req.profile?.role === "user" && !!req.profile.external_user_id;
+      if (!isAdminSecret && !isAdminUser && !isUser) {
+        return res.status(401).json({ error: "unauthorized" });
+      }
+
+      const sb = sbFn();
+      const { data: row, error } = await sb
+        .from("creatorvault_accounts")
+        .select("external_user_id")
+        .eq("cv_account_id", cvAccountId)
+        .maybeSingle();
+      if (error) throw error;
+
+      if (!row) {
+        return res.json({ status: "unknown" });
+      }
+      // Admin sees everything as "yours" (they can act on any row).
+      if (isAdminSecret || isAdminUser) {
+        return res.json({ status: "yours" });
+      }
+      // Regular user: match against their own external_user_id.
+      if (row.external_user_id && row.external_user_id === req.profile!.external_user_id) {
+        return res.json({ status: "yours" });
+      }
+      return res.json({ status: "other_user" });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
