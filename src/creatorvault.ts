@@ -398,9 +398,18 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
         if (platform !== "instagram" && platform !== "tiktok") {
           return res.status(400).json({ error: "invalid_platform", detail: "platform must be 'instagram' or 'tiktok'" });
         }
-        // For now, single-user Tradvio Reels: everything is 'tradvio-brand'.
-        // When multi-tenant lands, this will come from the authenticated user.
-        const externalUserId = String(req.body?.external_user_id || "tradvio-brand");
+        // WO-A: derive external_user_id from auth. Admins can pass any value
+        // (or omit and default to 'tradvio-brand' for backward-compat with the
+        // existing admin-secret Settings flow). Regular users are forced to
+        // their own external_user_id regardless of what the body says.
+        const requested = typeof req.body?.external_user_id === "string" ? req.body.external_user_id : null;
+        let externalUserId: string;
+        if (req.profile?.role === "user" && req.profile.external_user_id) {
+          externalUserId = req.profile.external_user_id;
+        } else {
+          // admin_secret, admin JWT, or unauthenticated legacy path
+          externalUserId = requested || "tradvio-brand";
+        }
 
         const dashboardOrigin =
           process.env.TRADVIO_DASHBOARD_ORIGIN ||
@@ -449,7 +458,16 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
   app.get("/api/creatorvault/accounts", async (req: Request, res: Response) => {
     try {
       const sb = sbFn();
-      const externalUserId = typeof req.query.external_user_id === "string" ? req.query.external_user_id : "";
+      // WO-A: Same rule as OAuth start. Admins can query any external_user_id
+      // (or omit to see all rows). Regular users are locked to their own.
+      const requested = typeof req.query.external_user_id === "string" ? req.query.external_user_id : "";
+      let externalUserId: string;
+      if (req.profile?.role === "user" && req.profile.external_user_id) {
+        externalUserId = req.profile.external_user_id;
+      } else {
+        // admin_secret, admin JWT, or unauthenticated legacy path
+        externalUserId = requested;
+      }
       let q = sb
         .from("creatorvault_accounts")
         .select("cv_account_id, platform, platform_user_id, platform_handle, connected_at, last_seen_at, is_active, external_user_id, bridge_source")

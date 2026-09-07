@@ -1,26 +1,8 @@
 import type { Express, Request, Response } from "express";
 import type { Server } from "node:http";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { registerPublerRoutes } from "./publer-routes.js";
-// Node 20 lacks native WebSocket; supabase-js Realtime requires one at import time.
-// We don't use realtime, but the client still instantiates it. Provide ws.
-import WebSocket from "ws";
-// @ts-ignore - polyfilling a global for supabase-js internals
-if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
-
-let sb: SupabaseClient | null = null;
-function supabase(): SupabaseClient {
-  if (!sb) {
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) throw new Error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set");
-    sb = createClient(url, key, {
-      auth: { persistSession: false, autoRefreshToken: false },
-      realtime: { params: { eventsPerSecond: 0 } },
-    });
-  }
-  return sb;
-}
+import { supabase } from "./supabase.js";
+import { resolveAuth, isAdmin, resolveExternalUserId } from "./auth.js";
 
 const BUCKET = "reels";
 const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
@@ -28,19 +10,23 @@ function parseSlot(v: string | undefined): string | null {
   return v && VALID_SLOTS.has(v) ? v : null;
 }
 
-// Simple shared-secret guard for mutation routes.
-// GETs remain public; POSTs require the header (or the guard is off if secret empty).
+// Mutation guard: accepts EITHER the legacy admin x-app-secret OR a valid
+// Supabase JWT (via resolveAuth middleware).
 function requireWriteAuth(req: Request, res: Response, next: any) {
   const secret = process.env.APP_WRITE_SECRET || "";
-  if (!secret) return next(); // disabled if not configured
-  const provided = req.header("x-app-secret") || "";
-  if (provided !== secret) return res.status(401).json({ error: "unauthorized" });
-  next();
+  // Legacy escape hatch: if no secret configured at all, allow (dev only).
+  if (!secret && !req.auth) return next();
+  if (req.auth) return next(); // resolved to admin_secret or user JWT
+  return res.status(401).json({ error: "unauthorized" });
 }
 
 export async function registerRoutes(_httpServer: Server, app: Express): Promise<void> {
-  // Gate every POST/PUT/PATCH/DELETE (mutations) with the shared secret.
-  // GETs stay public so charts/lists load without extra plumbing.
+  // Resolve auth for every /api/ request. Populates req.auth and req.profile.
+  // Never blocks; downstream handlers decide the policy.
+  app.use("/api", resolveAuth);
+
+  // Gate every POST/PUT/PATCH/DELETE (mutations). GETs stay public
+  // so charts/lists load without extra plumbing.
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
     if (!req.path.startsWith("/api/")) return next();
@@ -56,6 +42,34 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     res.json({
       auth_required: Boolean(process.env.APP_WRITE_SECRET),
     });
+  });
+
+  // WO-A: current-user endpoint. Returns the effective identity for this
+  // request. Used by the dashboard right after Supabase Auth session change.
+  app.get("/api/me", (req: Request, res: Response) => {
+    if (!req.auth) return res.status(401).json({ error: "unauthorized" });
+    if ("admin_secret" in req.auth && req.auth.admin_secret) {
+      return res.json({
+        mode: "admin_secret",
+        user_id: null,
+        external_user_id: null,
+        role: "admin",
+        email: null,
+        display_name: null,
+      });
+    }
+    if (req.profile) {
+      return res.json({
+        mode: "user",
+        user_id: req.profile.user_id,
+        external_user_id: req.profile.external_user_id,
+        role: req.profile.role,
+        email: req.profile.email,
+        display_name: req.profile.display_name,
+      });
+    }
+    // JWT valid but no profile row yet (trigger race, extremely rare).
+    return res.status(404).json({ error: "profile not provisioned" });
   });
 
   // Publer routes (scheduling + publish + analytics)
