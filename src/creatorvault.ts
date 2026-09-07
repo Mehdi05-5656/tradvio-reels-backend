@@ -273,11 +273,13 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
 
       // Process known events. Unknown events are logged as 'ignored'.
       try {
-        if (payload?.event === "account.matched") {
+        // CV bridge (WO-04) emits `account.connected` on new connects.
+        // Legacy `account.matched` is kept for backward compat.
+        if (payload?.event === "account.connected" || payload?.event === "account.matched") {
           const ca = payload.connected_account;
-          // Bridge-flow payloads include external_user_id + bridge_source at
-          // the top level of the payload (WO-04). Fall back to null for
-          // any legacy non-bridge account.matched events.
+          // Bridge-flow payloads include external_user_id + bridge_name at
+          // the top level of the payload. Real CV payload confirmed as:
+          //   { event, bridge_id, bridge_name, external_user_id, connected_account: {...} }
           const externalUserId: string | null =
             (typeof payload.external_user_id === "string" && payload.external_user_id) || null;
           const bridgeSource: string | null =
@@ -301,11 +303,8 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
               .update({ processing_status: "processed", processed_at: new Date().toISOString() })
               .eq("id", eventRow.id);
           }
-          console.log("[creatorvault] account.matched:", ca.platform, ca.platform_handle,
+          console.log("[creatorvault]", payload.event, ca.platform, ca.platform_handle,
             "external_user_id=", externalUserId, "bridge_source=", bridgeSource);
-          // Log full payload keys to aid debugging bridge integration.
-          console.log("[creatorvault] account.matched payload keys:",
-            Object.keys(payload).join(","));
         } else {
           if (eventRow?.id) {
             await sb.from("creatorvault_webhook_events")
