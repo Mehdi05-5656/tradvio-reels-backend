@@ -398,17 +398,22 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
         if (platform !== "instagram" && platform !== "tiktok") {
           return res.status(400).json({ error: "invalid_platform", detail: "platform must be 'instagram' or 'tiktok'" });
         }
-        // WO-A: derive external_user_id from auth. Admins can pass any value
-        // (or omit and default to 'tradvio-brand' for backward-compat with the
-        // existing admin-secret Settings flow). Regular users are forced to
-        // their own external_user_id regardless of what the body says.
+        // Auth model:
+        //   - admin_secret       -> may pass any external_user_id (or default 'tradvio-brand')
+        //   - profile.role=admin -> may pass any external_user_id (or default 'tradvio-brand')
+        //   - profile.role=user  -> forced to their own external_user_id
+        //   - unauthenticated    -> rejected
         const requested = typeof req.body?.external_user_id === "string" ? req.body.external_user_id : null;
+        const isAdminSecret = !!(req.auth && "admin_secret" in req.auth && req.auth.admin_secret);
+        const isAdminUser = req.profile?.role === "admin";
+        const isUser = req.profile?.role === "user" && !!req.profile.external_user_id;
         let externalUserId: string;
-        if (req.profile?.role === "user" && req.profile.external_user_id) {
-          externalUserId = req.profile.external_user_id;
-        } else {
-          // admin_secret, admin JWT, or unauthenticated legacy path
+        if (isAdminSecret || isAdminUser) {
           externalUserId = requested || "tradvio-brand";
+        } else if (isUser) {
+          externalUserId = req.profile!.external_user_id;
+        } else {
+          return res.status(401).json({ error: "unauthorized" });
         }
 
         const dashboardOrigin =
@@ -458,15 +463,22 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
   app.get("/api/creatorvault/accounts", async (req: Request, res: Response) => {
     try {
       const sb = sbFn();
-      // WO-A: Same rule as OAuth start. Admins can query any external_user_id
-      // (or omit to see all rows). Regular users are locked to their own.
+      // Auth model (matches /bridge/oauth/start):
+      //   - admin_secret       -> honors ?external_user_id= (empty = all rows)
+      //   - profile.role=admin -> honors ?external_user_id= (empty = all rows)
+      //   - profile.role=user  -> forced to their own external_user_id
+      //   - unauthenticated    -> rejected
       const requested = typeof req.query.external_user_id === "string" ? req.query.external_user_id : "";
+      const isAdminSecret = !!(req.auth && "admin_secret" in req.auth && req.auth.admin_secret);
+      const isAdminUser = req.profile?.role === "admin";
+      const isUser = req.profile?.role === "user" && !!req.profile.external_user_id;
       let externalUserId: string;
-      if (req.profile?.role === "user" && req.profile.external_user_id) {
-        externalUserId = req.profile.external_user_id;
+      if (isAdminSecret || isAdminUser) {
+        externalUserId = requested; // empty means all
+      } else if (isUser) {
+        externalUserId = req.profile!.external_user_id;
       } else {
-        // admin_secret, admin JWT, or unauthenticated legacy path
-        externalUserId = requested;
+        return res.status(401).json({ error: "unauthorized" });
       }
       let q = sb
         .from("creatorvault_accounts")
