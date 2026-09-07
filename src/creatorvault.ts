@@ -543,20 +543,25 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
     }
   });
 
-  // Ownership status for a specific cv_account_id.
-  // Any authenticated caller may check. Never leaks who the other owner is.
-  //   { status: 'yours' | 'other_user' | 'unknown' }
-  //   yours       -> row exists and external_user_id matches the caller
-  //   other_user  -> row exists but is owned by a different external_user_id
-  //   unknown     -> row not found (webhook may not have landed yet)
-  // Admin (secret or JWT) always sees 'yours' for any owned row and 'unknown'
-  // for missing rows.
+  // Pending-connect status for the OAuth-return poller.
+  //
+  // Two ways to identify the connect attempt:
+  //   1. cv_account_id in the query string (best, when CV returns it)
+  //   2. no cv_account_id: look at the most recent webhook events (last 90s)
+  //      that would either target OR bypass the caller
+  //
+  // Returns:
+  //   { status: 'yours' | 'other_user' | 'unknown', platform_handle?, platform? }
+  //   yours       -> connect attempt succeeded and belongs to the caller
+  //   other_user  -> connect attempt was rejected because the account is
+  //                  owned by someone else (also fires when webhook logged
+  //                  ownership_conflict targeting the caller's external_user_id)
+  //   unknown     -> not found yet (webhook still in flight)
   app.get("/api/creatorvault/account-status", async (req: Request, res: Response) => {
     try {
       const cvAccountId = typeof req.query.cv_account_id === "string" ? req.query.cv_account_id : "";
-      if (!cvAccountId) {
-        return res.status(400).json({ error: "missing_cv_account_id" });
-      }
+      // cv_account_id is optional now — path B (recent webhook lookup) covers
+      // the case when CV callback did not include it.
 
       const isAdminSecret = !!(req.auth && "admin_secret" in req.auth && req.auth.admin_secret);
       const isAdminUser = req.profile?.role === "admin";
@@ -566,25 +571,85 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
       }
 
       const sb = sbFn();
-      const { data: row, error } = await sb
-        .from("creatorvault_accounts")
-        .select("external_user_id")
-        .eq("cv_account_id", cvAccountId)
-        .maybeSingle();
-      if (error) throw error;
+      const callerExtUid = req.profile?.external_user_id ?? null;
 
-      if (!row) {
+      // Path A: cv_account_id in URL. Direct row check.
+      if (cvAccountId) {
+        const { data: row, error } = await sb
+          .from("creatorvault_accounts")
+          .select("external_user_id, platform, platform_handle")
+          .eq("cv_account_id", cvAccountId)
+          .maybeSingle();
+        if (error) throw error;
+
+        if (!row) return res.json({ status: "unknown" });
+
+        // Admin-secret with no user identity: treat everything as 'yours'.
+        if (isAdminSecret && !callerExtUid) return res.json({ status: "yours" });
+
+        if (row.external_user_id && row.external_user_id === callerExtUid) {
+          return res.json({
+            status: "yours",
+            platform: row.platform,
+            platform_handle: row.platform_handle,
+          });
+        }
+        return res.json({
+          status: "other_user",
+          platform: row.platform,
+          platform_handle: row.platform_handle,
+        });
+      }
+
+      // Path B: no cv_account_id, look at recent webhook events (last 120s)
+      // whose target external_user_id was the caller. If the most recent
+      // one is 'ownership_conflict', return 'other_user'; if 'processed'
+      // (or 'received' with matching row), 'yours'; otherwise 'unknown'.
+      if (!callerExtUid) {
+        // admin_secret without a user identity: nothing user-specific to look up.
         return res.json({ status: "unknown" });
       }
-      // Admin sees everything as "yours" (they can act on any row).
-      if (isAdminSecret || isAdminUser) {
-        return res.json({ status: "yours" });
+
+      const { data: recent, error: recentErr } = await sb
+        .from("creatorvault_webhook_events")
+        .select("event, processing_status, processing_error, payload, received_at")
+        .gt("received_at", new Date(Date.now() - 120_000).toISOString())
+        .order("received_at", { ascending: false })
+        .limit(20);
+      if (recentErr) throw recentErr;
+
+      // Filter to events whose payload targeted the caller.
+      const mine = (recent ?? []).filter((e: any) => {
+        const targetUid = e?.payload?.external_user_id;
+        return typeof targetUid === "string" && targetUid === callerExtUid;
+      });
+      if (mine.length === 0) return res.json({ status: "unknown" });
+
+      const newest = mine[0] as any;
+      const ca = newest.payload?.connected_account ?? {};
+      if (newest.processing_status === "ownership_conflict") {
+        return res.json({
+          status: "other_user",
+          platform: ca.platform,
+          platform_handle: ca.platform_handle,
+        });
       }
-      // Regular user: match against their own external_user_id.
-      if (row.external_user_id && row.external_user_id === req.profile!.external_user_id) {
-        return res.json({ status: "yours" });
+      // 'processed' or 'received' — check the accounts row exists and belongs to caller.
+      if (ca.id) {
+        const { data: row2 } = await sb
+          .from("creatorvault_accounts")
+          .select("external_user_id, platform, platform_handle")
+          .eq("cv_account_id", ca.id)
+          .maybeSingle();
+        if (row2?.external_user_id === callerExtUid) {
+          return res.json({
+            status: "yours",
+            platform: row2.platform,
+            platform_handle: row2.platform_handle,
+          });
+        }
       }
-      return res.json({ status: "other_user" });
+      return res.json({ status: "unknown" });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
