@@ -354,12 +354,17 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   // Per-device analytics with time-of-day heatmap + retention indicators.
   //
-  // Data source is provider-specific:
-  //   IG:     publer_analytics (Publer /post_insights returns real IG data)
-  //   TikTok: own_video_stats  (Publer returns 0 views for TT; SC is real data)
+  // Data source: publer_analytics for BOTH IG and TikTok.
+  //   IG:     Publer /post_insights returns real IG data (video_views, reach, etc.).
+  //   TikTok: Publer /post_insights does not return video_views but its reach field
+  //           IS the view count per Publer's own tooltip; the ingest layer
+  //           (publer-schedule.ts) mirrors that into video_views for TikTok rows.
+  //
+  // This unifies the code path AND naturally clips pre-pipeline data because
+  // publer_analytics only starts on 2026-09-05 (Publer coverage start).
   //
   // Range: ?days=N (0 = lifetime, clamped 1..3650 otherwise) OR
-  //        ?from=YYYY-MM-DD&to=YYYY-MM-DD (min 2026-09-05, IG lower bound only).
+  //        ?from=YYYY-MM-DD&to=YYYY-MM-DD (min 2026-09-05 applies to both IG and TikTok).
   app.get("/api/v2/analytics/:phone", async (req: Request, res: Response) => {
     try {
       const phone = req.params.phone;
@@ -374,9 +379,10 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       const isTikTok = slot.provider === "tiktok";
 
       // Window resolution.
-      // IG has a hard lower bound of 2026-09-05 (Publer coverage start).
-      // TikTok has none — own_video_stats spans back to 2025.
+      // Hard lower bound of 2026-09-05 (Publer coverage start / pipeline start)
+      // applied uniformly to IG and TikTok. Pre-pipeline data is intentionally hidden.
       const MIN_DATE = "2026-09-05";
+      const MIN_DATE_ISO = `${MIN_DATE}T00:00:00-07:00`;
       const rawDays = parseInt(String(req.query.days ?? "30"), 10);
       const isLifetime = rawDays === 0;
       const days = isLifetime ? 0 : Math.max(1, Math.min(3650, rawDays));
@@ -385,18 +391,19 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       let windowLabel: string;
       if (req.query.from) {
         let from = String(req.query.from);
-        if (!isTikTok && from < MIN_DATE) from = MIN_DATE;
+        if (from < MIN_DATE) from = MIN_DATE;
         const to = String(req.query.to ?? new Date().toISOString().slice(0, 10));
         sinceISO = `${from}T00:00:00-07:00`;
         untilISO = `${to}T23:59:59-07:00`;
         windowLabel = `${from} to ${to}`;
       } else if (isLifetime) {
-        // Lifetime: no lower bound. Use 20-year floor to avoid null-timestamp
-        // gotchas but effectively "everything".
-        sinceISO = new Date(Date.now() - 3650 * 86400_000).toISOString();
-        windowLabel = "lifetime";
+        // "Lifetime" now means from pipeline start (MIN_DATE), not truly lifetime.
+        sinceISO = MIN_DATE_ISO;
+        windowLabel = "since pipeline start";
       } else {
-        sinceISO = new Date(Date.now() - days * 86400_000).toISOString();
+        // Clamp the rolling window's start to MIN_DATE so pre-pipeline days never appear.
+        const rolling = new Date(Date.now() - days * 86400_000).toISOString();
+        sinceISO = rolling < MIN_DATE_ISO ? MIN_DATE_ISO : rolling;
         windowLabel = `last ${days} days`;
       }
 
@@ -421,54 +428,9 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       let posts: NormPost[] = [];
       let dataSource: string;
 
-      if (isTikTok) {
-        dataSource = "own_video_stats";
-        // Case-insensitive: slot handle may be "Tradvio", TT canonical is "tradvio".
-        let q = sb
-          .from("own_video_stats")
-          .select("*")
-          .eq("platform", "tiktok")
-          .ilike("own_handle", slot.handle)
-          .gte("posted_at", sinceISO);
-        if (untilISO) q = q.lte("posted_at", untilISO);
-        const { data: rows, error } = await q.order("captured_at", {
-          ascending: false,
-        });
-        if (error) throw error;
-        // Keep only the most-recent snapshot per post.
-        const latestByPost = new Map<string, any>();
-        for (const r of rows ?? []) {
-          const key = r.post_aweme_id || String(r.id);
-          if (!latestByPost.has(key)) latestByPost.set(key, r);
-        }
-        posts = Array.from(latestByPost.values()).map((r: any) => {
-          const likes = Number(r.like_count ?? 0);
-          const comments = Number(r.comment_count ?? 0);
-          const shares = Number(r.share_count ?? 0);
-          const saves = Number(r.save_count ?? 0);
-          const eng = likes + comments + shares + saves;
-          const posted = r.posted_at || r.captured_at;
-          return {
-            post_id: r.post_aweme_id ?? String(r.id),
-            post_link: r.post_aweme_id
-              ? `https://www.tiktok.com/@${slot.handle}/video/${r.post_aweme_id}`
-              : null,
-            scheduled_at: posted,
-            posted_at: posted,
-            video_views: Number(r.play_count ?? r.view_count ?? 0),
-            reach: 0,
-            likes,
-            comments,
-            shares,
-            saves,
-            engagement: eng,
-            engagement_rate: 0,
-            thumbnail_url: r.thumbnail_url ?? null,
-            caption: r.caption ?? null,
-          };
-        });
-      } else {
-        dataSource = "publer_analytics";
+      // Unified path: both IG and TikTok read from publer_analytics.
+      dataSource = "publer_analytics";
+      {
         let q = sb
           .from("publer_analytics")
           .select("*")

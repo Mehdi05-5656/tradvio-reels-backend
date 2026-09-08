@@ -168,50 +168,21 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
       const isTikTok = slot.provider === "tiktok";
       // days=0 means lifetime (no time filter).
       const isLifetime = days === 0;
-      const since = new Date(Date.now() - (days || 3650) * 86400_000).toISOString();
 
-      // Data source is provider-specific.
-      //
-      // IG: Publer's /post_insights returns real IG numbers, so publer_analytics is authoritative.
-      // TikTok: Publer's /post_insights returns nothing useful (video_views=0, reach unreliable).
-      //         Use own_video_stats which is populated from ScrapeCreators against the account
-      //         directly. That's real TikTok data (plays, likes, comments, shares, saves).
+      // Hard lower bound: 2026-09-05 (pipeline / Publer coverage start).
+      // Pre-pipeline data is intentionally hidden across IG and TikTok.
+      const MIN_DATE_ISO = "2026-09-05T00:00:00-07:00";
+      const rolling = new Date(Date.now() - (days || 3650) * 86400_000).toISOString();
+      const since = rolling < MIN_DATE_ISO ? MIN_DATE_ISO : rolling;
+
+      // Data source: publer_analytics for BOTH IG and TikTok.
+      // TikTok's video_views is populated in the ingest layer by mirroring
+      // Publer's analytics.reach (see publer-schedule.ts). This also naturally
+      // clips pre-pipeline data since publer_analytics starts 2026-09-05.
       let posts: any[] = [];
-      let dataSource = "";
+      const dataSource = "publer_analytics";
 
-      if (isTikTok) {
-        dataSource = "own_video_stats";
-        // Pull all stats for our own handle within the window, latest per post.
-        // ilike handles case mismatches between slot config ("Tradvio") and
-        // TikTok's canonical unique_id ("tradvio").
-        const { data: rows } = await sb()
-          .from("own_video_stats")
-          .select("*")
-          .eq("platform", "tiktok")
-          .ilike("own_handle", slot.handle)
-          .gte("posted_at", since)
-          .order("captured_at", { ascending: false });
-        const latestByPost = new Map<string, any>();
-        for (const r of rows ?? []) {
-          const key = r.post_aweme_id || r.publer_post_id || String(r.id);
-          if (!latestByPost.has(key)) latestByPost.set(key, r);
-        }
-        posts = Array.from(latestByPost.values()).map((r: any) => ({
-          post_id: r.post_aweme_id,
-          post_link: r.post_aweme_id
-            ? `https://www.tiktok.com/@${slot.handle}/video/${r.post_aweme_id}`
-            : r.publer_post_link,
-          posted_at: r.posted_at,
-          date_key: (r.posted_at || "").slice(0, 10),
-          views: r.play_count || r.view_count || 0,
-          likes: r.like_count || 0,
-          comments: r.comment_count || 0,
-          shares: r.share_count || 0,
-          saves: r.save_count || 0,
-          reach: 0, // TikTok doesn't expose reach
-        }));
-      } else {
-        dataSource = "publer_analytics";
+      {
         const { data: snapsRaw } = await sb()
           .from("publer_analytics")
           .select("*")
