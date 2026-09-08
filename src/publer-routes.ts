@@ -163,88 +163,119 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
       const slot = slots.find((s) => s.phone_slot === phone);
       if (!slot) return res.status(404).json({ error: "slot not found" });
 
-      // Source of truth: publer_analytics (populated by the analytics cron
-      // from Publer's /post_insights endpoint). This includes EVERY post on
-      // the account that Publer knows about, not just posts our pipeline
-      // published. Rationale: the dashboard should reflect real account
-      // performance, not just our pipeline's slice.
-      const since = new Date(Date.now() - days * 86400_000).toISOString();
-      const { data: snapsRaw } = await sb()
-        .from("publer_analytics")
-        .select("*")
-        .eq("phone_slot", phone)
-        .gte("captured_at", since)
-        .order("captured_at", { ascending: false });
-      const snaps = snapsRaw ?? [];
-
-      // For each unique post (keyed by publer_post_id, which stores the
-      // post_link URL), keep only the most recent snapshot.
-      const latestByPost = new Map<string, any>();
-      for (const s of snaps) {
-        if (!latestByPost.has(s.publer_post_id)) latestByPost.set(s.publer_post_id, s);
-      }
-      const posts = Array.from(latestByPost.values());
-
-      // Metric normalization:
-      // - IG returns video_views; TikTok doesn't. For TikTok, use reach as
-      //   the view proxy (TikTok's reach is view-based for videos).
-      // - Publer doesn't return a scalar `engagement` field, only
-      //   engagement_rate. Compute engagement = likes+comments+shares+saves.
       const isTikTok = slot.provider === "tiktok";
-      const viewsOf = (a: any) => (isTikTok ? (a.reach || 0) : (a.video_views || 0));
-      const engagementOf = (a: any) =>
-        (a.likes || 0) + (a.comments || 0) + (a.shares || 0) + (a.saves || 0);
+      const since = new Date(Date.now() - days * 86400_000).toISOString();
 
-      // Per-day rollup by LA date. Extract from raw.scheduled_at
-      // (format: '2026-09-06T06:03:57.000-07:00' — already LA offset).
+      // Data source is provider-specific.
+      //
+      // IG: Publer's /post_insights returns real IG numbers, so publer_analytics is authoritative.
+      // TikTok: Publer's /post_insights returns nothing useful (video_views=0, reach unreliable).
+      //         Use own_video_stats which is populated from ScrapeCreators against the account
+      //         directly. That's real TikTok data (plays, likes, comments, shares, saves).
+      let posts: any[] = [];
+      let dataSource = "";
+
+      if (isTikTok) {
+        dataSource = "own_video_stats";
+        // Pull all stats for our own handle within the window, latest per post.
+        const { data: rows } = await sb()
+          .from("own_video_stats")
+          .select("*")
+          .eq("platform", "tiktok")
+          .eq("own_handle", slot.handle)
+          .gte("posted_at", since)
+          .order("captured_at", { ascending: false });
+        const latestByPost = new Map<string, any>();
+        for (const r of rows ?? []) {
+          const key = r.post_aweme_id || r.publer_post_id || String(r.id);
+          if (!latestByPost.has(key)) latestByPost.set(key, r);
+        }
+        posts = Array.from(latestByPost.values()).map((r: any) => ({
+          post_id: r.post_aweme_id,
+          post_link: r.post_aweme_id
+            ? `https://www.tiktok.com/@${slot.handle}/video/${r.post_aweme_id}`
+            : r.publer_post_link,
+          posted_at: r.posted_at,
+          date_key: (r.posted_at || "").slice(0, 10),
+          views: r.play_count || r.view_count || 0,
+          likes: r.like_count || 0,
+          comments: r.comment_count || 0,
+          shares: r.share_count || 0,
+          saves: r.save_count || 0,
+          reach: 0, // TikTok doesn't expose reach
+        }));
+      } else {
+        dataSource = "publer_analytics";
+        const { data: snapsRaw } = await sb()
+          .from("publer_analytics")
+          .select("*")
+          .eq("phone_slot", phone)
+          .gte("captured_at", since)
+          .order("captured_at", { ascending: false });
+        const snaps = snapsRaw ?? [];
+        const latestByPost = new Map<string, any>();
+        for (const s of snaps) {
+          if (!latestByPost.has(s.publer_post_id)) latestByPost.set(s.publer_post_id, s);
+        }
+        posts = Array.from(latestByPost.values()).map((a: any) => ({
+          post_id: a.publer_post_id,
+          post_link: a.publer_post_id, // Publer stores the post URL here
+          posted_at: a?.raw?.scheduled_at || a.captured_at,
+          date_key: (a?.raw?.scheduled_at || a.captured_at || "").slice(0, 10),
+          views: a.video_views || 0,
+          likes: a.likes || 0,
+          comments: a.comments || 0,
+          shares: a.shares || 0,
+          saves: a.saves || 0,
+          reach: a.reach || 0,
+        }));
+      }
+
+      const engagementOf = (p: any) =>
+        (p.likes || 0) + (p.comments || 0) + (p.shares || 0) + (p.saves || 0);
+
+      // Per-day rollup by post date.
       const perDay: Record<string, { date: string; views: number; likes: number; comments: number; shares: number; saves: number; reach: number; engagement: number; posts: number }> = {};
-      for (const a of posts) {
-        const sched: string | undefined = a?.raw?.scheduled_at;
-        const d = sched ? sched.slice(0, 10) : (a.captured_at || "").slice(0, 10);
+      for (const p of posts) {
+        const d = p.date_key;
         if (!d) continue;
         perDay[d] ||= { date: d, views: 0, likes: 0, comments: 0, shares: 0, saves: 0, reach: 0, engagement: 0, posts: 0 };
-        perDay[d].views += viewsOf(a);
-        perDay[d].likes += a.likes || 0;
-        perDay[d].comments += a.comments || 0;
-        perDay[d].shares += a.shares || 0;
-        perDay[d].saves += a.saves || 0;
-        perDay[d].reach += a.reach || 0;
-        perDay[d].engagement += engagementOf(a);
+        perDay[d].views += p.views;
+        perDay[d].likes += p.likes;
+        perDay[d].comments += p.comments;
+        perDay[d].shares += p.shares;
+        perDay[d].saves += p.saves;
+        perDay[d].reach += p.reach;
+        perDay[d].engagement += engagementOf(p);
         perDay[d].posts += 1;
       }
 
-      // Top posts by computed engagement. Include convenience fields so
-      // the UI can render "YYYY-MM-DD · N views" and open the post link.
       const top = posts
-        .map((a: any) => {
-          const sched: string | undefined = a?.raw?.scheduled_at;
-          return {
-            publer_post_id: a.publer_post_id,
-            publer_post_link: a.publer_post_id,
-            slot_local_date: sched ? sched.slice(0, 10) : (a.captured_at || "").slice(0, 10),
-            attempted_at: sched || a.captured_at,
-            video_views: viewsOf(a),
-            likes: a.likes || 0,
-            comments: a.comments || 0,
-            shares: a.shares || 0,
-            saves: a.saves || 0,
-            reach: a.reach || 0,
-            engagement: engagementOf(a),
-          };
-        })
+        .map((p: any) => ({
+          publer_post_id: p.post_id,
+          publer_post_link: p.post_link,
+          slot_local_date: p.date_key,
+          attempted_at: p.posted_at,
+          video_views: p.views,
+          likes: p.likes,
+          comments: p.comments,
+          shares: p.shares,
+          saves: p.saves,
+          reach: p.reach,
+          engagement: engagementOf(p),
+        }))
         .sort((a: any, b: any) => (b.engagement || 0) - (a.engagement || 0))
         .slice(0, 10);
 
-      // Totals across the whole window.
       const totals = { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, reach: 0, engagement: 0, posts: posts.length };
-      for (const a of posts) {
-        totals.views += viewsOf(a);
-        totals.likes += a.likes || 0;
-        totals.comments += a.comments || 0;
-        totals.shares += a.shares || 0;
-        totals.saves += a.saves || 0;
-        totals.reach += a.reach || 0;
-        totals.engagement += engagementOf(a);
+      for (const p of posts) {
+        totals.views += p.views;
+        totals.likes += p.likes;
+        totals.comments += p.comments;
+        totals.shares += p.shares;
+        totals.saves += p.saves;
+        totals.reach += p.reach;
+        totals.engagement += engagementOf(p);
       }
 
       res.json({
@@ -252,6 +283,7 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
         handle: slot.handle,
         provider: slot.provider,
         days,
+        data_source: dataSource,
         totals,
         per_day: Object.values(perDay).sort((a, b) => a.date.localeCompare(b.date)),
         top_posts: top,
