@@ -178,11 +178,13 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
       if (isTikTok) {
         dataSource = "own_video_stats";
         // Pull all stats for our own handle within the window, latest per post.
+        // ilike handles case mismatches between slot config ("Tradvio") and
+        // TikTok's canonical unique_id ("tradvio").
         const { data: rows } = await sb()
           .from("own_video_stats")
           .select("*")
           .eq("platform", "tiktok")
-          .eq("own_handle", slot.handle)
+          .ilike("own_handle", slot.handle)
           .gte("posted_at", since)
           .order("captured_at", { ascending: false });
         const latestByPost = new Map<string, any>();
