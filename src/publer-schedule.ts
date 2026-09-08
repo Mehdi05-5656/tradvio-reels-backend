@@ -651,18 +651,29 @@ export async function analyticsTick(sb: SupabaseClient): Promise<{
         const lastCap2 = latest2?.captured_at ? new Date(latest2.captured_at) : null;
         if (lastCap2 && (now.getTime() - lastCap2.getTime()) / 60000 < minGapMin) continue;
 
+        // Provider-specific views field mapping.
+        // Publer returns different analytics keys per provider:
+        //   Instagram: analytics.video_views is the play count; analytics.reach is unique reach.
+        //   TikTok:    analytics.video_views does NOT exist. analytics.reach IS the view count
+        //              per Publer's own tooltip ("Number of times this post was viewed").
+        // We normalize video_views so the dashboard's "Views" tile lights up for TikTok too.
+        const rawViews = v("video_views");
+        const rawReach = v("reach");
+        const normalizedViews = rawViews != null ? rawViews
+          : (s.provider === "tiktok" ? rawReach : null);
+
         await sb.from("publer_analytics").insert({
           publer_post_id: joinKey,
           phone_slot: s.phone_slot,
           captured_at: now.toISOString(),
-          reach: v("reach"),
+          reach: rawReach,
           engagement: v("engagement"),
           engagement_rate: v("engagement_rate"),
           likes: v("likes"),
           comments: v("comments"),
           shares: v("shares"),
           saves: v("saves"),
-          video_views: v("video_views"),
+          video_views: normalizedViews,
           link_clicks: v("link_clicks"),
           post_clicks: v("post_clicks"),
           click_through_rate: v("click_through_rate"),
