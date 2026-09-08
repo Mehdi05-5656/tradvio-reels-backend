@@ -1036,6 +1036,186 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
     }
   });
 
+  // ==================== LEADER ACCOUNTS (Content Intelligence) ====================
+  // Admin-only endpoints. These expose leader-account historical data and
+  // hashtag stats that seed the caption/hashtag suggestion pipeline.
+
+  app.get("/api/v2/leaders", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const sb = sbFn();
+      const { data, error } = await sb
+        .from("leader_accounts")
+        .select("id, phone_slot, provider, handle, active, created_at")
+        .order("created_at");
+      if (error) throw error;
+      // Enrich each with post/hashtag counts + last refresh
+      const results = [] as any[];
+      for (const l of data || []) {
+        const [{ count: postCount }, { count: tagCount }, latest] = await Promise.all([
+          sb.from("leader_posts").select("id", { count: "exact", head: true }).eq("leader_id", l.id),
+          sb.from("leader_hashtag_stats").select("id", { count: "exact", head: true }).eq("leader_id", l.id),
+          sb.from("leader_posts").select("last_refreshed_at").eq("leader_id", l.id).order("last_refreshed_at", { ascending: false }).limit(1).single(),
+        ]);
+        results.push({
+          ...l,
+          post_count: postCount ?? 0,
+          hashtag_count: tagCount ?? 0,
+          last_refreshed_at: latest.data?.last_refreshed_at ?? null,
+        });
+      }
+      res.json({ leaders: results });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Top posts for a leader, sorted by composite score.
+  app.get("/api/v2/leaders/:id/posts", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const sb = sbFn();
+      const limit = Math.min(Number(req.query.limit) || 20, 100);
+      const sort = String(req.query.sort || "score");
+      const { data, error } = await sb
+        .from("leader_posts")
+        .select(
+          "id, external_post_id, shortcode, post_url, posted_at, caption, hashtags, media_type, product_type, video_duration, thumbnail_url, media_url, video_views, likes, comments, saves, shares, first_seen_at, last_refreshed_at, leader_post_scores(views_per_day, engagement_rate, composite_score, rank_overall, computed_at)",
+        )
+        .eq("leader_id", req.params.id);
+      if (error) throw error;
+      const posts = (data || []).map((p: any) => {
+        const s = Array.isArray(p.leader_post_scores) ? p.leader_post_scores[0] : p.leader_post_scores;
+        return {
+          id: p.id,
+          external_post_id: p.external_post_id,
+          shortcode: p.shortcode,
+          post_url: p.post_url,
+          posted_at: p.posted_at,
+          caption: p.caption,
+          hashtags: p.hashtags || [],
+          media_type: p.media_type,
+          product_type: p.product_type,
+          video_duration: p.video_duration,
+          thumbnail_url: p.thumbnail_url,
+          media_url: p.media_url,
+          video_views: Number(p.video_views ?? 0),
+          likes: Number(p.likes ?? 0),
+          comments: Number(p.comments ?? 0),
+          saves: p.saves == null ? null : Number(p.saves),
+          shares: p.shares == null ? null : Number(p.shares),
+          views_per_day: s?.views_per_day == null ? null : Number(s.views_per_day),
+          engagement_rate: s?.engagement_rate == null ? null : Number(s.engagement_rate),
+          composite_score: s?.composite_score == null ? null : Number(s.composite_score),
+          rank_overall: s?.rank_overall ?? null,
+          scored_at: s?.computed_at ?? null,
+          first_seen_at: p.first_seen_at,
+          last_refreshed_at: p.last_refreshed_at,
+        };
+      });
+      posts.sort((a: any, b: any) => {
+        if (sort === "views") return b.video_views - a.video_views;
+        if (sort === "posted") return new Date(b.posted_at || 0).getTime() - new Date(a.posted_at || 0).getTime();
+        return (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity);
+      });
+      res.json({ posts: posts.slice(0, limit) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Hashtag stats for a leader, ranked by avg composite score.
+  app.get("/api/v2/leaders/:id/hashtags", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const sb = sbFn();
+      const { data, error } = await sb
+        .from("leader_hashtag_stats")
+        .select("hashtag, post_count, avg_views, median_views, avg_composite_score, best_post_id, computed_at")
+        .eq("leader_id", req.params.id)
+        .order("avg_composite_score", { ascending: false });
+      if (error) throw error;
+      res.json({ hashtags: data || [] });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Build a caption + hashtag suggestion from the leader's top N posts.
+  //  POST /api/v2/leaders/:id/suggest
+  //  body: { queue_id?: string, top_n?: number, save?: boolean }
+  // If queue_id + save=true, writes a queue_suggestions row (source='leader_v1').
+  app.post("/api/v2/leaders/:id/suggest", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const sb = sbFn();
+      const topN = Math.min(Number(req.body?.top_n) || 10, 25);
+      const queueId: string | undefined = req.body?.queue_id;
+      const save: boolean = !!req.body?.save;
+
+      const { data: topPosts, error: postsErr } = await sb
+        .from("leader_posts")
+        .select("id, caption, hashtags, video_views, likes, leader_post_scores(composite_score, rank_overall)")
+        .eq("leader_id", req.params.id)
+        .limit(200);
+      if (postsErr) throw postsErr;
+
+      const withScore = (topPosts || []).map((p: any) => {
+        const s = Array.isArray(p.leader_post_scores) ? p.leader_post_scores[0] : p.leader_post_scores;
+        return { ...p, composite_score: Number(s?.composite_score ?? 0), rank_overall: s?.rank_overall ?? 999 };
+      });
+      withScore.sort((a: any, b: any) => b.composite_score - a.composite_score);
+      const top = withScore.slice(0, topN);
+
+      // Hashtag frequency weighted by composite score (only positive scorers count).
+      const tagWeight = new Map<string, number>();
+      for (const p of top) {
+        const w = Math.max(0.1, p.composite_score + 1); // shift so weakest positives still count
+        for (const t of p.hashtags || []) {
+          tagWeight.set(t, (tagWeight.get(t) || 0) + w);
+        }
+      }
+      const rankedTags = Array.from(tagWeight.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([t]) => t);
+
+      // Caption hook: first line of the top-1 post; fallback to top-2 if empty.
+      const hookSource = top.find((p: any) => (p.caption || "").trim().length > 0);
+      const rawHook = (hookSource?.caption || "").split("\n")[0].trim();
+      const cleanedHook = rawHook.replace(/#[\p{L}0-9_]+/gu, "").trim();
+      const suggestedCaption = cleanedHook
+        ? `${cleanedHook}\n\n${rankedTags.join(" ")}`
+        : rankedTags.join(" ");
+
+      const rationale = `Derived from top ${top.length} @leader posts. Hook adapted from post rank #${top[0]?.rank_overall}. Hashtags weighted by composite score.`;
+
+      const payload = {
+        source: "leader_v1",
+        suggested_caption: suggestedCaption,
+        suggested_hashtags: rankedTags,
+        rationale,
+        source_leader_post_ids: top.map((p: any) => p.id),
+      };
+
+      if (save && queueId) {
+        const { error: upErr } = await sb.from("queue_suggestions").upsert(
+          {
+            queue_id: queueId,
+            ...payload,
+            user_action: "pending",
+          },
+          { onConflict: "queue_id,source" },
+        );
+        if (upErr) throw upErr;
+      }
+
+      res.json({ suggestion: payload, saved: save && !!queueId });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
 
 }
 
