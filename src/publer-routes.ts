@@ -157,14 +157,18 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
     try {
       const phone = req.params.phone;
       if (!VALID_SLOTS.has(phone)) return res.status(400).json({ error: "invalid slot" });
-      const days = Math.max(1, Math.min(90, parseInt(String(req.query.days ?? "30"), 10)));
+      // days=0 means lifetime (no time filter); otherwise clamp 1..3650.
+      const rawDays = parseInt(String(req.query.days ?? "30"), 10);
+      const days = rawDays === 0 ? 0 : Math.max(1, Math.min(3650, rawDays));
 
       const slots = await loadSlots(sb());
       const slot = slots.find((s) => s.phone_slot === phone);
       if (!slot) return res.status(404).json({ error: "slot not found" });
 
       const isTikTok = slot.provider === "tiktok";
-      const since = new Date(Date.now() - days * 86400_000).toISOString();
+      // days=0 means lifetime (no time filter).
+      const isLifetime = days === 0;
+      const since = new Date(Date.now() - (days || 3650) * 86400_000).toISOString();
 
       // Data source is provider-specific.
       //
