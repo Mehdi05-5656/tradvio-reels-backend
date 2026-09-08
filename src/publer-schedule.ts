@@ -100,14 +100,39 @@ export async function harvestCaptions(
 }
 
 // -------- Caption composer --------
-// Loads the device template + hashtag pool, picks 1 hook + N unique hashtags.
-// If no template exists, falls back to empty (previous behavior, but logs the miss).
+// Priority order:
+//   1. Accepted queue_suggestions row for this queue item (user-approved from Leaders ML)
+//   2. device_content_templates hook + hashtag pool (legacy behavior)
+//   3. Empty (previous fallback, logs miss)
 // Hashtag selection avoids reusing the same set from the previous post to reduce
 // IG/TikTok "same hashtag spam" flags.
 async function composeCaption(
   sb: SupabaseClient,
   phoneSlot: string,
-): Promise<{ caption: string; hashtags: string[] }> {
+  queueRowId?: string,
+): Promise<{ caption: string; hashtags: string[]; source: "suggestion" | "template" | "empty" }> {
+  // Priority 1: accepted suggestion for this queue row
+  if (queueRowId) {
+    const { data: sug } = await sb
+      .from("queue_suggestions")
+      .select("suggested_caption, suggested_hashtags, user_action, final_caption, final_hashtags")
+      .eq("queue_id", queueRowId)
+      .eq("user_action", "accepted")
+      .limit(1)
+      .maybeSingle();
+    if (sug) {
+      const caption = (sug.final_caption && sug.final_caption.trim())
+        ? sug.final_caption
+        : sug.suggested_caption;
+      const rawTags = (sug.final_hashtags && sug.final_hashtags.length)
+        ? sug.final_hashtags
+        : (sug.suggested_hashtags || []);
+      const hashtags = rawTags.map((t: string) => t.replace(/^#/, ""));
+      console.log("[caption] using accepted suggestion for queue", queueRowId);
+      return { caption, hashtags, source: "suggestion" };
+    }
+  }
+
   const { data: tpl } = await sb
     .from("device_content_templates")
     .select("caption_hooks, hashtag_pool, hashtag_count_per_post, enabled")
@@ -116,7 +141,7 @@ async function composeCaption(
 
   if (!tpl || !tpl.enabled || !(tpl.caption_hooks?.length)) {
     console.log("[caption] no active template for", phoneSlot);
-    return { caption: "", hashtags: [] };
+    return { caption: "", hashtags: [], source: "empty" };
   }
 
   // Pull the last N caption+hashtag sets we used on this slot so we can rotate
@@ -146,7 +171,7 @@ async function composeCaption(
 
   const hashPart = chosen.map((t) => `#${t}`).join(" ");
   const caption = hashPart ? `${hook} ${hashPart}` : hook;
-  return { caption, hashtags: chosen };
+  return { caption, hashtags: chosen, source: "template" };
 }
 
 
@@ -392,7 +417,8 @@ export async function publishOne(
     }).eq("id", log.id);
 
     // 3) Publish — pull caption template + hashtag pool for this slot
-    const { caption, hashtags } = await composeCaption(sb, slot.phone_slot);
+    const { caption, hashtags, source: captionSource } = await composeCaption(sb, slot.phone_slot, row.id);
+    console.log("[publisher] caption source:", captionSource, "for queue", row.id);
     const { jobId: publishJob } = await publishNow({
       workspaceId: cfg.workspaceId,
       accountId: slot.publer_account_id,

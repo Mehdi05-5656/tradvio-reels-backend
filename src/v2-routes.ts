@@ -1216,6 +1216,92 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
     }
   });
 
+  // --------------------------------------------------------------------------
+  //  GET /api/v2/queue-suggestions?queue_ids=id1,id2,...
+  //  Batch fetch the current suggestion state for a set of queue items.
+  //  Returns { suggestions: { <queue_id>: { ...row } } } for any queue_id with a row.
+  // --------------------------------------------------------------------------
+  app.get("/api/v2/queue-suggestions", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const idsParam = String(req.query.queue_ids || "").trim();
+      if (!idsParam) return res.json({ suggestions: {} });
+      const ids = idsParam.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 200);
+      if (!ids.length) return res.json({ suggestions: {} });
+      const sb = sbFn();
+      const { data, error } = await sb
+        .from("queue_suggestions")
+        .select("queue_id, source, suggested_caption, suggested_hashtags, final_caption, final_hashtags, rationale, user_action, decided_at")
+        .in("queue_id", ids);
+      if (error) throw error;
+      const map: Record<string, any> = {};
+      for (const row of data || []) {
+        map[(row as any).queue_id] = row;
+      }
+      res.json({ suggestions: map });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  //  POST /api/v2/queue-suggestions/:queueId/accept
+  //  Marks the suggestion accepted. Optional body: { caption, hashtags } for edits.
+  // --------------------------------------------------------------------------
+  app.post("/api/v2/queue-suggestions/:queueId/accept", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const sb = sbFn();
+      const editedCaption: string | undefined = req.body?.caption;
+      const editedHashtags: string[] | undefined = req.body?.hashtags;
+      const patch: Record<string, any> = {
+        user_action: "accepted",
+        decided_at: new Date().toISOString(),
+      };
+      if (typeof editedCaption === "string" && editedCaption.trim()) {
+        patch.final_caption = editedCaption;
+      }
+      if (Array.isArray(editedHashtags) && editedHashtags.length) {
+        patch.final_hashtags = editedHashtags.map((t) => t.replace(/^#/, ""));
+      }
+      const { data, error } = await sb
+        .from("queue_suggestions")
+        .update(patch)
+        .eq("queue_id", req.params.queueId)
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ error: "no suggestion for this queue_id" });
+      res.json({ suggestion: data });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  //  POST /api/v2/queue-suggestions/:queueId/reject
+  //  Marks the suggestion rejected. Publisher will fall back to template/empty.
+  // --------------------------------------------------------------------------
+  app.post("/api/v2/queue-suggestions/:queueId/reject", async (req: Request, res: Response) => {
+    try {
+      if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+      const sb = sbFn();
+      const { data, error } = await sb
+        .from("queue_suggestions")
+        .update({
+          user_action: "rejected",
+          decided_at: new Date().toISOString(),
+        })
+        .eq("queue_id", req.params.queueId)
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ error: "no suggestion for this queue_id" });
+      res.json({ suggestion: data });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
 }
 
