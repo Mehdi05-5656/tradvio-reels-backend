@@ -4,6 +4,7 @@
 
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { loadSlots } from "./publer-schedule";
 
 type SbGetter = () => SupabaseClient;
 
@@ -284,95 +285,240 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   // ==================== ENHANCED ANALYTICS ====================
 
-  // Per-device analytics with time-of-day heatmap + retention indicators
+  // Per-device analytics with time-of-day heatmap + retention indicators.
+  //
+  // Data source is provider-specific:
+  //   IG:     publer_analytics (Publer /post_insights returns real IG data)
+  //   TikTok: own_video_stats  (Publer returns 0 views for TT; SC is real data)
+  //
+  // Range: ?days=N (0 = lifetime, clamped 1..3650 otherwise) OR
+  //        ?from=YYYY-MM-DD&to=YYYY-MM-DD (min 2026-09-05, IG lower bound only).
   app.get("/api/v2/analytics/:phone", async (req: Request, res: Response) => {
     try {
       const phone = req.params.phone;
       if (!VALID_SLOTS.has(phone)) {
         return res.status(400).json({ error: "invalid phone slot" });
       }
-      // Support ?days=N or ?from=YYYY-MM-DD&to=YYYY-MM-DD (min 2026-09-05)
+
+      const sb = sbFn();
+      const slots = await loadSlots(sb);
+      const slot = slots.find((s) => s.phone_slot === phone);
+      if (!slot) return res.status(404).json({ error: "slot not found" });
+      const isTikTok = slot.provider === "tiktok";
+
+      // Window resolution.
+      // IG has a hard lower bound of 2026-09-05 (Publer coverage start).
+      // TikTok has none — own_video_stats spans back to 2025.
       const MIN_DATE = "2026-09-05";
+      const rawDays = parseInt(String(req.query.days ?? "30"), 10);
+      const isLifetime = rawDays === 0;
+      const days = isLifetime ? 0 : Math.max(1, Math.min(3650, rawDays));
       let sinceISO: string;
       let untilISO: string | null = null;
       let windowLabel: string;
       if (req.query.from) {
         let from = String(req.query.from);
-        if (from < MIN_DATE) from = MIN_DATE;
+        if (!isTikTok && from < MIN_DATE) from = MIN_DATE;
         const to = String(req.query.to ?? new Date().toISOString().slice(0, 10));
         sinceISO = `${from}T00:00:00-07:00`;
         untilISO = `${to}T23:59:59-07:00`;
         windowLabel = `${from} to ${to}`;
+      } else if (isLifetime) {
+        // Lifetime: no lower bound. Use 20-year floor to avoid null-timestamp
+        // gotchas but effectively "everything".
+        sinceISO = new Date(Date.now() - 3650 * 86400_000).toISOString();
+        windowLabel = "lifetime";
       } else {
-        const days = Math.min(Number(req.query.days ?? 30), 90);
         sinceISO = new Date(Date.now() - days * 86400_000).toISOString();
         windowLabel = `last ${days} days`;
       }
 
-      const sb = sbFn();
-      let q = sb
-        .from("publer_analytics")
-        .select("*")
-        .eq("phone_slot", phone)
-        .gte("captured_at", sinceISO);
-      if (untilISO) q = q.lte("captured_at", untilISO);
-      const { data, error } = await q.order("captured_at", { ascending: false });
-      if (error) throw error;
+      // Normalized post shape used by aggregation below.
+      type NormPost = {
+        post_id: string;
+        post_link: string | null;
+        scheduled_at: string; // ISO — drives heatmap + daily_series
+        posted_at: string; // ISO — used for maturity filter (underperformers)
+        video_views: number;
+        reach: number;
+        likes: number;
+        comments: number;
+        shares: number;
+        saves: number;
+        engagement: number; // likes+comments+shares+saves
+        engagement_rate: number; // percent; 0 for TikTok (no reach)
+        thumbnail_url: string | null;
+        caption: string | null;
+      };
 
-      // Group by publer_post_id, keep latest snapshot per post
-      const byPost = new Map<string, any>();
-      for (const row of data ?? []) {
-        const cur = byPost.get(row.publer_post_id);
-        if (!cur || new Date(row.captured_at) > new Date(cur.captured_at)) {
-          byPost.set(row.publer_post_id, row);
+      let posts: NormPost[] = [];
+      let dataSource: string;
+
+      if (isTikTok) {
+        dataSource = "own_video_stats";
+        // Case-insensitive: slot handle may be "Tradvio", TT canonical is "tradvio".
+        let q = sb
+          .from("own_video_stats")
+          .select("*")
+          .eq("platform", "tiktok")
+          .ilike("own_handle", slot.handle)
+          .gte("posted_at", sinceISO);
+        if (untilISO) q = q.lte("posted_at", untilISO);
+        const { data: rows, error } = await q.order("captured_at", {
+          ascending: false,
+        });
+        if (error) throw error;
+        // Keep only the most-recent snapshot per post.
+        const latestByPost = new Map<string, any>();
+        for (const r of rows ?? []) {
+          const key = r.post_aweme_id || String(r.id);
+          if (!latestByPost.has(key)) latestByPost.set(key, r);
         }
+        posts = Array.from(latestByPost.values()).map((r: any) => {
+          const likes = Number(r.like_count ?? 0);
+          const comments = Number(r.comment_count ?? 0);
+          const shares = Number(r.share_count ?? 0);
+          const saves = Number(r.save_count ?? 0);
+          const eng = likes + comments + shares + saves;
+          const posted = r.posted_at || r.captured_at;
+          return {
+            post_id: r.post_aweme_id ?? String(r.id),
+            post_link: r.post_aweme_id
+              ? `https://www.tiktok.com/@${slot.handle}/video/${r.post_aweme_id}`
+              : null,
+            scheduled_at: posted,
+            posted_at: posted,
+            video_views: Number(r.play_count ?? r.view_count ?? 0),
+            reach: 0,
+            likes,
+            comments,
+            shares,
+            saves,
+            engagement: eng,
+            engagement_rate: 0,
+            thumbnail_url: r.thumbnail_url ?? null,
+            caption: r.caption ?? null,
+          };
+        });
+      } else {
+        dataSource = "publer_analytics";
+        let q = sb
+          .from("publer_analytics")
+          .select("*")
+          .eq("phone_slot", phone)
+          .gte("captured_at", sinceISO);
+        if (untilISO) q = q.lte("captured_at", untilISO);
+        const { data: rows, error } = await q.order("captured_at", {
+          ascending: false,
+        });
+        if (error) throw error;
+        const latestByPost = new Map<string, any>();
+        for (const r of rows ?? []) {
+          const cur = latestByPost.get(r.publer_post_id);
+          if (!cur || new Date(r.captured_at) > new Date(cur.captured_at)) {
+            latestByPost.set(r.publer_post_id, r);
+          }
+        }
+        posts = Array.from(latestByPost.values()).map((r: any) => {
+          const posted = r?.raw?.scheduled_at || r.captured_at;
+          return {
+            post_id: r.publer_post_id,
+            post_link: r?.raw?.post_link ?? r.publer_post_id ?? null,
+            scheduled_at: posted,
+            posted_at: posted,
+            video_views: Number(r.video_views ?? 0),
+            reach: Number(r.reach ?? 0),
+            likes: Number(r.likes ?? 0),
+            comments: Number(r.comments ?? 0),
+            shares: Number(r.shares ?? 0),
+            saves: Number(r.saves ?? 0),
+            engagement: Number(r.engagement ?? 0),
+            engagement_rate: Number(r.engagement_rate ?? 0),
+            thumbnail_url: r?.raw?.thumbnail ?? null,
+            caption: r?.raw?.caption ?? null,
+          };
+        });
       }
-      const posts = Array.from(byPost.values());
 
-      // Best time-of-day heatmap: 7 days x 24 hours = engagement rate median
-      const heatmap: Record<string, { total: number; count: number; avg: number }> = {};
+      // Best time-of-day heatmap. IG: avg engagement_rate. TikTok: avg views
+      // (TT doesn't expose reach so engagement_rate is 0, use views instead).
+      const heatmap: Record<string, number> = {};
+      const heatmapAgg: Record<string, { total: number; count: number }> = {};
       for (const p of posts) {
-        const scheduledAt = p.raw?.scheduled_at || p.raw?.updated_at;
-        if (!scheduledAt) continue;
-        const d = new Date(scheduledAt);
-        const dow = d.getDay(); // 0=Sun
-        const hour = d.getHours();
-        const key = `${dow}-${hour}`;
-        const engRate = Number(p.engagement_rate ?? 0);
-        const cur = heatmap[key] ?? { total: 0, count: 0, avg: 0 };
-        cur.total += engRate;
+        if (!p.scheduled_at) continue;
+        const d = new Date(p.scheduled_at);
+        const key = `${d.getDay()}-${d.getHours()}`;
+        const val = isTikTok ? p.video_views : p.engagement_rate;
+        const cur = heatmapAgg[key] ?? { total: 0, count: 0 };
+        cur.total += val;
         cur.count += 1;
-        cur.avg = cur.total / cur.count;
-        heatmap[key] = cur;
+        heatmapAgg[key] = cur;
+      }
+      for (const [k, v] of Object.entries(heatmapAgg)) {
+        heatmap[k] = v.count > 0 ? v.total / v.count : 0;
       }
 
-      // Top 5 performers
+      // Top 5 by views.
       const topPerformers = [...posts]
-        .filter((p) => (p.video_views ?? 0) > 0)
-        .sort((a, b) => Number(b.video_views ?? 0) - Number(a.video_views ?? 0))
+        .filter((p) => p.video_views > 0)
+        .sort((a, b) => b.video_views - a.video_views)
         .slice(0, 5);
 
-      // Underperformers (lowest views in posts >= 6h old)
+      // Underperformers: lowest views among posts >= 6h old with any views (so
+      // brand-new posts don't dominate the list).
       const now = Date.now();
       const matureUnderperformers = posts
         .filter((p) => {
-          const sched = p.raw?.scheduled_at;
-          if (!sched) return false;
-          return now - new Date(sched).getTime() > 6 * 3600_000;
+          if (!p.posted_at) return false;
+          return now - new Date(p.posted_at).getTime() > 6 * 3600_000;
         })
-        .sort((a, b) => Number(a.video_views ?? 0) - Number(b.video_views ?? 0))
+        .sort((a, b) => a.video_views - b.video_views)
         .slice(0, 5);
 
-      const sum = (k: string) => posts.reduce((a, p) => a + Number((p as any)[k] ?? 0), 0);
-      const avg = (k: string) => {
-        const vals = posts.map((p) => Number((p as any)[k] ?? 0)).filter((n) => n > 0);
-        return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
-      };
-      const medianViews = median(posts.map((p) => Number(p.video_views ?? 0)));
+      const sum = (k: keyof NormPost) =>
+        posts.reduce((a, p) => a + Number(p[k] ?? 0), 0);
+      const medianViews = median(posts.map((p) => p.video_views));
+
+      // Daily rollup for the trend chart (frontend also has its own rollup that
+      // reads posts_time_series; keep both so either code path renders).
+      const perDay: Record<string, { date: string; views: number; reach: number; posts: number }> = {};
+      for (const p of posts) {
+        const dk = (p.scheduled_at || "").slice(0, 10);
+        if (!dk) continue;
+        perDay[dk] ||= { date: dk, views: 0, reach: 0, posts: 0 };
+        perDay[dk].views += p.video_views;
+        perDay[dk].reach += p.reach;
+        perDay[dk].posts += 1;
+      }
+      const dailySeries = Object.values(perDay).sort((a, b) =>
+        a.date.localeCompare(b.date),
+      );
+
+      const mapPerformer = (p: NormPost) => ({
+        post_link: p.post_link,
+        video_views: p.video_views,
+        views: p.video_views,
+        reach: p.reach,
+        likes: p.likes,
+        comments: p.comments,
+        shares: p.shares,
+        saves: p.saves,
+        engagement: p.engagement,
+        engagement_rate: p.engagement_rate,
+        thumbnail: p.thumbnail_url,
+        thumbnail_url: p.thumbnail_url,
+        posted_at: p.posted_at,
+        scheduled_at: p.scheduled_at,
+        caption: p.caption,
+      });
 
       res.json({
         phone_slot: phone,
+        provider: slot.provider,
+        handle: slot.handle,
+        data_source: dataSource,
         window: windowLabel,
+        window_days: isLifetime ? 0 : days,
         min_date: MIN_DATE,
         posts_count: posts.length,
         totals: {
@@ -383,26 +529,20 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
           shares: sum("shares"),
           saves: sum("saves"),
           engagement: sum("engagement"),
-          link_clicks: sum("link_clicks"),
-          post_clicks: sum("post_clicks"),
           median_views_per_post: medianViews,
-          avg_engagement_rate: Number(avg("engagement_rate").toFixed(2)),
-          avg_ctr: Number(avg("click_through_rate").toFixed(4)),
-          avg_reach_rate: Number(avg("reach_rate").toFixed(2)),
         },
         heatmap,
-        top_performers: topPerformers.map(publicPost),
-        underperformers: matureUnderperformers.map(publicPost),
-        posts_time_series: posts
-          .filter((p) => p.raw?.scheduled_at)
-          .map((p) => ({
-            id: p.publer_post_id,
-            scheduled_at: p.raw?.scheduled_at,
-            video_views: Number(p.video_views ?? 0),
-            reach: Number(p.reach ?? 0),
-            engagement_rate: Number(p.engagement_rate ?? 0),
-            post_link: p.raw?.post_link ?? null,
-          })),
+        daily_series: dailySeries,
+        top_performers: topPerformers.map(mapPerformer),
+        underperformers: matureUnderperformers.map(mapPerformer),
+        posts_time_series: posts.map((p) => ({
+          id: p.post_id,
+          scheduled_at: p.scheduled_at,
+          video_views: p.video_views,
+          reach: p.reach,
+          engagement_rate: p.engagement_rate,
+          post_link: p.post_link,
+        })),
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
