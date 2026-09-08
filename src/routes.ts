@@ -127,7 +127,9 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
               { ascending: status === "pending" })
         .limit(limit + 1);
       if (error) throw error;
-      res.json(data ?? []);
+      const rows = data ?? [];
+      const enriched = await enrichQueueRows(rows);
+      res.json(enriched);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -303,9 +305,70 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
         .order("posted_at", { ascending: false, nullsFirst: false })
         .range(offset, offset + limit - 1);
       if (error) throw error;
-      res.json(data ?? []);
+      const rows = data ?? [];
+      const enriched = await enrichQueueRows(rows);
+      res.json(enriched);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+}
+
+// Enrich a list of reels_manual_queue rows with:
+//   video_url      — 1h signed URL to the mp4 in Supabase Storage (client uses
+//                    <video preload=metadata> to render the first frame as a
+//                    poster; no ffmpeg needed).
+//   caption_used   — the exact caption sent to Publer (for posted items).
+//   hashtags_used  — the hashtag array sent to Publer (for posted items).
+// Safe on empty input. Any lookup that fails degrades to nulls, never throws.
+async function enrichQueueRows(rows: any[]): Promise<any[]> {
+  if (!rows || rows.length === 0) return [];
+  const sb = supabase();
+
+  // 1) Bulk-sign all storage paths in parallel.
+  const signed = await Promise.all(
+    rows.map(async (r) => {
+      if (!r.storage_path) return null;
+      try {
+        const { data, error } = await sb.storage.from(BUCKET)
+          .createSignedUrl(r.storage_path, 3600);
+        if (error) return null;
+        return data?.signedUrl ?? null;
+      } catch { return null; }
+    })
+  );
+
+  // 2) For posted items, look up the actual caption/hashtags that went out.
+  const postedIds = rows.filter(r => r.status === "posted").map(r => r.id);
+  const publishByQueueId = new Map<string, { caption_used: string | null; hashtags_used: string[] | null }>();
+  if (postedIds.length > 0) {
+    try {
+      const { data: plogs } = await sb
+        .from("publer_publish_log")
+        .select("queue_id, caption_used, hashtags_used, attempted_at")
+        .in("queue_id", postedIds)
+        .eq("status", "published")
+        .order("attempted_at", { ascending: false });
+      for (const row of plogs ?? []) {
+        if (!publishByQueueId.has(row.queue_id)) {
+          publishByQueueId.set(row.queue_id, {
+            caption_used: row.caption_used ?? null,
+            hashtags_used: row.hashtags_used ?? null,
+          });
+        }
+      }
+    } catch {
+      // Failure is non-fatal; rows just don't get caption_used.
+    }
+  }
+
+  return rows.map((r, i) => {
+    const published = publishByQueueId.get(r.id) ?? { caption_used: null, hashtags_used: null };
+    return {
+      ...r,
+      video_url: signed[i],
+      caption_used: published.caption_used,
+      hashtags_used: published.hashtags_used,
+    };
   });
 }
