@@ -239,6 +239,7 @@ export interface SlotConfig {
   handle: string;
   daily_target: number;
   paused: boolean;
+  owner_user_id: string | null;
 }
 
 export async function loadConfig(sb: SupabaseClient): Promise<Config> {

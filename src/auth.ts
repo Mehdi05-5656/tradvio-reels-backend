@@ -113,3 +113,47 @@ export function resolveExternalUserId(req: Request, requested: string | null): s
   if (req.profile?.external_user_id) return req.profile.external_user_id;
   return requested; // unauth: legacy path
 }
+
+/**
+ * Filter a list of slots to those the current requester is allowed to see.
+ *
+ *  - Admin (x-app-secret OR profile.role='admin'): sees ALL slots.
+ *  - Authenticated user: sees only slots whose owner_user_id matches req.auth.user_id.
+ *  - Unauthenticated: sees NONE. This is a deliberate break from the legacy public-GET
+ *    behavior. Slot data is user-scoped; the only unauthenticated caller left is the
+ *    background cron, which uses the x-app-secret admin path.
+ */
+export function filterVisibleSlots<T extends { owner_user_id: string | null }>(
+  req: Request,
+  slots: T[],
+): T[] {
+  if (isAdmin(req)) return slots;
+  if (req.auth && "user_id" in req.auth) {
+    const uid = req.auth.user_id;
+    return slots.filter((s) => s.owner_user_id === uid);
+  }
+  return [];
+}
+
+/**
+ * Reject the request if the specific phone_slot isn't in the requester's visible set.
+ * Returns true when the caller should stop; the response has already been sent.
+ */
+export function assertCanReadSlot<T extends { phone_slot: string; owner_user_id: string | null }>(
+  req: Request,
+  res: Response,
+  slots: T[],
+  phone: string,
+): boolean {
+  const slot = slots.find((s) => s.phone_slot === phone);
+  if (!slot) {
+    res.status(404).json({ error: "slot not found" });
+    return true;
+  }
+  const visible = filterVisibleSlots(req, [slot]);
+  if (visible.length === 0) {
+    res.status(403).json({ error: "forbidden" });
+    return true;
+  }
+  return false;
+}

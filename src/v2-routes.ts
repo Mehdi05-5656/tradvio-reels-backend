@@ -5,32 +5,52 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadSlots } from "./publer-schedule";
+import { filterVisibleSlots, assertCanReadSlot, isAdmin } from "./auth.js";
 
 type SbGetter = () => SupabaseClient;
 
 const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
 
+// Load slots the current requester is allowed to see. Admin -> all, user -> owned,
+// unauth -> empty. All slot-scoped read routes should filter through this.
+async function visibleSlots(req: Request, sb: SupabaseClient) {
+  const slots = await loadSlots(sb);
+  return { all: slots, visible: filterVisibleSlots(req, slots) };
+}
+
 export function registerV2Routes(app: Express, sbFn: SbGetter): void {
   // ==================== DEVICES ====================
 
   // List all devices with derived health metrics
-  app.get("/api/v2/devices", async (_req: Request, res: Response) => {
+  app.get("/api/v2/devices", async (req: Request, res: Response) => {
     try {
       const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
+      if (visibleIds.length === 0 && !admin) return res.json({ devices: [] });
+      const scoped = <T>(builder: T): T => {
+        if (admin) return builder;
+        return (builder as any).in("phone_slot", visibleIds) as T;
+      };
       const sevenAgoIso = new Date(Date.now() - 7 * 86400_000).toISOString();
       const [devicesRes, summaryRes, settingsRes, logRes, analyticsRes] = await Promise.all([
-        sb.from("reels_devices").select("*").eq("active", true).order("created_at"),
-        sb.from("reels_dashboard_summary").select("*"),
-        sb.from("reels_settings").select("*"),
-        sb
-          .from("publer_publish_log")
-          .select("phone_slot,status,attempted_at,error")
-          .gte("attempted_at", sevenAgoIso)
-          .order("attempted_at", { ascending: false }),
-        sb
-          .from("publer_analytics")
-          .select("phone_slot,captured_at,video_views,reach,engagement,publer_post_id")
-          .gte("captured_at", sevenAgoIso),
+        scoped(sb.from("reels_devices").select("*").eq("active", true).order("created_at")),
+        scoped(sb.from("reels_dashboard_summary").select("*")),
+        scoped(sb.from("reels_settings").select("*")),
+        scoped(
+          sb
+            .from("publer_publish_log")
+            .select("phone_slot,status,attempted_at,error")
+            .gte("attempted_at", sevenAgoIso)
+            .order("attempted_at", { ascending: false }),
+        ),
+        scoped(
+          sb
+            .from("publer_analytics")
+            .select("phone_slot,captured_at,video_views,reach,engagement,publer_post_id")
+            .gte("captured_at", sevenAgoIso),
+        ),
       ]);
       if (devicesRes.error) throw devicesRes.error;
 
@@ -119,13 +139,19 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
   // List alerts (active by default; ?all=1 for full history; ?limit=N)
   app.get("/api/v2/alerts", async (req: Request, res: Response) => {
     try {
+      const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
+      if (visibleIds.length === 0 && !admin) return res.json({ alerts: [] });
       const showAll = req.query.all === "1";
       const limit = Math.min(Number(req.query.limit ?? 100), 500);
-      let q = sbFn()
+      let q = sb
         .from("reels_alerts")
         .select("*")
         .order("fired_at", { ascending: false })
         .limit(limit);
+      if (!admin) q = q.in("phone_slot", visibleIds);
       if (!showAll) q = q.is("dismissed_at", null);
       const { data, error } = await q;
       if (error) throw error;
@@ -177,35 +203,76 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
   // ==================== OVERVIEW ====================
 
   // Overview KPIs: aggregate rollup for hero header
-  app.get("/api/v2/overview", async (_req: Request, res: Response) => {
+  app.get("/api/v2/overview", async (req: Request, res: Response) => {
     try {
       const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      // Non-admin with no owned slots: return an empty overview instead of leaking totals.
+      if (visibleIds.length === 0 && !isAdmin(req)) {
+        return res.json({
+          as_of: new Date().toISOString(),
+          total_pending: 0,
+          posted_today: 0,
+          active_devices: 0,
+          total_devices: 0,
+          publish_success_rate_7d: null,
+          publish_attempts_7d: 0,
+          days_of_runway: null,
+          views_7d: 0,
+          views_prev_7d: 0,
+          views_change_pct: null,
+          reach_7d: 0,
+          reach_prev_7d: 0,
+          reach_change_pct: null,
+          engagement_7d: 0,
+          engagement_prev_7d: 0,
+          engagement_change_pct: null,
+          alerts: { total: 0, critical: 0, warning: 0, info: 0, success: 0 },
+        });
+      }
       const now = new Date();
       const dayAgo = new Date(now.getTime() - 86400_000).toISOString();
       const sevenDaysAgo = new Date(now.getTime() - 7 * 86400_000).toISOString();
       const fourteenDaysAgo = new Date(now.getTime() - 14 * 86400_000).toISOString();
+      const admin = isAdmin(req);
+
+      // Build scoped query helper: admin sees all rows; user sees only visible slot rows.
+      const scoped = <T>(builder: T): T => {
+        if (admin) return builder;
+        return (builder as any).in("phone_slot", visibleIds) as T;
+      };
 
       const [summaryRes, alertRes, publishRes, analytics7Res, analytics14Res, devicesRes] =
         await Promise.all([
-          sb.from("reels_dashboard_summary").select("*"),
-          sb
-            .from("reels_alerts")
-            .select("type,severity,fired_at")
-            .is("dismissed_at", null),
-          sb
-            .from("publer_publish_log")
-            .select("status,attempted_at")
-            .gte("attempted_at", sevenDaysAgo),
-          sb
-            .from("publer_analytics")
-            .select("phone_slot,captured_at,video_views,reach,engagement,likes,comments,shares")
-            .gte("captured_at", sevenDaysAgo),
-          sb
-            .from("publer_analytics")
-            .select("phone_slot,captured_at,video_views,reach,engagement")
-            .gte("captured_at", fourteenDaysAgo)
-            .lt("captured_at", sevenDaysAgo),
-          sb.from("reels_devices").select("phone_slot,display_name,paused").eq("active", true),
+          scoped(sb.from("reels_dashboard_summary").select("*")),
+          admin
+            ? sb.from("reels_alerts").select("type,severity,fired_at").is("dismissed_at", null)
+            : sb
+                .from("reels_alerts")
+                .select("type,severity,fired_at,phone_slot")
+                .is("dismissed_at", null)
+                .in("phone_slot", visibleIds),
+          scoped(
+            sb
+              .from("publer_publish_log")
+              .select("status,attempted_at,phone_slot")
+              .gte("attempted_at", sevenDaysAgo),
+          ),
+          scoped(
+            sb
+              .from("publer_analytics")
+              .select("phone_slot,captured_at,video_views,reach,engagement,likes,comments,shares")
+              .gte("captured_at", sevenDaysAgo),
+          ),
+          scoped(
+            sb
+              .from("publer_analytics")
+              .select("phone_slot,captured_at,video_views,reach,engagement")
+              .gte("captured_at", fourteenDaysAgo)
+              .lt("captured_at", sevenDaysAgo),
+          ),
+          scoped(sb.from("reels_devices").select("phone_slot,display_name,paused").eq("active", true)),
         ]);
 
       const totalPending = (summaryRes.data ?? []).reduce(
@@ -302,8 +369,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
       const sb = sbFn();
       const slots = await loadSlots(sb);
-      const slot = slots.find((s) => s.phone_slot === phone);
-      if (!slot) return res.status(404).json({ error: "slot not found" });
+      if (assertCanReadSlot(req, res, slots, phone)) return;
+      const slot = slots.find((s) => s.phone_slot === phone)!;
       const isTikTok = slot.provider === "tiktok";
 
       // Window resolution.
@@ -553,17 +620,26 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.get("/api/v2/archive", async (req: Request, res: Response) => {
     try {
+      const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
+      if (visibleIds.length === 0 && !admin) return res.json({ items: [], total: 0 });
       const limit = Math.min(Number(req.query.limit ?? 100), 500);
       const offset = Number(req.query.offset ?? 0);
       const phoneFilter = req.query.phone ? String(req.query.phone) : null;
+      if (phoneFilter && !admin && !visibleIds.includes(phoneFilter)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
 
-      let q = sbFn()
+      let q = sb
         .from("reels_manual_queue")
         .select("*")
         .in("status", ["posted", "archived"])
         .order("posted_at", { ascending: false, nullsFirst: false })
         .range(offset, offset + limit - 1);
       if (phoneFilter) q = q.eq("phone_slot", phoneFilter);
+      else if (!admin) q = q.in("phone_slot", visibleIds);
       const { data: archiveRows, error: err1 } = await q;
       if (err1) throw err1;
       const rows = archiveRows ?? [];
@@ -619,6 +695,13 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.get("/api/v2/today", async (req: Request, res: Response) => {
     try {
+      const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
+      if (visibleIds.length === 0 && !admin) {
+        return res.json({ from: "", to: "", min_date: "2026-09-05", slots: [], total_posts: 0 });
+      }
       // ?date=YYYY-MM-DD (default: today PT). ?from=YYYY-MM-DD&to=YYYY-MM-DD for range.
       // Minimum start date is 2026-09-05.
       const MIN_DATE = "2026-09-05";
@@ -633,12 +716,14 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       const toISO = `${to}T23:59:59-07:00`;
 
       // Get all publish log entries in range that succeeded
-      const { data: logs, error: logsErr } = await sbFn()
+      let logsQ = sb
         .from("publer_publish_log")
         .select("id, phone_slot, planned_at, attempted_at, publer_post_id, publer_post_link, status, caption_used, hashtags_used")
         .gte("attempted_at", fromISO)
         .lte("attempted_at", toISO)
         .order("attempted_at", { ascending: false });
+      if (!admin) logsQ = logsQ.in("phone_slot", visibleIds);
+      const { data: logs, error: logsErr } = await logsQ;
       if (logsErr) throw logsErr;
 
       // Bulk-fetch analytics for these posts
@@ -719,6 +804,10 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.get("/api/v2/post/:postLink(*)", async (req: Request, res: Response) => {
     try {
+      const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
       // Route param is URL-encoded post link (URL) OR raw publer_post_id
       const paramValue = decodeURIComponent(req.params.postLink);
 
@@ -760,12 +849,18 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       const latest = snaps && snaps.length ? snaps[snaps.length - 1] : null;
       const raw = latest?.raw ?? {};
 
+      // Slot-scope: block cross-user post lookup by publer_post_link/id.
+      const owningSlot = log?.phone_slot ?? latest?.phone_slot ?? null;
+      if (!admin && owningSlot && !visibleIds.includes(owningSlot)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
+
       const captionText = raw.text ?? log?.caption_used ?? "";
       const postLink = log?.publer_post_link ?? paramValue;
       res.json({
         post_link: postLink,
         publer_post_id: internalId,
-        phone_slot: log?.phone_slot ?? latest?.phone_slot ?? null,
+        phone_slot: owningSlot,
         planned_at: log?.planned_at ?? null,
         attempted_at: log?.attempted_at ?? null,
         status: log?.status ?? "unknown",
@@ -810,17 +905,26 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.get("/api/v2/hashtags", async (req: Request, res: Response) => {
     try {
+      const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
+      if (visibleIds.length === 0 && !admin) return res.json({ from: "", total_hashtags: 0, items: [] });
       const phoneFilter = req.query.phone ? String(req.query.phone) : null;
+      if (phoneFilter && !admin && !visibleIds.includes(phoneFilter)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
       const MIN_DATE = "2026-09-05";
       const from = String(req.query.from ?? MIN_DATE);
       const fromISO = `${from < MIN_DATE ? MIN_DATE : from}T00:00:00-07:00`;
 
       // Get latest snapshot per post so we don't double-count
-      let q = sbFn()
+      let q = sb
         .from("publer_analytics")
         .select("publer_post_id, phone_slot, video_views, reach, likes, engagement_rate, captured_at, raw")
         .gte("captured_at", fromISO);
       if (phoneFilter) q = q.eq("phone_slot", phoneFilter);
+      else if (!admin) q = q.in("phone_slot", visibleIds);
       const { data: snaps, error } = await q;
       if (error) throw error;
 
@@ -870,12 +974,16 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   // ==================== CAPTION TEMPLATES ====================
 
-  app.get("/api/v2/templates", async (_req: Request, res: Response) => {
+  app.get("/api/v2/templates", async (req: Request, res: Response) => {
     try {
-      const { data, error } = await sbFn()
-        .from("device_content_templates")
-        .select("*")
-        .order("phone_slot");
+      const sb = sbFn();
+      const { visible } = await visibleSlots(req, sb);
+      const visibleIds = visible.map((s) => s.phone_slot);
+      const admin = isAdmin(req);
+      if (visibleIds.length === 0 && !admin) return res.json({ templates: [] });
+      let q = sb.from("device_content_templates").select("*").order("phone_slot");
+      if (!admin) q = q.in("phone_slot", visibleIds);
+      const { data, error } = await q;
       if (error) throw error;
       res.json({ templates: data ?? [] });
     } catch (e: any) {
