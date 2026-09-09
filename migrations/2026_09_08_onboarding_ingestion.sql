@@ -74,19 +74,19 @@ RETURNS TABLE (
 ) AS $$
 BEGIN
   RETURN QUERY
-  UPDATE ingestion_jobs
+  UPDATE ingestion_jobs j
      SET status = 'claimed',
          claimed_by = worker_id,
          claimed_at = NOW(),
-         attempts = attempts + 1
-   WHERE id = (
+         attempts = j.attempts + 1
+   WHERE j.id = (
      SELECT id FROM ingestion_jobs
       WHERE status = 'pending'
       ORDER BY created_at ASC
       LIMIT 1
       FOR UPDATE SKIP LOCKED
    )
-  RETURNING id, cv_account_id, since_cursor, page_limit, attempts;
+  RETURNING j.id, j.cv_account_id, j.since_cursor, j.page_limit, j.attempts;
 END $$ LANGUAGE plpgsql;
 
 -- 3.1e: RLS — jobs are admin/service-role only (webhooks + worker).
