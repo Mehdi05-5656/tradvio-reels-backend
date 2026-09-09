@@ -351,6 +351,16 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
             }
             console.log("[creatorvault]", payload.event, ca.platform, ca.platform_handle,
               "external_user_id=", externalUserId, "bridge_source=", bridgeSource);
+
+            // Sprint 3.2: enqueue historical video ingestion for this account.
+            // Idempotent — unique partial index blocks duplicate active jobs.
+            try {
+              const { enqueueIngestionJob } = await import("./ingestion-worker.js");
+              const enq = await enqueueIngestionJob(sb, ca.id);
+              console.log("[creatorvault] ingestion enqueue:", ca.id, enq);
+            } catch (ingErr: any) {
+              console.warn("[creatorvault] ingestion enqueue failed:", ingErr?.message ?? ingErr);
+            }
           }
         } else if (
           payload?.event === "reel.container_created" ||

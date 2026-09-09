@@ -6,6 +6,8 @@ import { registerRoutes } from "./routes.js";
 import { registerV2Routes } from "./v2-routes.js";
 import { registerCreatorVaultRoutes } from "./creatorvault.js";
 import { registerReelsScheduleRoutes } from "./reels-schedule.js";
+import { registerOnboardingRoutes } from "./onboarding-routes.js";
+import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -59,6 +61,11 @@ async function main() {
   registerV2Routes(app, getSb);
   registerCreatorVaultRoutes(app, getSb);
   registerReelsScheduleRoutes(app, getSb);
+  registerOnboardingRoutes(app, getSb);
+
+  // Sprint 3.3: background ingestion worker (setInterval poller).
+  // Disabled by setting INGESTION_WORKER_DISABLED=1 (e.g. in tests).
+  startIngestionWorker(getSb);
 
   app.get("/", (_req, res) => res.json({ ok: true, service: "tradvio-reels-backend" }));
   app.get("/healthz", (_req, res) => res.status(200).send("ok"));
