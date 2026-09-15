@@ -374,9 +374,34 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
       const sb = sbFn();
       const slots = await loadSlots(sb);
-      if (assertCanReadSlot(req, res, slots, phone)) return;
-      const slot = slots.find((s) => s.phone_slot === phone)!;
-      const isTikTok = slot.provider === "tiktok";
+
+      // Multi-slot support. When ?phones=phone_a,phone_b is present it overrides
+      // the path :phone (which we keep for backward compat). Each requested slot
+      // must be valid AND readable by the caller.
+      const phonesQuery = String(req.query.phones ?? "").trim();
+      let phones: string[];
+      if (phonesQuery) {
+        const requested = phonesQuery.split(",").map((s) => s.trim()).filter(Boolean);
+        const invalid = requested.filter((p) => !VALID_SLOTS.has(p));
+        if (invalid.length) {
+          return res.status(400).json({ error: `invalid phone slot: ${invalid.join(",")}` });
+        }
+        for (const p of requested) {
+          if (assertCanReadSlot(req, res, slots, p)) return;
+        }
+        phones = Array.from(new Set(requested));
+      } else {
+        if (assertCanReadSlot(req, res, slots, phone)) return;
+        phones = [phone];
+      }
+      const isMulti = phones.length > 1;
+      const selectedSlots = slots.filter((s) => phones.includes(s.phone_slot));
+      const slot = selectedSlots[0]; // primary slot for single-mode metadata
+      const providers = Array.from(new Set(selectedSlots.map((s) => s.provider)));
+      // In single-account mode, heatmap uses engagement_rate for IG and views for
+      // TikTok. In multi-account mode we always use views (engagement_rate mixes
+      // dimensions that don't compare across platforms).
+      const isTikTok = !isMulti && slot?.provider === "tiktok";
 
       // Window resolution.
       // Hard lower bound of 2026-09-05 (Publer coverage start / pipeline start)
@@ -434,18 +459,21 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         let q = sb
           .from("publer_analytics")
           .select("*")
-          .eq("phone_slot", phone)
+          .in("phone_slot", phones)
           .gte("captured_at", sinceISO);
         if (untilISO) q = q.lte("captured_at", untilISO);
         const { data: rows, error } = await q.order("captured_at", {
           ascending: false,
         });
         if (error) throw error;
+        // Latest snapshot per (slot, post) — same post_id across slots would be
+        // treated as one row otherwise, so key includes the slot.
         const latestByPost = new Map<string, any>();
         for (const r of rows ?? []) {
-          const cur = latestByPost.get(r.publer_post_id);
+          const key = `${r.phone_slot}::${r.publer_post_id}`;
+          const cur = latestByPost.get(key);
           if (!cur || new Date(r.captured_at) > new Date(cur.captured_at)) {
-            latestByPost.set(r.publer_post_id, r);
+            latestByPost.set(key, r);
           }
         }
         posts = Array.from(latestByPost.values()).map((r: any) => {
@@ -465,6 +493,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
             engagement_rate: Number(r.engagement_rate ?? 0),
             thumbnail_url: r?.raw?.thumbnail ?? null,
             caption: r?.raw?.caption ?? null,
+            phone_slot: r.phone_slot,
           };
         });
       }
@@ -473,11 +502,14 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
       // (TT doesn't expose reach so engagement_rate is 0, use views instead).
       const heatmap: Record<string, number> = {};
       const heatmapAgg: Record<string, { total: number; count: number }> = {};
+      // In multi-account mode always use views. In single-account: TikTok uses
+      // views, IG uses engagement_rate.
+      const heatmapUsesViews = isMulti || isTikTok;
       for (const p of posts) {
         if (!p.scheduled_at) continue;
         const d = new Date(p.scheduled_at);
         const key = `${d.getDay()}-${d.getHours()}`;
-        const val = isTikTok ? p.video_views : p.engagement_rate;
+        const val = heatmapUsesViews ? p.video_views : p.engagement_rate;
         const cur = heatmapAgg[key] ?? { total: 0, count: 0 };
         cur.total += val;
         cur.count += 1;
@@ -523,6 +555,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         a.date.localeCompare(b.date),
       );
 
+      const handleBySlot = new Map(selectedSlots.map((s) => [s.phone_slot, s.handle]));
+      const providerBySlot = new Map(selectedSlots.map((s) => [s.phone_slot, s.provider]));
       const mapPerformer = (p: NormPost) => ({
         post_link: p.post_link,
         video_views: p.video_views,
@@ -539,13 +573,21 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         posted_at: p.posted_at,
         scheduled_at: p.scheduled_at,
         caption: p.caption,
+        phone_slot: (p as any).phone_slot ?? null,
+        handle: handleBySlot.get((p as any).phone_slot) ?? null,
+        provider: providerBySlot.get((p as any).phone_slot) ?? null,
       });
 
       res.json({
         phone_slot: phone,
-        provider: slot.provider,
-        handle: slot.handle,
+        phone_slots: phones,
+        is_multi: isMulti,
+        provider: isMulti ? providers.join(",") : slot?.provider ?? null,
+        providers,
+        handle: isMulti ? selectedSlots.map((s) => s.handle).join(",") : slot?.handle ?? null,
+        handles: selectedSlots.map((s) => s.handle),
         data_source: dataSource,
+        heatmap_metric: heatmapUsesViews ? "avg_views" : "avg_engagement_rate",
         window: windowLabel,
         window_days: isLifetime ? 0 : days,
         min_date: MIN_DATE,
