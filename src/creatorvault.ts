@@ -521,10 +521,19 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
           return res.status(401).json({ error: "unauthorized" });
         }
 
+        // Accept optional phone_slot so we can bridge legacy Publer-managed IG
+        // accounts back to their CV connection. Slot is passed through the
+        // redirect URL and picked up by the OAuthReturn poller, which then
+        // calls /api/creatorvault/accounts/:id/link-slot after the account
+        // resolves.
+        const phoneSlot = typeof req.body?.phone_slot === "string" ? req.body.phone_slot.trim() : "";
+
         const dashboardOrigin =
           process.env.TRADVIO_DASHBOARD_ORIGIN ||
-          "https://tradvio-reels-dashboard.onrender.com";
-        const redirectBackUrl = `${dashboardOrigin}/oauth-return`;
+          "https://tradvio-reels.vercel.app";
+        const returnUrl = new URL(`${dashboardOrigin}/oauth-return`);
+        if (phoneSlot) returnUrl.searchParams.set("slot", phoneSlot);
+        const redirectBackUrl = returnUrl.toString();
 
         assertKey();
         const url = new URL(CV_BASE + "/bridge/oauth/start");
@@ -587,7 +596,7 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
       }
       let q = sb
         .from("creatorvault_accounts")
-        .select("cv_account_id, platform, platform_user_id, platform_handle, connected_at, last_seen_at, is_active, external_user_id, bridge_source")
+        .select("cv_account_id, platform, platform_user_id, platform_handle, connected_at, last_seen_at, is_active, external_user_id, bridge_source, local_phone_slot")
         .order("last_seen_at", { ascending: false })
         .limit(200);
       if (externalUserId) {
@@ -615,6 +624,61 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
   //                  owned by someone else (also fires when webhook logged
   //                  ownership_conflict targeting the caller's external_user_id)
   //   unknown     -> not found yet (webhook still in flight)
+  // Link a CV-connected account to a legacy phone_slot (phone_a, phone_b,
+  // tiktok_tradvio). Admin-authenticated. Called by OAuthReturn poller when
+  // the user connected via the "Bridge legacy account" flow (the redirect
+  // URL included ?slot=X).
+  //
+  // POST /api/creatorvault/accounts/:cv_account_id/link-slot
+  //   body: { phone_slot: string }
+  //   200 OK { ok: true, cv_account_id, phone_slot } | 404 not_found | 400 invalid_slot
+  app.post(
+    "/api/creatorvault/accounts/:cv_account_id/link-slot",
+    async (req: Request, res: Response) => {
+      try {
+        const isAdminSecret = !!(req.auth && "admin_secret" in req.auth && req.auth.admin_secret);
+        const isAdminUser = req.profile?.role === "admin";
+        if (!isAdminSecret && !isAdminUser) {
+          return res.status(401).json({ error: "unauthorized" });
+        }
+        const cvAccountId = req.params.cv_account_id;
+        const phoneSlot = typeof req.body?.phone_slot === "string" ? req.body.phone_slot.trim() : "";
+        const ALLOWED_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
+        if (!ALLOWED_SLOTS.has(phoneSlot)) {
+          return res.status(400).json({ error: "invalid_slot", detail: `phone_slot must be one of ${Array.from(ALLOWED_SLOTS).join(", ")}` });
+        }
+        const sb = sbFn();
+        const { data: row, error: findErr } = await sb
+          .from("creatorvault_accounts")
+          .select("cv_account_id, platform, platform_handle, local_phone_slot")
+          .eq("cv_account_id", cvAccountId)
+          .maybeSingle();
+        if (findErr) throw findErr;
+        if (!row) return res.status(404).json({ error: "not_found", detail: "cv_account_id not found" });
+
+        // If a different account already occupies this slot, clear it first.
+        // Only one CV account per slot.
+        const { error: clearErr } = await sb
+          .from("creatorvault_accounts")
+          .update({ local_phone_slot: null })
+          .eq("local_phone_slot", phoneSlot)
+          .neq("cv_account_id", cvAccountId);
+        if (clearErr) throw clearErr;
+
+        const { error: updateErr } = await sb
+          .from("creatorvault_accounts")
+          .update({ local_phone_slot: phoneSlot })
+          .eq("cv_account_id", cvAccountId);
+        if (updateErr) throw updateErr;
+
+        return res.json({ ok: true, cv_account_id: cvAccountId, phone_slot: phoneSlot, previous_slot: row.local_phone_slot });
+      } catch (e: any) {
+        console.error("[creatorvault] link-slot exception:", e.message);
+        return res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
   app.get("/api/creatorvault/account-status", async (req: Request, res: Response) => {
     try {
       const cvAccountId = typeof req.query.cv_account_id === "string" ? req.query.cv_account_id : "";
