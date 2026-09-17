@@ -240,6 +240,36 @@ function verifySignature(rawBody: string, headerValue: string | undefined): bool
 // ---------- Route registration ----------
 
 export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseClient) {
+  // OAuth bounce endpoint. CreatorVault's bridge maintains an allowlist of
+  // permitted redirect_back_url origins. Rather than require every deploy
+  // target (tradvio-reels.vercel.app, preview builds, future custom domains)
+  // to be added to CV's allowlist, CV redirects back to THIS route on the
+  // backend service (which is already allowlisted), and we 302-forward the
+  // user to the real dashboard origin from TRADVIO_DASHBOARD_ORIGIN.
+  //
+  // No auth: CV callbacks are unauthenticated by design (the OAuth account
+  // resolution happens via webhook + polling, not query params). This route
+  // just preserves the query string and forwards.
+  app.get("/oauth-return", (req: Request, res: Response) => {
+    try {
+      const dashboardOrigin =
+        process.env.TRADVIO_DASHBOARD_ORIGIN ||
+        "https://tradvio-reels.vercel.app";
+      const target = new URL(`${dashboardOrigin}/oauth-return`);
+      // Copy all query params (connected_account_id, slot, error, etc.)
+      for (const [k, v] of Object.entries(req.query)) {
+        if (typeof v === "string") target.searchParams.set(k, v);
+      }
+      // Some SPA setups use hash routing (Tradvio Reels dashboard uses
+      // #accounts). The /oauth-return path itself is a real route on the
+      // Vercel dashboard (see App.tsx) so a plain path redirect is fine.
+      return res.redirect(302, target.toString());
+    } catch (e: any) {
+      console.error("[oauth-return] bounce failed:", e.message);
+      return res.status(500).send(`oauth_bounce_failed: ${e.message}`);
+    }
+  });
+
   // Inbound webhook. HMAC verification needs the raw request body, which is
   // captured globally by the express.json verify fn in index.ts (req.rawBody).
   app.post(
@@ -528,10 +558,21 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
         // resolves.
         const phoneSlot = typeof req.body?.phone_slot === "string" ? req.body.phone_slot.trim() : "";
 
-        const dashboardOrigin =
-          process.env.TRADVIO_DASHBOARD_ORIGIN ||
-          "https://tradvio-reels.vercel.app";
-        const returnUrl = new URL(`${dashboardOrigin}/oauth-return`);
+        // Redirect flow: CreatorVault's bridge has an allowlist of permitted
+        // redirect_back_url origins. Rather than require every deploy target
+        // (tradvio-reels.vercel.app, preview builds, future custom domains) to
+        // be added to CV's allowlist, we bounce the callback through this
+        // backend service (whose origin IS allowlisted by CV) and then
+        // 302-forward the user to the real dashboard.
+        //
+        // TRADVIO_OAUTH_BOUNCE_ORIGIN = origin CV sees in redirect_back_url
+        //                               (must be in CV allowlist)
+        // TRADVIO_DASHBOARD_ORIGIN    = origin we forward the user to after
+        //                               receiving CV's callback
+        const bounceOrigin =
+          process.env.TRADVIO_OAUTH_BOUNCE_ORIGIN ||
+          "https://tradvio-reels-backend.onrender.com";
+        const returnUrl = new URL(`${bounceOrigin}/oauth-return`);
         if (phoneSlot) returnUrl.searchParams.set("slot", phoneSlot);
         const redirectBackUrl = returnUrl.toString();
 
