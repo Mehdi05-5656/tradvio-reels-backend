@@ -118,6 +118,28 @@ async function readCvError(res: Response): Promise<{ error: string; message: str
   }
 }
 
+// CV v5 returns { reel_id, media_id, media_permalink, error_message, ... }.
+// Our internal ReelStatus keeps historical names (cv_reel_id, ig_media_id,
+// permalink, last_error). Accept both shapes so a future rename on either side
+// doesn't break the mapping.
+function mapCvDto(dto: any): Partial<ReelStatus> & { cv_reel_id?: string } {
+  if (!dto || typeof dto !== "object") return {};
+  return {
+    cv_reel_id: dto.cv_reel_id ?? dto.reel_id ?? undefined,
+    client_ref: dto.client_ref ?? null,
+    connected_account_id: dto.connected_account_id ?? null,
+    external_user_id: dto.external_user_id ?? null,
+    status: dto.status,
+    scheduled_for: dto.scheduled_for ?? null,
+    ig_media_id: dto.ig_media_id ?? dto.media_id ?? null,
+    permalink: dto.permalink ?? dto.media_permalink ?? null,
+    published_at: dto.published_at ?? null,
+    last_error: dto.last_error ?? dto.error_message ?? null,
+    failure_reason: dto.failure_reason ?? dto.error_code ?? null,
+    attempts: typeof dto.attempts === "number" ? dto.attempts : (typeof dto.attempt === "number" ? dto.attempt : undefined),
+  };
+}
+
 // ---------- Public API ----------
 
 export const cvBridge = {
@@ -180,7 +202,8 @@ export const cvBridge = {
         continue;
       }
       if (res.status === 201 || res.status === 200) {
-        const dto = (await res.json().catch(() => ({}))) as Partial<ReelStatus>;
+        const raw = await res.json().catch(() => ({}));
+        const dto = mapCvDto(raw);
         const id = String(dto.cv_reel_id ?? "");
         if (!id) {
           rejected.push({ client_ref: r.client_ref, error: "bad_response", detail: "missing cv_reel_id" });
@@ -223,7 +246,8 @@ export const cvBridge = {
       const err = await readCvError(res);
       throw new Error(`cv_bridge_get_failed status=${res.status} error=${err.error} msg=${err.message}`);
     }
-    return (await res.json()) as ReelStatus;
+    const raw = await res.json().catch(() => ({}));
+    return mapCvDto(raw) as ReelStatus;
   },
 
   /**
@@ -271,8 +295,9 @@ export const cvBridge = {
       throw new Error(`cv_bridge_list_failed status=${res.status} error=${err.error} msg=${err.message}`);
     }
     // CV v5 returns { reels, next_cursor }. Map to our internal {items, next_cursor}.
-    const json = (await res.json()) as { reels?: ReelStatus[]; items?: ReelStatus[]; next_cursor?: string | null };
-    const items = json.reels ?? json.items ?? [];
+    const json = (await res.json()) as { reels?: any[]; items?: any[]; next_cursor?: string | null };
+    const rawItems = json.reels ?? json.items ?? [];
+    const items = rawItems.map((r) => mapCvDto(r)) as ReelStatus[];
     return { items, next_cursor: json.next_cursor ?? null };
   },
 
