@@ -372,4 +372,42 @@ export function registerReelsScheduleRoutes(app: Express, sbFn: () => SupabaseCl
       res.status(500).json({ error: e.message });
     }
   });
+
+  // -------------------- POST /api/reels/sign-storage --------------------
+  //
+  // Admin-only. Returns a short-lived signed URL for an existing object in a
+  // Supabase Storage bucket. Used by the queue -> publish pipeline where the
+  // source video already lives in the private `reels` bucket and CV needs an
+  // https URL to fetch it.
+  //
+  // Body: { bucket: string, path: string, expires_in_sec?: number (default 3600, max 604800) }
+  // Returns: { signed_url: string, expires_in_sec: number }
+  app.post("/api/reels/sign-storage", async (req: Request, res: Response) => {
+    try {
+      const { isAdminSecret, isAdminUser } = authContext(req);
+      if (!isAdminSecret && !isAdminUser) {
+        return res.status(401).json({ error: "unauthorized" });
+      }
+
+      const body = req.body ?? {};
+      const bucket = typeof body.bucket === "string" ? body.bucket : "";
+      const path = typeof body.path === "string" ? body.path : "";
+      const rawExpires = typeof body.expires_in_sec === "number" ? body.expires_in_sec : 3600;
+      const expiresIn = Math.max(60, Math.min(604800, Math.floor(rawExpires)));
+
+      if (!bucket || !path) {
+        return res.status(400).json({ error: "missing_bucket_or_path" });
+      }
+
+      const sb = sbFn();
+      const { data, error } = await sb.storage.from(bucket).createSignedUrl(path, expiresIn);
+      if (error || !data?.signedUrl) {
+        return res.status(500).json({ error: "sign_failed", detail: error?.message || "no_url" });
+      }
+
+      res.json({ signed_url: data.signedUrl, expires_in_sec: expiresIn });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }
