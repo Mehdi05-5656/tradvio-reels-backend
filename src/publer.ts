@@ -24,7 +24,7 @@ async function pubFetch(
   };
   if (workspaceId) h["Publer-Workspace-Id"] = workspaceId;
   const url = path.startsWith("http") ? path : `${BASE}${path}`;
-  const resp = await fetch(url, { ...rest, headers: h });
+  const resp = await fetch(url, { ...rest, headers: h, signal: rest.signal ?? AbortSignal.timeout(30_000) });
   const text = await resp.text();
   let body: any = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }

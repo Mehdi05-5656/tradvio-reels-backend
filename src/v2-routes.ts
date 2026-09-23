@@ -4,7 +4,7 @@
 
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { loadSlots } from "./publer-schedule";
+import { loadConfig, loadSlots, ptNow } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin } from "./auth.js";
 
 type SbGetter = () => SupabaseClient;
@@ -26,6 +26,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
     try {
       const sb = sbFn();
       const { visible } = await visibleSlots(req, sb);
+      const publishConfig = await loadConfig(sb);
       const visibleIds = visible.map((s) => s.phone_slot);
       const admin = isAdmin(req);
       if (visibleIds.length === 0 && !admin) return res.json({ devices: [] });
@@ -41,7 +42,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         scoped(
           sb
             .from("publer_publish_log")
-            .select("phone_slot,status,attempted_at,error")
+            .select("phone_slot,status,attempted_at,error,slot_local_date,slot_index")
             .gte("attempted_at", sevenAgoIso)
             .order("attempted_at", { ascending: false }),
         ),
@@ -88,11 +89,20 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
         const failed = logs.filter((l) => l.status === "failed").length;
         const lastAttempt = logs[0];
         const an = analyticsBySlot.get(d.phone_slot) ?? { views: 0, reach: 0, engagement: 0 };
-        const status = d.paused ? "paused" : d.active ? "active" : "inactive";
+        const publishSlot = visible.find(slot => slot.phone_slot === d.phone_slot);
+        const status = !publishSlot ? "error" : publishSlot.paused ? "paused" : "active";
+        const todayLogs = logs.filter(l => l.slot_local_date === ptNow().ymd);
         return {
           ...d,
           status,
-          daily_target: setting.daily_target ?? 8,
+          publer_account_id: publishSlot?.publer_account_id ?? null,
+          daily_target: publishSlot?.daily_target ?? null,
+          schedule_times: publishSlot ? publishConfig.slotTimes.slice(0, publishSlot.daily_target) : [],
+          schedule_timezone: publishConfig.timezone,
+          published_today: new Set(todayLogs.filter(l => l.status === "published").map(l => l.slot_index)).size,
+          held_count: logs.filter(l => l.status === "pending" && (
+            l.error || Date.parse(l.attempted_at) < Date.now() - 15 * 60_000
+          )).length,
           pending_count: Number(s.pending_count ?? 0),
           posted_count: Number(s.posted_count ?? 0),
           archived_count: Number(s.archived_count ?? 0),

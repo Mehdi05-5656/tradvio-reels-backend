@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-build && node --test .test-build/*.js",
     "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cardinal --external:@babel/preset-typescript --minify",
     "start": "node dist/index.cjs",
     "publisher-tick": "node dist/publisher-tick.cjs",

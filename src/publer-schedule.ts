@@ -11,13 +11,22 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   listAccounts,
   listPosts,
+  jobStatus,
   postInsights,
   publishNow,
   uploadFromUrl,
   waitForJob,
 } from "./publer.js";
+import { parsePublishResult, retryDecision } from "./publer-safety.js";
 
 const BUCKET = "reels";
+
+// Supabase returns failures in the result; awaiting alone does not throw.
+async function checked(query: any): Promise<any> {
+  const result = await query;
+  if (result.error) throw new Error(result.error.message || String(result.error));
+  return result;
+}
 
 // -------- Caption harvester --------
 // Mines historical captions from Publer's post_insights for a given phone_slot,
@@ -334,10 +343,22 @@ async function nextPendingQueueRow(sb: SupabaseClient, phone_slot: string): Prom
     .eq("phone_slot", phone_slot)
     .eq("status", "pending")
     .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+    .limit(10);
   if (error) throw error;
-  return data;
+  for (const row of data ?? []) {
+    const { data: failures, error: failureErr } = await sb
+      .from("publer_publish_log")
+      .select("error,attempted_at")
+      .eq("queue_id", row.id)
+      .eq("status", "failed")
+      .order("attempted_at", { ascending: false });
+    if (failureErr) throw failureErr;
+    if (!failures?.length) return row;
+    const decision = retryDecision(failures.length, failures[0].error || "", false);
+    const retryAt = Date.parse(failures[0].attempted_at) + decision.delayMs;
+    if (decision.action === "retry" && retryAt <= Date.now()) return row;
+  }
+  return null;
 }
 
 async function signedUrl(sb: SupabaseClient, path: string, ttl = 86400): Promise<string> {
@@ -383,27 +404,37 @@ export async function publishOne(
     return { status: "failed", error: reserveErr.message };
   }
 
-  // Also flip queue row to publer_publishing so it doesn't re-appear.
-  await sb
+  // Atomically claim this queue row. Another worker may have read the same
+  // candidate, but only one can transition pending -> publer_publishing.
+  const { data: claimed, error: claimErr } = await sb
     .from("reels_manual_queue")
     .update({ status: "publer_publishing" })
-    .eq("id", row.id);
+    .eq("id", row.id)
+    .eq("status", "pending")
+    .select("id")
+    .maybeSingle();
+  if (claimErr || !claimed) {
+    await checked(sb.from("publer_publish_log").update({
+      status: "failed",
+      error: claimErr?.message || "queue row claimed by another worker",
+      updated_at: new Date().toISOString(),
+    }).eq("id", log.id));
+    return { status: "reserve_conflict" };
+  }
 
+  let submissionUncertain = false;
   try {
     // 2) Upload — serialize per workspace to respect Publer's queue rule
     const url = await signedUrl(sb, row.storage_path, 24 * 3600);
     const name = row.filename || row.storage_path.split("/").pop() || "video.mp4";
     const uploadPayload = await withUploadLock(async () => {
       const { jobId: uploadJob } = await uploadFromUrl(cfg.workspaceId, url, name);
-      const payload = await waitForJob(uploadJob, {
+      return await waitForJob(uploadJob, {
         timeoutMs: 180_000,
         intervalMs: 3000,
         workspaceId: cfg.workspaceId,
       });
-      (payload as any).__uploadJob = uploadJob;
-      return payload;
     });
-    const uploadJob = (uploadPayload as any).__uploadJob;
 
     // Payload shape from Publer for from-url upload is an array/object of media
     // { id, path, thumbnails?, ... }. Handle both array + wrapped shapes.
@@ -414,14 +445,19 @@ export async function publishOne(
     } else if (uploadPayload?.id) mediaObj = uploadPayload;
     if (!mediaObj || !mediaObj.id) throw new Error("upload payload missing media id: " + JSON.stringify(uploadPayload).slice(0, 300));
 
-    await sb.from("publer_publish_log").update({
+    await checked(sb.from("publer_publish_log").update({
       media_id: mediaObj.id,
-      publer_job_id: uploadJob,
-    }).eq("id", log.id);
+    }).eq("id", log.id));
 
     // 3) Publish — pull caption template + hashtag pool for this slot
     const { caption, hashtags, source: captionSource } = await composeCaption(sb, slot.phone_slot, row.id);
     console.log("[publisher] caption source:", captionSource, "for queue", row.id);
+    // Persist intent BEFORE crossing the irreversible API boundary.
+    await checked(sb.from("publer_publish_log").update({
+      caption_used: caption, hashtags_used: hashtags,
+      raw_publish_payload: { _publisher: { phase: "submitting" } },
+    }).eq("id", log.id));
+    submissionUncertain = true;
     const { jobId: publishJob } = await publishNow({
       workspaceId: cfg.workspaceId,
       accountId: slot.publer_account_id,
@@ -431,121 +467,98 @@ export async function publishOne(
       mediaPath: mediaObj.path,
       thumbnailPath: mediaObj.thumbnails?.[0]?.real,
     });
+    if (!publishJob) throw new Error("publish response missing job ID; outcome uncertain");
 
-    // Record what we actually posted so analytics can correlate later
-    await sb.from("publer_publish_log").update({
-      caption_used: caption,
-      hashtags_used: hashtags,
-    }).eq("id", log.id);
+    // Persist the Publer job before polling. If the process exits or polling
+    // times out, operators can reconcile this exact job without resubmitting.
+    await checked(sb.from("publer_publish_log").update({
+      publer_job_id: publishJob,
+      raw_publish_payload: { _publisher: { phase: "submitted" } },
+    }).eq("id", log.id));
     const publishPayload = await waitForJob(publishJob, {
       timeoutMs: 120_000,
       intervalMs: 2500,
       workspaceId: cfg.workspaceId,
     });
 
-    // Failures embedded in payload
-    const failures = publishPayload?.failures;
-    if (failures && Object.keys(failures).length) {
-      throw new Error("publer publish failures: " + JSON.stringify(failures).slice(0, 400));
+    const exact = parsePublishResult(publishPayload, slot.publer_account_id);
+    await checked(sb.from("publer_publish_log").update({
+      raw_publish_payload: exact.outcome === "published" ? publishPayload :
+        { _publisher: { phase: "submitted" }, last_payload: publishPayload },
+    }).eq("id", log.id));
+    if (exact.outcome !== "published") {
+      // Even a reported failure after submission is held for review, never
+      // blindly resent. This favors avoiding duplicate public posts.
+      throw new Error("publish requires reconciliation: " + (exact.error || exact.outcome));
     }
-
-    // Log full payload shape once so we can build a proper post-id resolver.
-    // Diagnostic only; safe to leave on — payload is small.
-    console.log(
-      "[publer.publish]",
-      slot.phone_slot,
-      "job=" + publishJob,
-      "payload=" + JSON.stringify(publishPayload).slice(0, 800),
-    );
-
-    // Resolve the created post's ID and link.
-    //
-    // Publer's publish job payload MAY include post_ids depending on network.
-    // For IG the newest-in-list heuristic worked because IG shows up in
-    // /posts within seconds; for TikTok, propagation lag caused us to grab
-    // an unrelated older post. Fix: only accept a listed post if it was
-    // created within a small window around our job's completion AND its
-    // provider matches the account we published to.
-    let postId: string | undefined;
-    let postLink: string | undefined;
-
-    // 1) Preferred path: pull directly from job payload.
-    const payloadPostIds: string[] | undefined =
-      publishPayload?.post_ids ||
-      publishPayload?.posts?.map((p: any) => p?.id).filter(Boolean);
-    if (payloadPostIds && payloadPostIds.length) {
-      postId = payloadPostIds[0];
-    }
-
-    // 2) Fallback: poll listPosts and match strictly on account, state,
-    //    and recency (created within the last 4 minutes of now).
-    if (!postId || !postLink) {
-      const cutoff = Date.now() - 4 * 60_000;
-      for (let i = 0; i < 6; i++) {
-        await new Promise((r) => setTimeout(r, 2500));
-        try {
-          const listed = await listPosts(cfg.workspaceId, {
-            accountId: slot.publer_account_id,
-            page: 1,
-          });
-          const posts = (listed?.posts ?? []).filter((p: any) => {
-            if (p.state !== "published") return false;
-            if (!p.post_link) return false;
-            // scheduled_at is when Publer marked the post; must be recent
-            const at = p.scheduled_at ? Date.parse(p.scheduled_at) : NaN;
-            if (isNaN(at) || at < cutoff) return false;
-            // if we already have an id from the payload, use it strictly
-            if (postId && p.id !== postId) return false;
-            return true;
-          });
-          if (posts.length) {
-            const p = posts[0];
-            postId = postId || p.id;
-            postLink = p.post_link || p.short_link || p.link;
-            break;
-          }
-        } catch {}
-      }
-    }
-
-    // If we still have no link, don't record a fake one — leave publer_post_link null.
-    if (!postLink) {
-      console.warn(
-        "[publer.publish] could not resolve fresh post link for job",
-        publishJob,
-        "slot=" + slot.phone_slot,
-      );
-    }
-
-    // 4) Mark posted (raw_publish_payload lets us diagnose without redeploying)
-    await sb.from("publer_publish_log").update({
-      publer_job_id: publishJob,
-      publer_post_id: postId,
-      publer_post_link: postLink,
-      raw_publish_payload: publishPayload,
-      status: "published",
-      updated_at: new Date().toISOString(),
-    }).eq("id", log.id);
-
-    await sb.from("reels_manual_queue").update({
-      status: "posted",
-      posted_at: new Date().toISOString(),
-      posted_ig_url: postLink,
-      notes: (row.notes ? row.notes + " | " : "") + "via publer",
-    }).eq("id", row.id);
-
-    return { status: "published", publer_post_id: postId };
+    await finishPublication(sb, log.id, row.id, exact, publishPayload);
+    return { status: "published", publer_post_id: exact.postId };
   } catch (e: any) {
-    // Roll queue row back to pending so it can retry later, mark log failed.
-    await sb.from("publer_publish_log").update({
-      status: "failed",
-      error: String(e.message || e).slice(0, 2000),
+    const message = String(e.message || e);
+    const { count } = await checked(sb
+      .from("publer_publish_log")
+      .select("id", { count: "exact", head: true })
+      .eq("queue_id", row.id)
+      .eq("status", "failed"));
+    const decision = retryDecision((count ?? 0) + 1, message, submissionUncertain);
+    // A held log stays reserved. Unknown outcomes must never free this slot.
+    await checked(sb.from("publer_publish_log").update({
+      status: decision.action === "hold" ? "pending" : "failed",
+      error: `${decision.action}: ${message}`.slice(0, 2000),
       updated_at: new Date().toISOString(),
-    }).eq("id", log.id);
-    await sb.from("reels_manual_queue").update({
-      status: "pending",
-    }).eq("id", row.id);
-    return { status: "failed", error: String(e.message || e) };
+    }).eq("id", log.id));
+    const nextStatus =
+      decision.action === "retry" ? "pending" :
+      decision.action === "quarantine" ? "skipped" :
+      "publer_publishing";
+    await checked(sb.from("reels_manual_queue").update({
+      status: nextStatus,
+      notes: (row.notes ? row.notes + " | " : "") +
+        `publer ${decision.action}: ${message.slice(0, 500)}`,
+    }).eq("id", row.id).eq("status", "publer_publishing"));
+    return { status: "failed", error: message };
+  }
+}
+
+async function finishPublication(
+  sb: SupabaseClient, logId: number, queueId: string,
+  result: { postId: string; postLink: string | null }, payload: any,
+) {
+  // Keep the log pending until BOTH writes finish. If the second fails, the
+  // next tick can idempotently reconcile the first without posting again.
+  await checked(sb.from("reels_manual_queue").update({
+    status: "posted", posted_at: new Date().toISOString(),
+    posted_ig_url: result.postLink,
+  }).eq("id", queueId).eq("status", "publer_publishing"));
+  await checked(sb.from("publer_publish_log").update({
+    publer_post_id: result.postId, publer_post_link: result.postLink,
+    raw_publish_payload: payload, status: "published", error: null,
+    updated_at: new Date().toISOString(),
+  }).eq("id", logId));
+}
+
+/** Read-only provider reconciliation; never calls publishNow. */
+export async function reconcilePendingPublications(sb: SupabaseClient, cfg: Config, slot: SlotConfig) {
+  const { data } = await checked(sb.from("publer_publish_log")
+    .select("*").eq("phone_slot", slot.phone_slot).eq("status", "pending")
+    .lt("updated_at", new Date(Date.now() - 10 * 60_000).toISOString())
+    .order("attempted_at", { ascending: true }).limit(10));
+  for (const log of data ?? []) {
+    // Old pre-fix logs may contain an UPLOAD job ID. Only poll our explicit
+    // submitted marker or a previously captured publish payload.
+    const marker = log.raw_publish_payload?._publisher?.phase;
+    let payload = log.raw_publish_payload;
+    if (marker === "submitted" && log.publer_job_id) {
+      try {
+        const job = await jobStatus(log.publer_job_id, cfg.workspaceId);
+        if (!["complete", "completed"].includes(job.status)) continue;
+        payload = job.payload;
+      } catch { continue; }
+    }
+    const result = parsePublishResult(payload, slot.publer_account_id);
+    if (result.outcome === "published") {
+      await finishPublication(sb, log.id, log.queue_id, result, payload);
+    }
   }
 }
 
@@ -562,11 +575,23 @@ export async function publisherTick(sb: SupabaseClient): Promise<{
 
   for (const s of slots) {
     if (s.paused) continue;
+    try {
+      await reconcilePendingPublications(sb, cfg, s);
+    } catch (e: any) {
+      attempts.push({ slot: s.phone_slot, slotIndex: -1, result: "reconcile_error", error: e.message });
+      continue;
+    }
     const eligible = eligibleSlotIndexes(cfg.slotTimes, s.daily_target, now.minutes);
     const taken = await takenSlotIndexes(sb, s.phone_slot, now.ymd);
     for (const idx of eligible) {
       if (taken.has(idx)) continue;
-      const r = await publishOne(sb, cfg, s, idx, now.ymd);
+      let r: Awaited<ReturnType<typeof publishOne>>;
+      try {
+        r = await publishOne(sb, cfg, s, idx, now.ymd);
+      } catch (e: any) {
+        attempts.push({ slot: s.phone_slot, slotIndex: idx, result: "database_error", error: e.message });
+        break;
+      }
       attempts.push({ slot: s.phone_slot, slotIndex: idx, result: r.status, error: r.error });
       if (r.status === "no_queue" || r.status === "reserve_conflict") {
         // No point trying the next slot index if queue empty; but conflict means

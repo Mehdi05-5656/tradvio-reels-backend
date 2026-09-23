@@ -9,6 +9,7 @@ import {
   publishOne,
   reconcileSlotAccounts,
 } from "./publer-schedule.js";
+import { chooseTimelineLog } from "./publer-safety.js";
 import { listAccounts, postInsights } from "./publer.js";
 
 const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
@@ -71,7 +72,7 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
         .order("slot_index", { ascending: true });
 
       const timeline = cfg.slotTimes.slice(0, slot.daily_target).map((hhmm, i) => {
-        const log = (logs ?? []).find((l: any) => l.slot_index === i);
+        const log = chooseTimelineLog((logs ?? []).filter((l: any) => l.slot_index === i));
         const [h, m] = hhmm.split(":").map((n) => parseInt(n, 10));
         const plannedUtc = ptDateTimeToUtc(now.ymd, hhmm).toISOString();
         return {

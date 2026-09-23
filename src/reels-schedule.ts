@@ -50,6 +50,12 @@ export function registerReelsScheduleRoutes(app: Express, sbFn: () => SupabaseCl
   //   7. Return the passthrough response.
   app.post("/api/reels/schedule", async (req: Request, res: Response) => {
     try {
+      if (process.env.CREATORVAULT_PUBLISH_ENABLED !== "1") {
+        return res.status(410).json({
+          error: "creatorvault_publishing_disabled",
+          detail: "Publishing is managed by the Publer schedule.",
+        });
+      }
       const { isAdminSecret, isAdminUser, isUser, callerExtUid } = authContext(req);
       if (!isAdminSecret && !isAdminUser && !isUser) {
         return res.status(401).json({ error: "unauthorized" });
