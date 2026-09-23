@@ -152,8 +152,48 @@ test("global write controls reject ordinary users", async t => {
   for (const path of ["/api/v2/devices/other", "/api/v2/alerts/dismiss-all", "/api/publer/reconcile", "/api/publer/publish-now/slot-b", "/api/creatorvault/sync/accounts"]) {
     assert.equal((await s.get(path, "a", "POST")).status, 403, path);
   }
-  assert.equal((await s.get("/api/publer/slot/slot-a", "a", "POST")).status, 200);
+  assert.equal((await s.get("/api/publer/slot/slot-a", "a", "POST")).status, 403);
   assert.equal((await s.get("/api/publer/slot/slot-b", "a", "POST")).status, 403);
+});
+test("managed customers cannot change even their own content, schedule or onboarding", async t => {
+  const s = await setup(t);
+  const paths = [
+    "/api/publer/slot/slot-a",
+    "/api/publer/publish-now/slot-a",
+    "/api/v2/templates/slot-a",
+    "/api/v2/queue-suggestions/q-a/accept",
+    "/api/v2/queue-suggestions/q-a/reject",
+    "/api/onboard/retry",
+    "/api/onboard/enqueue",
+    "/api/creatorvault/bridge/oauth/start",
+    "/api/reels/schedule",
+    "/api/reels/upload-url",
+    "/api/reels/sign-storage",
+    "/api/archive/q-a",
+    "/api/undo/q-a",
+  ];
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    for (const path of paths) {
+      const r = await s.get(`${path}?role=admin&owner_user_id=a`, "a", method);
+      assert.equal(r.status, 403, `${method} ${path}`);
+    }
+  }
+  assert.equal(s.db.calls.length, 0, "no writes or ownership/provider lookups for denied mutations");
+  assert.equal(s.providerCalls(), 0);
+});
+test("read-only policy leaves owned reads, administrator operations and signed webhook dispatch intact", async t => {
+  const s = await setup(t);
+  assert.equal((await s.get("/api/queue/slot-a", "a")).status, 200);
+  assert.equal((await s.get("/api/queue/slot-b", "a")).status, 403);
+  assert.equal((await s.get("/api/publer/slot/slot-a", "admin", "POST")).status, 200);
+  // The real webhook handler still verifies its HMAC; access middleware must
+  // not replace that with a requirement for an interactive customer login.
+  const middleware = accountAccess(() => s.db);
+  let continued = false;
+  await middleware({ path: "/api/creatorvault/webhook", method: "POST", auth: null } as any,
+    { status() { throw new Error("webhook must reach signature verification"); } } as any,
+    () => { continued = true; });
+  assert.equal(continued, true);
 });
 test("ownership lookup failure denies the request instead of allowing it", async t => {
   const s = await setup(t); s.db.fail = "publer_slot_config";

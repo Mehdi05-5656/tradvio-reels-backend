@@ -15,15 +15,17 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (!req.profile || !("user_id" in req.auth)) return res.status(403).json({ error: "profile_required" });
 
     const read = ["GET", "HEAD"].includes(req.method);
+    // Fully managed service: a customer's ownership grants visibility only.
+    // Never permit pause/resume, schedule changes, uploads, direct OAuth,
+    // onboarding retries or publishing through a client-owned resource.
+    // Public auth and signature-verified webhooks are handled above/outside /api.
+    if (!read) return res.status(403).json({ error: "read_only_customer" });
     // These handlers apply their own per-user filters. All other global v2
     // control, leader and suggestion routes remain administrator-only.
     if (read && /^\/api\/(?:me|v2\/(?:accounts|devices|overview|alerts|archive|today|hashtags|templates)|v2\/analytics\/[^/]+|v2\/post\/.+|creatorvault\/(?:accounts|account-status)|onboard\/status|reels\/scheduled(?:\/[^/]+)?)$/.test(path)) return next();
-    if (req.method === "POST" && /^\/api\/(?:creatorvault\/bridge\/oauth\/start|onboard\/(?:retry|enqueue)|reels\/schedule)$/.test(path)) return next();
     try {
       let slot: string | null = null;
-      const slotMatch = read
-        ? path.match(/^\/api\/(?:next|queue|publer\/timeline|publer\/analytics)\/([^/]+)$/)
-        : req.method === "POST" ? path.match(/^\/api\/publer\/slot\/([^/]+)$/) : null;
+      const slotMatch = path.match(/^\/api\/(?:next|queue|publer\/timeline|publer\/analytics)\/([^/]+)$/);
       if (slotMatch) slot = decodeURIComponent(slotMatch[1]);
       const signedMatch = read ? path.match(/^\/api\/signed\/([^/]+)$/) : null;
       if (signedMatch) {

@@ -15,3 +15,18 @@ No production writes or external publish calls in this suite.
 - All existing time slots, timezone, daily targets, caption policy stay unchanged.
 - Dashboard active accounts use existing scoped device data; no CreatorVault connect CTA.
 - Desktop/mobile, empty/error state, refresh and navigation checks.
+
+## Fully managed customer permissions
+
+Requested September 23: customers are read-only, including their own accounts.
+These changes are staged separately from the deployed three-account release.
+
+- Deny customer POST, PUT, PATCH and DELETE under `/api`, including owned slots.
+- Deny customer scheduling, publishing, pause/resume, caption decisions, upload
+  signing, onboarding retries and CreatorVault OAuth initiation.
+- Reject forged owner, role and administrator query parameters.
+- Preserve owned reads and continue denying cross-customer reads.
+- Preserve anonymous/profile-missing denial before any privileged handler runs.
+- Keep HMAC webhook routing available to its own signature-verifying handler.
+- Existing administrator permissions are unchanged in this first slice; sole
+  operator binding is blocked until the designated login exists and is verified.
