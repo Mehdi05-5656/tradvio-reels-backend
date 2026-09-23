@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { registerPublerRoutes } from "./publer-routes.js";
 import { supabase } from "./supabase.js";
 import { resolveAuth, isAdmin, resolveExternalUserId } from "./auth.js";
+import { accountAccess } from "./account-access.js";
 
 const BUCKET = "reels";
 const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
@@ -22,11 +23,11 @@ function requireWriteAuth(req: Request, res: Response, next: any) {
 
 export async function registerRoutes(_httpServer: Server, app: Express): Promise<void> {
   // Resolve auth for every /api/ request. Populates req.auth and req.profile.
-  // Never blocks; downstream handlers decide the policy.
+  // Hydration precedes the default-deny access boundary below.
   app.use("/api", resolveAuth);
+  app.use(accountAccess(supabase));
 
-  // Gate every POST/PUT/PATCH/DELETE (mutations). GETs stay public
-  // so charts/lists load without extra plumbing.
+  // Additional mutation guard. Reads are already protected by accountAccess.
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
     if (!req.path.startsWith("/api/")) return next();

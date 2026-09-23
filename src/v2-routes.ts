@@ -865,7 +865,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
       // Slot-scope: block cross-user post lookup by publer_post_link/id.
       const owningSlot = log?.phone_slot ?? latest?.phone_slot ?? null;
-      if (!admin && owningSlot && !visibleIds.includes(owningSlot)) {
+      if (!admin && (!owningSlot || !visibleIds.includes(owningSlot))) {
         return res.status(403).json({ error: "forbidden" });
       }
 

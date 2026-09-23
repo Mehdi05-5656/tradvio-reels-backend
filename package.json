@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-build && node --test .test-build/*.js",
+    "test": "esbuild tests/*.test.ts --bundle --packages=external --platform=node --format=esm --outdir=.test-build && node --test .test-build/*.js",
     "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cardinal --external:@babel/preset-typescript --minify",
     "start": "node dist/index.cjs",
     "publisher-tick": "node dist/publisher-tick.cjs",
@@ -19,6 +19,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.5",
     "@types/ws": "^8.5.13",

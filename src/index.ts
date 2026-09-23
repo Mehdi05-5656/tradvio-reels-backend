@@ -7,6 +7,7 @@ import { registerV2Routes } from "./v2-routes.js";
 import { registerCreatorVaultRoutes } from "./creatorvault.js";
 import { registerReelsScheduleRoutes } from "./reels-schedule.js";
 import { registerOnboardingRoutes } from "./onboarding-routes.js";
+import { registerAccountInventory } from "./account-inventory.js";
 import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import WebSocket from "ws";
@@ -59,6 +60,7 @@ async function main() {
     return sb;
   };
   registerV2Routes(app, getSb);
+  registerAccountInventory(app, getSb);
   registerCreatorVaultRoutes(app, getSb);
   registerReelsScheduleRoutes(app, getSb);
   registerOnboardingRoutes(app, getSb);

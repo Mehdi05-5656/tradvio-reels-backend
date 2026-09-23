@@ -759,8 +759,7 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
         }
         return res.json({
           status: "other_user",
-          platform: row.platform,
-          platform_handle: row.platform_handle,
+          ...(isAdminUser || isAdminSecret ? { platform: row.platform, platform_handle: row.platform_handle } : {}),
         });
       }
 
@@ -793,8 +792,7 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
       if (newest.processing_status === "ownership_conflict") {
         return res.json({
           status: "other_user",
-          platform: ca.platform,
-          platform_handle: ca.platform_handle,
+          ...(isAdminUser || isAdminSecret ? { platform: ca.platform, platform_handle: ca.platform_handle } : {}),
         });
       }
       // 'processed' or 'received' — check the accounts row exists and belongs to caller.
@@ -820,4 +818,3 @@ export function registerCreatorVaultRoutes(app: Express, sbFn: () => SupabaseCli
 }
 
 // ---------- helpers ----------
-
