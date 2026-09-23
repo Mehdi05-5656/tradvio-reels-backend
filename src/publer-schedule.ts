@@ -222,7 +222,7 @@ export function ptNow(now: Date = new Date()): {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   }).formatToParts(now);
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
   const ymd = `${get("year")}-${get("month")}-${get("day")}`;

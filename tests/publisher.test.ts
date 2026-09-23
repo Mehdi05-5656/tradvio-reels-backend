@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { publishOne, reconcilePendingPublications, eligibleSlotIndexes, ptDateTimeToUtc } from "../src/publer-schedule.js";
+import { publishOne, reconcilePendingPublications, eligibleSlotIndexes, ptDateTimeToUtc, ptNow } from "../src/publer-schedule.js";
 
 const cfg = { workspaceId: "workspace", timezone: "America/Los_Angeles", slotTimes: ["08:00", "10:00"], jitterMinutes: 10 };
 const slot = { phone_slot: "phone_a", publer_account_id: "a1", provider: "instagram" as const, handle: "test", daily_target: 2, paused: false, owner_user_id: null };
@@ -153,4 +153,11 @@ test("schedule due times, target cap and DST remain unchanged", () => {
   assert.deepEqual(eligibleSlotIndexes(["08:00"], 8, 7 * 60), []);
   assert.equal(ptDateTimeToUtc("2026-09-23", "14:00").toISOString(), "2026-09-23T21:00:00.000Z");
   assert.equal(ptDateTimeToUtc("2026-12-23", "14:00").toISOString(), "2026-12-23T22:00:00.000Z");
+});
+test("Pacific midnight is hour zero, not all daytime slots eligible", () => {
+  const midnight = ptNow(new Date("2026-09-24T07:05:00Z"));
+  assert.equal(midnight.ymd, "2026-09-24");
+  assert.equal(midnight.hhmm, "00:05");
+  assert.equal(midnight.minutes, 5);
+  assert.deepEqual(eligibleSlotIndexes(["08:00", "10:00"], 2, midnight.minutes), []);
 });
