@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { registerPublerRoutes } from "./publer-routes.js";
 import { supabase } from "./supabase.js";
 import { resolveAuth, isAdmin, resolveExternalUserId } from "./auth.js";
+import { accountCapabilities } from "./account-capabilities.js";
 import { accountAccess } from "./account-access.js";
 
 const BUCKET = "reels";
@@ -48,6 +49,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
   // WO-A: current-user endpoint. Returns the effective identity for this
   // request. Used by the dashboard right after Supabase Auth session change.
   app.get("/api/me", (req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "private, no-store");
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
     if ("admin_secret" in req.auth && req.auth.admin_secret) {
       return res.json({
@@ -57,6 +59,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
         role: "admin",
         email: null,
         display_name: null,
+        capabilities: accountCapabilities(req),
       });
     }
     if (req.profile) {
@@ -67,6 +70,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
         role: req.profile.role,
         email: req.profile.email,
         display_name: req.profile.display_name,
+        capabilities: accountCapabilities(req),
       });
     }
     // JWT valid but no profile row yet (trigger race, extremely rare).

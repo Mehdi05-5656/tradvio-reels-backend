@@ -109,14 +109,17 @@ will require separate fenced leases; none are claimed to exist here.
 - Workspace registration and its inventory snapshot are separate transactions.
   A snapshot failure may leave a registered workspace; retry the same registration
   or refresh discovery. Registration itself is idempotent.
-- Pending: admin assignment UI and customer status UI, capabilities in the frontend,
-  recent-auth/MFA checks for sensitive assignment, provider health/rate-capacity
+- Staged UI: admin assignment and customer setup status are implemented in the
+  companion frontend. `/api/me` supplies UUID/profile-checked operator capabilities
+  with private/no-store caching. Missing capability hides write controls; the
+  backend still independently authorizes every mutation.
+- Pending: recent-auth/MFA checks for sensitive assignment, provider health/rate-capacity
   validation, licensed raw assets, renderer, meaningful-variation checks, media QC,
   account-based scheduling, analytics attribution and the learning loop.
 
 ## Verification and release gate
 
-The suite has 59 passing tests: existing regressions plus SQL validation,
+The suite has 61 passing tests: existing regressions plus operator capability checks, SQL validation,
 idempotency conflicts, tenant boundaries, browser privilege denial, staged
 HTTP-to-SQL setup, rollback recovery, and rights/renderer blocking. TypeScript,
 web backend and scheduled-worker builds pass. Tests use local PGlite, synthetic
@@ -124,7 +127,13 @@ authenticated request contexts and a stubbed provider. They do not verify live
 Supabase JWTs, live Publer authorization, or multi-connection production
 Postgres contention.
 
-Before rollout: finish the UI/capability alignment and shared-secret caller
+The companion frontend has seven unit tests and thirteen simulated browser
+check groups. Assignment review preserves the exact request key on retry,
+invalidates stale customer/workspace inventory, and distinguishes accepted,
+blocked, unavailable and out-of-date status. Its private preview has no live
+API calls; it is not proof of production account health.
+
+Before rollout: finish sensitive-action step-up and shared-secret caller
 migration, run staging with real operator/customer sessions and multi-connection
 Postgres tests, review rights and cadence, then obtain approval for the exact
 migration/backend/frontend package. Apply the additive migration before starting
