@@ -95,6 +95,20 @@ export async function resolveAuth(req: Request, _res: Response, next: NextFuncti
 }
 
 // Convenience helpers used by handlers ---------------------------------------
+// Owner-selected support@tradvio.com identity, verified in this project's auth
+// records on 2026-09-23. Deliberately server-maintained: changing an email,
+// display name, request field or client metadata must not transfer authority.
+// Changing the operator requires an explicitly reviewed code/configuration change.
+const PLATFORM_OPERATOR_USER_ID = "71c2308a-9e23-4458-b4f0-df7ae53c841e";
+
+export function isOperator(req: Request): boolean {
+  return !!req.auth &&
+    "user_id" in req.auth &&
+    req.auth.user_id === PLATFORM_OPERATOR_USER_ID &&
+    req.profile?.user_id === req.auth.user_id &&
+    req.profile?.role === "admin";
+}
+
 export function isAdmin(req: Request): boolean {
   if (!req.auth) return false;
   if ("admin_secret" in req.auth && req.auth.admin_secret) return true;

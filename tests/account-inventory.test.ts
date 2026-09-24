@@ -61,9 +61,10 @@ async function setup(t: any, opts: { providerFails?: boolean } = {}) {
   // Test-only identities, not an authentication mechanism in application code.
   app.use((req: any, _res, next) => {
     const who = req.header("test-identity");
-    req.auth = who ? { user_id: who } : null;
+    const uid = who === "operator" ? "71c2308a-9e23-4458-b4f0-df7ae53c841e" : who;
+    req.auth = who === "shared-secret" ? { admin_secret: true } : who ? { user_id: uid } : null;
     req.profile = who && who !== "no-profile" ? {
-      user_id: who, external_user_id: `ext-${who}`, role: who === "admin" ? "admin" : "user",
+      user_id: uid, external_user_id: `ext-${who}`, role: ["admin", "operator"].includes(who) ? "admin" : "user",
     } : null;
     next();
   });
@@ -181,11 +182,11 @@ test("managed customers cannot change even their own content, schedule or onboar
   assert.equal(s.db.calls.length, 0, "no writes or ownership/provider lookups for denied mutations");
   assert.equal(s.providerCalls(), 0);
 });
-test("read-only policy leaves owned reads, administrator operations and signed webhook dispatch intact", async t => {
+test("read-only policy leaves owned reads, operator operations and signed webhook dispatch intact", async t => {
   const s = await setup(t);
   assert.equal((await s.get("/api/queue/slot-a", "a")).status, 200);
   assert.equal((await s.get("/api/queue/slot-b", "a")).status, 403);
-  assert.equal((await s.get("/api/publer/slot/slot-a", "admin", "POST")).status, 200);
+  assert.equal((await s.get("/api/publer/slot/slot-a", "operator", "POST")).status, 200);
   // The real webhook handler still verifies its HMAC; access middleware must
   // not replace that with a requirement for an interactive customer login.
   const middleware = accountAccess(() => s.db);
@@ -194,6 +195,48 @@ test("read-only policy leaves owned reads, administrator operations and signed w
     { status() { throw new Error("webhook must reach signature verification"); } } as any,
     () => { continued = true; });
   assert.equal(continued, true);
+});
+test("non-operator administrators retain inventory visibility but cannot mutate any account", async t => {
+  const s = await setup(t);
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    for (const path of ["/api/publer/slot/slot-a", "/api/publer/publish-now/slot-b", "/api/admin/accounts/assign", "/api/onboard/enqueue"]) {
+      assert.equal((await s.get(`${path}?email=support@tradvio.com&role=admin`, "admin", method)).status, 403);
+    }
+  }
+  assert.equal(s.db.calls.length, 0);
+  assert.equal(s.providerCalls(), 0);
+  assert.equal((await s.get()).body.scope, "all_profiles");
+});
+test("legacy shared secret cannot grant human operator mutation authority", async t => {
+  const s = await setup(t);
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    assert.equal((await s.get("/api/publer/slot/slot-a", "shared-secret", method)).status, 403);
+  }
+  assert.equal(s.db.calls.length, 0);
+  assert.equal(s.providerCalls(), 0);
+});
+test("operator authorization requires the selected subject and matching server administrator profile", async () => {
+  const uid = "71c2308a-9e23-4458-b4f0-df7ae53c841e";
+  const cases = [
+    { auth: { user_id: uid }, profile: { user_id: uid, role: "admin" }, expected: true },
+    { auth: { user_id: uid, email: "changed@example.test" }, profile: { user_id: uid, role: "admin" }, expected: true },
+    { auth: { user_id: uid }, profile: null, expected: false },
+    { auth: { user_id: uid }, profile: { user_id: "other", role: "admin" }, expected: false },
+    { auth: { user_id: uid }, profile: { user_id: uid, role: "user" }, expected: false },
+    { auth: { user_id: "other", email: "support@tradvio.com" }, profile: { user_id: "other", role: "admin" }, expected: false },
+    { auth: { admin_secret: true }, profile: { user_id: uid, role: "admin" }, expected: false },
+    { auth: null, profile: { user_id: uid, role: "admin" }, expected: false },
+  ];
+  for (const c of cases) {
+    let continued = false;
+    let status = 0;
+    const middleware = accountAccess(() => { throw new Error("authorization must not query data"); });
+    const res: any = { status(n: number) { status = n; return res; }, json() { return res; } };
+    await middleware({ path: "/api/admin/accounts/assign", method: "POST", auth: c.auth, profile: c.profile } as any,
+      res, () => { continued = true; });
+    assert.equal(continued, c.expected, JSON.stringify(c));
+    if (!c.expected) assert.equal(status, c.auth ? 403 : 401);
+  }
 });
 test("ownership lookup failure denies the request instead of allowing it", async t => {
   const s = await setup(t); s.db.fail = "publer_slot_config";

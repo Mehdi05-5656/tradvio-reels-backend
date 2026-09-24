@@ -28,5 +28,11 @@ These changes are staged separately from the deployed three-account release.
 - Preserve owned reads and continue denying cross-customer reads.
 - Preserve anonymous/profile-missing denial before any privileged handler runs.
 - Keep HMAC webhook routing available to its own signature-verifying handler.
-- Existing administrator permissions are unchanged in this first slice; sole
-  operator binding is blocked until the designated login exists and is verified.
+- Bind human operator writes to the verified support@tradvio.com auth UUID,
+  never an email, display name, submitted role or client-provided owner ID.
+- Preserve non-operator administrator read visibility but reject all mutations.
+- Reject legacy shared-secret mutations; it is not a human operator identity.
+- Deny operator writes if the server-loaded profile is missing, mismatched or
+  no longer an administrator. Preserve signature-verified webhook dispatch.
+- Test the selected operator, another administrator, an ordinary customer,
+  absent profile, mismatched profile, revoked role and forged operator email.

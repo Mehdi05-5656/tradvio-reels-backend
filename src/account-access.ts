@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { isAdmin } from "./auth.js";
+import { isAdmin, isOperator } from "./auth.js";
 
 // Default-deny legacy/global routes. Ownership is checked on the server, never
 // inferred from a client-supplied role, external user id, or slot name.
@@ -11,15 +11,22 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (path === "/api/bootstrap" && ["GET", "HEAD"].includes(req.method)) return next();
     if (path === "/api/creatorvault/webhook" && req.method === "POST") return next();
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
+    const read = ["GET", "HEAD"].includes(req.method);
+    // All application mutations require the selected human operator. An admin
+    // viewing role or the legacy shared secret must not grant write authority.
+    // Scheduled workers call their services directly; machine HTTP mutations
+    // require a separate, narrowly scoped design, not an implicit exception here.
+    if (!read) {
+      if (isOperator(req)) return next();
+      return res.status(403).json({ error: "operator_required" });
+    }
     if (isAdmin(req)) return next();
     if (!req.profile || !("user_id" in req.auth)) return res.status(403).json({ error: "profile_required" });
 
-    const read = ["GET", "HEAD"].includes(req.method);
     // Fully managed service: a customer's ownership grants visibility only.
     // Never permit pause/resume, schedule changes, uploads, direct OAuth,
     // onboarding retries or publishing through a client-owned resource.
     // Public auth and signature-verified webhooks are handled above/outside /api.
-    if (!read) return res.status(403).json({ error: "read_only_customer" });
     // These handlers apply their own per-user filters. All other global v2
     // control, leader and suggestion routes remain administrator-only.
     if (read && /^\/api\/(?:me|v2\/(?:accounts|devices|overview|alerts|archive|today|hashtags|templates)|v2\/analytics\/[^/]+|v2\/post\/.+|creatorvault\/(?:accounts|account-status)|onboard\/status|reels\/scheduled(?:\/[^/]+)?)$/.test(path)) return next();
