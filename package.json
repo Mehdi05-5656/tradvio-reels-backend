@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "esbuild tests/*.test.ts --bundle --packages=external --platform=node --format=esm --outdir=.test-build && node --test .test-build/*.js",
+    "build-handoff": "esbuild src/handoff-tick.ts --bundle --platform=node --format=cjs --outfile=dist/handoff-tick.cjs --external:ws",
+    "handoff-tick": "node dist/handoff-tick.cjs",
     "build-generation": "esbuild src/generation-tick.ts --bundle --platform=node --format=cjs --outfile=dist/generation-tick.cjs --external:ws",
     "generation-tick": "node dist/generation-tick.cjs",
     "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cardinal --external:@babel/preset-typescript --minify",

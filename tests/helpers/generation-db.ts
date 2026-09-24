@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 export const OP="71c2308a-9e23-4458-b4f0-df7ae53c841e";
 export const A="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 export const B="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-export async function generationDb(t:any) {
+export async function generationDb(t:any,extraMigrations:string[]=[] ) {
   const db=new PGlite(); t.after(()=>db.close());
   await db.exec(`
     CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
@@ -25,7 +25,7 @@ export async function generationDb(t:any) {
     INSERT INTO profiles VALUES('${OP}','admin','Operator'),('${A}','user','A'),('${B}','user','B');
     GRANT USAGE ON SCHEMA public TO anon,authenticated,service_role;
   `);
-  for(const file of ["20260924001500_managed_provisioning.sql","20260924010000_managed_generation.sql"]) {
+  for(const file of ["20260924001500_managed_provisioning.sql","20260924010000_managed_generation.sql",...extraMigrations]) {
     const sql=await readFile(`migrations/${file}`,"utf8"); await db.exec(sql); await db.exec(sql);
   }
   async function rpc(name:string,args:Record<string,any>={}) {

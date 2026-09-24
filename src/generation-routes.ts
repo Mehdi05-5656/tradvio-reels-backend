@@ -53,7 +53,7 @@ export function registerGenerationRoutes(app:Express,sbFn:()=>SupabaseClient,ena
     if(!UUID.test(req.params.accountId))return res.status(400).json({error:"invalid_account"});
     try {
       const sb=sbFn();
-      let q=sb.from("managed_accounts").select("id").eq("id",req.params.accountId);
+      let q=sb.from("managed_accounts").select("id,publishing_enabled").eq("id",req.params.accountId);
       if(!isAdmin(req))q=q.eq("customer_user_id",(req.auth as {user_id:string}).user_id);
       const a=await q.maybeSingle();if(a.error)throw a.error;
       if(!a.data)return res.status(404).json({error:"account_not_found"});
@@ -61,8 +61,9 @@ export function registerGenerationRoutes(app:Express,sbFn:()=>SupabaseClient,ena
       const j=await sb.from("managed_generation_jobs").select("id,ordinal,state,error_code")
         .eq("account_id",a.data.id).order("ordinal").limit(24);
       if(j.error)throw j.error;
-      res.json({account_id:a.data.id,jobs:j.data??[],publishing_enabled:false,
-        ready_meaning:"private_quality_passed_not_scheduled"});
+      res.json({account_id:a.data.id,jobs:j.data??[],publishing_enabled:Boolean(a.data.publishing_enabled),
+        ready_meaning:"quality_passed_is_not_scheduling_proof",
+        scheduling_status_url:`/api/managed/handoffs/${a.data.id}`});
     }catch {res.status(503).json({error:"generation_unavailable"});}
   });
 }
