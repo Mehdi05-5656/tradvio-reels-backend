@@ -9,6 +9,7 @@ import { registerReelsScheduleRoutes } from "./reels-schedule.js";
 import { registerOnboardingRoutes } from "./onboarding-routes.js";
 import { registerAccountInventory } from "./account-inventory.js";
 import { registerManagedRoutes } from "./managed-routes.js";
+import { registerGenerationRoutes } from "./generation-routes.js";
 import { startManagedProvisioningWorker } from "./managed-provisioning.js";
 import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
@@ -64,6 +65,7 @@ async function main() {
   registerV2Routes(app, getSb);
   registerAccountInventory(app, getSb);
   registerManagedRoutes(app, getSb);
+  registerGenerationRoutes(app, getSb);
   registerCreatorVaultRoutes(app, getSb);
   registerReelsScheduleRoutes(app, getSb);
   registerOnboardingRoutes(app, getSb);

@@ -1,5 +1,9 @@
 # Managed customer assignment and provisioning
 
+This document records the assignment foundation. The next staged slice now
+implements video generation and QC; see `MANAGED_GENERATION.md` for its separate
+worker, private storage, tests and rollout gates. Neither slice is deployed.
+
 Staged implementation, September 23, 2026. This is a backend foundation, not
 a deployed customer launch or a video renderer. Do not enable it in production
 until the complete release package and migration have explicit owner approval.
@@ -114,8 +118,9 @@ will require separate fenced leases; none are claimed to exist here.
   with private/no-store caching. Missing capability hides write controls; the
   backend still independently authorizes every mutation.
 - Pending: recent-auth/MFA checks for sensitive assignment, provider health/rate-capacity
-  validation, licensed raw assets, renderer, meaningful-variation checks, media QC,
-  account-based scheduling, analytics attribution and the learning loop.
+  validation, live licensed-source onboarding and generation acceptance,
+  account-based scheduling, analytics attribution and the learning loop. The
+  staged renderer and QC implementation are documented in `MANAGED_GENERATION.md`.
 
 ## Verification and release gate
 

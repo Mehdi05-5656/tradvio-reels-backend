@@ -29,7 +29,7 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     // Public auth and signature-verified webhooks are handled above/outside /api.
     // These handlers apply their own per-user filters. All other global v2
     // control, leader and suggestion routes remain administrator-only.
-    if (read && /^\/api\/(?:me|managed\/accounts|v2\/(?:accounts|devices|overview|alerts|archive|today|hashtags|templates)|v2\/analytics\/[^/]+|v2\/post\/.+|creatorvault\/(?:accounts|account-status)|onboard\/status|reels\/scheduled(?:\/[^/]+)?)$/.test(path)) return next();
+    if (read && /^\/api\/(?:me|managed\/accounts|managed\/generation\/[^/]+|v2\/(?:accounts|devices|overview|alerts|archive|today|hashtags|templates)|v2\/analytics\/[^/]+|v2\/post\/.+|creatorvault\/(?:accounts|account-status)|onboard\/status|reels\/scheduled(?:\/[^/]+)?)$/.test(path)) return next();
     try {
       let slot: string | null = null;
       const slotMatch = path.match(/^\/api\/(?:next|queue|publer\/timeline|publer\/analytics)\/([^/]+)$/);
