@@ -36,3 +36,30 @@ These changes are staged separately from the deployed three-account release.
   no longer an administrator. Preserve signature-verified webhook dispatch.
 - Test the selected operator, another administrator, an ordinary customer,
   absent profile, mismatched profile, revoked role and forged operator email.
+
+## Managed account assignment and automatic provisioning
+
+Staged only; no provider writes, migration application or production activation.
+
+- New dedicated customer workspace registration requires the selected operator
+  and an existing verified, non-banned customer profile. No email/handle matching.
+- Preserve all legacy slots, rows, queues, schedules and workspace assignments.
+  Reject attempts to register the legacy workspace or reuse a legacy destination.
+- Snapshot Publer inventory server-side; clients cannot submit provider facts.
+  Reject malformed/duplicate/unsupported accounts, stale snapshots and mismatches.
+- Assign by exact customer, registered workspace and observed provider account ID.
+- Atomic assignment creates account, policy inputs, audit event and durable job.
+  Replays return the same account; changed payloads or ownership conflict.
+- Destination uniqueness survives retries with different idempotency keys.
+- Ordinary users and non-operator admins cannot invoke setup mutations.
+- Customer status queries are owner-scoped, cache-disabled and expose no raw
+  provider inventory, consent references, other customers or private blueprints.
+- RLS/revokes deny browser table/function access. Only server functions may write.
+- Provisioning atomically consumes locked pending jobs, rechecks customer
+  eligibility and creates one baseline blueprint and one initial batch.
+- Repeated worker runs do not duplicate work; transaction failures roll back.
+- Missing rights or the unimplemented renderer creates an honest blocked state.
+  Nothing is sent to the legacy ready queue; publishing remains disabled.
+- Feature defaults off. No live provider writes, generation spend or publishing.
+- Local SQL tests exercise constraints/transactions and repeatability; they do
+  not substitute for a multi-connection production-Postgres contention test.
