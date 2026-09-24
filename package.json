@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build-staging": "esbuild src/staging-readonly.ts --bundle --platform=node --format=cjs --outfile=dist/staging-readonly.cjs --external:ws",
+    "start-staging": "node dist/staging-readonly.cjs",
+    "check-staging": "node staging/cli.mjs",
     "test": "esbuild tests/*.test.ts --bundle --packages=external --platform=node --format=esm --outdir=.test-build && node --test .test-build/*.js",
     "build-handoff": "esbuild src/handoff-tick.ts --bundle --platform=node --format=cjs --outfile=dist/handoff-tick.cjs --external:ws",
     "handoff-tick": "node dist/handoff-tick.cjs",

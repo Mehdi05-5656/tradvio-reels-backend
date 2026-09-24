@@ -3,3 +3,5 @@ dist
 .env
 .env.local
 .test-build
+staging/*.local.json
+staging/*results*.json

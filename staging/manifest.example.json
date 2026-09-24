@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mode": "managed-readonly-staging",
+  "backend_origin": "https://REPLACE-staging.onrender.com",
+  "project_ref": "REPLACE_WITH_NEW_STAGING_PROJECT_REF",
+  "build_sha": "REPLACE_WITH_REVIEWED_40_CHARACTER_GIT_SHA",
+  "users": {
+    "operator": "71c2308a-9e23-4458-b4f0-df7ae53c841e",
+    "view_admin": "REPLACE",
+    "customer_a": "REPLACE",
+    "customer_b": "REPLACE"
+  },
+  "accounts": {
+    "customer_a": ["REPLACE"],
+    "customer_b": ["REPLACE"]
+  }
+}
