@@ -1,4 +1,5 @@
 import express from "express";
+import path from "node:path";
 import type {RequestHandler} from "express";
 import {isOperator} from "./auth.js";
 import {accountCapabilities} from "./account-capabilities.js";
@@ -11,7 +12,8 @@ import {STAGING_MODE,stagingDatabaseSafety} from "./staging-safety.js";
 // Deliberately not the production server: no legacy routes, webhooks or workers.
 export function stagingApp(deps:{db:any,auth:RequestHandler,config:{
   project_ref:string;frontend_origin:string;build_sha:string;
-}}) {
+},frontendDir?:string;
+}) {
   const app=express();app.disable("x-powered-by");
   app.use((req,res,next)=>{
     res.setHeader("Cache-Control","private, no-store");
@@ -50,6 +52,11 @@ export function stagingApp(deps:{db:any,auth:RequestHandler,config:{
     providerList:async()=>{throw new Error("staging_provider_access_forbidden");}});
   registerGenerationRoutes(app,()=>deps.db,()=>true);
   registerHandoffRoutes(app,()=>deps.db,()=>true);
+  if(deps.frontendDir) {
+    const root=path.resolve(deps.frontendDir);
+    app.use(express.static(root,{index:"index.html",dotfiles:"deny"}));
+    app.get(["/login","/verify"],(_req,res)=>res.sendFile(path.join(root,"index.html")));
+  }
   app.use((_req,res)=>res.status(404).json({error:"staging_route_not_found"}));
   return app;
 }

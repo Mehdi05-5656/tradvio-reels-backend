@@ -1,0 +1,2 @@
+# Generated Vite bundles can contain whitespace inside vendor template literals.
+staging-dashboard/** -whitespace

@@ -7,7 +7,7 @@ async function main() {
   globalThis.fetch=stagingFetch(config.supabase_origin,globalThis.fetch);
   const db=supabase();
   await stagingDatabaseSafety(db);
-  const app=stagingApp({db,auth:resolveAuth,config});
+  const app=stagingApp({db,auth:resolveAuth,config,frontendDir:"staging-dashboard"});
   const port=Number(process.env.PORT??10000);
   app.listen(port,"0.0.0.0",()=>console.log(JSON.stringify({mode:"managed-readonly-staging",ready:true})));
 }
