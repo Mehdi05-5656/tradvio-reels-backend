@@ -2,6 +2,28 @@
 
 No production writes or external publish calls in this suite.
 
+## Production blocker regression list, September 29
+
+Tests precede implementation. Only synthetic local HTTP/JWKS and database fixtures
+are used; do not run mutations against production or Publer.
+
+- Operator JWT alone can update templates and invoke the controlled harvest adapter
+  with APP_WRITE_SECRET configured; no browser secret required.
+- Customer, viewing admin, anonymous, missing/revoked profile and secret-only
+  identities cannot mutate either route, with or without the global boundary.
+- Mixed headers never convert a customer/invalid token into operator authority.
+  The existing secret-first resolver is fail-closed for these writes.
+- Invalid legacy slot IDs stop before writes/provider calls.
+- Privacy migration removes anon/authenticated caption view access, preserves
+  service reads and existing materialized data, and is replay-safe.
+- Signup still provisions a user profile; ordinary profile updates cannot change
+  role/identity; own-profile and admin profile reads still work under RLS.
+- The admin policy helper cannot probe another user's role and is not anonymous.
+- Pin audited function search paths, preserve backend-only RPC execution and
+  prevent browser execution of worker/trigger functions.
+- Missing or incompatible prerequisites abort the migration, rather than quietly
+  claiming that privacy is fixed. Local tests do not authorize production DDL.
+
 - Exact identity from actual array-shaped Publer publish response.
 - TikTok published response with no permalink remains link-pending.
 - Legacy wrapped posts accepted, bare IDs do not prove publication.

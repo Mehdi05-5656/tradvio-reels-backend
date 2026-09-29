@@ -5,7 +5,7 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow } from "./publer-schedule";
-import { filterVisibleSlots, assertCanReadSlot, isAdmin } from "./auth.js";
+import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
 
 type SbGetter = () => SupabaseClient;
 
@@ -18,7 +18,9 @@ async function visibleSlots(req: Request, sb: SupabaseClient) {
   return { all: slots, visible: filterVisibleSlots(req, slots) };
 }
 
-export function registerV2Routes(app: Express, sbFn: SbGetter): void {
+export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
+  harvestCaptions?: typeof import("./publer-schedule.js").harvestCaptions;
+} = {}): void {
   // ==================== DEVICES ====================
 
   // List all devices with derived health metrics
@@ -1007,12 +1009,11 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.post("/api/v2/templates/:phone", async (req: Request, res: Response) => {
     try {
-      // Requires APP_WRITE_SECRET (uses same x-app-secret header as other mutations)
-      const secret = process.env.APP_WRITE_SECRET || "";
-      if (secret && req.header("x-app-secret") !== secret) {
-        return res.status(401).json({ error: "unauthorized" });
-      }
+      // Independently enforce the human operator, even without the outer gate.
+      // Do not require or distribute the legacy machine secret to a browser.
+      if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
       const phone = req.params.phone;
+      if (!VALID_SLOTS.has(phone)) return res.status(400).json({ error: "invalid_slot" });
       const body = req.body ?? {};
       const patch: any = { updated_at: new Date().toISOString() };
       if (Array.isArray(body.caption_hooks)) patch.caption_hooks = body.caption_hooks;
@@ -1037,12 +1038,11 @@ export function registerV2Routes(app: Express, sbFn: SbGetter): void {
 
   app.post("/api/v2/harvest/:phone", async (req: Request, res: Response) => {
     try {
-      const secret = process.env.APP_WRITE_SECRET || "";
-      if (secret && req.header("x-app-secret") !== secret) {
-        return res.status(401).json({ error: "unauthorized" });
-      }
+      if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
       const phone = req.params.phone;
-      const { harvestCaptions } = await import("./publer-schedule.js");
+      if (!VALID_SLOTS.has(phone)) return res.status(400).json({ error: "invalid_slot" });
+      const harvestCaptions = options.harvestCaptions ??
+        (await import("./publer-schedule.js")).harvestCaptions;
       const result = await harvestCaptions(sbFn(), phone);
       res.json(result);
     } catch (e: any) {
