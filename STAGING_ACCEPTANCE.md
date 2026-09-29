@@ -1,19 +1,28 @@
 # Controlled staging acceptance
 
 This package prepares read-only checks for the managed Publer account pipeline.
-It does not deploy a service, create users, copy production data, enable publishing
-or run a real sign-in test. Production posting must remain untouched.
+The isolated database is now provisioned and audited, but no staging application
+has been deployed and real-session acceptance has not run. Production posting
+remains untouched.
 
 ## Current release boundary
 
 - Frontend baseline: `c0e182e`, account-scoped scheduling progress and review warnings.
 - Backend baseline before this staging package: `f3f64b0`, account-bound handoffs.
-- A dedicated Reels staging database and backend have not been approved or
-  provisioned in this task. Discovery found no development branch of the Reels
-  database. A different project named `tradvio-testing` must not be repurposed
-  without first verifying its ownership, purpose and isolation.
-- Render service discovery requires workspace confirmation. No environment
-  variables, services, databases or scheduled tasks were changed.
+- Approved and created: `tradvio-reels-staging`, project
+  `hjojeyewxtmunrwcjjzg`, region `us-west-1`, organization
+  `ppwjskrxhcqlkdfadotf` (Mehdi05-5656's Org).
+- Approved project quote: $10/month, excluding additional usage charges.
+  This replaces the hourly branch proposal; no branch was created. The project
+  can incur charges while awaiting the remaining configuration.
+- The branch approach was rejected after reviewing production migration history:
+  historical migrations embed live Publer destination IDs. None of those seed
+  migrations were replayed into staging. The unrelated `tradvio-testing`
+  project was not changed.
+- Render workspace `tea-daenhlht0dsc73avs4d0` is approved. Its production backend
+  and publishing services follow `master`; do not push staging changes there.
+- No Render service or environment variable was created or modified. No
+  repository push, production migration, live account change or schedule change ran.
 - This package starts a separate read-only entry point. The normal production
   entry point and existing three publishing destinations are unchanged.
 
@@ -88,20 +97,26 @@ and storage cannot be reused accidentally.
 
 ## Database and synthetic fixtures
 
-Use a reviewed schema-only baseline that includes Supabase Auth and the Reels
-foundation tables. Then apply the relevant reviewed migrations to staging only,
-including:
+This isolated managed-account slice uses native Supabase Auth/Storage and a
+minimal, empty legacy compatibility foundation, not the complete production
+schema. The following reviewed files were applied only to the new project:
 
 ```text
-20260923234000_account_data_server_only.sql
-20260924001500_managed_provisioning.sql
-20260924010000_managed_generation.sql
-20260924020000_managed_handoff.sql
+staging/foundation.sql
+migrations/2026_09_07_endpoint_user_auth.sql
+migrations/20260924001500_managed_provisioning.sql
+migrations/20260924010000_managed_generation.sql
+migrations/20260924020000_managed_handoff.sql
+staging/lockdown.sql
 ```
 
-The repository's migrations are incremental, not a complete empty-project bootstrap.
-Validate prerequisites before applying them. This preparation did not create an
-automatic schema/bootstrap or seed script against a connected project.
+The foundation rejects nonempty application schemas or existing users/media.
+The lockdown adds six constraints that prohibit account/control activation,
+approvals, worker leases and remote publication receipts. Legacy compatibility
+slots must be paused. Browser roles have no direct public-table access.
+An additional staging-only migration pins the profile-lock function search path.
+The production privacy migration is not applicable here: its legacy tables are
+intentionally absent. None of these omissions proves full legacy-app acceptance.
 
 Create four synthetic, separately authenticated staging identities:
 
@@ -116,9 +131,10 @@ The current operator is pinned to UUID
 `71c2308a-9e23-4458-b4f0-df7ae53c841e`, associated with the selected
 `support@tradvio.com` operator. An identical email alone does not confer authority.
 The independent staging Auth setup must preserve that reviewed operator identity
-without copying a production password/session. If the supported provisioning
-flow cannot do that, stop and prepare an explicitly reviewed staging identity
-strategy. Never weaken the production operator check to make a test pass.
+without copying a production password/session. The installed Supabase Auth SDK's
+`AdminUserAttributes` supports an explicit `id`; use its admin create-user flow
+with a new synthetic login and fresh secret after secure credentials are available.
+Never weaken the production operator check to make a test pass.
 
 Assign at least one synthetic account to each customer, using fake, non-routable
 provider IDs and no real Publer workspace. Fixtures should contain distinct
@@ -204,19 +220,44 @@ pass/fail results, actor labels, build SHAs and timestamps instead.
 
 ### Local verification record
 
-- Full backend suite: **124 passed, 0 failed, 0 skipped**.
+- Full backend suite: **125 passed, 0 failed, 0 skipped**.
 - TypeScript checking passed.
 - Production, staging, generation-worker and handoff-worker builds passed.
   Building a worker does not start it.
-- The 11 new staging tests cover startup configuration, outbound request
+- The 12 new staging tests cover startup configuration, outbound request
   restrictions, database gates and privileges, mutation rejection, signed
   synthetic sessions, tenant isolation and deliberately corrupted responses.
 - Local signed-session tests use test keys and an in-process authentication
   adapter. They do not prove Supabase JWKS authentication or real sign-in.
-- The SQL audit was executed only against an isolated in-memory test database.
-  No connected database migration, fixture insertion or permission change ran.
-- Real staging API acceptance, browser sign-in checks and the connected staging
-  database audit are **not run**. No service was deployed and no source was pushed.
+- The clean foundation and lockdown also passed an in-memory database test,
+  including rejection of enabled controls and unpaused legacy slots.
+- Connected staging audit: **8/8 safety gates true**, **21 public tables with
+  RLS**, **0 public tables accessible to browser roles**, **0 managed functions
+  executable by browser roles**, and **6 staging lock constraints present**.
+- Staging contains **0 Auth users, 0 managed accounts and 0 storage objects**.
+  Both managed media buckets are private. Fixtures have not been provisioned.
+- The security advisor has no remaining WARN/ERROR findings. It reports
+  20 informational entries for deliberately deny-all RLS tables without
+  permissive policies; this is intentional for backend-only tables
+  ([Supabase linter explanation](https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy)).
+- Real staging API acceptance and browser sign-in checks are **not run**.
+  No service was deployed and no source was pushed.
+
+### Remaining secure handoff
+
+The connector supplies publishable keys, not the new project's server-side
+secret. A local signed-in browser was not reachable during this task. A saved
+Supabase Management credential named `Supabase Management API (Tradvio staging
+recovery)` is available but requires session approval, which has been requested.
+The documented project-key endpoint can supply the staging-only server key
+([Supabase Management API](https://supabase.com/docs/reference/api/v1-get-project-api-keys)).
+Do not substitute a production key, place a key in this document or paste it in chat.
+
+Next, securely configure the staging-only server key in the new Render service,
+then create the four synthetic Auth users through the supported admin API,
+assign fixture roles and account rows, and run the API/browser checks. Keep
+publishing credentials absent and automatic production deployment untouched.
+Do not create a deliberately failing Render service merely to claim deployment.
 
 ### Release gate
 
