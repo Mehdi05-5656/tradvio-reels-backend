@@ -24,8 +24,28 @@ export function parsePublishResult(payload: any, accountId: string): PublishReso
 
 export type RetryDecision = { action: "retry" | "quarantine" | "hold"; delayMs: number };
 
+function isRejectedBusyUpload(error: string): boolean {
+  // Publer also uses 403 for its upload-concurrency limit. Exempt only the
+  // observed response from this exact pre-submission endpoint, not all 403s.
+  // The retry prefix is persisted by our existing failure/backoff path.
+  const match = /^(?:retry: )?publer POST \/media\/from-url -> 403: (\{[^\r\n]*\})$/.exec(error);
+  if (!match) return false;
+  try {
+    const body = JSON.parse(match[1]);
+    return Object.keys(body).length === 1 &&
+      Array.isArray(body.errors) && body.errors.length === 1 &&
+      body.errors[0] === "Please wait until your other download media from URL jobs have finished";
+  } catch {
+    return false;
+  }
+}
+
 export function retryDecision(attempt: number, error: string, submissionUncertain: boolean): RetryDecision {
   if (submissionUncertain) return { action: "hold", delayMs: 0 };
+  if (isRejectedBusyUpload(error)) {
+    return attempt >= 5 ? { action: "hold", delayMs: 0 } :
+      { action: "retry", delayMs: Math.min(60, 15 * Math.max(1, attempt)) * 60_000 };
+  }
   const s = error.toLowerCase();
   const authOrConfig = /\b(401|403)\b|api key|workspace|account.+not found|permission/.test(s);
   if (authOrConfig) return { action: "hold", delayMs: 0 };

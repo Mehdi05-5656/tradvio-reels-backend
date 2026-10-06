@@ -52,3 +52,30 @@ test("timeline prioritizes successful reservation over old failed attempts", () 
   assert.equal(chooseTimelineLog([{ status: "failed", attempted_at: "2026-09-23T12:00Z" }, { status: "published", attempted_at: "2026-09-23T11:00Z" }])?.status, "published");
   assert.equal(chooseTimelineLog([{ status: "failed", attempted_at: "2026-09-23T11:00Z", error: "old" }, { status: "failed", attempted_at: "2026-09-23T12:00Z", error: "new" }])?.error, "new");
 });
+
+const busyMessage = "Please wait until your other download media from URL jobs have finished";
+const busyResponse = `publer POST /media/from-url -> 403: ${JSON.stringify({ errors: [busyMessage] })}`;
+test("exact pre-submission upload-busy response retries with existing bounded backoff", () => {
+  assert.deepEqual(retryDecision(1, busyResponse, false), { action: "retry", delayMs: 15 * 60_000 });
+  assert.deepEqual(retryDecision(2, `retry: ${busyResponse}`, false), { action: "retry", delayMs: 30 * 60_000 });
+  assert.deepEqual(retryDecision(4, busyResponse, false), { action: "retry", delayMs: 60 * 60_000 });
+  assert.deepEqual(retryDecision(5, busyResponse, false), { action: "hold", delayMs: 0 });
+});
+test("upload-busy exception never releases an uncertain submission or historical hold", () => {
+  assert.equal(retryDecision(1, busyResponse, true).action, "hold");
+  assert.equal(retryDecision(1, `hold: ${busyResponse}`, false).action, "hold");
+});
+test("other 403s and malformed or mixed upload responses stay held", () => {
+  for (const error of [
+    'publer POST /media/from-url -> 403: {"errors":["Permission denied"]}',
+    `publer POST /media/from-url -> 403: ${JSON.stringify({ errors: [busyMessage, "Permission denied"] })}`,
+    `publer POST /media/from-url -> 403: ${JSON.stringify({ errors: busyMessage })}`,
+    `publer POST /media/from-url -> 403: ${JSON.stringify({ errors: [busyMessage], permission_error: true })}`,
+    'publer POST /media/from-url -> 403: {broken json',
+    busyResponse.replace("403", "401"),
+    busyResponse.replace("/media/from-url", "/posts/schedule/publish"),
+    busyResponse.replace("POST", "GET"),
+    `unexpected prefix ${busyResponse}`,
+    `publer POST /media/from-url -> 403: ${JSON.stringify({ errors: [busyMessage + "."] })}`,
+  ]) assert.equal(retryDecision(1, error, false).action, "hold", error);
+});
