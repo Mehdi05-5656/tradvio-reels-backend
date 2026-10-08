@@ -114,6 +114,22 @@ test("unassigned new user receives an empty inventory, not admin defaults", asyn
   const s = await setup(t); const r = await s.get("/api/v2/accounts", "new");
   assert.equal(r.status, 200); assert.deepEqual(r.body.accounts, []); assert.deepEqual(r.body.monitored, []);
 });
+test("managed accounts appear once, remain scoped, and expose no private inputs",async t=>{
+  const s=await setup(t);
+  s.db.tables.managed_accounts=[
+    {id:"m-a",customer_user_id:"a",workspace_id:"w",publer_account_id:"unmapped",platform:"tiktok",handle:"owned-managed",publishing_enabled:false,brand_inputs:"PRIVATE"},
+    {id:"m-b",customer_user_id:"b",workspace_id:"dedicated-b",publer_account_id:"other-b",platform:"instagram",handle:"other-managed",publishing_enabled:true},
+  ];
+  const admin=await s.get();
+  assert.equal(admin.body.accounts.filter((a:any)=>a.handle==="owned-managed").length,1);
+  assert.ok(!admin.body.accounts.some((a:any)=>a.id==="publer-unassigned:unmapped"));
+  assert.equal(admin.body.accounts.find((a:any)=>a.id==="managed:m-b").connection,"unverified");
+  const own=await s.get("/api/v2/accounts?owner_user_id=b","a");
+  assert.ok(own.body.accounts.some((a:any)=>a.id==="managed:m-a"));
+  assert.ok(!JSON.stringify(own.body).includes("other-managed"));
+  assert.ok(!JSON.stringify(admin.body).includes("PRIVATE"));
+  assert.ok(!own.body.accounts.find((a:any)=>a.id==="managed:m-a").owner);
+});
 test("anonymous and missing-profile requests fail before database/provider reads", async t => {
   const s = await setup(t);
   assert.equal((await s.get("/api/v2/accounts", "")).status, 401);

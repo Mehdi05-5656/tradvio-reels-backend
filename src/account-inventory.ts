@@ -7,6 +7,7 @@ import { loadConfig, ptNow } from "./publer-schedule.js";
 // Explicit column allowlists: do not send tokens, webhook payloads or raw provider responses.
 const SLOT_COLS = "phone_slot,publer_account_id,provider,handle,daily_target,paused,owner_user_id";
 const CV_COLS = "cv_account_id,platform,platform_handle,is_active,external_user_id,bridge_source,local_phone_slot,connected_at,last_synced_at";
+const MANAGED_COLS = "id,customer_user_id,workspace_id,publer_account_id,platform,handle,state,blocked_reason,publishing_enabled";
 async function allRows(makeQuery: () => any) {
   const rows: any[] = [];
   for (let offset = 0; ; offset += 500) {
@@ -39,10 +40,15 @@ export function registerAccountInventory(app: Express, sbFn: () => SupabaseClien
         if (!admin) q = q.eq("external_user_id", req.profile!.external_user_id);
         return q;
       };
-      const [slots, cv, owners, cfg] = await Promise.all([
+      const scopedManaged = () => {
+        let q = sb.from("managed_accounts").select(MANAGED_COLS).order("id");
+        if (!admin) q = q.eq("customer_user_id",(req.auth as {user_id:string}).user_id);
+        return q;
+      };
+      const [slots, cv, owners, cfg, managed] = await Promise.all([
         allRows(scopedSlots), allRows(scopedCv),
-        admin ? allRows(() => sb.from("profiles").select("user_id,external_user_id,display_name").order("user_id")) : Promise.resolve([]),
-        loadConfig(sb),
+        admin ? allRows(() => sb.from("profiles").select("user_id,external_user_id,display_name,email").order("user_id")) : Promise.resolve([]),
+        loadConfig(sb), allRows(scopedManaged),
       ]);
       let providerAccounts: any[] | null = null;
       let providerCheck = "unavailable";
@@ -55,7 +61,7 @@ export function registerAccountInventory(app: Express, sbFn: () => SupabaseClien
       const ownerFor = (id: string | null, external = false) => {
         if (!admin) return undefined;
         const p = owners.find(p => (external ? p.external_user_id : p.user_id) === id);
-        return p ? { user_id: p.user_id, label: p.display_name || p.external_user_id } : { user_id: null, label: id ? "Unmapped profile" : "Unassigned" };
+        return p ? { user_id: p.user_id, label: p.email || p.display_name || p.external_user_id } : { user_id: null, label: id ? "Unmapped profile" : "Unassigned" };
       };
       const today = ptNow().ymd;
       const accounts: any[] = [];
@@ -84,9 +90,21 @@ export function registerAccountInventory(app: Express, sbFn: () => SupabaseClien
           issue: held ? "A submission needs review; do not blindly resend." : latest.data?.status === "failed" ? "Latest publishing attempt failed." : providerAccounts && !match ? "Configured account is missing from the Publer account list." : null,
         });
       }
+      // Persisted managed ownership stays visible even when provider reads fail.
+      for (const a of managed) {
+        if (slots.some(s=>s.publer_account_id===a.publer_account_id)) continue;
+        const observed = a.workspace_id===cfg.workspaceId ? providerAccounts : null;
+        accounts.push({
+          id:`managed:${a.id}`,managed_account_id:a.id,source:"Publer",platform:a.platform,handle:a.handle,
+          owner:ownerFor(a.customer_user_id),phone_slot:null,
+          connection:observed===null?"unverified":observed.some(p=>p.id===a.publer_account_id)?"listed":"missing",
+          publishing:a.publishing_enabled?"managed_enabled":"managed_setup",
+          issue:null,
+        });
+      }
       // Accounts discovered at the provider but not assigned to a user are admin-only.
       if (admin && providerAccounts) for (const a of providerAccounts) {
-        if (slots.some(s => s.publer_account_id === a.id)) continue;
+        if (slots.some(s => s.publer_account_id === a.id)||managed.some(m=>m.publer_account_id===a.id)) continue;
         accounts.push({ id: `publer-unassigned:${a.id}`, source: "Publer", platform: a.provider || a.type || "unknown",
           handle: a.username || a.name || a.id, owner: ownerFor(null), connection: "listed",
           publishing: "not_configured", issue: "No publishing schedule or owner mapping.", phone_slot: null });

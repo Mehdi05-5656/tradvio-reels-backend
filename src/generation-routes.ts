@@ -61,7 +61,9 @@ export function registerGenerationRoutes(app:Express,sbFn:()=>SupabaseClient,ena
       const j=await sb.from("managed_generation_jobs").select("id,ordinal,state,error_code")
         .eq("account_id",a.data.id).order("ordinal").limit(24);
       if(j.error)throw j.error;
-      res.json({account_id:a.data.id,jobs:j.data??[],publishing_enabled:Boolean(a.data.publishing_enabled),
+      const batch=await sb.from("managed_batches").select("target_count").eq("account_id",a.data.id).maybeSingle();
+      if(batch.error)throw batch.error;
+      res.json({account_id:a.data.id,jobs:j.data??[],target_count:batch.data?.target_count??null,publishing_enabled:Boolean(a.data.publishing_enabled),
         ready_meaning:"quality_passed_is_not_scheduling_proof",
         scheduling_status_url:`/api/managed/handoffs/${a.data.id}`});
     }catch {res.status(503).json({error:"generation_unavailable"});}

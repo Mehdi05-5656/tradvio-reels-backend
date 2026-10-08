@@ -92,7 +92,12 @@ export function registerManagedRoutes(app: Express, sbFn: () => SupabaseClient,
       if(after) q=q.gt("user_id",after);
       const r=await q; if(r.error) throw r.error;
       const rows=r.data??[];
-      res.json({customers:rows,next_cursor:rows.length===50?rows[49].user_id:null});
+      // Operator ownership is a narrow SQL eligibility exception, not general
+      // admin eligibility. Include self once without changing customer cursors.
+      const own = !after ? await sbFn().from("profiles").select("user_id,display_name,email")
+        .eq("user_id",(req.auth as {user_id:string}).user_id).eq("role","admin") : {data:[],error:null};
+      if(own.error) throw own.error;
+      res.json({customers:[...(own.data??[]),...rows],next_cursor:rows.length===50?rows[49].user_id:null});
     } catch(e) { fail(res,e); }
   });
   app.post("/api/admin/managed/workspaces",async(req,res)=>{
