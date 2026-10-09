@@ -130,6 +130,25 @@ test("managed accounts appear once, remain scoped, and expose no private inputs"
   assert.ok(!JSON.stringify(admin.body).includes("PRIVATE"));
   assert.ok(!own.body.accounts.find((a:any)=>a.id==="managed:m-a").owner);
 });
+test("ownership-only accounts are visible without being scheduled or duplicated and survive a failed provider check",async t=>{
+  for(const providerFails of [false,true]) {
+    const s=await setup(t,{providerFails});
+    s.db.tables.publer_account_ownership=[
+      {publer_account_id:"p-a",workspace_id:"w",owner_user_id:"a",platform:"instagram",label:"alpha",label_is_username:true},
+      {publer_account_id:"unmapped",workspace_id:"w",owner_user_id:"a",platform:"tiktok",label:"Display Name",label_is_username:false},
+      {publer_account_id:"private-b",workspace_id:"w",owner_user_id:"b",platform:"instagram",label:"private_b",label_is_username:true},
+    ];
+    const admin=await s.get();
+    assert.equal(admin.body.accounts.filter((a:any)=>a.handle==="alpha"&&a.source==="Publer").length,1);
+    assert.ok(!admin.body.accounts.some((a:any)=>a.id==="publer-unassigned:unmapped"));
+    const own=await s.get("/api/v2/accounts","a");
+    const mapped=own.body.accounts.find((a:any)=>a.id==="publer-owned:unmapped");
+    assert.equal(mapped.publishing,"awaiting_setup");assert.equal(mapped.label_is_username,false);
+    assert.equal(mapped.connection,providerFails?"unverified":"listed");
+    assert.ok(!JSON.stringify(own.body).includes("private_b"));
+    assert.equal(mapped.owner,undefined);
+  }
+});
 test("anonymous and missing-profile requests fail before database/provider reads", async t => {
   const s = await setup(t);
   assert.equal((await s.get("/api/v2/accounts", "")).status, 401);

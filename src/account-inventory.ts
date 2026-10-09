@@ -8,6 +8,7 @@ import { loadConfig, ptNow } from "./publer-schedule.js";
 const SLOT_COLS = "phone_slot,publer_account_id,provider,handle,daily_target,paused,owner_user_id";
 const CV_COLS = "cv_account_id,platform,platform_handle,is_active,external_user_id,bridge_source,local_phone_slot,connected_at,last_synced_at";
 const MANAGED_COLS = "id,customer_user_id,workspace_id,publer_account_id,platform,handle,state,blocked_reason,publishing_enabled";
+const OWNERSHIP_COLS = "publer_account_id,workspace_id,owner_user_id,platform,label,label_is_username";
 async function allRows(makeQuery: () => any) {
   const rows: any[] = [];
   for (let offset = 0; ; offset += 500) {
@@ -45,10 +46,15 @@ export function registerAccountInventory(app: Express, sbFn: () => SupabaseClien
         if (!admin) q = q.eq("customer_user_id",(req.auth as {user_id:string}).user_id);
         return q;
       };
-      const [slots, cv, owners, cfg, managed] = await Promise.all([
+      const scopedOwnership=()=>{
+        let q=sb.from("publer_account_ownership").select(OWNERSHIP_COLS).order("publer_account_id");
+        if(!admin)q=q.eq("owner_user_id",(req.auth as {user_id:string}).user_id);
+        return q;
+      };
+      const [slots, cv, owners, cfg, managed, ownership] = await Promise.all([
         allRows(scopedSlots), allRows(scopedCv),
         admin ? allRows(() => sb.from("profiles").select("user_id,external_user_id,display_name,email").order("user_id")) : Promise.resolve([]),
-        loadConfig(sb), allRows(scopedManaged),
+        loadConfig(sb), allRows(scopedManaged), allRows(scopedOwnership),
       ]);
       let providerAccounts: any[] | null = null;
       let providerCheck = "unavailable";
@@ -102,9 +108,17 @@ export function registerAccountInventory(app: Express, sbFn: () => SupabaseClien
           issue:null,
         });
       }
+      for(const a of ownership) {
+        if(slots.some(s=>s.publer_account_id===a.publer_account_id)||managed.some(m=>m.publer_account_id===a.publer_account_id))continue;
+        const observed=a.workspace_id===cfg.workspaceId?providerAccounts:null;
+        accounts.push({id:`publer-owned:${a.publer_account_id}`,source:"Publer",platform:a.platform,
+          handle:a.label,label_is_username:a.label_is_username,owner:ownerFor(a.owner_user_id),phone_slot:null,
+          connection:observed===null?"unverified":observed.some(p=>p.id===a.publer_account_id)?"listed":"missing",
+          publishing:"awaiting_setup",issue:null});
+      }
       // Accounts discovered at the provider but not assigned to a user are admin-only.
       if (admin && providerAccounts) for (const a of providerAccounts) {
-        if (slots.some(s => s.publer_account_id === a.id)||managed.some(m=>m.publer_account_id===a.id)) continue;
+        if (slots.some(s => s.publer_account_id === a.id)||managed.some(m=>m.publer_account_id===a.id)||ownership.some(o=>o.publer_account_id===a.id)) continue;
         accounts.push({ id: `publer-unassigned:${a.id}`, source: "Publer", platform: a.provider || a.type || "unknown",
           handle: a.username || a.name || a.id, owner: ownerFor(null), connection: "listed",
           publishing: "not_configured", issue: "No publishing schedule or owner mapping.", phone_slot: null });
