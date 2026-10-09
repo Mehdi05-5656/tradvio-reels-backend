@@ -8,6 +8,7 @@ import { registerCreatorVaultRoutes } from "./creatorvault.js";
 import { registerReelsScheduleRoutes } from "./reels-schedule.js";
 import { registerOnboardingRoutes } from "./onboarding-routes.js";
 import { registerAccountInventory } from "./account-inventory.js";
+import { registerAccountHistory } from "./account-history.js";
 import { registerManagedRoutes } from "./managed-routes.js";
 import { registerGenerationRoutes } from "./generation-routes.js";
 import { registerHandoffRoutes } from "./handoff-routes.js";
@@ -65,6 +66,7 @@ async function main() {
   };
   registerV2Routes(app, getSb);
   registerAccountInventory(app, getSb);
+  registerAccountHistory(app, getSb);
   registerManagedRoutes(app, getSb);
   registerGenerationRoutes(app, getSb);
   registerHandoffRoutes(app, getSb);

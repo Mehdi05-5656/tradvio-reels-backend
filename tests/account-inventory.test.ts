@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
 import { registerAccountInventory } from "../src/account-inventory.js";
+import { registerAccountHistory } from "../src/account-history.js";
 import { accountAccess } from "../src/account-access.js";
 import { registerCreatorVaultRoutes } from "../src/creatorvault.js";
 
@@ -36,6 +37,7 @@ function database() {
     const q: any = {
       select(c: string, o = {}) { cols = c; opts = o; return q; },
       eq(k: string, v: any) { filters.push((r: any) => r[k] === v); return q; },
+      in(k: string, v: any[]) { filters.push((r: any) => v.includes(r[k])); return q; },
       order() { return q; },
       range(a: number, b: number) { start = a; end = b; return q; },
       limit(n: number) { end = n - 1; return q; },
@@ -79,6 +81,7 @@ async function setup(t: any, opts: { providerFails?: boolean } = {}) {
     ];
   });
   registerCreatorVaultRoutes(app, () => db);
+  registerAccountHistory(app, () => db);
   app.all("*", (_req, res) => res.json({ passed: true }));
   const server = createServer(app);
   await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
@@ -90,6 +93,70 @@ async function setup(t: any, opts: { providerFails?: boolean } = {}) {
   }};
 }
 
+test("history denies anonymous and other-owner reads before accessing event tables",async t=>{
+  const s=await setup(t);
+  assert.equal((await s.get("/api/v2/accounts/publer:slot-a/history","")).status,401);
+  s.db.calls.length=0;
+  assert.equal((await s.get("/api/v2/accounts/publer:slot-b/history?owner_user_id=a","a")).status,404);
+  assert.ok(!s.db.calls.includes("publer_publish_log"));
+  assert.equal((await s.get("/api/v2/accounts/publer:slot-a/history","no-profile")).status,403);
+});
+test("history exposes safe owned publishing evidence and never provider payloads",async t=>{
+  const s=await setup(t);
+  s.db.tables.publer_publish_log[0].error="SECRET https://private.invalid/signed";
+  s.db.tables.publer_publish_log[0].raw_publish_payload={token:"SECRET"};
+  s.db.tables.publer_analytics=[{phone_slot:"slot-a",captured_at:"2026-10-08T12:00:00Z",raw:"SECRET"}];
+  const r=await s.get("/api/v2/accounts/publer:slot-a/history","a");
+  assert.equal(r.status,200);assert.equal(r.cache,"private, no-store");
+  assert.ok(r.body.events.some((e:any)=>e.title==="Published (provider reported)"));
+  assert.ok(r.body.events.some((e:any)=>e.stage==="analytics"));
+  assert.ok(!JSON.stringify(r.body).includes("SECRET"));
+  assert.ok(r.body.learning_note.includes("No verified"));
+  assert.equal((await s.get("/api/v2/accounts/publer:slot-b/history","admin")).status,200);
+});
+test("ownership-only history shows assignment without invented generation or posting",async t=>{
+  const s=await setup(t);
+  s.db.tables.publer_account_ownership=[{publer_account_id:"p-a",owner_user_id:"a",assigned_at:"2026-10-08T12:00:00Z"}];
+  const r=await s.get("/api/v2/accounts/publer-owned:p-a/history","a");
+  assert.equal(r.status,200);assert.equal(r.body.events.length,1);
+  assert.equal(r.body.current[0].title,"Awaiting content setup");
+  assert.equal((await s.get("/api/v2/accounts/publer-owned:p-a/history","b")).status,404);
+});
+test("managed history scopes job claims and handoff events through owned account IDs",async t=>{
+  const s=await setup(t);
+  s.db.tables.managed_accounts=[{id:"m-a",customer_user_id:"a",publishing_enabled:false}];
+  s.db.tables.managed_generation_jobs=[{id:"j-a",account_id:"m-a",state:"quality_passed",ordinal:1,created_at:"2026-10-08T12:00:00Z"},
+    {id:"j-b",account_id:"m-b",state:"running",ordinal:2}];
+  s.db.tables.managed_generation_attempts=[{job_id:"j-a",claimed_at:"2026-10-08T12:01:00Z",token:"SECRET"},
+    {job_id:"j-b",claimed_at:"2026-10-08T12:02:00Z"}];
+  s.db.tables.managed_handoffs=[{id:"h-a",account_id:"m-a",state:"held",scheduled_at:"2026-10-09T12:00:00Z",updated_at:"2026-10-08T12:02:00Z"}];
+  s.db.tables.managed_handoff_events=[{id:"e-a",handoff_id:"h-a",event:"expired_write_held",created_at:"2026-10-08T12:03:00Z",detail:"SECRET"},
+    {id:"e-b",handoff_id:"h-b",event:"published",created_at:"2026-10-08T12:03:00Z"}];
+  const r=await s.get("/api/v2/accounts/managed:m-a/history","a");
+  assert.equal(r.status,200);
+  assert.ok(r.body.current.some((x:any)=>x.title==="Video 1: Quality checks passed"));
+  assert.ok(r.body.events.some((x:any)=>x.attention));
+  for(const word of ["SECRET","j-b","e-b"])assert.ok(!JSON.stringify(r.body).includes(word));
+  assert.equal((await s.get("/api/v2/accounts/managed:m-a/history","b")).status,404);
+});
+test("history is bounded, preserves older hold warning and fails closed on DB errors",async t=>{
+  const s=await setup(t);
+  s.db.tables.publer_publish_log=Array.from({length:70},(_,i)=>({id:i,phone_slot:"slot-a",status:i===69?"pending":"published",
+    attempted_at:"2026-01-01T12:00:00Z",updated_at:"2026-01-01T12:01:00Z",error:null}));
+  const r=await s.get("/api/v2/accounts/publer:slot-a/history","a");
+  assert.equal(r.body.limited,true);assert.equal(r.body.events.length,101);
+  assert.ok(r.body.current.some((x:any)=>x.title.includes("Unresolved")));
+  s.db.fail="publer_publish_log";
+  assert.deepEqual((await s.get("/api/v2/accounts/publer:slot-a/history","a")).body,{error:"account_history_unavailable"});
+  assert.equal((await s.get("/api/v2/accounts/publer-unassigned:x/history","admin")).status,404);
+});
+test("CreatorVault history is external-profile scoped",async t=>{
+  const s=await setup(t);
+  assert.equal((await s.get("/api/v2/accounts/creatorvault:cv-a/history","b")).status,404);
+  const r=await s.get("/api/v2/accounts/creatorvault:cv-a/history","a");
+  assert.equal(r.status,200);assert.ok(r.body.current[0].title.includes("on hold"));
+  assert.ok(!JSON.stringify(r.body).includes("NEVER_SEND"));
+});
 test("admin inventory includes both profiles, every provider and unmapped accounts", async t => {
   const s = await setup(t); const r = await s.get();
   assert.equal(r.status, 200); assert.equal(r.body.scope, "all_profiles");
