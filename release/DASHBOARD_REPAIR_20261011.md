@@ -60,7 +60,7 @@ A follow-up read found the remaining attempt explicitly held after HTTP 429 whil
 
 These are provider-reported receipts, not independently opened social permalinks. Prior failed attempts include Publer job-status HTTP 429 rate limits. No retry, resubmission, pause change or publisher repair was performed during this dashboard work. The above is a timestamped observation, not a guarantee for subsequent windows.
 
-## Exact proposed rollout
+## Approved rollout
 
 1. Apply `20261011193000_dashboard_report.sql` to Supabase project `gzvxqzguthrpvjtflxcx`. This adds a reporting index and a service-role-only read function. It changes schema, not ownership or publishing records. The index can briefly lock analytics writes; lock acquisition is bounded to five seconds.
 2. Push the scoped backend commit to the existing production branch. Render auto-deployment may rebuild/restart the web service and services tracking that branch, although this package does not change publisher or analytics worker logic.
@@ -69,9 +69,26 @@ These are provider-reported receipts, not independently opened social permalinks
 
 Customer account privacy is retained. Existing generation, ownership, schedules, publication settings and paid jobs are unchanged. No pending submission will be resent.
 
+## Production deployment result
+
+Approved by the user at 12:25 PM Pacific on October 11. Deployed and checked by 12:28 PM Pacific:
+
+- Supabase migration `dashboard_report_20261011`: applied successfully. Live function returned 6,752 rows for the selected seven-day range. Anonymous and authenticated customer roles cannot execute it directly; the service role can.
+- Backend master: `1862c4cc0cc56f131008ac9cb4f91fc32bc9715f`.
+- Render web deployment `dep-db5u5p0u01pc73f271a0`: live.
+- Render publisher deployment `dep-db5u5p8u01pc73f272jg`: live.
+- Render analytics deployment `dep-db5u5p8u01pc73f272lg`: live.
+- Vercel deployment `dpl_5xGMXL9kEGXWo1hHCWHYfpYgHVdy`: production Ready; dashboard candidate `52776f7`.
+- Production dashboard: https://tradvio-reels.vercel.app
+- Production deployment: https://tradvio-reels-7qdw11kl1-tradvio.vercel.app
+- Public-browser check loaded the sign-in screen without JavaScript errors. The served JavaScript contains the new report endpoint, all-video analytics action, Daily activity and attempt history.
+- Anonymous report request returned HTTP 401 as expected.
+- Final database check at 12:28:28 PM Pacific: 18 owned accounts, zero paused, 18/18 published in the 8 AM window, 18/18 at 10 AM, 17/18 at noon with one pending hold. No resubmission was performed.
+
 ## Remaining limitations
 
-- Production has not received these changes yet. The preview uses simulated data and does not post.
+- Production has received the approved changes. Signed-in production dashboard acceptance remains unverified because the available browser has no authorized user session. Local authenticated-route tests and production database checks are not a substitute for that final session check.
+- The attached preview continues to use simulated data and does not post.
 - The reporting repair does not cure Publer rate limits, create missing analytics, or establish successful ML promotion or an A/B winner.
 - Previously saved snapshots limit how precisely historical view gains can be reconstructed. Reports label observed changes and missing baselines rather than inventing exact daily views.
 - Other legacy API routes remain for compatibility. The three repaired pages use the new shared endpoint.
