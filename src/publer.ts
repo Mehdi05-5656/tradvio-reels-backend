@@ -2,10 +2,11 @@
 // Docs: https://publer.com/docs/api-reference/introduction.md
 //
 // Auth: header "Authorization: Bearer-API <API_KEY>" + "Publer-Workspace-Id: <WS>"
-// Rate limit: 100 requests / 2 minutes / user. We stay well under.
+// Rate limit: 100 requests / 2 minutes / user, shared by every process. See publer-rate.ts.
 
 const BASE = "https://app.publer.com/api/v1";
 import {publishedIdentity} from "./publer-identity.js";
+import {takeSlot,blockUntil,resetFromHeaders,currentLane,RateBudgetDeferred,pause} from "./publer-rate.js";
 
 function apiKey(): string {
   const k = process.env.PUBLER_API_KEY;
@@ -25,21 +26,40 @@ async function pubFetch(
   };
   if (workspaceId) h["Publer-Workspace-Id"] = workspaceId;
   const url = path.startsWith("http") ? path : `${BASE}${path}`;
-  const resp = await fetch(url, { ...rest, headers: h, signal: rest.signal ?? AbortSignal.timeout(30_000) });
-  const text = await resp.text();
-  let body: any = null;
-  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-  if (!resp.ok) {
-    const err = new Error(
-      `publer ${rest.method || "GET"} ${path} -> ${resp.status}: ${
-        typeof body === "string" ? body.slice(0, 400) : JSON.stringify(body).slice(0, 400)
-      }`,
-    );
-    (err as any).status = resp.status;
-    (err as any).body = body;
-    throw err;
+  const method = String(rest.method || "GET").toUpperCase();
+  // Only reads are retried after a 429. Uploads and publishes are never resent automatically.
+  const retryable = method === "GET";
+  for (let attempt = 0; ; attempt++) {
+    await takeSlot();
+    const resp = await fetch(url, { ...rest, headers: h, signal: rest.signal ?? AbortSignal.timeout(30_000) });
+    const text = await resp.text();
+    let body: any = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+    const hdr = { get: (n: string): string | null => resp.headers?.get?.(n) ?? null };
+    const remaining = hdr.get("x-ratelimit-remaining");
+    if (resp.status === 429) {
+      const until = resetFromHeaders(hdr, 60_000);
+      await blockUntil(until, `429 ${method} ${path.split("?")[0]}`);
+      if (currentLane() === "analytics") throw new RateBudgetDeferred(until - Date.now());
+      if (retryable && attempt < 2) {
+        await pause(Math.max(250, until - Date.now()));
+        continue;
+      }
+    } else if (remaining !== null && remaining !== "" && Number(remaining) <= 5) {
+      await blockUntil(resetFromHeaders(hdr, 30_000), "near_limit");
+    }
+    if (!resp.ok) {
+      const err = new Error(
+        `publer ${method} ${path} -> ${resp.status}: ${
+          typeof body === "string" ? body.slice(0, 400) : JSON.stringify(body).slice(0, 400)
+        }`,
+      );
+      (err as any).status = resp.status;
+      (err as any).body = body;
+      throw err;
+    }
+    return body;
   }
-  return body;
 }
 
 export interface PublerAccount {
@@ -101,18 +121,21 @@ export async function jobStatus(jobId: string, workspaceId?: string): Promise<Jo
   return await pubFetch(`/job_status/${jobId}`, { workspaceId });
 }
 
+/** Status checks back off: 3s, 4s, 6s, 10s, then every 15s. */
+export const JOB_POLL_SCHEDULE_MS = [3000, 4000, 6000, 10000, 15000];
+
 /** Poll a job until complete or timeout. Returns final payload. */
 export async function waitForJob(
   jobId: string,
-  { timeoutMs = 120_000, intervalMs = 2000, workspaceId }: { timeoutMs?: number; intervalMs?: number; workspaceId?: string } = {},
+  { timeoutMs = 120_000, workspaceId, schedule = JOB_POLL_SCHEDULE_MS }: { timeoutMs?: number; workspaceId?: string; schedule?: number[] } = {},
 ): Promise<any> {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  for (let i = 0; Date.now() - start < timeoutMs; i++) {
+    await pause(schedule[Math.min(i, schedule.length - 1)]);
     const j = await jobStatus(jobId, workspaceId);
     const s = String(j.status || "").toLowerCase();
     if (s === "complete" || s === "completed") return j.payload;
     if (s === "failed") throw new Error(`publer job ${jobId} failed: ${JSON.stringify(j.payload)}`);
-    await new Promise((r) => setTimeout(r, intervalMs));
   }
   throw new Error(`publer job ${jobId} timed out after ${timeoutMs}ms`);
 }

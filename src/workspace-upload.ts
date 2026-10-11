@@ -32,7 +32,7 @@ export async function coordinatedUpload(sb:any,workspace:string,url:string,name:
   }
   await rpc("publer_upload_record_job",{p_token:token,p_job:job});
   try{
-    const payload=await waitForJob(job,{timeoutMs:180000,intervalMs:3000,workspaceId:workspace});
+    const payload=await waitForJob(job,{timeoutMs:180000,workspaceId:workspace});
     if(await rpc("publer_upload_finish",{p_job:job,p_terminal:"complete"})!==true)
       throw new Error("upload_completion_unconfirmed");
     return payload;

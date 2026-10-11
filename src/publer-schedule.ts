@@ -8,6 +8,7 @@
 //   then hourly through 30 days, then freeze.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { RateBudgetDeferred } from "./publer-rate.js";
 import {
   listAccounts,
   listPosts,
@@ -442,7 +443,6 @@ export async function publishOne(
       const { jobId: uploadJob } = await uploadFromUrl(cfg.workspaceId, url, name);
       return await waitForJob(uploadJob, {
         timeoutMs: 180_000,
-        intervalMs: 3000,
         workspaceId: cfg.workspaceId,
       });
     });
@@ -495,8 +495,7 @@ export async function publishOne(
       raw_publish_payload: { _publisher: { phase: "submitted" } },
     }).eq("id", log.id));
     const publishPayload = await waitForJob(publishJob, {
-      timeoutMs: 120_000,
-      intervalMs: 2500,
+      timeoutMs: 180_000,
       workspaceId: cfg.workspaceId,
     });
 
@@ -633,40 +632,66 @@ export async function publisherTick(sb: SupabaseClient): Promise<{
 
 // --- Analytics poller --------------------------------------------------------
 
+/** Minutes after midnight (PT) that fall inside a posting window, including a short lead-in. */
+export function inPostingWindow(slotTimes: string[], minutesPT: number, before = 5, after = 25): boolean {
+  return slotTimes.some((t) => {
+    const [h, m] = t.split(":").map((n) => parseInt(n, 10));
+    const start = h * 60 + m - before, end = h * 60 + m + after;
+    return minutesPT >= start && minutesPT < end;
+  });
+}
+
+/** Publer refreshes post stats about once a day, so one pull per account every few hours is enough. */
+export const ANALYTICS_ACCOUNT_INTERVAL_MS = 3 * 3600_000;
+
 /**
- * Snapshot analytics for all publer_post_ids whose most recent snapshot age
- * satisfies the polling cadence:
- *   < 7 days since published:  every 30 min
- *   7-30 days:                 every hour
- *   > 30 days:                 frozen (no more snapshots)
+ * Snapshot analytics for recent posts.
+ *   - Skips runs inside posting windows so publishing keeps the Publer budget.
+ *   - Calls Publer for each account at most every 3 hours.
+ *   - Stops (and resumes next run) as soon as the shared budget is tight; never waits.
+ *   < 7 days since published: at most every 30 min; 7-30 days: hourly; > 30 days: frozen.
  */
-export async function analyticsTick(sb: SupabaseClient): Promise<{
+export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): Promise<{
   snapshots: number;
+  skipped?: "posting_window";
+  deferred?: boolean;
+  accounts_pulled?: number;
 }> {
   const cfg = await loadConfig(sb);
+  const now = at;
+  if (inPostingWindow(cfg.slotTimes, ptNow(now).minutes)) return { snapshots: 0, skipped: "posting_window" };
   const slots = await loadSlots(sb);
-  const now = new Date();
-
-  // Build the map account_id -> slot for reverse-lookup
-  const accountToSlot = new Map<string, SlotConfig>();
-  for (const s of slots) accountToSlot.set(s.publer_account_id, s);
 
   // Recent post window: 30 days back from now, formatted YYYY-MM-DD in PT
   const to = ptNow(now).ymd;
   const fromDate = new Date(now.getTime() - 30 * 86400_000);
   const from = ptNow(fromDate).ymd;
 
+  const { data: pulls, error: pullErr } = await sb.from("publer_analytics_pulls").select("phone_slot,pulled_at");
+  if (pullErr) throw new Error("analytics_pull_state_unavailable");
+  const lastPull = new Map<string, number>((pulls ?? []).map((p: any) => [p.phone_slot, Date.parse(p.pulled_at)]));
+  // Least recently pulled accounts first, so a deferred run never starves the same accounts.
+  const due = slots
+    .filter((s) => !(now.getTime() - (lastPull.get(s.phone_slot) ?? 0) < ANALYTICS_ACCOUNT_INTERVAL_MS))
+    .sort((a, b) => (lastPull.get(a.phone_slot) ?? 0) - (lastPull.get(b.phone_slot) ?? 0));
+  let accountsPulled = 0;
+
   let snapshots = 0;
 
-  for (const s of slots) {
-    // Skip if account has no posts yet (we still call and it comes back empty)
+  for (const s of due) {
     let page = 0;
     while (true) {
-      const resp = await postInsights(cfg.workspaceId, s.publer_account_id, from, to, {
+      let resp: any;
+      try {
+        resp = await postInsights(cfg.workspaceId, s.publer_account_id, from, to, {
         page,
         sortBy: "scheduled_at",
         sortType: "DESC",
       });
+      } catch (e) {
+        if (e instanceof RateBudgetDeferred) return { snapshots, deferred: true, accounts_pulled: accountsPulled };
+        throw e;
+      }
       const posts = resp?.posts ?? [];
       if (!posts.length) break;
 
@@ -738,8 +763,12 @@ export async function analyticsTick(sb: SupabaseClient): Promise<{
       page++;
       if (page > 20) break; // safety
     }
+    const mark = await sb.from("publer_analytics_pulls")
+      .upsert({ phone_slot: s.phone_slot, pulled_at: now.toISOString() }, { onConflict: "phone_slot" });
+    if (mark.error) throw new Error("analytics_pull_state_write_failed");
+    accountsPulled++;
   }
-  return { snapshots };
+  return { snapshots, accounts_pulled: accountsPulled };
 }
 
 // --- Discovery convenience ---------------------------------------------------

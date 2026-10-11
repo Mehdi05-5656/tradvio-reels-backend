@@ -1,6 +1,7 @@
 // One-shot publisher tick, invoked by Render Cron every 5 minutes.
 import { createClient } from "@supabase/supabase-js";
 import { publisherTick } from "./publer-schedule.js";
+import { configurePublerRate } from "./publer-rate.js";
 
 async function main() {
   const sb = createClient(
@@ -11,6 +12,7 @@ async function main() {
       realtime: { params: { eventsPerSecond: 0 } },
     },
   );
+  configurePublerRate(sb, "publish");
   const result = await publisherTick(sb);
   console.log("[cron:publisher] ok", JSON.stringify(result));
 }

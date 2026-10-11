@@ -1,6 +1,7 @@
 // One-shot analytics tick, invoked by Render Cron every 15 minutes.
 import { createClient } from "@supabase/supabase-js";
 import { analyticsTick } from "./publer-schedule.js";
+import { configurePublerRate } from "./publer-rate.js";
 
 async function main() {
   const sb = createClient(
@@ -11,6 +12,7 @@ async function main() {
       realtime: { params: { eventsPerSecond: 0 } },
     },
   );
+  configurePublerRate(sb, "analytics");
   const result = await analyticsTick(sb);
   console.log("[cron:analytics] ok", JSON.stringify(result));
 }

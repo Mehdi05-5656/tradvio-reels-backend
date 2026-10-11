@@ -16,6 +16,7 @@ import { registerHandoffRoutes } from "./handoff-routes.js";
 import { startManagedProvisioningWorker } from "./managed-provisioning.js";
 import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { configurePublerRate } from "./publer-rate.js";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
 
@@ -66,6 +67,8 @@ async function main() {
   };
   // Capability handler owns its auth; disabled unless explicitly rolled out.
   // All existing /api routes retain their existing default-deny middleware.
+  // Every Publer call from this process shares the database-backed request budget.
+  configurePublerRate(getSb, "publish");
   registerLibraryImport(app,getSb);
   await registerRoutes(http, app);
   registerV2Routes(app, getSb);
