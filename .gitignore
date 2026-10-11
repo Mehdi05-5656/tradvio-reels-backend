@@ -5,3 +5,4 @@ dist
 .test-build
 rehearsal/
 scripts/__pycache__/
+.venv-learning/

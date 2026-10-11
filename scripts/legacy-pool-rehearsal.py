@@ -143,9 +143,10 @@ def silence_safe_trim(samples, proposed, rate=16000):
     return round(min(proposed, max(0, quiet/rate - .03)), 6)
 
 
-def render(source, account_id, outdir, reviewed_masks=False):
+def render(source, account_id, outdir, reviewed_masks=False, *, allowed_root=None, emit=True):
     source = source.resolve()
-    if not source.is_relative_to(RAW_ROOT):
+    root = pathlib.Path(allowed_root).resolve() if allowed_root is not None else RAW_ROOT
+    if not source.is_relative_to(root):
         raise ValueError("original_download_required")
     meta = probe(source)
     plan = recipe(digest(source), account_id)
@@ -188,7 +189,8 @@ def render(source, account_id, outdir, reviewed_masks=False):
                "editorial_review": "pending", "publishing_enabled": False,
                "disclaimer": "A distinct file hash does not establish perceptual uniqueness or platform acceptance."}
     receipt_path.write_text(json.dumps(receipt, indent=2))
-    print(json.dumps(receipt))
+    if emit:
+        print(json.dumps(receipt))
     return receipt
 
 

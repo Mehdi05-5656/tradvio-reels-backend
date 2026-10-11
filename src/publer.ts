@@ -5,6 +5,7 @@
 // Rate limit: 100 requests / 2 minutes / user. We stay well under.
 
 const BASE = "https://app.publer.com/api/v1";
+import {publishedIdentity} from "./publer-identity.js";
 
 function apiKey(): string {
   const k = process.env.PUBLER_API_KEY;
@@ -55,6 +56,14 @@ export async function listAccounts(workspaceId: string): Promise<PublerAccount[]
 
 export async function me(): Promise<any> {
   return await pubFetch("/users/me");
+}
+
+// Read-only bridge for analytics reconciliation. Callers persist mappings only
+// after checking the account and exact legacy ID; never overwrite publish state.
+export async function getPublishedTikTokIdentity(workspaceId:string,postId:string,accountId:string){
+  if(!/^[A-Za-z0-9_-]{1,128}$/.test(postId))throw new Error("invalid_post_id");
+  const post=await pubFetch(`/posts/${encodeURIComponent(postId)}`,{workspaceId});
+  return publishedIdentity(post,postId,accountId);
 }
 
 // --- Media -------------------------------------------------------------------

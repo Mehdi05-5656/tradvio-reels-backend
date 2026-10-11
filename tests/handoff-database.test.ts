@@ -108,7 +108,9 @@ test("same-account jobs reserve separate slots; SQL rejects cross-account read-b
 test("activation requires explicit platform settings; TikTok disclosures are never silently defaulted",async t=>{
   const s=await handoffDb(t),a=await s.ready();
   const args={p_actor:OP,p_account:a.account,p_enabled:true,p_approval:"approved",
-    p_expires:new Date(Date.now()+86400000).toISOString()};
+    // This test checks settings, not expiry. With a one-hour lead time, the
+    // next daily slot can be more than 24h away when run just before 10:00 UTC.
+    p_expires:new Date(Date.now()+14*86400000).toISOString()};
   await assert.rejects(s.rpc("managed_handoff_activate",args),/invalid_publication_settings/);
   await s.db.query("UPDATE managed_accounts SET platform='tiktok' WHERE id=$1",[a.account]);
   await assert.rejects(s.rpc("managed_handoff_activate",{...args,p_settings:{feed:true}}),/invalid_publication_settings/);

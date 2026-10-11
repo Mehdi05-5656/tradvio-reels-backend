@@ -122,6 +122,27 @@ test("ownership-only history shows assignment without invented generation or pos
   assert.equal(r.body.current[0].title,"Awaiting content setup");
   assert.equal((await s.get("/api/v2/accounts/publer-owned:p-a/history","b")).status,404);
 });
+test("private library history is owned, counted, bounded and never calls a render a scheduled post",async t=>{
+  const old=process.env.LIBRARY_STATUS_ENABLED;process.env.LIBRARY_STATUS_ENABLED="1";
+  t.after(()=>{if(old===undefined)delete process.env.LIBRARY_STATUS_ENABLED;else process.env.LIBRARY_STATUS_ENABLED=old;});
+  const s=await setup(t);
+  s.db.tables.publer_account_ownership=[{publer_account_id:"p-a",owner_user_id:"a",assigned_at:"2026-10-08T12:00:00Z"}];
+  let rpcCalls=0,malformed=false;
+  s.db.rpc=async(name:string,args:any)=>{
+    rpcCalls++;assert.equal(name,"library_account_progress");
+    assert.deepEqual(args,{p_actor:"a",p_account:"p-a"});
+    return {error:null,data:{counts:{total:877,pending:874,running:1,blocked:1,rendered_private:malformed?8:1},
+      generation_enabled:true,publishing_enabled:false,
+      events:[{id:"event-1",event:"rendered_private",created_at:"2026-10-11T10:00:00Z"}]}};
+  };
+  assert.equal((await s.get("/api/v2/accounts/publer-owned:p-a/history","b")).status,404);
+  assert.equal(rpcCalls,0);
+  const r=await s.get("/api/v2/accounts/publer-owned:p-a/history","a");
+  assert.equal(r.status,200);assert.match(r.body.current[0].detail,/1\/877 privately rendered/);
+  assert.equal(r.body.current[1].title,"New-account scheduling not enabled");
+  assert.ok(r.body.events.some((e:any)=>e.title==="Private render and technical checks completed"));
+  malformed=true;assert.equal((await s.get("/api/v2/accounts/publer-owned:p-a/history","a")).status,503);
+});
 test("managed history scopes job claims and handoff events through owned account IDs",async t=>{
   const s=await setup(t);
   s.db.tables.managed_accounts=[{id:"m-a",customer_user_id:"a",publishing_enabled:false}];

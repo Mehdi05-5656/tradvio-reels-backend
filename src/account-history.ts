@@ -84,7 +84,27 @@ export function registerAccountHistory(app:Express,sbFn:()=>SupabaseClient){
         if(latest)add("analytics-latest",latest.captured_at,"analytics","Performance snapshot collected",
           "Analytics collection is recorded. It does not prove a learning update or an A/B-test winner.");
       }else if(kind==="publer-owned"){
-        current.push({stage:"generation",title:"Awaiting content setup",
+        if(process.env.LIBRARY_STATUS_ENABLED==="1"&&uid){
+          const r=await sb.rpc("library_account_progress",{p_actor:uid,p_account:a.publer_account_id});
+          if(r.error||!r.data?.counts||!Array.isArray(r.data.events))throw new Error("library_status_unavailable");
+          const p=r.data,c=p.counts;
+          if(typeof p.generation_enabled!=="boolean"||p.publishing_enabled!==false)
+            throw new Error("library_status_invalid");
+          for(const name of ["total","pending","running","blocked","rendered_private"])
+            if(!Number.isSafeInteger(c[name])||c[name]<0)throw new Error("library_status_invalid");
+          if(c.total!==c.pending+c.running+c.blocked+c.rendered_private)throw new Error("library_counts_invalid");
+          current.push({stage:"generation",title:c.total?"Account-specific video library":"Awaiting original-library import",
+            detail:`${c.rendered_private}/${c.total} privately rendered; ${c.running} processing; ${c.pending} waiting; ${c.blocked} blocked. Worker permission ${p.generation_enabled?"enabled":"disabled"}.`});
+          current.push({stage:"publishing",title:"New-account scheduling not enabled",
+            detail:"A private render is not editorial approval, a scheduled post or proof of publication."});
+          const titles:Record<string,string>={queued:"Account-specific video queued",render_started:"Processing original video",
+            rendered_private:"Private render and technical checks completed",blocked:"Video processing needs review",
+            lease_expired:"Interrupted render attempt recorded"};
+          for(const e of r.data.events)
+            add(`library-${e.id}`,e.created_at,"generation",titles[e.event]??"Private library event",
+              "Recorded by the private-library worker. No public posting implied.",["blocked","lease_expired"].includes(e.event));
+          if(r.data.events.length===50)limited=true;
+        }else current.push({stage:"generation",title:"Awaiting content setup",
           detail:"Ownership only. No managed generation or publishing workflow is attached to this record."});
       }else if(kind==="creatorvault"){
         add("cv-connected",a.connected_at,"connection","Stored direct connection","Historical CreatorVault connection; publishing through this path is on hold.");

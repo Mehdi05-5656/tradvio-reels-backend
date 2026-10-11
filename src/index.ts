@@ -9,6 +9,7 @@ import { registerReelsScheduleRoutes } from "./reels-schedule.js";
 import { registerOnboardingRoutes } from "./onboarding-routes.js";
 import { registerAccountInventory } from "./account-inventory.js";
 import { registerAccountHistory } from "./account-history.js";
+import { registerLibraryImport } from "./library-import.js";
 import { registerManagedRoutes } from "./managed-routes.js";
 import { registerGenerationRoutes } from "./generation-routes.js";
 import { registerHandoffRoutes } from "./handoff-routes.js";
@@ -48,7 +49,6 @@ async function main() {
   }));
 
   const http = createServer(app);
-  await registerRoutes(http, app);
 
   // v2 routes: devices, alerts, overview. Auth middleware from routes.ts applies to POSTs.
   let sb: SupabaseClient | null = null;
@@ -64,6 +64,10 @@ async function main() {
     }
     return sb;
   };
+  // Capability handler owns its auth; disabled unless explicitly rolled out.
+  // All existing /api routes retain their existing default-deny middleware.
+  registerLibraryImport(app,getSb);
+  await registerRoutes(http, app);
   registerV2Routes(app, getSb);
   registerAccountInventory(app, getSb);
   registerAccountHistory(app, getSb);
