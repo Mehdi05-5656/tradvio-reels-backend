@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import hashlib
+import io
 
 spec = importlib.util.spec_from_file_location("library_worker", pathlib.Path(__file__).with_name("library-worker.py"))
 m = importlib.util.module_from_spec(spec)
@@ -47,6 +48,12 @@ def fake_render(source, account, outdir, **kwargs):
             "full_decode_passed": True, "plan": plan, "media": {"bytes": 8, "duration": 16}}
 
 class WorkerTests(unittest.TestCase):
+    def test_void_rpc_accepts_empty_204_body(self):
+        client=m.StorageClient("https://example.supabase.co","test-placeholder-not-a-credential")
+        with patch.object(client,"request",return_value=io.BytesIO(b"")):
+            self.assertIsNone(client.rpc("library_complete",{}))
+        with patch.object(client,"request",return_value=io.BytesIO(b"null")):
+            self.assertIsNone(client.rpc("library_claim",{}))
     def run_worker(self, client, enabled=True):
         with tempfile.TemporaryDirectory() as d, patch.object(m.media, "render", fake_render):
             return m.run_one(client, "test-worker", enabled, pathlib.Path(d))

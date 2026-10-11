@@ -48,7 +48,8 @@ class StorageClient:
             raw=response.read(65537)
             if len(raw)>65536:
                 raise ValueError("oversized_response")
-            return json.loads(raw)
+            # PostgREST void RPCs legitimately return HTTP 204 with no body.
+            return json.loads(raw) if raw.strip() else None
     def check_private(self):
         for bucket in ("managed-raw","managed-variants"):
             with self.request("/storage/v1/bucket/"+bucket) as response:
@@ -156,6 +157,8 @@ if __name__=="__main__":
             for _ in range(count):
                 result=run_one(client,worker,True)
                 print(json.dumps({"status":result}),flush=True)
+                if result in {"blocked","completion_unconfirmed","failure_unconfirmed","lease_lost"}:
+                    raise SystemExit(1)
                 if result!="rendered_private":
                     break
     except Exception:
