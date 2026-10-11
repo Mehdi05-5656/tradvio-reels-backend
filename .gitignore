@@ -3,3 +3,5 @@ dist
 .env
 .env.local
 .test-build
+rehearsal/
+scripts/__pycache__/
