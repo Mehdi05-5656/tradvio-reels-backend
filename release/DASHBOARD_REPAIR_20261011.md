@@ -56,6 +56,8 @@ October 11, approximately 12:20 PM Pacific, from scoped production records:
 
 The last 10 AM publication was recorded at 10:23:22 Pacific. All 15 library-launch destinations have noon published receipts; Instagram @tradingwithalexx_ is the remaining legacy destination awaiting noon confirmation. The other two legacy destinations have noon receipts. All 18 configured schedules remain unpaused.
 
+A follow-up read found the remaining attempt explicitly held after HTTP 429 while querying its Publer job status. It must be reconciled against that exact provider job, not blindly resent.
+
 These are provider-reported receipts, not independently opened social permalinks. Prior failed attempts include Publer job-status HTTP 429 rate limits. No retry, resubmission, pause change or publisher repair was performed during this dashboard work. The above is a timestamped observation, not a guarantee for subsequent windows.
 
 ## Exact proposed rollout
