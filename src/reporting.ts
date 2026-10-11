@@ -56,7 +56,8 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
       }
     }
     previous.set(key,s);latest.set(key,s);
-    for(const id of [s.publer_post_id,raw.id,raw.post_link].filter(Boolean))alias.set(`${s.phone_slot}|${id}`,key);
+    // raw.old_id is the Publer post id our publisher recorded; TikTok posts often have no permalink in the log.
+    for(const id of [s.publer_post_id,raw.id,raw.post_link,raw.old_id].filter(Boolean))alias.set(`${s.phone_slot}|${id}`,key);
   }
   coverage.missing_baselines=missing.size;
   const lookup=(l:any)=>latest.get(alias.get(`${l.phone_slot}|${l.publer_post_link}`)??alias.get(`${l.phone_slot}|${l.publer_post_id}`)??"");

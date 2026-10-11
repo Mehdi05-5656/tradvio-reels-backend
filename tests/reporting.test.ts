@@ -65,3 +65,23 @@ test("bounded pagination refuses partial totals",async()=>{
   let calls=0; const rows=await paged(()=>Promise.resolve({data:++calls===1?[1,2]:[3],error:null}),2,3);
   assert.deepEqual(rows,[1,2,3]);
 });
+test("TikTok posts without a permalink match analytics through Publer old_id, without a duplicate row",()=>{
+  const tt={...slot(),provider:"tiktok"};
+  const url="https://www.tiktok.com/@tradvio/video/7695054763573923102?utm_campaign=tt4d_open_api";
+  const r=buildReport([tt],[log(1,"published",{publer_post_id:"6aca539310a76b25d4f418e8",publer_post_link:null,caption_used:"Bro"})],[
+    snap(1,"2026-10-11T18:00:00Z",420,{publer_post_id:url,likes:12,raw:{id:"219632075",old_id:"6aca539310a76b25d4f418e8",post_link:url,scheduled_at:"2026-10-11T15:05:00Z"}}),
+  ],range);
+  assert.equal(r.posts.length,1);
+  assert.equal(r.posts[0].recorded_by,"publisher");
+  assert.equal(r.posts[0].video_views,420);
+  assert.equal(r.posts[0].likes,12);
+  assert.equal(r.posts[0].post_link,url);
+  assert.equal(r.accounts[0].metrics_available,1);
+  // A different Publer id must not borrow another post's metrics.
+  const other=buildReport([tt],[log(1,"published",{publer_post_id:"different",publer_post_link:null})],[
+    snap(1,"2026-10-11T18:00:00Z",420,{publer_post_id:url,raw:{old_id:"6aca539310a76b25d4f418e8",post_link:url,scheduled_at:"2026-10-11T15:05:00Z"}}),
+  ],range);
+  const own=other.posts.find(p=>p.recorded_by==="publisher")!;
+  assert.equal(own.video_views,null);
+  assert.equal(own.captured_at,null);
+});

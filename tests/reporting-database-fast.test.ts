@@ -50,3 +50,21 @@ test("fast report SQL returns exactly the original function's output across rang
   const idx=(await db.query<any>("SELECT indexname FROM pg_indexes WHERE tablename='publer_analytics' ORDER BY 1")).rows.map(r=>r.indexname);
   assert.ok(idx.includes("publer_analytics_report_post_capture")&&idx.includes("publer_analytics_report_range"));
 });
+
+test("old_id migration exposes Publer old_id and otherwise preserves the fast function output",async t=>{
+  const db=new PGlite();t.after(()=>db.close());
+  await db.exec(schema);
+  await db.exec(`INSERT INTO publer_analytics VALUES
+    (1,'a','https://www.tiktok.com/@x/video/1','2026-10-11T08:00:00Z',5,1,1,1,1,1,'{"id":"9","old_id":"6aca","post_link":"https://www.tiktok.com/@x/video/1","scheduled_at":"2026-10-11T07:30:00Z","text":"hi"}'),
+    (2,'a','https://www.tiktok.com/@x/video/1','2026-10-11T09:00:00Z',8,1,1,1,1,1,'{"id":"9","old_id":"6aca","post_link":"https://www.tiktok.com/@x/video/1","scheduled_at":"2026-10-11T07:30:00Z","text":"hi"}')`);
+  await db.exec(await readFile("migrations/20261011194000_dashboard_report_fast.sql","utf8"));
+  const q="SELECT dashboard_report_snapshots(ARRAY['a'],'2026-10-11T07:00:00Z','2026-10-12T07:00:00Z') d";
+  const before=(await db.query<any>(q)).rows[0].d;
+  const m=await readFile("migrations/20261011200000_dashboard_report_old_id.sql","utf8");
+  await db.exec(m);await db.exec(m);
+  const after=(await db.query<any>(q)).rows[0].d;
+  assert.deepEqual(after.map((r:any)=>r.raw.old_id),["6aca","6aca"]);
+  assert.deepEqual(after.map((r:any)=>{const {old_id,...raw}=r.raw;return {...r,raw};}),before);
+  await db.exec("SET ROLE authenticated");
+  await assert.rejects(db.query(q),/permission denied/);
+});
