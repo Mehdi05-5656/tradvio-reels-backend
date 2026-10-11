@@ -9,12 +9,15 @@ const SHA="a".repeat(64);
 async function fixture(t:any){
   const db=new PGlite();t.after(()=>db.close());
   await db.exec(`CREATE ROLE anon;CREATE ROLE authenticated;CREATE ROLE service_role BYPASSRLS;
+    CREATE SCHEMA storage;CREATE TABLE storage.objects(bucket_id text,name text,metadata jsonb);
     CREATE TABLE publer_account_ownership(publer_account_id text PRIMARY KEY,owner_user_id uuid NOT NULL,workspace_id text NOT NULL);
     INSERT INTO publer_account_ownership VALUES('${ACCOUNT}','${OP}','workspace');
     CREATE FUNCTION managed_require_operator(p_actor uuid) RETURNS void LANGUAGE plpgsql AS $$
     BEGIN IF p_actor IS DISTINCT FROM '${OP}'::uuid THEN RAISE EXCEPTION 'operator_required';END IF;END $$;`);
   const sql=await readFile("migrations/20261011010000_private_library.sql","utf8");
   await db.exec(sql);await db.exec(sql);
+  const budget=await readFile("migrations/20261011020000_library_storage_budget.sql","utf8");
+  await db.exec(budget);await db.exec(budget);
   const rpc=async(name:string,args:any={})=>(await db.query<any>(
     `SELECT ${name}(${Object.keys(args).map((k,i)=>`${k}=>$${i+1}`).join(",")}) value`,
     Object.values(args).map(v=>v&&typeof v==="object"?JSON.stringify(v):v))).rows[0].value;
@@ -119,4 +122,12 @@ test("source import tickets are source-bound, single redemption and expiring",as
   await s.db.exec("UPDATE library_import_tickets SET expires_at=now()-interval '1 second'");
   assert.equal(await s.rpc("library_redeem_import",{p_token_hash:"d".repeat(64)}),null);
   await assert.rejects(s.rpc("library_issue_import",{p_actor:null,p_source:SHA,p_token_hash:token}),/operator_required/);
+});
+test("storage budget accounts for orphan objects and fails closed before claiming",async t=>{
+  const s=await fixture(t);await s.plan();
+  await s.rpc("library_configure",{p_actor:OP,p_enabled:true,p_max_active:4,p_daily:100});
+  await s.db.exec(`UPDATE library_control SET max_output_bytes=67108864;
+    INSERT INTO storage.objects VALUES('managed-variants','library/orphan.mp4','{"size":1}')`);
+  assert.equal(await s.rpc("library_claim",{p_worker:"budget-test"}),null);
+  assert.equal((await s.db.query<any>("SELECT attempts FROM library_variants")).rows[0].attempts,0);
 });

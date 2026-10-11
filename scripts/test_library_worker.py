@@ -48,6 +48,21 @@ def fake_render(source, account, outdir, **kwargs):
             "full_decode_passed": True, "plan": plan, "media": {"bytes": 8, "duration": 16}}
 
 class WorkerTests(unittest.TestCase):
+    def test_batch_is_bounded_and_stops_on_uncertainty(self):
+        out=[]
+        with patch.object(m,"run_one",side_effect=["rendered_private","completion_unconfirmed"]) as runner:
+            self.assertEqual(m.run_batch(None,"worker",5000,out.append),1)
+            self.assertEqual(runner.call_count,2)
+    def test_batch_continues_isolated_bad_media_but_stops_three_consecutive_failures(self):
+        out=[]
+        with patch.object(m,"run_one",side_effect=["blocked","rendered_private","blocked","blocked","blocked"]) as runner:
+            self.assertEqual(m.run_batch(None,"worker",5000,out.append),1)
+            self.assertEqual(runner.call_count,5)
+        with patch.object(m,"run_one",return_value="rendered_private") as runner:
+            self.assertEqual(m.run_batch(None,"worker",2,out.append),0)
+            self.assertEqual(runner.call_count,2)
+        with self.assertRaises(ValueError):
+            m.run_batch(None,"worker",20001,out.append)
     def test_void_rpc_accepts_empty_204_body(self):
         client=m.StorageClient("https://example.supabase.co","test-placeholder-not-a-credential")
         with patch.object(client,"request",return_value=io.BytesIO(b"")):

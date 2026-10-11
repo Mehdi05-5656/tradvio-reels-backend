@@ -144,6 +144,28 @@ def run_one(client, worker, enabled, scratch=None):
         except Exception:
             return "failure_unconfirmed"
 
+def run_batch(client, worker, count, emit):
+    """Bounded batch; isolate ordinary media failures, stop uncertain operations."""
+    if not 1<=count<=20000:
+        raise ValueError("invalid_job_budget")
+    consecutive=0
+    for _ in range(count):
+        result=run_one(client,worker,True)
+        emit(result)
+        if result=="rendered_private":
+            consecutive=0
+        elif result=="blocked":
+            consecutive+=1
+            if consecutive>=3:
+                return 1
+        elif result in {"completion_unconfirmed","failure_unconfirmed","lease_lost"}:
+            return 1
+        elif result=="idle":
+            return 0
+        else:
+            return 1
+    return 0
+
 if __name__=="__main__":
     try:
         if os.environ.get("LIBRARY_RENDER_ENABLED")!="1":
@@ -151,16 +173,9 @@ if __name__=="__main__":
         else:
             client=StorageClient(os.environ["SUPABASE_URL"],os.environ["SUPABASE_SERVICE_ROLE_KEY"])
             count=int(os.environ.get("LIBRARY_MAX_JOBS","1"))
-            if not 1<=count<=100:
-                raise ValueError("invalid_job_budget")
             worker="library-"+str(uuid.uuid4())
-            for _ in range(count):
-                result=run_one(client,worker,True)
-                print(json.dumps({"status":result}),flush=True)
-                if result in {"blocked","completion_unconfirmed","failure_unconfirmed","lease_lost"}:
-                    raise SystemExit(1)
-                if result!="rendered_private":
-                    break
+            raise SystemExit(run_batch(client,worker,count,
+                lambda status:print(json.dumps({"status":status}),flush=True)))
     except Exception:
         print(json.dumps({"status":"worker_failed"}))
         raise SystemExit(1)
