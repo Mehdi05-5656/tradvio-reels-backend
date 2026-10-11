@@ -127,6 +127,7 @@ export interface PublishInput {
   mediaId: string;
   mediaPath: string;      // URL to the video Publer stored
   thumbnailPath?: string; // real thumb URL (optional but recommended)
+  publicationSettings?: Record<string,unknown>;
 }
 
 /**
@@ -176,6 +177,18 @@ export async function publishNow(input: PublishInput): Promise<{ jobId: string }
     };
   } else {
     throw new Error(`unsupported provider: ${provider}`);
+  }
+
+  if(input.publicationSettings){
+    const settings=input.publicationSettings;
+    if(provider==="instagram"){
+      if(Object.keys(settings).length!==1||settings.feed!==true)throw new Error("invalid_instagram_settings");
+    }else{
+      const expected={privacy:"PUBLIC_TO_EVERYONE",comment:true,duet:false,stitch:false,promotional:true,paid:false};
+      if(Object.keys(settings).length!==Object.keys(expected).length||
+        Object.entries(expected).some(([k,v])=>settings[k]!==v))throw new Error("invalid_tiktok_settings");
+      network.tiktok.details={...settings};
+    }
   }
 
   const body = {

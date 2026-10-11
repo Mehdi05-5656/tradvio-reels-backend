@@ -42,6 +42,7 @@ function isRejectedBusyUpload(error: string): boolean {
 
 export function retryDecision(attempt: number, error: string, submissionUncertain: boolean): RetryDecision {
   if (submissionUncertain) return { action: "hold", delayMs: 0 };
+  if(error==="upload_coordination_held")return {action:"hold",delayMs:0};
   if (isRejectedBusyUpload(error)) {
     return attempt >= 5 ? { action: "hold", delayMs: 0 } :
       { action: "retry", delayMs: Math.min(60, 15 * Math.max(1, attempt)) * 60_000 };

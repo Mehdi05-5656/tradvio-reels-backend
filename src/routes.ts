@@ -5,11 +5,12 @@ import { supabase } from "./supabase.js";
 import { resolveAuth, isAdmin, resolveExternalUserId } from "./auth.js";
 import { accountCapabilities } from "./account-capabilities.js";
 import { accountAccess } from "./account-access.js";
+import {queueMediaBucket} from "./library-publishing.js";
 
 const BUCKET = "reels";
 const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
 function parseSlot(v: string | undefined): string | null {
-  return v && VALID_SLOTS.has(v) ? v : null;
+  return v && (VALID_SLOTS.has(v)||/^library_[a-f0-9]{24}$/.test(v)) ? v : null;
 }
 
 // Mutation guard: accepts EITHER the legacy admin x-app-secret OR a valid
@@ -108,7 +109,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       if (!data) return res.json(null);
 
       const { data: signed, error: se } = await supabase().storage
-        .from(BUCKET).createSignedUrl(data.storage_path, 3600);
+        .from(queueMediaBucket(data)).createSignedUrl(data.storage_path, 3600);
       if (se) throw se;
       res.json({ ...data, signed_url: signed?.signedUrl ?? null });
     } catch (e: any) {
@@ -125,7 +126,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       const status = String(req.query.status ?? "pending");
       const { data, error } = await supabase()
         .from("reels_manual_queue")
-        .select("id, phone_slot, source_handle, filename, storage_path, status, posted_at, created_at")
+        .select("id, phone_slot, source_handle, filename, storage_path, storage_bucket, library_variant_id, status, posted_at, created_at")
         .eq("phone_slot", phone)
         .eq("status", status)
         .order(status === "pending" ? "created_at" : "posted_at",
@@ -145,13 +146,13 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     try {
       const { data: row, error } = await supabase()
         .from("reels_manual_queue")
-        .select("storage_path")
+        .select("storage_path,storage_bucket,library_variant_id,phone_slot")
         .eq("id", req.params.id)
         .maybeSingle();
       if (error) throw error;
       if (!row) return res.status(404).json({ error: "not found" });
       const { data: signed, error: se } = await supabase().storage
-        .from(BUCKET).createSignedUrl(row.storage_path, 3600);
+        .from(queueMediaBucket(row)).createSignedUrl(row.storage_path, 3600);
       if (se) throw se;
       res.json({ url: signed?.signedUrl ?? null });
     } catch (e: any) {
@@ -335,7 +336,7 @@ async function enrichQueueRows(rows: any[]): Promise<any[]> {
     rows.map(async (r) => {
       if (!r.storage_path) return null;
       try {
-        const { data, error } = await sb.storage.from(BUCKET)
+        const { data, error } = await sb.storage.from(queueMediaBucket(r))
           .createSignedUrl(r.storage_path, 3600);
         if (error) return null;
         return data?.signedUrl ?? null;

@@ -12,7 +12,7 @@ import {
 import { chooseTimelineLog } from "./publer-safety.js";
 import { listAccounts, postInsights } from "./publer.js";
 
-const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
+const VALID_SLOTS = {has:(value:string)=>["phone_a","phone_b","tiktok_tradvio"].includes(value)||/^library_[a-f0-9]{24}$/.test(value)};
 
 export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
   // ---- Config ---------------------------------------------------------------

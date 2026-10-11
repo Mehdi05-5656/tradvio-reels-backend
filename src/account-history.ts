@@ -83,20 +83,23 @@ export function registerAccountHistory(app:Express,sbFn:()=>SupabaseClient){
           .order("captured_at",{ascending:false}).limit(1));
         if(latest)add("analytics-latest",latest.captured_at,"analytics","Performance snapshot collected",
           "Analytics collection is recorded. It does not prove a learning update or an A/B-test winner.");
-      }else if(kind==="publer-owned"){
+      }
+      if(kind==="publer-owned"||(kind==="publer"&&a.phone_slot.startsWith("library_"))){
         if(process.env.LIBRARY_STATUS_ENABLED==="1"&&uid){
           const r=await sb.rpc("library_account_progress",{p_actor:uid,p_account:a.publer_account_id});
           if(r.error||!r.data?.counts||!Array.isArray(r.data.events))throw new Error("library_status_unavailable");
           const p=r.data,c=p.counts;
-          if(typeof p.generation_enabled!=="boolean"||p.publishing_enabled!==false)
+          if(typeof p.generation_enabled!=="boolean"||typeof p.publishing_enabled!=="boolean")
             throw new Error("library_status_invalid");
           for(const name of ["total","pending","running","blocked","rendered_private"])
             if(!Number.isSafeInteger(c[name])||c[name]<0)throw new Error("library_status_invalid");
           if(c.total!==c.pending+c.running+c.blocked+c.rendered_private)throw new Error("library_counts_invalid");
           current.push({stage:"generation",title:c.total?"Account-specific video library":"Awaiting original-library import",
             detail:`${c.rendered_private}/${c.total} privately rendered; ${c.running} processing; ${c.pending} waiting; ${c.blocked} blocked. Worker permission ${p.generation_enabled?"enabled":"disabled"}.`});
-          current.push({stage:"publishing",title:"New-account scheduling not enabled",
-            detail:"A private render is not editorial approval, a scheduled post or proof of publication."});
+          current.push({stage:"publishing",title:p.publishing_enabled?(p.waiting_for_pilot?"Awaiting verified pilot post":"Automatic schedule armed"):"New-account scheduling not enabled",
+            detail:p.publishing_enabled?
+              `First eligible time: ${p.not_before}. Minimum checked launch buffer: ${p.minimum_ready} videos. Posts are submitted at due times, not pre-booked in Publer; publication requires a provider receipt.`:
+              "A private render is not editorial approval, a scheduled post or proof of publication."});
           const titles:Record<string,string>={queued:"Account-specific video queued",render_started:"Processing original video",
             rendered_private:"Private render and technical checks completed",blocked:"Video processing needs review",
             lease_expired:"Interrupted render attempt recorded"};
@@ -110,7 +113,7 @@ export function registerAccountHistory(app:Express,sbFn:()=>SupabaseClient){
         add("cv-connected",a.connected_at,"connection","Stored direct connection","Historical CreatorVault connection; publishing through this path is on hold.");
         add("cv-sync",a.last_synced_at,"analytics","Last stored data sync","Stored sync timestamp, not proof of current token eligibility.");
         current.push({stage:"publishing",title:"Direct publishing on hold",detail:"Publer is the active publishing path."});
-      }else{
+      }else if(kind==="managed"){
         current.push({stage:"publishing",title:a.publishing_enabled?"Scheduling permission enabled":"Scheduling permission disabled",
           detail:"Permission is not worker health or confirmation of a complete scheduled batch."});
         add("managed-created",a.created_at,"connection","Managed account created","Account-specific provisioning record created.");

@@ -161,3 +161,55 @@ test("Pacific midnight is hour zero, not all daytime slots eligible", () => {
   assert.equal(midnight.minutes, 5);
   assert.deepEqual(eligibleSlotIndexes(["08:00", "10:00"], 2, midnight.minutes), []);
 });
+
+function libraryFixture(t:any,denySecond=false){
+  for(const key of ["LIBRARY_PUBLISHING_ENABLED","PUBLER_WORKSPACE_COORDINATION_ENABLED"]){
+    const old=process.env[key];process.env[key]="1";
+    t.after(()=>{if(old===undefined)delete process.env[key];else process.env[key]=old;});
+  }
+  const fixed=Date.parse("2026-10-11T15:10:00Z");
+  t.mock.method(Date,"now",()=>fixed);
+  const sb=database(),account="a".repeat(24),id="11111111-1111-4111-8111-111111111111";
+  const row=sb.tables.reels_manual_queue[0];
+  Object.assign(row,{phone_slot:"library_"+account,storage_bucket:"managed-variants",library_variant_id:id,
+    storage_path:`library/${id}/${account}/${id}/${id}.mp4`});
+  let receipts=0;
+  sb.rpc=async(name:string)=>{
+    if(name==="library_publication_receipt"){
+      receipts++;
+      return {data:denySecond&&receipts>1?null:{storage_bucket:row.storage_bucket,
+        storage_path:row.storage_path,variant_id:id,caption:"Approved process caption. Trading involves risk.",settings:{feed:true}}};
+    }
+    if(name==="publer_upload_acquire")return {data:{mode:"acquired",token:id}};
+    if(name==="publer_upload_finish")return {data:true};
+    return {data:null};
+  };
+  const libSlot={...slot,phone_slot:row.phone_slot,publer_account_id:account,publish_after:"2026-10-11T15:00:00Z"};
+  return {sb,libSlot,account};
+}
+test("library publisher uses account-bound private media and rechecks approval before one public submission",async t=>{
+  const {sb,libSlot,account}=libraryFixture(t);
+  let bucket="";
+  sb.storage.from=(b:string)=>{bucket=b;return {createSignedUrl:async()=>({data:{signedUrl:"https://test.invalid/library"}})}};
+  const calls=network(t,{payload:[{post:{id:"post-library",account_id:account,state:"published"}}]});
+  assert.equal((await publishOne(sb,cfg,libSlot,0,"2026-10-11")).status,"published");
+  assert.equal(bucket,"managed-variants");
+  assert.equal(sb.tables.publer_publish_log[0].caption_used,"Approved process caption. Trading involves risk.");
+  assert.equal(calls.filter(x=>x.endsWith("/posts/schedule/publish")).length,1);
+});
+test("revocation during private upload stops before public submission",async t=>{
+  const {sb,libSlot}=libraryFixture(t,true);
+  const calls=network(t);
+  assert.equal((await publishOne(sb,cfg,libSlot,0,"2026-10-11")).status,"failed");
+  assert.equal(calls.filter(x=>x.endsWith("/posts/schedule/publish")).length,0);
+});
+test("disabled or expired library schedule does not touch storage or provider",async t=>{
+  const {sb,libSlot}=libraryFixture(t);
+  const calls=network(t);
+  process.env.LIBRARY_PUBLISHING_ENABLED="0";
+  assert.equal((await publishOne(sb,cfg,libSlot,0,"2026-10-11")).status,"not_due");
+  process.env.LIBRARY_PUBLISHING_ENABLED="1";
+  assert.equal((await publishOne(sb,cfg,libSlot,0,"2026-10-10")).status,"not_due");
+  assert.equal(calls.length,0);
+  assert.equal(sb.tables.publer_publish_log.length,0);
+});

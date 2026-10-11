@@ -1,6 +1,7 @@
 // Exact provider identity reconciliation, never a time/caption similarity join.
 export function publishedIdentity(post:any,requestedId:string,accountId:string){
-  if(!post||post.account_id!==accountId||post.state!=="published")
+  if(!post||post.account_id!==accountId||post.state!=="published"||
+    !["string","number"].includes(typeof post.id)||!String(post.id).match(/^[A-Za-z0-9_-]{1,128}$/))
     throw new Error("publication_not_confirmed");
   const ids=[post.id,post.old_id].filter(x=>typeof x==="string"||typeof x==="number").map(String);
   if(!ids.includes(requestedId))throw new Error("publication_identity_mismatch");

@@ -142,6 +142,11 @@ test("private library history is owned, counted, bounded and never calls a rende
   assert.equal(r.body.current[1].title,"New-account scheduling not enabled");
   assert.ok(r.body.events.some((e:any)=>e.title==="Private render and technical checks completed"));
   malformed=true;assert.equal((await s.get("/api/v2/accounts/publer-owned:p-a/history","a")).status,503);
+  malformed=false;
+  s.db.tables.publer_slot_config.push({phone_slot:"library_abc",publer_account_id:"p-a",owner_user_id:"a",paused:false});
+  const scheduled=await s.get("/api/v2/accounts/publer:library_abc/history","a");
+  assert.equal(scheduled.status,200);
+  assert.ok(scheduled.body.current.some((c:any)=>c.stage==="generation"&&c.detail.includes("1/877 privately rendered")));
 });
 test("managed history scopes job claims and handoff events through owned account IDs",async t=>{
   const s=await setup(t);

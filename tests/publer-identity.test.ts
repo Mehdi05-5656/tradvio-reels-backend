@@ -13,7 +13,7 @@ test("old and new provider IDs reconcile to an exact platform identity",()=>{
   assert.equal(publishedIdentity(sample,"219632154",sample.account_id).legacy_post_id,sample.old_id);
 });
 test("foreign accounts, unknown IDs and unpublished posts never become labels",()=>{
-  for(const delta of [{account_id:"foreign"},{old_id:"unrelated"},{state:"scheduled"},{post_id:"111"}])
+  for(const delta of [{account_id:"foreign"},{old_id:"unrelated"},{state:"scheduled"},{post_id:"111"},{id:undefined}])
     assert.throws(()=>parse({...sample,...delta}));
 });
 test("permalink validation rejects credentials, redirect hosts and insecure links",()=>{

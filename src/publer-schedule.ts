@@ -18,6 +18,8 @@ import {
   waitForJob,
 } from "./publer.js";
 import { parsePublishResult, retryDecision } from "./publer-safety.js";
+import {coordinatedUpload} from "./workspace-upload.js";
+import {libraryPublishingEnabled,queueMediaBucket,libraryWindowAllowed,libraryReceipt} from "./library-publishing.js";
 
 const BUCKET = "reels";
 
@@ -277,6 +279,8 @@ export interface SlotConfig {
   daily_target: number;
   paused: boolean;
   owner_user_id: string | null;
+  publish_after?:string|null;
+  publication_settings?:Record<string,unknown>|null;
 }
 
 export async function loadConfig(sb: SupabaseClient): Promise<Config> {
@@ -361,8 +365,8 @@ async function nextPendingQueueRow(sb: SupabaseClient, phone_slot: string): Prom
   return null;
 }
 
-async function signedUrl(sb: SupabaseClient, path: string, ttl = 86400): Promise<string> {
-  const { data, error } = await sb.storage.from(BUCKET).createSignedUrl(path, ttl);
+async function signedUrl(sb: SupabaseClient, path: string, ttl = 86400,bucket=BUCKET): Promise<string> {
+  const { data, error } = await sb.storage.from(bucket).createSignedUrl(path, ttl);
   if (error) throw error;
   return data.signedUrl;
 }
@@ -380,11 +384,16 @@ export async function publishOne(
   slot: SlotConfig,
   slotIndex: number,
   ptYmd: string,
-): Promise<{ status: "published" | "no_queue" | "reserve_conflict" | "failed"; error?: string; publer_post_id?: string }> {
+): Promise<{ status: "published" | "no_queue" | "reserve_conflict" | "failed" | "not_due"; error?: string; publer_post_id?: string }> {
+  const isLibrary=slot.phone_slot.startsWith("library_");
+  const planned = ptDateTimeToUtc(ptYmd, cfg.slotTimes[slotIndex]).toISOString();
+  if(isLibrary&&(!libraryPublishingEnabled()||!libraryWindowAllowed(slot.publish_after,planned)))
+    return {status:"not_due"};
   const row = await nextPendingQueueRow(sb, slot.phone_slot);
   if (!row) return { status: "no_queue" };
-
-  const planned = ptDateTimeToUtc(ptYmd, cfg.slotTimes[slotIndex]).toISOString();
+  const bucket=queueMediaBucket(row);
+  if(isLibrary!==!!row.library_variant_id)throw new Error("library_destination_mismatch");
+  const permission=isLibrary?await libraryReceipt(sb,row,slot.publer_account_id):null;
 
   // 1) Reserve slot — unique index (phone_slot, slot_local_date, slot_index) on status in (pending,published)
   const { data: log, error: reserveErr } = await sb
@@ -425,9 +434,11 @@ export async function publishOne(
   let submissionUncertain = false;
   try {
     // 2) Upload — serialize per workspace to respect Publer's queue rule
-    const url = await signedUrl(sb, row.storage_path, 24 * 3600);
+    const url = await signedUrl(sb, row.storage_path, 24 * 3600,bucket);
     const name = row.filename || row.storage_path.split("/").pop() || "video.mp4";
     const uploadPayload = await withUploadLock(async () => {
+      if(process.env.PUBLER_WORKSPACE_COORDINATION_ENABLED==="1")
+        return coordinatedUpload(sb,cfg.workspaceId,url,name);
       const { jobId: uploadJob } = await uploadFromUrl(cfg.workspaceId, url, name);
       return await waitForJob(uploadJob, {
         timeoutMs: 180_000,
@@ -450,8 +461,15 @@ export async function publishOne(
     }).eq("id", log.id));
 
     // 3) Publish — pull caption template + hashtag pool for this slot
-    const { caption, hashtags, source: captionSource } = await composeCaption(sb, slot.phone_slot, row.id);
+    const { caption, hashtags, source: captionSource } = permission?
+      {caption:permission.caption,hashtags:["Trading","TradingEducation","RiskManagement"],source:"registered_caption_experiment"}:
+      await composeCaption(sb, slot.phone_slot, row.id);
     console.log("[publisher] caption source:", captionSource, "for queue", row.id);
+    if(isLibrary){
+      const current=await libraryReceipt(sb,row,slot.publer_account_id);
+      if(current.caption!==caption||JSON.stringify(current.settings)!==JSON.stringify(permission.settings))
+        throw new Error("library_publication_changed");
+    }
     // Persist intent BEFORE crossing the irreversible API boundary.
     await checked(sb.from("publer_publish_log").update({
       caption_used: caption, hashtags_used: hashtags,
@@ -466,6 +484,7 @@ export async function publishOne(
       mediaId: mediaObj.id,
       mediaPath: mediaObj.path,
       thumbnailPath: mediaObj.thumbnails?.[0]?.real,
+      ...(permission?{publicationSettings:permission.settings}:{}),
     });
     if (!publishJob) throw new Error("publish response missing job ID; outcome uncertain");
 
@@ -569,6 +588,10 @@ export async function publisherTick(sb: SupabaseClient): Promise<{
   attempts: Array<{ slot: string; slotIndex: number; result: string; error?: string }>;
 }> {
   const cfg = await loadConfig(sb);
+  if(libraryPublishingEnabled()){
+    const r=await sb.rpc("library_feed_publishers");
+    if(r.error)throw new Error("library_queue_feed_unavailable");
+  }
   const slots = await loadSlots(sb);
   const now = ptNow();
   const attempts: any[] = [];
@@ -585,6 +608,9 @@ export async function publisherTick(sb: SupabaseClient): Promise<{
     const taken = await takenSlotIndexes(sb, s.phone_slot, now.ymd);
     for (const idx of eligible) {
       if (taken.has(idx)) continue;
+      if(s.phone_slot.startsWith("library_")&&
+        (!libraryPublishingEnabled()||!libraryWindowAllowed(s.publish_after,ptDateTimeToUtc(now.ymd,cfg.slotTimes[idx]).toISOString())))
+        continue;
       let r: Awaited<ReturnType<typeof publishOne>>;
       try {
         r = await publishOne(sb, cfg, s, idx, now.ymd);
