@@ -6,6 +6,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
+import { registerReportingRoutes } from "./reporting.js";
 
 type SbGetter = () => SupabaseClient;
 
@@ -21,6 +22,7 @@ async function visibleSlots(req: Request, sb: SupabaseClient) {
 export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
   harvestCaptions?: typeof import("./publer-schedule.js").harvestCaptions;
 } = {}): void {
+  registerReportingRoutes(app,sbFn);
   // ==================== DEVICES ====================
 
   // List all devices with derived health metrics
@@ -83,7 +85,11 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
         analyticsBySlot.set(row.phone_slot, cur);
       }
 
-      const devices = (devicesRes.data ?? []).map((d: any) => {
+      const devices = visible.map((publishSlot: any) => {
+        const legacy=(devicesRes.data??[]).find((d:any)=>d.phone_slot===publishSlot.phone_slot);
+        const d={...legacy,id:legacy?.id??publishSlot.phone_slot,phone_slot:publishSlot.phone_slot,
+          handle:publishSlot.handle,platform:publishSlot.provider,provider:publishSlot.provider,
+          display_name:legacy?.display_name??publishSlot.handle,tags:legacy?.tags??[],active:!publishSlot.paused,paused:publishSlot.paused};
         const s = summary.get(d.phone_slot) ?? {};
         const setting = settings.get(d.phone_slot) ?? {};
         const logs = logsBySlot.get(d.phone_slot) ?? [];
@@ -91,7 +97,6 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
         const failed = logs.filter((l) => l.status === "failed").length;
         const lastAttempt = logs[0];
         const an = analyticsBySlot.get(d.phone_slot) ?? { views: 0, reach: 0, engagement: 0 };
-        const publishSlot = visible.find(slot => slot.phone_slot === d.phone_slot);
         const status = !publishSlot ? "error" : publishSlot.paused ? "paused" : "active";
         const todayLogs = logs.filter(l => l.slot_local_date === ptNow().ymd);
         return {

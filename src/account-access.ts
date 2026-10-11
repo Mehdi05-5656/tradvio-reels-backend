@@ -30,6 +30,7 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     // These handlers apply their own per-user filters. All other global v2
     // control, leader and suggestion routes remain administrator-only.
     if (read && /^\/api\/v2\/accounts\/[^/]+\/history$/.test(path)) return next();
+    if (read && path === "/api/v2/report") return next(); // Handler scopes every read to visible publishing slots.
     if (read && /^\/api\/(?:me|managed\/accounts|managed\/(?:generation|handoffs)\/[^/]+|v2\/(?:accounts|devices|overview|alerts|archive|today|hashtags|templates)|v2\/analytics\/[^/]+|v2\/post\/.+|creatorvault\/(?:accounts|account-status)|onboard\/status|reels\/scheduled(?:\/[^/]+)?)$/.test(path)) return next();
     try {
       let slot: string | null = null;
