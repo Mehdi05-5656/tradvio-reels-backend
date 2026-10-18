@@ -53,39 +53,58 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
     for(const id of [s.publer_post_id,raw.id,raw.post_link,raw.old_id,platformKey(raw.post_link),platformKey(s.publer_post_id)].filter(Boolean))alias.set(`${s.phone_slot}|${id}`,k);}
   for(const s of live){const k=keyOf(s);
     for(const id of [s.publer_post_id,s.post_link,platformKey(s.post_link)].filter(Boolean))alias.set(`${s.phone_slot}|${id}`,k);}
-  // One view timeline per post: Publer snapshots until live readings start, live readings after.
-  const firstLive=new Map<string,string>();
-  for(const s of live){const k=keyOf(s);if(!firstLive.has(k))firstLive.set(k,s.captured_at);}
-  const timeline=[...snapshots.filter(s=>{const f=firstLive.get(keyOf(s));return !f||s.captured_at<f;}),...live]
+  // One timeline per post and per source. Publer and the public profile count views differently
+  // (for TikTok, Publer's "views" are reach), so a change is only ever measured between two
+  // readings from the same source. When both sources observe a post on the same Pacific day,
+  // the live readings are used for that day and the Publer readings are set aside.
+  const timeline=[...snapshots,...live]
     .sort((a,b)=>Date.parse(a.captured_at)-Date.parse(b.captured_at)||(a.source===b.source?Number(a.id)-Number(b.id):a.source==="publer"?-1:1));
   const series:any[]=[];
   for(let d=range.from;d<=range.to;d=shiftDay(d,1))series.push({date:d,observed_views:null,observations:0,accounts:{}});
   const dayMap=new Map(series.map(d=>[d.date,d]));
   const previous=new Map<string,any>(),latestPub=new Map<string,any>(),latestLive=new Map<string,any>();
   const gains=new Map<string,number[]>(),coverage={missing_baselines:0,corrections:0,snapshots:0,posts_with_metrics:0,live_snapshots:0};
-  const missing=new Set<string>();
+  const missing=new Set<string>(),counted=new Set<string>();
+  type DayGains={phone_slot:string;live:number[];publer:number[];liveSeed?:number;publerSeed?:number};
+  const byDay=new Map<string,Map<string,DayGains>>();
   for(const s of timeline){
-    const key=keyOf(s),v=num(s.video_views),old=previous.get(key),day=ptNow(new Date(s.captured_at)).ymd;
+    const key=keyOf(s),v=num(s.video_views),track=`${key}|${s.source}`,old=previous.get(track),day=ptNow(new Date(s.captured_at)).ymd;
     const published=s.source==="live"?s.posted_at:(s.raw?.scheduled_at??s.raw?.published_at);
-    let delta:number|null=null;
-    if(s.captured_at>=range.start){
-      coverage.snapshots++;if(s.source==="live")coverage.live_snapshots++;
-      if(v!==null&&old&&num(old.video_views)!==null){
-        delta=v-Number(old.video_views);
-        if(delta<0){coverage.corrections++;delta=null;}
-      } else if(v!==null&&published&&Date.parse(published)>=Date.parse(range.start)&&Date.parse(published)<=Date.parse(s.captured_at))delta=v;
-      else if(v!==null)missing.add(key);
-      if(delta!==null&&dayMap.has(day)){
-        const bucket=dayMap.get(day)!;bucket.observed_views=(bucket.observed_views??0)+delta;bucket.observations++;
-        bucket.accounts[s.phone_slot]=(bucket.accounts[s.phone_slot]??0)+delta;
-        gains.set(s.phone_slot,[...(gains.get(s.phone_slot)??[]),delta]);
+    if(s.captured_at>=range.start){coverage.snapshots++;if(s.source==="live")coverage.live_snapshots++;}
+    // A reading without a view count neither counts nor moves the baseline.
+    if(v===null)continue;
+    if(s.captured_at>=range.start&&dayMap.has(day)){
+      const posts=byDay.get(day)??new Map<string,DayGains>();byDay.set(day,posts);
+      const g=posts.get(key)??{phone_slot:s.phone_slot,live:[],publer:[]};posts.set(key,g);
+      if(old){
+        const delta=v-Number(old.video_views);
+        // A downward correction is excluded and the higher baseline is kept, so climbing back
+        // to an earlier value is not counted as new views.
+        if(delta<0)coverage.corrections++;else{g[s.source as "live"|"publer"].push(delta);counted.add(key);}
+      } else if(published&&Date.parse(published)>=Date.parse(range.start)&&Date.parse(published)<=Date.parse(s.captured_at)){
+        // First reading of a post published inside the range: its whole count is new (used once per post).
+        g[s.source==="live"?"liveSeed":"publerSeed"]=v;counted.add(key);
+      } else missing.add(key);
+    }
+    if(!old||v>=Number(old.video_views))previous.set(track,s);
+  }
+  const seeded=new Set<string>();
+  for(const d of series){
+    for(const [key,g] of byDay.get(d.date)??[]){
+      const src=g.live.length||g.liveSeed!==undefined?"live":"publer";
+      const seed=src==="live"?g.liveSeed:g.publerSeed;
+      const values=[...(seed!==undefined&&!seeded.has(key)?[seed]:[]),...g[src]];
+      if(seed!==undefined)seeded.add(key);
+      for(const delta of values){
+        d.observed_views=(d.observed_views??0)+delta;d.observations++;
+        d.accounts[g.phone_slot]=(d.accounts[g.phone_slot]??0)+delta;
+        gains.set(g.phone_slot,[...(gains.get(g.phone_slot)??[]),delta]);
       }
     }
-    previous.set(key,s);
   }
   for(const s of snapshots)latestPub.set(keyOf(s),s);
   for(const s of live)latestLive.set(keyOf(s),s);
-  coverage.missing_baselines=missing.size;
+  coverage.missing_baselines=[...missing].filter(k=>!counted.has(k)).length;
   // Per-metric merge: the preferred source supplies each number; the other fills gaps
   // (for example Instagram shares and saves, which are not public, come from Publer).
   const merged=(key:string)=>{

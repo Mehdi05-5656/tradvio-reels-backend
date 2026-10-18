@@ -641,7 +641,8 @@ export function inPostingWindow(slotTimes: string[], minutesPT: number, before =
   });
 }
 
-/** Publer refreshes post stats about once a day, so one pull per account every few hours is enough. */
+/** Publer refreshes post stats about once a day, so one pull per account every few hours is enough.
+ *  Posts older than 30 days are no longer pulled, so their stored numbers stop changing. */
 export const ANALYTICS_ACCOUNT_INTERVAL_MS = 3 * 3600_000;
 
 /**
@@ -656,6 +657,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
   skipped?: "posting_window";
   deferred?: boolean;
   accounts_pulled?: number;
+  insert_errors?: number;
 }> {
   const cfg = await loadConfig(sb);
   const now = at;
@@ -675,6 +677,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
     .filter((s) => !(now.getTime() - (lastPull.get(s.phone_slot) ?? 0) < ANALYTICS_ACCOUNT_INTERVAL_MS))
     .sort((a, b) => (lastPull.get(a.phone_slot) ?? 0) - (lastPull.get(b.phone_slot) ?? 0));
   let accountsPulled = 0;
+  let insertErrors = 0;
 
   let snapshots = 0;
 
@@ -689,7 +692,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
         sortType: "DESC",
       });
       } catch (e) {
-        if (e instanceof RateBudgetDeferred) return { snapshots, deferred: true, accounts_pulled: accountsPulled };
+        if (e instanceof RateBudgetDeferred) return { snapshots, deferred: true, accounts_pulled: accountsPulled, ...(insertErrors ? { insert_errors: insertErrors } : {}) };
         throw e;
       }
       const posts = resp?.posts ?? [];
@@ -738,7 +741,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
         const normalizedViews = rawViews != null ? rawViews
           : (s.provider === "tiktok" ? rawReach : null);
 
-        await sb.from("publer_analytics").insert({
+        const ins = await sb.from("publer_analytics").insert({
           publer_post_id: joinKey,
           phone_slot: s.phone_slot,
           captured_at: now.toISOString(),
@@ -756,6 +759,12 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
           reach_rate: v("reach_rate"),
           raw: p,
         });
+        if (ins.error) {
+          // A lost snapshot must be visible in the cron log, not silently skipped.
+          insertErrors++;
+          console.error("[analytics] snapshot insert failed", s.phone_slot, joinKey, ins.error.message);
+          continue;
+        }
         snapshots++;
       }
 
@@ -768,7 +777,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
     if (mark.error) throw new Error("analytics_pull_state_write_failed");
     accountsPulled++;
   }
-  return { snapshots, accounts_pulled: accountsPulled };
+  return { snapshots, accounts_pulled: accountsPulled, ...(insertErrors ? { insert_errors: insertErrors } : {}) };
 }
 
 // --- Discovery convenience ---------------------------------------------------

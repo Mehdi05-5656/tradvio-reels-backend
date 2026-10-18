@@ -172,7 +172,7 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
 
       // Hard lower bound: 2026-09-05 (pipeline / Publer coverage start).
       // Pre-pipeline data is intentionally hidden across IG and TikTok.
-      const MIN_DATE_ISO = "2026-09-05T00:00:00-07:00";
+      const MIN_DATE_ISO = ptDateTimeToUtc("2026-09-05", "00:00").toISOString();
       const rolling = new Date(Date.now() - (days || 3650) * 86400_000).toISOString();
       const since = rolling < MIN_DATE_ISO ? MIN_DATE_ISO : rolling;
 

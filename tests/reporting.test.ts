@@ -85,3 +85,49 @@ test("TikTok posts without a permalink match analytics through Publer old_id, wi
   assert.equal(own.video_views,null);
   assert.equal(own.captured_at,null);
 });
+
+// ---- View-gain math (added 2026-10-18 after the analytics audit) ----
+const snapAt=(id:number,t:string,views:number|null,extra:any={})=>snap(id,t,views,{raw:{scheduled_at:"2026-10-11T15:00:00Z"},...extra});
+const liveAt=(id:number,t:string,views:number|null,extra:any={})=>({id,phone_slot:"a",provider:"instagram",platform_post_id:"abc",post_link:"https://www.instagram.com/reel/abc/",posted_at:"2026-10-11T15:00:00Z",captured_at:t,video_views:views,likes:1,comments:0,shares:null,saves:null,...extra});
+test("a downward correction keeps the higher baseline, so recovering to it adds no views",()=>{
+  const r=buildReport([slot()],[],[snapAt(1,"2026-10-11T16:00:00Z",1000),snapAt(2,"2026-10-11T18:00:00Z",900),snapAt(3,"2026-10-11T20:00:00Z",1000)],range);
+  assert.equal(r.coverage.corrections,1);
+  assert.equal(r.totals.observed_views,1000); // seeded by the first in-range reading of a post published in range
+  const above=buildReport([slot()],[],[snapAt(1,"2026-10-11T16:00:00Z",1000),snapAt(2,"2026-10-11T18:00:00Z",900),snapAt(3,"2026-10-11T20:00:00Z",1100)],range);
+  assert.equal(above.totals.observed_views,1100);
+  const before=buildReport([slot()],[],[snap(1,"2026-10-10T20:00:00Z",1000),snap(2,"2026-10-11T12:00:00Z",900),snap(3,"2026-10-11T16:00:00Z",1000)],range);
+  assert.equal(before.totals.observed_views,0);
+});
+test("a reading without a view count is skipped instead of resetting the baseline",()=>{
+  const r=buildReport([slot()],[],[snapAt(1,"2026-10-11T16:00:00Z",500),snapAt(2,"2026-10-11T18:00:00Z",null),snapAt(3,"2026-10-11T20:00:00Z",600)],range);
+  assert.equal(r.totals.observed_views,600);
+  assert.equal(r.coverage.missing_baselines,0);
+  const before=buildReport([slot()],[],[snap(1,"2026-10-10T20:00:00Z",500),snap(2,"2026-10-11T12:00:00Z",null),snap(3,"2026-10-11T16:00:00Z",600)],range);
+  assert.equal(before.totals.observed_views,100);
+});
+test("Publer and live readings are never differenced against each other",()=>{
+  const link="https://www.instagram.com/reel/abc/";
+  const pub=(id:number,t:string,v:number)=>snap(id,t,v,{publer_post_id:link,raw:{scheduled_at:"2026-10-10T15:00:00Z",post_link:link}});
+  // Post published before the range. Publer counts 120 -> 140; live (different scale) 50 -> 80 the same day.
+  const same=buildReport([slot()],[],[pub(1,"2026-10-10T20:00:00Z",120),pub(2,"2026-10-11T18:00:00Z",140)],range,
+    [liveAt(1,"2026-10-11T16:00:00Z",50,{posted_at:"2026-10-10T15:00:00Z"}),liveAt(2,"2026-10-11T20:00:00Z",80,{posted_at:"2026-10-10T15:00:00Z"})]);
+  assert.equal(same.totals.observed_views,30);
+  assert.equal(same.coverage.corrections,0);
+  assert.equal(same.coverage.missing_baselines,0);
+  // Live covered the first day only; Publer keeps counting on the second day.
+  const two=resolveRange({from:"2026-10-11",to:"2026-10-12"},new Date("2026-10-12T23:00:00Z"));
+  const later=buildReport([slot()],[],[pub(1,"2026-10-10T20:00:00Z",120),pub(2,"2026-10-11T18:00:00Z",140),pub(3,"2026-10-12T18:00:00Z",190)],two,
+    [liveAt(1,"2026-10-11T16:00:00Z",50,{posted_at:"2026-10-10T15:00:00Z"}),liveAt(2,"2026-10-11T20:00:00Z",80,{posted_at:"2026-10-10T15:00:00Z"})]);
+  assert.deepEqual(later.series.map(d=>d.observed_views),[30,50]);
+});
+test("a post published in range is seeded once, by the source used on its first day",()=>{
+  const link="https://www.instagram.com/reel/abc/";
+  const pub=(id:number,t:string,v:number)=>snap(id,t,v,{publer_post_id:link,raw:{scheduled_at:"2026-10-11T15:00:00Z",post_link:link}});
+  // Same day: Publer seeds 100 at 17:00, live seeds 150 at 18:00 and gains 30 by 20:00 -> live wins the day: 180.
+  const same=buildReport([slot()],[],[pub(1,"2026-10-11T17:00:00Z",100)],range,[liveAt(1,"2026-10-11T18:00:00Z",150),liveAt(2,"2026-10-11T20:00:00Z",180)]);
+  assert.equal(same.totals.observed_views,180);
+  // Different days: Publer seeds on day one; live starting on day two must not seed again.
+  const two=resolveRange({from:"2026-10-11",to:"2026-10-12"},new Date("2026-10-12T23:00:00Z"));
+  const split=buildReport([slot()],[],[pub(1,"2026-10-11T17:00:00Z",100),pub(2,"2026-10-12T17:00:00Z",160)],two,[liveAt(1,"2026-10-12T18:00:00Z",170),liveAt(2,"2026-10-12T21:00:00Z",200)]);
+  assert.deepEqual(split.series.map(d=>d.observed_views),[100,30]);
+});

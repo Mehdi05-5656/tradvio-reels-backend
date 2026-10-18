@@ -4,9 +4,9 @@
 
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { loadConfig, loadSlots, ptNow } from "./publer-schedule";
+import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
-import { registerReportingRoutes } from "./reporting.js";
+import { registerReportingRoutes, shiftDay } from "./reporting.js";
 
 type SbGetter = () => SupabaseClient;
 
@@ -423,8 +423,9 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       // Window resolution.
       // Hard lower bound of 2026-09-05 (Publer coverage start / pipeline start)
       // applied uniformly to IG and TikTok. Pre-pipeline data is intentionally hidden.
+      // Pacific midnights are converted with the DST-safe helper (a fixed -07:00 is wrong after Nov 1).
       const MIN_DATE = "2026-09-05";
-      const MIN_DATE_ISO = `${MIN_DATE}T00:00:00-07:00`;
+      const MIN_DATE_ISO = ptDateTimeToUtc(MIN_DATE, "00:00").toISOString();
       const rawDays = parseInt(String(req.query.days ?? "30"), 10);
       const isLifetime = rawDays === 0;
       const days = isLifetime ? 0 : Math.max(1, Math.min(3650, rawDays));
@@ -434,9 +435,10 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       if (req.query.from) {
         let from = String(req.query.from);
         if (from < MIN_DATE) from = MIN_DATE;
-        const to = String(req.query.to ?? new Date().toISOString().slice(0, 10));
-        sinceISO = `${from}T00:00:00-07:00`;
-        untilISO = `${to}T23:59:59-07:00`;
+        const to = String(req.query.to ?? ptNow().ymd);
+        sinceISO = ptDateTimeToUtc(from, "00:00").toISOString();
+        // Exclusive end: the Pacific midnight after "to", so the last second of the day is kept.
+        untilISO = ptDateTimeToUtc(shiftDay(to, 1), "00:00").toISOString();
         windowLabel = `${from} to ${to}`;
       } else if (isLifetime) {
         // "Lifetime" now means from pipeline start (MIN_DATE), not truly lifetime.
@@ -478,7 +480,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
           .select("*")
           .in("phone_slot", phones)
           .gte("captured_at", sinceISO);
-        if (untilISO) q = q.lte("captured_at", untilISO);
+        if (untilISO) q = q.lt("captured_at", untilISO);
         const { data: rows, error } = await q.order("captured_at", {
           ascending: false,
         });
@@ -669,13 +671,27 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       const analyticsByPostLink = new Map<string, any>();
       const analyticsByFilename = new Map<string, any>();
       if (phoneSlots.length > 0) {
-        const { data: analytics } = await sbFn()
-          .from("publer_analytics")
-          .select("publer_post_id, phone_slot, video_views, reach, likes, comments, engagement_rate, captured_at, raw")
-          .in("phone_slot", phoneSlots as string[])
-          .order("captured_at", { ascending: false })
-          .limit(2000);
-        for (const a of analytics ?? []) {
+        // Latest snapshot per post for these accounts. The database function returns one row per
+        // post, so posts whose metrics froze weeks ago are still found. If the function is not
+        // installed yet, fall back to the newest rows only (which misses frozen posts).
+        const latest = await sbFn().rpc("publer_analytics_latest", { p_slots: phoneSlots });
+        let analytics: any[];
+        if (!latest.error) {
+          analytics = (latest.data ?? []).map((a: any) => ({
+            ...a,
+            raw: { post_link: a.post_link, medias: [{ path: a.media_filename, thumbnail: a.thumbnail_url }] },
+          }));
+        } else {
+          console.warn("[archive] publer_analytics_latest unavailable, using newest rows:", latest.error.message);
+          const { data } = await sbFn()
+            .from("publer_analytics")
+            .select("publer_post_id, phone_slot, video_views, reach, likes, comments, engagement_rate, captured_at, raw")
+            .in("phone_slot", phoneSlots as string[])
+            .order("captured_at", { ascending: false })
+            .limit(2000);
+          analytics = data ?? [];
+        }
+        for (const a of analytics) {
           const raw = (a as any).raw || {};
           const link = raw.post_link || raw.postLink || null;
           if (link && !analyticsByPostLink.has(link)) analyticsByPostLink.set(link, a);
@@ -727,21 +743,22 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       // Minimum start date is 2026-09-05.
       const MIN_DATE = "2026-09-05";
       const now = new Date();
-      const ptToday = new Date(now.getTime() - 7 * 3600_000).toISOString().slice(0, 10);
+      const ptToday = ptNow(now).ymd;
       let from = String(req.query.from ?? req.query.date ?? ptToday);
       let to = String(req.query.to ?? req.query.date ?? ptToday);
       if (from < MIN_DATE) from = MIN_DATE;
       if (to < from) to = from;
 
-      const fromISO = `${from}T00:00:00-07:00`;
-      const toISO = `${to}T23:59:59-07:00`;
+      const fromISO = ptDateTimeToUtc(from, "00:00").toISOString();
+      // Exclusive end: the Pacific midnight after "to".
+      const toISO = ptDateTimeToUtc(shiftDay(to, 1), "00:00").toISOString();
 
       // Get all publish log entries in range that succeeded
       let logsQ = sb
         .from("publer_publish_log")
         .select("id, phone_slot, planned_at, attempted_at, publer_post_id, publer_post_link, status, caption_used, hashtags_used")
         .gte("attempted_at", fromISO)
-        .lte("attempted_at", toISO)
+        .lt("attempted_at", toISO)
         .order("attempted_at", { ascending: false });
       if (!admin) logsQ = logsQ.in("phone_slot", visibleIds);
       const { data: logs, error: logsErr } = await logsQ;
@@ -937,7 +954,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       }
       const MIN_DATE = "2026-09-05";
       const from = String(req.query.from ?? MIN_DATE);
-      const fromISO = `${from < MIN_DATE ? MIN_DATE : from}T00:00:00-07:00`;
+      const fromISO = ptDateTimeToUtc(from < MIN_DATE ? MIN_DATE : from, "00:00").toISOString();
 
       // Get latest snapshot per post so we don't double-count
       let q = sb
