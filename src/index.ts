@@ -9,6 +9,7 @@ import { registerReelsScheduleRoutes } from "./reels-schedule.js";
 import { registerOnboardingRoutes } from "./onboarding-routes.js";
 import { registerAccountInventory } from "./account-inventory.js";
 import { registerAccountHistory } from "./account-history.js";
+import { registerOpsPipeline } from "./ops-pipeline.js";
 import { registerLibraryImport } from "./library-import.js";
 import { registerManagedRoutes } from "./managed-routes.js";
 import { registerGenerationRoutes } from "./generation-routes.js";
@@ -74,6 +75,7 @@ async function main() {
   registerV2Routes(app, getSb);
   registerAccountInventory(app, getSb);
   registerAccountHistory(app, getSb);
+  registerOpsPipeline(app, getSb);
   registerManagedRoutes(app, getSb);
   registerGenerationRoutes(app, getSb);
   registerHandoffRoutes(app, getSb);
