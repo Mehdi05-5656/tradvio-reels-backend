@@ -99,12 +99,19 @@ export async function resolveAuth(req: Request, _res: Response, next: NextFuncti
 // records on 2026-09-23. Deliberately server-maintained: changing an email,
 // display name, request field or client metadata must not transfer authority.
 // Changing the operator requires an explicitly reviewed code/configuration change.
-const PLATFORM_OPERATOR_USER_ID = "71c2308a-9e23-4458-b4f0-df7ae53c841e";
+// Operators may perform writes. Comma-separated Supabase auth user ids from the environment;
+// the default is the owner's account so existing deployments keep working without a new variable.
+const DEFAULT_OPERATOR_USER_IDS = "71c2308a-9e23-4458-b4f0-df7ae53c841e";
+export function operatorUserIds(env: Record<string, string | undefined> = process.env): Set<string> {
+  const raw = env.PLATFORM_OPERATOR_USER_IDS?.trim() || DEFAULT_OPERATOR_USER_IDS;
+  return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+}
+const OPERATOR_USER_IDS = operatorUserIds();
 
 export function isOperator(req: Request): boolean {
   return !!req.auth &&
     "user_id" in req.auth &&
-    req.auth.user_id === PLATFORM_OPERATOR_USER_ID &&
+    OPERATOR_USER_IDS.has(req.auth.user_id) &&
     req.profile?.user_id === req.auth.user_id &&
     req.profile?.role === "admin";
 }

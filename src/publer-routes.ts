@@ -10,6 +10,7 @@ import {
   reconcileSlotAccounts,
 } from "./publer-schedule.js";
 import { chooseTimelineLog } from "./publer-safety.js";
+import { paged } from "./reporting.js";
 import { listAccounts, postInsights } from "./publer.js";
 
 const VALID_SLOTS = {has:(value:string)=>["phone_a","phone_b","tiktok_tradvio"].includes(value)||/^library_[a-f0-9]{24}$/.test(value)};
@@ -184,13 +185,13 @@ export function registerPublerRoutes(app: Express, sb: () => SupabaseClient) {
       const dataSource = "publer_analytics";
 
       {
-        const { data: snapsRaw } = await sb()
+        // Paged: a single account has about 10,000 captures a week; PostgREST stops at 1,000 per request.
+        const snaps = await paged((a, b) => sb()
           .from("publer_analytics")
           .select("*")
           .eq("phone_slot", phone)
           .gte("captured_at", since)
-          .order("captured_at", { ascending: false });
-        const snaps = snapsRaw ?? [];
+          .order("captured_at", { ascending: false }).order("id", { ascending: false }).range(a, b));
         const latestByPost = new Map<string, any>();
         for (const s of snaps) {
           if (!latestByPost.has(s.publer_post_id)) latestByPost.set(s.publer_post_id, s);

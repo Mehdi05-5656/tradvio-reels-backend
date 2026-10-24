@@ -6,11 +6,15 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
-import { registerReportingRoutes, shiftDay, publerThumbnail } from "./reporting.js";
+import { registerReportingRoutes, shiftDay, publerThumbnail, paged } from "./reporting.js";
+import { sumLatest, effectiveStaleMinutes, interactions, engagementRatePct, fetchWindowSnapshots, type SnapshotRow } from "./analytics-util.js";
 
 type SbGetter = () => SupabaseClient;
 
-const VALID_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
+// Legacy device slots plus the full-library accounts (library_<24 hex>) added in October.
+const LEGACY_SLOTS = new Set(["phone_a", "phone_b", "tiktok_tradvio"]);
+export const isValidSlot = (slot: unknown): slot is string =>
+  typeof slot === "string" && (LEGACY_SLOTS.has(slot) || /^library_[a-f0-9]{24}$/.test(slot));
 
 // Load slots the current requester is allowed to see. Admin -> all, user -> owned,
 // unauth -> empty. All slot-scoped read routes should filter through this.
@@ -18,6 +22,14 @@ async function visibleSlots(req: Request, sb: SupabaseClient) {
   const slots = await loadSlots(sb);
   return { all: slots, visible: filterVisibleSlots(req, slots) };
 }
+
+// One row per (account, post) for a time window, through the indexed database function the report
+// endpoint already uses. Replaces whole-table reads of publer_analytics, which PostgREST silently
+// cut at 1,000 rows (a 7-day window is about 74,000 rows). Rows carry video_views, reach, likes,
+// comments, shares, saves and a compact raw {post_link, scheduled_at, published_at, text}.
+const windowSnapshots = (sb: SupabaseClient, slots: string[], startISO: string, endISO: string): Promise<SnapshotRow[]> =>
+  fetchWindowSnapshots((args) => sb.rpc("dashboard_report_snapshots", args), slots, startISO, endISO);
+const rangeErrorStatus = (e: any) => (/report_too_large|invalid_report_range/.test(String(e?.message)) ? 400 : 500);
 
 export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
   harvestCaptions?: typeof import("./publer-schedule.js").harvestCaptions;
@@ -50,12 +62,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
             .gte("attempted_at", sevenAgoIso)
             .order("attempted_at", { ascending: false }),
         ),
-        scoped(
-          sb
-            .from("publer_analytics")
-            .select("phone_slot,captured_at,video_views,reach,engagement,publer_post_id")
-            .gte("captured_at", sevenAgoIso),
-        ),
+        windowSnapshots(sb, visibleIds, sevenAgoIso, new Date().toISOString()),
       ]);
       if (devicesRes.error) throw devicesRes.error;
 
@@ -68,21 +75,15 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
         logsBySlot.set(row.phone_slot, arr);
       });
 
-      // For each (phone_slot, post) keep the latest snapshot to avoid double-counting.
-      // publer_analytics rows are per-capture; the last capture per post is the current metric.
-      const latestByPost = new Map<string, any>();
-      (analyticsRes.data ?? []).forEach((row: any) => {
-        const key = `${row.phone_slot}::${row.publer_post_id ?? row.captured_at}`;
-        const prev = latestByPost.get(key);
-        if (!prev || new Date(row.captured_at) > new Date(prev.captured_at)) latestByPost.set(key, row);
-      });
+      // One newest capture per (account, post) in the last 7 days; engagement is the interaction
+      // count (likes + comments + shares + saves) because Publer's engagement column is always empty.
       const analyticsBySlot = new Map<string, { views: number; reach: number; engagement: number }>();
-      for (const row of latestByPost.values()) {
-        const cur = analyticsBySlot.get(row.phone_slot) ?? { views: 0, reach: 0, engagement: 0 };
+      for (const row of analyticsRes) {
+        const cur = analyticsBySlot.get(row.phone_slot!) ?? { views: 0, reach: 0, engagement: 0 };
         cur.views += Number(row.video_views ?? 0);
         cur.reach += Number(row.reach ?? 0);
-        cur.engagement += Number(row.engagement ?? 0);
-        analyticsBySlot.set(row.phone_slot, cur);
+        cur.engagement += interactions(row);
+        analyticsBySlot.set(row.phone_slot!, cur);
       }
 
       const devices = visible.map((publishSlot: any) => {
@@ -276,19 +277,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
               .select("status,attempted_at,phone_slot")
               .gte("attempted_at", sevenDaysAgo),
           ),
-          scoped(
-            sb
-              .from("publer_analytics")
-              .select("phone_slot,captured_at,video_views,reach,engagement,likes,comments,shares")
-              .gte("captured_at", sevenDaysAgo),
-          ),
-          scoped(
-            sb
-              .from("publer_analytics")
-              .select("phone_slot,captured_at,video_views,reach,engagement")
-              .gte("captured_at", fourteenDaysAgo)
-              .lt("captured_at", sevenDaysAgo),
-          ),
+          windowSnapshots(sb, visibleIds, sevenDaysAgo, now.toISOString()),
+          windowSnapshots(sb, visibleIds, fourteenDaysAgo, sevenDaysAgo),
           scoped(sb.from("reels_devices").select("phone_slot,display_name,paused").eq("active", true)),
         ]);
 
@@ -306,17 +296,15 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       const publishFailed = publishLogs.filter((l: any) => l.status === "failed").length;
       const publishSuccessRate = publishTotal === 0 ? null : 1 - publishFailed / publishTotal;
 
-      // Reach in last 7d vs prior 7d
-      const sum = (rows: any[], k: string) =>
-        rows.reduce((a, r) => a + Number(r[k] ?? 0), 0);
-      const cur7 = analytics7Res.data ?? [];
-      const prev7 = analytics14Res.data ?? [];
-      const reach7 = sum(cur7, "reach");
-      const reachPrev7 = sum(prev7, "reach");
-      const views7 = sum(cur7, "video_views");
-      const viewsPrev7 = sum(prev7, "video_views");
-      const eng7 = sum(cur7, "engagement");
-      const engPrev7 = sum(prev7, "engagement");
+      // Last 7 days vs the 7 before: one newest capture per post per window, never every capture.
+      const cur7 = analytics7Res;
+      const prev7 = analytics14Res;
+      const reach7 = sumLatest(cur7, "reach");
+      const reachPrev7 = sumLatest(prev7, "reach");
+      const views7 = sumLatest(cur7, "video_views");
+      const viewsPrev7 = sumLatest(prev7, "video_views");
+      const eng7 = cur7.reduce((a, r) => a + interactions(r), 0);
+      const engPrev7 = prev7.reduce((a, r) => a + interactions(r), 0);
 
       const pctChange = (cur: number, prev: number) =>
         prev === 0 ? null : ((cur - prev) / prev) * 100;
@@ -385,7 +373,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
   app.get("/api/v2/analytics/:phone", async (req: Request, res: Response) => {
     try {
       const phone = req.params.phone;
-      if (!VALID_SLOTS.has(phone)) {
+      if (!isValidSlot(phone)) {
         return res.status(400).json({ error: "invalid phone slot" });
       }
 
@@ -399,7 +387,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       let phones: string[];
       if (phonesQuery) {
         const requested = phonesQuery.split(",").map((s) => s.trim()).filter(Boolean);
-        const invalid = requested.filter((p) => !VALID_SLOTS.has(p));
+        const invalid = requested.filter((p) => !isValidSlot(p));
         if (invalid.length) {
           return res.status(400).json({ error: `invalid phone slot: ${invalid.join(",")}` });
         }
@@ -475,27 +463,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       // Unified path: both IG and TikTok read from publer_analytics.
       dataSource = "publer_analytics";
       {
-        let q = sb
-          .from("publer_analytics")
-          .select("*")
-          .in("phone_slot", phones)
-          .gte("captured_at", sinceISO);
-        if (untilISO) q = q.lt("captured_at", untilISO);
-        const { data: rows, error } = await q.order("captured_at", {
-          ascending: false,
-        });
-        if (error) throw error;
-        // Latest snapshot per (slot, post) — same post_id across slots would be
-        // treated as one row otherwise, so key includes the slot.
-        const latestByPost = new Map<string, any>();
-        for (const r of rows ?? []) {
-          const key = `${r.phone_slot}::${r.publer_post_id}`;
-          const cur = latestByPost.get(key);
-          if (!cur || new Date(r.captured_at) > new Date(cur.captured_at)) {
-            latestByPost.set(key, r);
-          }
-        }
-        posts = Array.from(latestByPost.values()).map((r: any) => {
+        const rows = await windowSnapshots(sb, phones, sinceISO, untilISO ?? new Date().toISOString());
+        posts = rows.map((r: any) => {
           const posted = r?.raw?.scheduled_at || r.captured_at;
           return {
             post_id: r.publer_post_id,
@@ -508,10 +477,11 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
             comments: Number(r.comments ?? 0),
             shares: Number(r.shares ?? 0),
             saves: Number(r.saves ?? 0),
-            engagement: Number(r.engagement ?? 0),
-            engagement_rate: Number(r.engagement_rate ?? 0),
-            thumbnail_url: r?.raw?.thumbnail ?? null,
-            caption: r?.raw?.caption ?? null,
+            engagement: interactions(r),
+            engagement_rate: engagementRatePct(r),
+            // Compact window rows carry no media; /api/v2/post/:link and /api/v2/report serve thumbnails.
+            thumbnail_url: null,
+            caption: r?.raw?.text ?? null,
             phone_slot: r.phone_slot,
           };
         });
@@ -635,7 +605,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
         })),
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(rangeErrorStatus(e)).json({ error: e.message });
     }
   });
 
@@ -753,28 +723,31 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       // Exclusive end: the Pacific midnight after "to".
       const toISO = ptDateTimeToUtc(shiftDay(to, 1), "00:00").toISOString();
 
-      // Get all publish log entries in range that succeeded
-      let logsQ = sb
-        .from("publer_publish_log")
-        .select("id, phone_slot, planned_at, attempted_at, publer_post_id, publer_post_link, status, caption_used, hashtags_used")
-        .gte("attempted_at", fromISO)
-        .lt("attempted_at", toISO)
-        .order("attempted_at", { ascending: false });
-      if (!admin) logsQ = logsQ.in("phone_slot", visibleIds);
-      const { data: logs, error: logsErr } = await logsQ;
-      if (logsErr) throw logsErr;
+      // All publish log entries in range, paged (a 30-day range is several thousand rows).
+      // A fresh builder per page: supabase-js builders are mutable, so reusing one would stack filters.
+      const logsQuery = () => {
+        const q = sb
+          .from("publer_publish_log")
+          .select("id, phone_slot, planned_at, attempted_at, publer_post_id, publer_post_link, status, caption_used, hashtags_used")
+          .gte("attempted_at", fromISO)
+          .lt("attempted_at", toISO)
+          .order("attempted_at", { ascending: false })
+          .order("id", { ascending: false });
+        return admin ? q : q.in("phone_slot", visibleIds);
+      };
+      const logs = await paged((a, b) => logsQuery().range(a, b));
 
       // Bulk-fetch analytics for these posts
       const postIds = (logs ?? []).map((l: any) => l.publer_post_link).filter(Boolean);
       let latestByPost: Record<string, any> = {};
       let historyByPost: Record<string, any[]> = {};
       if (postIds.length) {
-        const { data: snaps } = await sbFn()
+        const snaps = await paged((a, b) => sbFn()
           .from("publer_analytics")
           .select("publer_post_id, captured_at, reach, engagement, engagement_rate, likes, comments, shares, saves, video_views, link_clicks, post_clicks, click_through_rate, reach_rate, raw")
           .in("publer_post_id", postIds)
-          .order("captured_at", { ascending: true });
-        for (const s of snaps ?? []) {
+          .order("captured_at", { ascending: true }).order("id").range(a, b));
+        for (const s of snaps) {
           historyByPost[s.publer_post_id] = historyByPost[s.publer_post_id] || [];
           historyByPost[s.publer_post_id].push(s);
           latestByPost[s.publer_post_id] = s; // last wins due to asc order
@@ -872,12 +845,11 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       // Resolve the internal id used by publer_analytics
       const internalId = log?.publer_post_id ?? paramValue;
 
-      const { data: snaps, error } = await sbFn()
+      const snaps = await paged((a, b) => sbFn()
         .from("publer_analytics")
         .select("*")
         .eq("publer_post_id", internalId)
-        .order("captured_at", { ascending: true });
-      if (error) throw error;
+        .order("captured_at", { ascending: true }).order("id").range(a, b));
 
       // If we have neither snapshots nor a log record, this post is unknown
       if ((!snaps || !snaps.length) && !log) {
@@ -956,28 +928,12 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       const from = String(req.query.from ?? MIN_DATE);
       const fromISO = ptDateTimeToUtc(from < MIN_DATE ? MIN_DATE : from, "00:00").toISOString();
 
-      // Get latest snapshot per post so we don't double-count
-      let q = sb
-        .from("publer_analytics")
-        .select("publer_post_id, phone_slot, video_views, reach, likes, engagement_rate, captured_at, raw")
-        .gte("captured_at", fromISO);
-      if (phoneFilter) q = q.eq("phone_slot", phoneFilter);
-      else if (!admin) q = q.in("phone_slot", visibleIds);
-      const { data: snaps, error } = await q;
-      if (error) throw error;
-
-      // Reduce to latest per publer_post_id
-      const latestByPost: Record<string, any> = {};
-      for (const s of snaps ?? []) {
-        const prev = latestByPost[s.publer_post_id];
-        if (!prev || new Date(s.captured_at) > new Date(prev.captured_at)) {
-          latestByPost[s.publer_post_id] = s;
-        }
-      }
+      // Newest capture per post in the window: one row per post, never every hourly capture.
+      const latestByPost = await windowSnapshots(sb, phoneFilter ? [phoneFilter] : visibleIds, fromISO, new Date().toISOString());
 
       // Extract hashtags per post and aggregate
       const tagStats: Record<string, { count: number; total_views: number; total_reach: number; total_likes: number; er_sum: number; er_n: number; posts: string[] }> = {};
-      for (const s of Object.values(latestByPost)) {
+      for (const s of latestByPost) {
         const text = s.raw?.text ?? "";
         const tags = extractHashtags(text);
         for (const tag of tags) {
@@ -986,7 +942,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
           tagStats[tag].total_views += Number(s.video_views ?? 0);
           tagStats[tag].total_reach += Number(s.reach ?? 0);
           tagStats[tag].total_likes += Number(s.likes ?? 0);
-          const er = Number(s.engagement_rate ?? 0);
+          const er = engagementRatePct(s);
           if (er > 0) { tagStats[tag].er_sum += er; tagStats[tag].er_n++; }
           if (tagStats[tag].posts.length < 5) tagStats[tag].posts.push(s.publer_post_id);
         }
@@ -1006,7 +962,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
 
       res.json({ from, total_hashtags: items.length, items });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(rangeErrorStatus(e)).json({ error: e.message });
     }
   });
 
@@ -1035,7 +991,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       // Do not require or distribute the legacy machine secret to a browser.
       if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
       const phone = req.params.phone;
-      if (!VALID_SLOTS.has(phone)) return res.status(400).json({ error: "invalid_slot" });
+      if (!isValidSlot(phone)) return res.status(400).json({ error: "invalid_slot" });
       const body = req.body ?? {};
       const patch: any = { updated_at: new Date().toISOString() };
       if (Array.isArray(body.caption_hooks)) patch.caption_hooks = body.caption_hooks;
@@ -1062,7 +1018,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
     try {
       if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
       const phone = req.params.phone;
-      if (!VALID_SLOTS.has(phone)) return res.status(400).json({ error: "invalid_slot" });
+      if (!isValidSlot(phone)) return res.status(400).json({ error: "invalid_slot" });
       const harvestCaptions = options.harvestCaptions ??
         (await import("./publer-schedule.js")).harvestCaptions;
       const result = await harvestCaptions(sbFn(), phone);
@@ -1402,11 +1358,11 @@ export async function evaluateAlerts(sb: SupabaseClient): Promise<any> {
     const twoHoursAgo = new Date(now - 2 * 3600_000).toISOString();
     const twentyFourHoursAgo = new Date(now - 24 * 3600_000).toISOString();
 
-    const { data: recent } = await sb
+    const recent = await paged((a, b) => sb
       .from("publer_analytics")
       .select("publer_post_id,phone_slot,captured_at,video_views,reach")
       .gte("captured_at", twentyFourHoursAgo)
-      .order("captured_at", { ascending: false });
+      .order("captured_at", { ascending: false }).order("id", { ascending: false }).range(a, b));
 
     if (recent) {
       // Group by post; find latest and 1-hour-prior snapshot
@@ -1481,11 +1437,12 @@ export async function evaluateAlerts(sb: SupabaseClient): Promise<any> {
     const minMedianViews = Number(cfg.min_median_views ?? 10);
 
     for (const d of devices) {
-      const { data: recent } = await sb
+      const recent = await paged((a, b) => sb
         .from("publer_analytics")
         .select("publer_post_id,captured_at,video_views,raw")
         .eq("phone_slot", d.phone_slot)
-        .gte("captured_at", new Date(Date.now() - 7 * 86400_000).toISOString());
+        .gte("captured_at", new Date(Date.now() - 7 * 86400_000).toISOString())
+        .order("id").range(a, b));
 
       if (!recent || recent.length === 0) continue;
 
@@ -1547,7 +1504,7 @@ export async function evaluateAlerts(sb: SupabaseClient): Promise<any> {
   // ---- 3. System health: cron staleness ----
   const cronRule = ruleByType.get("cron_health");
   if (cronRule) {
-    const maxMinutes = Number(cronRule.config.max_minutes_stale ?? 30);
+    const maxMinutes = effectiveStaleMinutes(cronRule.config.max_minutes_stale);
 
     const { data: latestAnalytics } = await sb
       .from("publer_analytics")
@@ -1651,11 +1608,12 @@ export async function evaluateAlerts(sb: SupabaseClient): Promise<any> {
           .limit(1);
         if (existing && existing.length > 0) continue;
 
-        const { data: todayPosts } = await sb
+        const todayPosts = await paged((a, b) => sb
           .from("publer_analytics")
           .select("publer_post_id,video_views,engagement_rate,raw")
           .eq("phone_slot", d.phone_slot)
-          .gte("captured_at", new Date(Date.now() - 30 * 3600_000).toISOString());
+          .gte("captured_at", new Date(Date.now() - 30 * 3600_000).toISOString())
+          .order("id").range(a, b));
         if (!todayPosts || todayPosts.length === 0) continue;
 
         const byPost = new Map<string, any>();

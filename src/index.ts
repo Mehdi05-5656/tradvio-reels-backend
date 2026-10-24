@@ -1,6 +1,6 @@
 // Render entry point: full Express app with routes + Publer routes.
 // Runs as a normal always-on Node server (no serverless cold-start concerns).
-import express, { type Request, type Response } from "express";
+import express from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes.js";
 import { registerV2Routes } from "./v2-routes.js";
@@ -18,30 +18,15 @@ import { startManagedProvisioningWorker } from "./managed-provisioning.js";
 import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { configurePublerRate } from "./publer-rate.js";
+import { corsMiddleware } from "./cors.js";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
-
-function cors(req: Request, res: Response, next: (err?: any) => void) {
-  const origin = req.header("origin") || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "content-type,x-app-secret,authorization,x-creatorvault-signature",
-  );
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-  next();
-}
 
 async function main() {
   const app = express();
   app.disable("x-powered-by");
-  app.use(cors);
+  // Browser origins are allowlisted (src/cors.ts); curl/cron callers never send Origin and are unaffected.
+  app.use(corsMiddleware());
   // Capture raw body for HMAC verification (needed by the CreatorVault webhook).
   // Attaching a verify fn to express.json makes rawBody available on req without
   // installing a separate body-consuming middleware, which would hang after json parsed.
