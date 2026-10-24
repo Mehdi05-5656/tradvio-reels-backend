@@ -12,6 +12,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { supabase } from "./supabase.js";
+import { loadOrgSlots } from "./org-visibility.js";
 
 // --- Types shared with route handlers -----------------------------------------
 export type AuthCtx =
@@ -32,6 +33,8 @@ declare module "express-serve-static-core" {
   interface Request {
     auth?: AuthCtx;
     profile?: ProfileCtx;
+    /** Accounts visible through client organizations (read-only). Admins see everything and skip this. */
+    orgSlots?: Set<string>;
   }
 }
 
@@ -87,6 +90,7 @@ export async function resolveAuth(req: Request, _res: Response, next: NextFuncti
       } catch {
         // fall through with req.profile = null
       }
+      if (req.profile && req.profile.role !== "admin") req.orgSlots = await loadOrgSlots(supabase(), claims.sub);
       return next();
     }
   }
@@ -139,19 +143,21 @@ export function resolveExternalUserId(req: Request, requested: string | null): s
  * Filter a list of slots to those the current requester is allowed to see.
  *
  *  - Admin (x-app-secret OR profile.role='admin'): sees ALL slots.
- *  - Authenticated user: sees only slots whose owner_user_id matches req.auth.user_id.
+ *  - Authenticated user: sees slots whose owner_user_id matches req.auth.user_id, plus slots
+ *    granted through a client organization they belong to (req.orgSlots).
  *  - Unauthenticated: sees NONE. This is a deliberate break from the legacy public-GET
  *    behavior. Slot data is user-scoped; the only unauthenticated caller left is the
  *    background cron, which uses the x-app-secret admin path.
  */
-export function filterVisibleSlots<T extends { owner_user_id: string | null }>(
+export function filterVisibleSlots<T extends { owner_user_id: string | null; phone_slot?: string }>(
   req: Request,
   slots: T[],
 ): T[] {
   if (isAdmin(req)) return slots;
   if (req.auth && "user_id" in req.auth) {
     const uid = req.auth.user_id;
-    return slots.filter((s) => s.owner_user_id === uid);
+    const granted = req.orgSlots;
+    return slots.filter((s) => s.owner_user_id === uid || (!!s.phone_slot && !!granted?.has(s.phone_slot)));
   }
   return [];
 }

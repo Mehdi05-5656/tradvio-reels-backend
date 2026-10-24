@@ -10,6 +10,9 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (!path.startsWith("/api/") || req.method === "OPTIONS") return next();
     if (path === "/api/bootstrap" && ["GET", "HEAD"].includes(req.method)) return next();
     if (path === "/api/creatorvault/webhook" && req.method === "POST") return next();
+    // Invite preview: the single-use token in the path is the credential; the handler reveals only the
+    // organization name and whether the link is still valid.
+    if (/^\/api\/invites\/[^/]+$/.test(path) && ["GET", "HEAD"].includes(req.method)) return next();
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
     const read = ["GET", "HEAD"].includes(req.method);
     // All application mutations require the selected human operator. An admin
@@ -18,6 +21,9 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     // require a separate, narrowly scoped design, not an implicit exception here.
     if (!read) {
       if (isOperator(req)) return next();
+      // The one client-side write: joining an organization with an invite link. The handler binds the
+      // membership to the signed-in user and the database function checks the token.
+      if (/^\/api\/invites\/[^/]+\/accept$/.test(path) && "user_id" in req.auth) return next();
       return res.status(403).json({ error: "operator_required" });
     }
     if (isAdmin(req)) return next();
@@ -45,7 +51,7 @@ export function accountAccess(sbFn: () => SupabaseClient) {
       if (slot) {
         const r = await sbFn().from("publer_slot_config").select("owner_user_id").eq("phone_slot", slot).maybeSingle();
         if (r.error) throw r.error;
-        if (r.data?.owner_user_id === req.auth.user_id) return next();
+        if (r.data?.owner_user_id === req.auth.user_id || req.orgSlots?.has(slot)) return next();
       }
       return res.status(403).json({ error: "forbidden" });
     } catch {

@@ -10,6 +10,7 @@ import { registerOnboardingRoutes } from "./onboarding-routes.js";
 import { registerAccountInventory } from "./account-inventory.js";
 import { registerAccountHistory } from "./account-history.js";
 import { registerOpsPipeline } from "./ops-pipeline.js";
+import { registerClientOrgRoutes } from "./client-orgs.js";
 import { registerLibraryImport } from "./library-import.js";
 import { registerManagedRoutes } from "./managed-routes.js";
 import { registerGenerationRoutes } from "./generation-routes.js";
@@ -61,6 +62,7 @@ async function main() {
   registerAccountInventory(app, getSb);
   registerAccountHistory(app, getSb);
   registerOpsPipeline(app, getSb);
+  registerClientOrgRoutes(app, getSb);
   registerManagedRoutes(app, getSb);
   registerGenerationRoutes(app, getSb);
   registerHandoffRoutes(app, getSb);
