@@ -23,6 +23,13 @@ export async function paged(fetchPage:(a:number,b:number)=>PromiseLike<any>,size
 }
 const num=(v:any)=>v===null||v===undefined||v===""?null:Number.isFinite(Number(v))?Number(v):null;
 const safeLink=(v:any)=>typeof v==="string"&&/^https:\/\/(www\.)?(instagram\.com|tiktok\.com)\//.test(v)?v:null;
+// Publer stores a poster frame per post; only the small variant is publicly readable.
+export function publerThumbnail(raw:any):string|null{
+  const media=raw?.media?.[0];if(!media)return null;
+  const idx=Number.isInteger(media.default_thumbnail)?media.default_thumbnail:0;
+  const url=media.thumbnails?.[idx]?.small??media.thumbnails?.[0]?.small;
+  return typeof url==="string"&&/^https:\/\/cdn\.publer\.com\//.test(url)?url:null;
+}
 const metrics=["video_views","reach","likes","comments","shares","saves"] as const;
 const sumKnown=(rows:any[],key:string)=>{const values=rows.map(r=>num(r[key])).filter(v=>v!==null) as number[];return values.length?values.reduce((a,b)=>a+b,0):null;};
 const identity=(r:any)=>`${r.phone_slot}|${r.publer_post_id}`;
@@ -116,13 +123,14 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
     return {values,captured_at:primary.captured_at,live_captured_at:L?.captured_at??null,publer_captured_at:P?.captured_at??null,
       metrics_source:primary===L?(filled?"live+publer":"live"):(filled?"publer+live":"publer"),
       link:safeLink(L?.post_link)??safeLink(P?.raw?.post_link)??safeLink(P?.publer_post_id),
+      thumbnail:publerThumbnail(P?.raw),
       caption:P?.raw?.text??P?.raw?.caption??L?.caption??null,
       at:P?.raw?.scheduled_at??P?.raw?.published_at??L?.posted_at??null};
   };
   const lookup=(l:any)=>alias.get(`${l.phone_slot}|${l.publer_post_link}`)??alias.get(`${l.phone_slot}|${platformKey(l.publer_post_link)}`)??alias.get(`${l.phone_slot}|${l.publer_post_id}`)??null;
   const liveBySlot=new Map(liveAccounts.map(a=>[a.phone_slot,a]));
   const posts:any[]=[],postKeys=new Set<string>(),matched=new Set<string>();
-  const empty={values:Object.fromEntries(metrics.map(k=>[k,null])),captured_at:null,live_captured_at:null,publer_captured_at:null,metrics_source:null,link:null,caption:null,at:null};
+  const empty={values:Object.fromEntries(metrics.map(k=>[k,null])),captured_at:null,live_captured_at:null,publer_captured_at:null,metrics_source:null,link:null,thumbnail:null,caption:null,at:null};
   for(const l of logs.filter(l=>l.status==="published")){
     const key=`${l.phone_slot}|${l.publer_post_id??l.publer_post_link??l.queue_id??`${l.slot_local_date}:${l.slot_index}`}`;
     if(postKeys.has(key))continue;postKeys.add(key);
@@ -134,7 +142,7 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
     const visibility=m.live_captured_at?"public":acct?.last_pulled_at&&String(acct.last_status??"").startsWith("ok")&&
       Date.parse(acct.last_pulled_at)-Date.parse(publishedAt)>=3600_000?"not_found_publicly":null;
     posts.push({id:key,phone_slot:l.phone_slot,post_link:safeLink(l.publer_post_link)??m.link,
-      published_at:publishedAt,caption:l.caption_used??m.caption,
+      published_at:publishedAt,caption:l.caption_used??m.caption,thumbnail:m.thumbnail,
       status:"published",recorded_by:"publisher",captured_at:m.captured_at,live_captured_at:m.live_captured_at,
       publer_captured_at:m.publer_captured_at,metrics_source:m.metrics_source,public_visibility:visibility,...m.values});
   }
@@ -142,7 +150,7 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
     if(matched.has(key))continue;
     const m=merged(key)!,phone_slot=(latestPub.get(key)??latestLive.get(key)).phone_slot;
     if(!m.at||Date.parse(m.at)<Date.parse(range.start)||Date.parse(m.at)>=Date.parse(range.end))continue;
-    posts.push({id:key,phone_slot,post_link:m.link,published_at:new Date(m.at).toISOString(),caption:m.caption,
+    posts.push({id:key,phone_slot,post_link:m.link,published_at:new Date(m.at).toISOString(),caption:m.caption,thumbnail:m.thumbnail,
       status:"provider_analytics",recorded_by:"analytics",captured_at:m.captured_at,live_captured_at:m.live_captured_at,
       publer_captured_at:m.publer_captured_at,metrics_source:m.metrics_source,public_visibility:m.live_captured_at?"public":null,...m.values});
   }

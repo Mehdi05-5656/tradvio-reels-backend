@@ -6,7 +6,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
-import { registerReportingRoutes, shiftDay } from "./reporting.js";
+import { registerReportingRoutes, shiftDay, publerThumbnail } from "./reporting.js";
 
 type SbGetter = () => SupabaseClient;
 
@@ -801,7 +801,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
           caption: captionSource,
           hashtags: l.hashtags_used ?? extractHashtags(captionSource || ""),
           source_handle: raw?.notes ? extractHandle(raw.notes) : null,
-          thumbnail: raw?.media?.[0]?.thumbnails?.[0]?.real ?? raw?.medias?.[0]?.thumbnail ?? null,
+          thumbnail: publerThumbnail(raw) ?? raw?.medias?.[0]?.thumbnail ?? null,
           metrics: latest ? {
             video_views: latest.video_views,
             reach: latest.reach,

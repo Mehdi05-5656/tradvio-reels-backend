@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReport, resolveRange, paged } from "../src/reporting.js";
+import { buildReport, resolveRange, paged, publerThumbnail } from "../src/reporting.js";
 
 const slot=(id="a")=>({phone_slot:id,handle:`handle_${id}`,provider:"instagram",paused:false,daily_target:8,owner_user_id:"owner"});
 const log=(id:number,status="published",extra:any={})=>({id,phone_slot:"a",status,slot_local_date:"2026-10-11",slot_index:0,attempted_at:"2026-10-11T15:00:00Z",planned_at:"2026-10-11T15:00:00Z",publer_post_id:"post1",...extra});
@@ -130,4 +130,15 @@ test("a post published in range is seeded once, by the source used on its first 
   const two=resolveRange({from:"2026-10-11",to:"2026-10-12"},new Date("2026-10-12T23:00:00Z"));
   const split=buildReport([slot()],[],[pub(1,"2026-10-11T17:00:00Z",100),pub(2,"2026-10-12T17:00:00Z",160)],two,[liveAt(1,"2026-10-12T18:00:00Z",170),liveAt(2,"2026-10-12T21:00:00Z",200)]);
   assert.deepEqual(split.series.map(d=>d.observed_views),[100,30]);
+});
+
+test("posts carry Publer's public thumbnail, never the private one or a foreign host",()=>{
+  const media=[{default_thumbnail:1,thumbnails:[{real:"https://cdn.publer.com/uploads/photos/a.jpg",small:"https://cdn.publer.com/uploads/photos/thumb_a.jpg"},{real:"https://cdn.publer.com/uploads/photos/b.jpg",small:"https://cdn.publer.com/uploads/photos/thumb_b.jpg"}]}];
+  assert.equal(publerThumbnail({media}),"https://cdn.publer.com/uploads/photos/thumb_b.jpg");
+  assert.equal(publerThumbnail({media:[{thumbnails:[{small:"https://evil.example/x.jpg"}]}]}),null);
+  assert.equal(publerThumbnail({}),null);
+  const r:any=buildReport([slot()],[log(1)],[snap(1,"2026-10-11T17:00:00Z",40,{raw:{scheduled_at:"2026-10-11T15:00:00Z",media}})],range);
+  assert.equal(r.posts[0].thumbnail,"https://cdn.publer.com/uploads/photos/thumb_b.jpg");
+  const none:any=buildReport([slot()],[log(1)],[],range);
+  assert.equal(none.posts[0].thumbnail,null);
 });
