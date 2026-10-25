@@ -36,6 +36,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     // Exempt paths that carry their own auth (e.g. HMAC-signed webhooks).
     // Route handler MUST verify its own auth before doing anything sensitive.
     if (req.path === "/api/creatorvault/webhook") return next();
+    if (req.path === "/api/public/invite-requests") return next(); // validated and rate-limited in public-routes.ts
     return requireWriteAuth(req, res, next);
   });
 
