@@ -10,7 +10,7 @@ const base = (): RawCounts => ({
   sources: 877, variants: { rendered_private: 12962, running: 4, pending: 189 }, queue: { "pending|managed-variants": 11636, "posted|managed-variants": 1326, "publer_publishing|reels": 9 },
   logs_today: { published: 72, failed: 1 }, stale_pending: 0, logs_7d_published: 846, logs_total_published: 2149, held_pending: 0, last_attempt_at: "2026-10-24T22:10:00Z",
   analytics_latest: "2026-10-24T22:00:00Z", analytics_snapshots_24h: 4100, analytics_pulls_24h: 140, measured_7d: 790, live_latest: null,
-  live_accounts: { ok: 0, failed: 0, never: 18 }, features_latest: "2026-10-20T20:01:00Z", features_rows: 14742, captions_latest: "2026-09-13T10:53:00Z", captions: { slots: 3, pending: 895, backlog: 0 },
+  live_accounts: { ok: 0, failed: 0, never: 18 }, features_latest: "2026-10-20T20:01:00Z", features_rows: 14742, captions_latest: "2026-09-13T10:53:00Z", captions: { slots: 3, pending: 895, backlog: 0 }, leader_latest: "2026-10-24T10:00:00Z", render_latest: "2026-10-24T10:00:00Z",
   library_control: { enabled: true, max_active: 4, max_daily_claims: 15000 }, upload: { phase: "idle", updated_at: "2026-10-24T21:15:00Z", expires_at: null },
   rate: { blocked_until: null, last_block_reason: null }, slots: { total: 18, enabled: 18, paused: 0 },
 });

@@ -10,6 +10,7 @@ import { registerOnboardingRoutes } from "./onboarding-routes.js";
 import { registerAccountInventory } from "./account-inventory.js";
 import { registerAccountHistory } from "./account-history.js";
 import { registerOpsPipeline } from "./ops-pipeline.js";
+import { registerOpsActions } from "./ops-actions.js";
 import { registerClientOrgRoutes } from "./client-orgs.js";
 import { registerPublicRoutes, registerInviteRequestInbox } from "./public-routes.js";
 import { registerLibraryImport } from "./library-import.js";
@@ -66,6 +67,7 @@ async function main() {
   registerAccountInventory(app, getSb);
   registerAccountHistory(app, getSb);
   registerOpsPipeline(app, getSb);
+  registerOpsActions(app, getSb);
   registerClientOrgRoutes(app, getSb);
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
