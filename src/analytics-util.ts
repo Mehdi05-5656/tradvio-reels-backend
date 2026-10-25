@@ -52,12 +52,14 @@ export function latestInWindow<T extends SnapshotRow>(rows: T[], startISO: strin
 
 export type WindowRpc = (args: { p_slots: string[]; p_start: string; p_end: string }) =>
   PromiseLike<{ data: any; error: { message: string } | null }>;
-const TOO_LARGE = /report_too_large/;
+/** Reasons to split a window query: the function's 50,000-row cap, or the database role's statement timeout (8 s). */
+const SPLITTABLE = /report_too_large|statement timeout/i;
 
 /**
  * One newest in-window capture per (slot, post) through dashboard_report_snapshots. The database
- * function refuses more than 50,000 rows per call; past that we split by account, then by time, and
- * merge, so long ranges over many accounts stay correct instead of failing or being silently cut.
+ * function refuses more than 50,000 rows per call and the role cancels statements after 8 seconds;
+ * on either we split by account, then by time, and merge, so long ranges over many accounts stay
+ * correct instead of failing or being silently cut.
  */
 export async function fetchWindowSnapshots(rpc: WindowRpc, slots: string[], startISO: string, endISO: string, depth = 0): Promise<SnapshotRow[]> {
   const unique = [...new Set(slots.filter(Boolean))];
@@ -65,7 +67,7 @@ export async function fetchWindowSnapshots(rpc: WindowRpc, slots: string[], star
   if (!unique.length || !(end > start)) return [];
   const r = await rpc({ p_slots: unique, p_start: startISO, p_end: endISO });
   if (!r.error) return latestInWindow((r.data ?? []) as SnapshotRow[], startISO);
-  if (!TOO_LARGE.test(r.error.message) || depth >= 8) throw new Error(r.error.message);
+  if (!SPLITTABLE.test(r.error.message) || depth >= 8) throw new Error(r.error.message);
   let parts: Promise<SnapshotRow[]>[];
   if (unique.length > 1) {
     const mid = Math.ceil(unique.length / 2);

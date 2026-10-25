@@ -226,9 +226,11 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:
         for(const [from,to] of ranges){
           const key=`${[...ids].sort().join(",")}|${from}|${to}`,hit=cache.get(key);
           if(hit&&Date.now()-hit.at<hit.ttl-30_000)continue;
-          const range=resolveRange({from,to});
-          const result=await computeReport(sb,slots,ids,range);
-          cache.set(key,{at:Date.now(),ttl:to<today?3600_000:6*60_000,body:result});
+          try{
+            const range=resolveRange({from,to});
+            const result=await computeReport(sb,slots,ids,range);
+            cache.set(key,{at:Date.now(),ttl:to<today?3600_000:6*60_000,body:result});
+          }catch(e:any){console.warn(`[report] warm failed for ${from}..${to}:`,e?.message??e);}
         }
       }catch(e:any){console.warn("[report] warm failed:",e?.message??e);}
     };

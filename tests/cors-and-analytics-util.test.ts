@@ -101,3 +101,18 @@ test("fetchWindowSnapshots splits by account, then by time, when the database fu
   await assert.rejects(fetchWindowSnapshots(async () => ({ data: null, error: { message: "permission denied" } }), ["s1"], new Date(start).toISOString(), new Date(end).toISOString()), /permission denied/);
   assert.deepEqual(await fetchWindowSnapshots(rpc, [], new Date(start).toISOString(), new Date(end).toISOString()), []);
 });
+
+test("fetchWindowSnapshots also splits when the database role cancels a statement after 8 seconds", async () => {
+  const { fetchWindowSnapshots } = await import("../src/analytics-util.js");
+  const DAY = 86400_000, start = Date.parse("2026-10-01T07:00:00Z"), end = start + 4 * DAY;
+  let calls = 0;
+  const rpc = async ({ p_slots, p_start, p_end }: any) => {
+    calls++;
+    // Only single-account, half-range calls are fast enough.
+    if (p_slots.length > 1 || Date.parse(p_end) - Date.parse(p_start) > 2 * DAY) return { data: null, error: { message: "canceling statement due to statement timeout" } };
+    return { data: p_slots.map((s: string) => ({ publer_post_id: `${s}-p`, phone_slot: s, captured_at: p_start, video_views: 1, reach: 1 })), error: null };
+  };
+  const out = await fetchWindowSnapshots(rpc, ["a", "b"], new Date(start).toISOString(), new Date(end).toISOString());
+  assert.equal(out.length, 2);
+  assert.equal(calls > 2, true);
+});
