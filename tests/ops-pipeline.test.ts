@@ -98,7 +98,7 @@ test("caption job is idle, not down, when every pending video already has a sugg
 test("captionBacklog counts pending videos on the worker's accounts that lack a nightly suggestion", async () => {
   const calls: string[] = [];
   const table = (name: string, rows: any[]) => { const q: any = { select() { return q }, eq() { return q }, in(_c: string, v: string[]) { q._in = v; return q }, range() { return Promise.resolve({ data: rows, error: null }) }, then(res: any) { calls.push(name); return Promise.resolve({ data: name === "queue_suggestions" ? rows.filter((r) => (q._in ?? []).includes(r.queue_id)) : rows, error: null }).then(res) } }; return q; };
-  const sb: any = { from(name: string) { return table(name, name === "reels_devices" ? [{ phone_slot: "phone_a" }, { phone_slot: "phone_b" }] : name === "reels_manual_queue" ? [{ id: "q1" }, { id: "q2" }, { id: "q3" }] : [{ queue_id: "q1" }, { queue_id: "q3" }, { queue_id: "other" }]); } };
+  const sb: any = { from(name: string) { return table(name, name === "reels_devices" ? [{ phone_slot: "phone_a" }, { phone_slot: "phone_b" }] : name === "publer_slot_config" ? [{ phone_slot: "phone_a" }, { phone_slot: "library_1" }] : name === "reels_manual_queue" ? [{ id: "q1" }, { id: "q2" }, { id: "q3" }] : [{ queue_id: "q1" }, { queue_id: "q3" }, { queue_id: "other" }]); } };
   const { captionBacklog } = await import("../src/ops-pipeline.js");
-  assert.deepEqual(await captionBacklog(sb), { slots: 2, pending: 3, backlog: 1 });
+  assert.deepEqual(await captionBacklog(sb), { slots: 3, pending: 3, backlog: 1 }, "legacy and library accounts, deduplicated");
 });

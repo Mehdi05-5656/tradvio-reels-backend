@@ -30,7 +30,7 @@ export type RawCounts = {
   features_latest: string | null;
   features_rows: number;
   captions_latest: string | null;
-  captions: { slots: number; pending: number; backlog: number }; // the nightly worker's accounts (reels_devices), their pending videos, and how many still lack a suggestion
+  captions: { slots: number; pending: number; backlog: number }; // every publishing account, its pending videos, and how many still lack a nightly suggestion
   library_control: { enabled: boolean; max_active: number; max_daily_claims: number } | null;
   upload: { phase: string; updated_at: string | null; expires_at: string | null } | null;
   rate: { blocked_until: string | null; last_block_reason: string | null } | null;
@@ -92,11 +92,13 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
   return { generated_at: now.toISOString(), day: ptNow(now).ymd, stages, jobs, accounts: c.slots };
 }
 
-/** The nightly caption worker's view: its accounts (active, unpaused rows of reels_devices), their pending queue videos, and how many of those have no nightly suggestion yet. */
+/** The nightly caption worker's view: every account we publish for (unpaused reels_devices and publer_slot_config rows), their pending queue videos, and how many of those have no nightly suggestion yet. */
 export async function captionBacklog(sb: any): Promise<{ slots: number; pending: number; backlog: number }> {
   const d = await sb.from("reels_devices").select("phone_slot").eq("active", true).eq("paused", false);
   if (d.error) throw d.error;
-  const slots: string[] = (d.data ?? []).map((r: any) => r.phone_slot).filter(Boolean);
+  const l = await sb.from("publer_slot_config").select("phone_slot").eq("paused", false);
+  if (l.error) throw l.error;
+  const slots: string[] = [...new Set([...(d.data ?? []), ...(l.data ?? [])].map((r: any) => r.phone_slot).filter(Boolean))] as string[];
   if (!slots.length) return { slots: 0, pending: 0, backlog: 0 };
   const ids: string[] = [];
   for (let from = 0; ; from += 1000) {
