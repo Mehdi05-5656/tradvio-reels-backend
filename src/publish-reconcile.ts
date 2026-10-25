@@ -40,8 +40,10 @@ export async function expireHeldWindows(sb: SupabaseClient, now = new Date()): P
     try {
       const times = logs.map((l) => Date.parse(l.planned_at));
       const fromISO = new Date(Math.min(...times) - WINDOW_BEFORE_MS).toISOString(), toISO = new Date(Math.max(...times) + WINDOW_AFTER_MS).toISOString();
-      const posts = await sb.from("publer_analytics").select("publer_post_id,raw").eq("phone_slot", slot)
-        .gte("raw->>scheduled_at", fromISO).lte("raw->>scheduled_at", toISO).limit(2000);
+      // A post is captured only after it is scheduled, so captured_at >= fromISO is implied by the scheduled_at
+      // bound; stating it lets the query use the (phone_slot, captured_at) index instead of scanning every row.
+      const posts = await sb.from("publer_analytics").select("publer_post_id,raw").eq("phone_slot", slot).gte("captured_at", fromISO)
+        .gte("raw->>scheduled_at", fromISO).lte("raw->>scheduled_at", toISO).order("captured_at").limit(2000);
       if (posts.error) throw new Error(posts.error.message);
       const seen = new Map<string, Post>();
       for (const a of posts.data ?? []) {

@@ -64,3 +64,11 @@ test("publerThumbnail accepts the compact raw.thumbnail projection and the full 
   assert.equal(publerThumbnail({ media: [{ default_thumbnail: 1, thumbnails: [{ small: "https://cdn.publer.com/a.jpg" }, { small: "https://cdn.publer.com/b.jpg" }] }] }), "https://cdn.publer.com/b.jpg");
   assert.equal(publerThumbnail({ id: "x" }), null);
 });
+
+test("ptMidnightBetween returns a Pacific midnight strictly inside the window", async () => {
+  const { ptMidnightBetween } = await import("../src/reporting.js");
+  const start = Date.parse("2026-09-25T07:00:00Z"), end = Date.parse("2026-10-25T07:00:00Z");
+  const mid = ptMidnightBetween(start, end)!;
+  assert.equal(mid, "2026-10-10T07:00:00.000Z");
+  assert.equal(ptMidnightBetween(Date.parse("2026-10-10T07:00:00Z"), Date.parse("2026-10-11T07:00:00Z")), null);
+});

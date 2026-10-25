@@ -116,3 +116,26 @@ test("fetchWindowSnapshots also splits when the database role cancels a statemen
   assert.equal(out.length, 2);
   assert.equal(calls > 2, true);
 });
+
+test("fetchCompactSnapshots splits by account then at the given boundary and merges rows by id", async () => {
+  const { fetchCompactSnapshots } = await import("../src/analytics-util.js");
+  const DAY = 86400_000, start = Date.parse("2026-10-01T07:00:00Z"), end = start + 4 * DAY;
+  const calls: string[] = [];
+  const rpc = async ({ p_slots, p_start, p_end }: any) => {
+    calls.push(`${p_slots.join("+")} ${p_start.slice(5, 10)}..${p_end.slice(5, 10)}`);
+    if (p_slots.length > 1 || Date.parse(p_end) - Date.parse(p_start) > 2 * DAY) return { data: null, error: { message: "canceling statement due to statement timeout" } };
+    // Each part returns its own rows plus a "baseline" row shared with the neighbouring part (same id).
+    const base = p_slots[0] === "a" ? 100 : 200; // row ids are unique across accounts in the real table
+    const rows = [{ id: base + 1, phone_slot: p_slots[0], publer_post_id: "p", captured_at: "2026-09-30T00:00:00Z" }];
+    for (let t = Date.parse(p_start); t < Date.parse(p_end); t += DAY) rows.push({ id: base + Math.round((t - start) / DAY) + 2, phone_slot: p_slots[0], publer_post_id: "p", captured_at: new Date(t + 3600_000).toISOString() });
+    return { data: rows, error: null };
+  };
+  const splitAt = (a: number, b: number) => new Date(a + Math.floor((b - a) / 2 / DAY) * DAY).toISOString();
+  const out = await fetchCompactSnapshots(rpc, ["a", "b"], new Date(start).toISOString(), new Date(end).toISOString(), splitAt);
+  const a = out.filter((r) => r.phone_slot === "a");
+  assert.equal(a.length, 5); // baseline + 4 days, the shared baseline counted once
+  assert.deepEqual(a.map((r) => r.id), [101, 102, 103, 104, 105]);
+  assert.equal(out.filter((r) => r.phone_slot === "b").length, 5);
+  assert.equal(calls[0], "a+b 10-01..10-05");
+  await assert.rejects(fetchCompactSnapshots(rpc, ["a"], new Date(start).toISOString(), new Date(end).toISOString(), () => null), /statement timeout/);
+});

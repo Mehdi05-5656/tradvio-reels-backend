@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { filterVisibleSlots } from "./auth.js";
 import { loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule.js";
+import { fetchCompactSnapshots } from "./analytics-util.js";
 
 export const MIN_REPORT_DATE="2026-09-05";
 export const shiftDay=(day:string,n:number)=>new Date(Date.parse(day+"T12:00:00Z")+n*86400000).toISOString().slice(0,10);
@@ -224,7 +225,8 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:
       try{
         const sb=sbFn(),slots=await loadSlots(sb);if(!slots.length)return;
         const ids=slots.map((s:any)=>s.phone_slot),today=ptNow().ymd;
-        const ranges=[[today,today],[shiftDay(today,-6),today],[shiftDay(today,-29),today],[shiftDay(today,-13),shiftDay(today,-7)],[shiftDay(today,-59),shiftDay(today,-30)]];
+        const ranges=[[today,today],[shiftDay(today,-6),today],[shiftDay(today,-29),today],[shiftDay(today,-13),shiftDay(today,-7)],[shiftDay(today,-59),shiftDay(today,-30)]]
+          .map(([from,to])=>[from<MIN_REPORT_DATE?MIN_REPORT_DATE:from,to]).filter(([from,to])=>from<=to);
         for(const [from,to] of ranges){
           const key=`${[...ids].sort().join(",")}|${from}|${to}`,hit=cache.get(key);
           if(hit&&Date.now()-hit.at<hit.ttl-30_000)continue;
@@ -240,12 +242,19 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:
     setInterval(warmOnce,4*60_000).unref();
   }
 }
+/** The Pacific midnight nearest the middle of [start,end), as an ISO instant; null when none lies strictly inside. */
+export function ptMidnightBetween(startMs:number,endMs:number):string|null{
+  const day=ptNow(new Date((startMs+endMs)/2)).ymd;
+  for(const d of [day,shiftDay(day,1),shiftDay(day,-1)]){const t=ptDateTimeToUtc(d,"00:00").getTime();if(t>startMs&&t<endMs)return new Date(t).toISOString();}
+  return null;
+}
 async function computeReport(sb:any,slots:any[],ids:string[],range:ReturnType<typeof resolveRange>){
       const logs=await paged((a,b)=>sb.from("publer_publish_log")
         .select("id,phone_slot,queue_id,slot_local_date,slot_index,status,planned_at,attempted_at,updated_at,publer_post_id,publer_post_link,caption_used,error")
         .in("phone_slot",ids).gte("slot_local_date",range.from).lte("slot_local_date",range.to).order("id").range(a,b));
       const [r,lr,la]=await Promise.all([
-        sb.rpc("dashboard_report_snapshots",{p_slots:ids,p_start:range.start,p_end:range.end}),
+        fetchCompactSnapshots((args)=>sb.rpc("dashboard_report_snapshots",args),ids,range.start,range.end,ptMidnightBetween)
+          .then((data)=>({data,error:null as any}),(e:any)=>({data:null,error:e})),
         sb.rpc("dashboard_live_snapshots",{p_slots:ids,p_start:range.start,p_end:range.end}),
         sb.from("live_metric_accounts").select("phone_slot,username,last_pulled_at,last_status").in("phone_slot",ids)]);
       if(r.error)throw r.error;

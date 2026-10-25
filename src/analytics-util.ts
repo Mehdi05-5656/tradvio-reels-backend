@@ -78,3 +78,30 @@ export async function fetchWindowSnapshots(rpc: WindowRpc, slots: string[], star
   }
   return latestPerPost((await Promise.all(parts)).flat());
 }
+
+/**
+ * The compact rows a report needs (baseline before the window, first and last capture per post per Pacific day),
+ * fetched with the same splitting as fetchWindowSnapshots when the function refuses the call. Account splits are
+ * exact; a time split lands on the boundary `splitAt` returns (a Pacific midnight keeps the per-day rows identical
+ * to the unsplit call) and the parts are merged by row id.
+ */
+export async function fetchCompactSnapshots(rpc: WindowRpc, slots: string[], startISO: string, endISO: string, splitAt: (startMs: number, endMs: number) => string | null, depth = 0): Promise<any[]> {
+  const unique = [...new Set(slots.filter(Boolean))];
+  const start = Date.parse(startISO), end = Date.parse(endISO);
+  if (!unique.length || !(end > start)) return [];
+  const r = await rpc({ p_slots: unique, p_start: startISO, p_end: endISO });
+  if (!r.error) return (r.data ?? []) as any[];
+  if (!SPLITTABLE.test(r.error.message) || depth >= 8) throw new Error(r.error.message);
+  let parts: Promise<any[]>[];
+  if (unique.length > 1) {
+    const mid = Math.ceil(unique.length / 2);
+    parts = [unique.slice(0, mid), unique.slice(mid)].map((part) => fetchCompactSnapshots(rpc, part, startISO, endISO, splitAt, depth + 1));
+  } else {
+    const midISO = splitAt(start, end), mid = midISO ? Date.parse(midISO) : NaN;
+    if (!(mid > start && mid < end)) throw new Error(r.error.message);
+    parts = [[startISO, midISO!], [midISO!, endISO]].map(([a, b]) => fetchCompactSnapshots(rpc, unique, a, b, splitAt, depth + 1));
+  }
+  const byId = new Map<string, any>();
+  for (const row of (await Promise.all(parts)).flat()) byId.set(String(row.id ?? `${row.phone_slot}|${row.publer_post_id}|${row.captured_at}`), row);
+  return [...byId.values()].sort((a, b) => Date.parse(a.captured_at) - Date.parse(b.captured_at) || Number(a.id) - Number(b.id));
+}
