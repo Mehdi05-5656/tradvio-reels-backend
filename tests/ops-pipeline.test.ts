@@ -10,7 +10,7 @@ const base = (): RawCounts => ({
   sources: 877, variants: { rendered_private: 12962, running: 4, pending: 189 }, queue: { "pending|managed-variants": 11636, "posted|managed-variants": 1326, "publer_publishing|reels": 9 },
   logs_today: { published: 72, failed: 1 }, stale_pending: 0, logs_7d_published: 846, logs_total_published: 2149, held_pending: 0, last_attempt_at: "2026-10-24T22:10:00Z",
   analytics_latest: "2026-10-24T22:00:00Z", analytics_snapshots_24h: 4100, analytics_pulls_24h: 140, measured_7d: 790, live_latest: null,
-  live_accounts: { ok: 0, failed: 0, never: 18 }, features_latest: "2026-10-20T20:01:00Z", features_rows: 14742, captions_latest: "2026-09-13T10:53:00Z",
+  live_accounts: { ok: 0, failed: 0, never: 18 }, features_latest: "2026-10-20T20:01:00Z", features_rows: 14742, captions_latest: "2026-09-13T10:53:00Z", captions: { slots: 3, pending: 895, backlog: 0 },
   library_control: { enabled: true, max_active: 4, max_daily_claims: 15000 }, upload: { phase: "idle", updated_at: "2026-10-24T21:15:00Z", expires_at: null },
   rate: { blocked_until: null, last_block_reason: null }, slots: { total: 18, enabled: 18, paused: 0 },
 });
@@ -30,12 +30,12 @@ test("stages count the real pipeline and flag held submissions", () => {
   assert.equal(held.jobs.find((j) => j.id === "publisher")!.health, "warn");
 });
 
-test("job health: stale captions are down, missing live metrics are off, idle features are ok", () => {
+test("job health: captions with no backlog are idle, missing live metrics are off, idle features are ok", () => {
   const jobs = Object.fromEntries(summarizePipeline(base(), now).jobs.map((j) => [j.id, j]));
   assert.equal(jobs.publisher.health, "ok");
   assert.equal(jobs.analytics.health, "ok");
-  assert.equal(jobs.captions.health, "down");
-  assert.match(jobs.captions.note, /no new suggestions since 2026-09-13/);
+  assert.equal(jobs.captions.health, "ok");
+  assert.match(jobs.captions.note, /^idle: all 895 pending videos on 3 accounts have a suggestion/);
   assert.equal(jobs.live.health, "off");
   assert.match(jobs.live.note, /ScrapeCreators key/);
   assert.equal(jobs.features.health, "ok");     // every queued video already has features, so a 4-day-old write is idle, not stale
@@ -53,7 +53,7 @@ test("job health: stale captions are down, missing live metrics are off, idle fe
 
 test("route is admin-only: anonymous 401, customer 403, admin 200 with no table reads for the denied", async (t) => {
   const reads: string[] = [];
-  const sb: any = { from(table: string) { reads.push(table); const q: any = { select() { return q }, order() { return q }, limit() { return q }, gte() { return q }, lt() { return q }, eq() { return q }, range() { return Promise.resolve({ data: [], error: null }) }, then(resolve: any) { return Promise.resolve({ data: [], error: null, count: 0 }).then(resolve) } }; return q; } };
+  const sb: any = { from(table: string) { reads.push(table); const q: any = { select() { return q }, order() { return q }, limit() { return q }, gte() { return q }, lt() { return q }, eq() { return q }, in() { return q }, range() { return Promise.resolve({ data: [], error: null }) }, then(resolve: any) { return Promise.resolve({ data: [], error: null, count: 0 }).then(resolve) } }; return q; } };
   const app = express();
   app.use((req: any, _res, next) => { if (req.headers["x-test-user"]) { req.auth = { user_id: req.headers["x-test-user"] }; req.profile = { role: req.headers["x-test-role"] ?? "user" }; } next(); });
   app.use(accountAccess(() => sb)); registerOpsPipeline(app, () => sb);
@@ -83,4 +83,22 @@ test("today's windows count outcomes per window: a retried window is one publish
   const stale = summarizePipeline({ ...base(), stale_pending: 72 }, now);
   assert.match(stale.jobs.find((j) => j.id === "publisher")!.note, /72 old pending windows/);
   assert.equal(stale.jobs.find((j) => j.id === "publisher")!.health, "ok");
+});
+
+test("caption job is idle, not down, when every pending video already has a suggestion; a real backlog with stale writes warns", () => {
+  const now = new Date("2026-10-25T20:00:00Z");
+  const idle = summarizePipeline({ ...base(), captions_latest: "2026-09-13T10:53:00Z", captions: { slots: 3, pending: 895, backlog: 0 } }, now).jobs.find((j) => j.id === "captions")!;
+  assert.equal(idle.health, "ok"); assert.match(idle.note, /^idle: all 895 pending videos on 3 accounts have a suggestion/);
+  const behind = summarizePipeline({ ...base(), captions_latest: "2026-09-13T10:53:00Z", captions: { slots: 3, pending: 895, backlog: 40 } }, now).jobs.find((j) => j.id === "captions")!;
+  assert.equal(behind.health, "down"); assert.match(behind.note, /^40 of 895 pending videos still need a suggestion/);
+  const none = summarizePipeline({ ...base(), captions: { slots: 0, pending: 0, backlog: 0 } }, now).jobs.find((j) => j.id === "captions")!;
+  assert.equal(none.health, "off");
+});
+
+test("captionBacklog counts pending videos on the worker's accounts that lack a nightly suggestion", async () => {
+  const calls: string[] = [];
+  const table = (name: string, rows: any[]) => { const q: any = { select() { return q }, eq() { return q }, in(_c: string, v: string[]) { q._in = v; return q }, range() { return Promise.resolve({ data: rows, error: null }) }, then(res: any) { calls.push(name); return Promise.resolve({ data: name === "queue_suggestions" ? rows.filter((r) => (q._in ?? []).includes(r.queue_id)) : rows, error: null }).then(res) } }; return q; };
+  const sb: any = { from(name: string) { return table(name, name === "reels_devices" ? [{ phone_slot: "phone_a" }, { phone_slot: "phone_b" }] : name === "reels_manual_queue" ? [{ id: "q1" }, { id: "q2" }, { id: "q3" }] : [{ queue_id: "q1" }, { queue_id: "q3" }, { queue_id: "other" }]); } };
+  const { captionBacklog } = await import("../src/ops-pipeline.js");
+  assert.deepEqual(await captionBacklog(sb), { slots: 2, pending: 3, backlog: 1 });
 });

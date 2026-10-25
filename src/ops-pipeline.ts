@@ -30,6 +30,7 @@ export type RawCounts = {
   features_latest: string | null;
   features_rows: number;
   captions_latest: string | null;
+  captions: { slots: number; pending: number; backlog: number }; // the nightly worker's accounts (reels_devices), their pending videos, and how many still lack a suggestion
   library_control: { enabled: boolean; max_active: number; max_daily_claims: number } | null;
   upload: { phase: string; updated_at: string | null; expires_at: string | null } | null;
   rate: { blocked_until: string | null; last_block_reason: string | null } | null;
@@ -72,7 +73,11 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
       health: featureBacklog === 0 ? "ok" : health(hoursAgo(c.features_latest, now), 3, 24),
       note: featureBacklog === 0 ? `idle, all ${c.features_rows} videos processed; last write ${ago(c.features_latest, now)}` : `${featureBacklog} videos waiting; last write ${ago(c.features_latest, now)}`, details: { rows: c.features_rows, backlog: featureBacklog } },
     { id: "captions", label: "Caption suggestions (nightly)", cadence: "10:50 UTC daily", last_at: c.captions_latest,
-      health: health(hoursAgo(c.captions_latest, now), 30, 72), note: hoursAgo(c.captions_latest, now) > 72 ? `no new suggestions since ${c.captions_latest?.slice(0, 10) ?? "never"}` : `latest ${ago(c.captions_latest, now)}` },
+      // The worker only serves the accounts in reels_devices. With no backlog it is idle, not broken; a stale latest
+      // write only matters while videos are waiting for a suggestion.
+      health: c.captions.slots === 0 ? "off" : c.captions.backlog === 0 ? "ok" : health(hoursAgo(c.captions_latest, now), 30, 72),
+      note: c.captions.slots === 0 ? "no accounts configured for suggestions" : c.captions.backlog === 0 ? `idle: all ${c.captions.pending} pending videos on ${c.captions.slots} account${c.captions.slots === 1 ? "" : "s"} have a suggestion; last write ${ago(c.captions_latest, now)}` : `${c.captions.backlog} of ${c.captions.pending} pending videos still need a suggestion; last write ${ago(c.captions_latest, now)}`,
+      details: { accounts: c.captions.slots, pending: c.captions.pending, backlog: c.captions.backlog } },
     { id: "render", label: "Library renderer", cadence: "one-off cloud jobs", last_at: null,
       health: !c.library_control ? "off" : !c.library_control.enabled ? "off" : blocked ? "warn" : "ok",
       note: !c.library_control ? "not configured" : !c.library_control.enabled ? "disabled" : `${running} running, ${pendingRender} pending, ${rendered} done`,
@@ -85,6 +90,28 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
       note: c.rate?.blocked_until && Date.parse(c.rate.blocked_until) > now.getTime() ? `blocked until ${c.rate.blocked_until} (${c.rate.last_block_reason ?? "no reason"})` : "not blocked" },
   ];
   return { generated_at: now.toISOString(), day: ptNow(now).ymd, stages, jobs, accounts: c.slots };
+}
+
+/** The nightly caption worker's view: its accounts (active, unpaused rows of reels_devices), their pending queue videos, and how many of those have no nightly suggestion yet. */
+export async function captionBacklog(sb: any): Promise<{ slots: number; pending: number; backlog: number }> {
+  const d = await sb.from("reels_devices").select("phone_slot").eq("active", true).eq("paused", false);
+  if (d.error) throw d.error;
+  const slots: string[] = (d.data ?? []).map((r: any) => r.phone_slot).filter(Boolean);
+  if (!slots.length) return { slots: 0, pending: 0, backlog: 0 };
+  const ids: string[] = [];
+  for (let from = 0; ; from += 1000) {
+    const r = await sb.from("reels_manual_queue").select("id").eq("status", "pending").in("phone_slot", slots).range(from, from + 999);
+    if (r.error) throw r.error;
+    for (const row of r.data ?? []) ids.push(row.id);
+    if ((r.data ?? []).length < 1000) break;
+  }
+  const suggested = new Set<string>();
+  for (let i = 0; i < ids.length; i += 200) {
+    const r = await sb.from("queue_suggestions").select("queue_id").eq("source", "nightly_llm").in("queue_id", ids.slice(i, i + 200));
+    if (r.error) throw r.error;
+    for (const row of r.data ?? []) suggested.add(row.queue_id);
+  }
+  return { slots: slots.length, pending: ids.length, backlog: ids.filter((id) => !suggested.has(id)).length };
 }
 
 async function count(q: any): Promise<number> { const r = await q; if (r.error) throw r.error; return r.count ?? 0; }
@@ -133,7 +160,7 @@ const latest = async (sb: any, table: string, col: string, filter?: (q: any) => 
 export async function collectPipeline(sb: any, now = new Date()): Promise<RawCounts> {
   const day = ptNow(now).ymd, dayStart = ptDateTimeToUtc(day, "00:00").toISOString();
   const h24 = new Date(now.getTime() - 24 * 3600_000).toISOString(), d7 = new Date(now.getTime() - 7 * 86400_000).toISOString(), held = new Date(now.getTime() - 45 * 60_000).toISOString();
-  const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, control, upload, rate, slots] = await Promise.all([
+  const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, captions, control, upload, rate, slots] = await Promise.all([
     count(sb.from("library_sources").select("sha256", { count: "exact", head: true })),
     groupCount(sb, "library_variants", ["state"]),
     groupCount(sb, "reels_manual_queue", ["status", "storage_bucket"]),
@@ -151,6 +178,7 @@ export async function collectPipeline(sb: any, now = new Date()): Promise<RawCou
     latest(sb, "video_content_features", "computed_at"),
     count(sb.from("video_content_features").select("id", { count: "exact", head: true })),
     latest(sb, "queue_suggestions", "created_at"),
+    captionBacklog(sb),
     (async () => { const r = await sb.from("library_control").select("enabled,max_active,max_daily_claims").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     (async () => { const r = await sb.from("publer_workspace_upload").select("phase,updated_at,expires_at").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     (async () => { const r = await sb.from("publer_rate_state").select("blocked_until,last_block_reason").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
@@ -166,7 +194,7 @@ export async function collectPipeline(sb: any, now = new Date()): Promise<RawCou
   }
   return { sources, variants, queue, logs_today: logsToday, logs_7d_published: logs7d, logs_total_published: logsTotal, held_pending: heldPending, stale_pending: stalePending, last_attempt_at: lastAttempt,
     analytics_latest: analyticsLatest, analytics_snapshots_24h: snaps24h, analytics_pulls_24h: pulls24h, measured_7d: measured.size, live_latest: liveLatest, live_accounts: liveAccounts,
-    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, library_control: control, upload, rate, slots };
+    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, library_control: control, upload, rate, slots };
 }
 
 export function registerOpsPipeline(app: Express, sbFn: () => any) {
