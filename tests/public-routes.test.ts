@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { summarizeCaseStudy, validateInviteRequest, makeLimiter, registerPublicRoutes, type CaseStudyRaw } from "../src/public-routes.js";
+import { summarizeCaseStudy, validateInviteRequest, makeLimiter, registerPublicRoutes, registerInviteRequestInbox, type CaseStudyRaw } from "../src/public-routes.js";
 import { accountAccess } from "../src/account-access.js";
 
 const now = new Date("2026-10-24T22:00:00Z");
@@ -40,10 +40,13 @@ test("case study: aggregate numbers only, unknown views not counted as zero, onl
 });
 
 test("invite request validation and the per-address limiter", () => {
-  assert.deepEqual(validateInviteRequest({ name: " Jane ", email: "Jane@Example.com", company: "", message: "hi" }), { ok: true, row: { name: "Jane", email: "jane@example.com", company: null, message: "hi" } });
-  assert.equal((validateInviteRequest({ name: "", email: "a@b.co" }) as any).error, "invalid_name");
-  assert.equal((validateInviteRequest({ name: "x", email: "nope" }) as any).error, "invalid_email");
-  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", website: "http://spam" }) as any).honeypot, true);
+  assert.deepEqual(validateInviteRequest({ name: " Jane ", email: "Jane@Example.com", company: " Northline ", website: "northline.example", platforms: ["Instagram", "TikTok"], accounts: "20", monthly_videos: "", library: "40 hours of calls", goals: "1M views" }),
+    { ok: true, row: { name: "Jane", email: "jane@example.com", company: "Northline", website: "northline.example", platforms: "instagram, tiktok", accounts: 20, monthly_videos: null, library: "40 hours of calls", goals: "1M views", message: null } });
+  assert.equal((validateInviteRequest({ name: "", email: "a@b.co", company: "x" }) as any).error, "invalid_name");
+  assert.equal((validateInviteRequest({ name: "x", email: "nope", company: "x" }) as any).error, "invalid_email");
+  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co" }) as any).error, "invalid_company");
+  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", accounts: "lots" }) as any).error, "invalid_accounts");
+  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", fax: "555" }) as any).honeypot, true);
   assert.equal((validateInviteRequest(null) as any).error, "invalid_body");
   const allow = makeLimiter(2, 1000);
   assert.equal(allow("a", 0), true); assert.equal(allow("a", 1), true); assert.equal(allow("a", 2), false);
@@ -70,7 +73,7 @@ test("public routes work without any auth; the case study is cached and the form
       return q;
     },
   };
-  const app = express(); app.use(express.json()); app.use(accountAccess(() => sb)); registerPublicRoutes(app, () => sb, { now: () => now });
+  const app = express(); app.use(express.json()); app.use(accountAccess(() => sb)); registerPublicRoutes(app, () => sb, { now: () => now }); registerInviteRequestInbox(app, () => sb);
   const server = createServer(app); await new Promise<void>((r) => server.listen(0, "127.0.0.1", r)); t.after(() => server.close());
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
   const a = await fetch(`${base}/api/public/case-study`, { headers: { origin: "https://clone8.io" } });
@@ -85,10 +88,11 @@ test("public routes work without any auth; the case study is cached and the form
   // Other /api routes stay closed to anonymous callers.
   assert.equal((await fetch(`${base}/api/ops/clients`)).status, 401);
   const post = (b: any) => fetch(`${base}/api/public/invite-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
-  assert.equal((await post({ name: "Jane", email: "jane@example.com", company: "Northline" })).status, 201);
+  assert.equal((await post({ name: "Jane", email: "jane@example.com", company: "Northline", accounts: 12 })).status, 201);
   assert.equal(inserts[0].v.email, "jane@example.com");
   assert.equal(inserts[0].v.source, "clone8.io");
-  assert.equal((await post({ name: "", email: "jane@example.com" })).status, 400);
-  assert.equal((await post({ name: "Bot", email: "b@b.co", website: "x" })).status, 202);
+  assert.equal((await post({ name: "", email: "jane@example.com", company: "x" })).status, 400);
+  assert.equal((await fetch(`${base}/api/ops/invite-requests`)).status, 401, "inbox is not public");
+  assert.equal((await post({ name: "Bot", email: "b@b.co", company: "x", fax: "x" })).status, 202);
   assert.equal(inserts.length, 1, "honeypot submissions are not stored");
 });

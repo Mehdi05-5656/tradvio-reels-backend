@@ -5,7 +5,13 @@ CREATE TABLE IF NOT EXISTS public.invite_requests(
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
   email text NOT NULL CHECK(length(email) <= 254 AND email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'),
-  company text CHECK(company IS NULL OR length(company) <= 120),
+  company text NOT NULL CHECK(length(trim(company)) BETWEEN 1 AND 120),
+  website text CHECK(website IS NULL OR length(website) <= 200),
+  platforms text CHECK(platforms IS NULL OR length(platforms) <= 120),      -- e.g. "instagram, tiktok"
+  accounts integer CHECK(accounts IS NULL OR accounts BETWEEN 0 AND 10000), -- accounts they have or want posting
+  monthly_videos integer CHECK(monthly_videos IS NULL OR monthly_videos BETWEEN 0 AND 100000), -- what they post today
+  library text CHECK(library IS NULL OR length(library) <= 200),            -- rough size of existing recordings
+  goals text CHECK(goals IS NULL OR length(goals) <= 2000),
   message text CHECK(message IS NULL OR length(message) <= 2000),
   source text NOT NULL DEFAULT 'clone8.io' CHECK(length(source) <= 60),
   status text NOT NULL DEFAULT 'new' CHECK(status IN ('new','contacted','invited','declined')),

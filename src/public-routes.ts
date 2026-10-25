@@ -6,6 +6,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchWindowSnapshots, interactions, type SnapshotRow } from "./analytics-util.js";
 import { loadSlots } from "./publer-schedule.js";
 import { paged } from "./reporting.js";
+import { isAdmin, isOperator } from "./auth.js";
 
 type SbGetter = () => SupabaseClient;
 export const PIPELINE_START = "2026-09-05"; // Publer coverage start; the case study counts from here
@@ -75,17 +76,24 @@ export async function collectCaseStudy(sb: SupabaseClient, now = new Date()): Pr
 }
 
 // ---- invite requests -------------------------------------------------------------------------
-export type InviteRequestInput = { name: string; email: string; company?: string | null; message?: string | null; website?: string };
-export function validateInviteRequest(body: any): { ok: true; row: { name: string; email: string; company: string | null; message: string | null } } | { ok: false; error: string; honeypot?: boolean } {
+export type InviteRequestRow = { name: string; email: string; company: string; website: string | null; platforms: string | null; accounts: number | null; monthly_videos: number | null; library: string | null; goals: string | null; message: string | null };
+const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+const int = (v: unknown, max: number) => { if (v === "" || v === null || v === undefined) return null; const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 && n <= max ? n : undefined; };
+/** The hidden "fax" field is the honeypot; a real browser leaves it empty. "website" is a real, visible field. */
+export function validateInviteRequest(body: any): { ok: true; row: InviteRequestRow } | { ok: false; error: string; honeypot?: boolean } {
   if (!body || typeof body !== "object") return { ok: false, error: "invalid_body" };
-  if (typeof body.website === "string" && body.website.trim()) return { ok: false, error: "ok", honeypot: true }; // bots fill the hidden field
+  if (typeof body.fax === "string" && body.fax.trim()) return { ok: false, error: "ok", honeypot: true };
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
-  const company = typeof body.company === "string" && body.company.trim() ? body.company.trim().slice(0, 120) : null;
-  const message = typeof body.message === "string" && body.message.trim() ? body.message.trim().slice(0, 2000) : null;
+  const company = typeof body.company === "string" ? body.company.trim().slice(0, 120) : "";
   if (name.length < 1 || name.length > 120) return { ok: false, error: "invalid_name" };
   if (email.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: "invalid_email" };
-  return { ok: true, row: { name, email, company, message } };
+  if (company.length < 1) return { ok: false, error: "invalid_company" };
+  const accounts = int(body.accounts, 10000), monthly_videos = int(body.monthly_videos, 100000);
+  if (accounts === undefined) return { ok: false, error: "invalid_accounts" };
+  if (monthly_videos === undefined) return { ok: false, error: "invalid_monthly_videos" };
+  const platforms = Array.isArray(body.platforms) ? body.platforms.filter((p: unknown) => typeof p === "string").map((p: string) => p.trim().toLowerCase()).filter(Boolean).slice(0, 6).join(", ") || null : text(body.platforms, 120);
+  return { ok: true, row: { name, email, company, website: text(body.website, 200), platforms, accounts, monthly_videos, library: text(body.library, 200), goals: text(body.goals, 2000), message: text(body.message, 2000) } };
 }
 
 /** Tiny fixed-window limiter per client address: enough to stop a script, invisible to people. */
@@ -96,6 +104,30 @@ export function makeLimiter(limit = 10, windowMs = 3600_000) {
     if (!cur || cur.reset <= now) { hits.set(key, { n: 1, reset: now + windowMs }); return true; }
     cur.n += 1; return cur.n <= limit;
   };
+}
+
+/** Operator inbox: newest invite requests. Admin-read through the global gate; re-checked here. */
+export function registerInviteRequestInbox(app: Express, sbFn: SbGetter): void {
+  app.get("/api/ops/invite-requests", async (req: Request, res: Response) => {
+    if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+    try {
+      const r = await sbFn().from("invite_requests").select("id,name,email,company,website,platforms,accounts,monthly_videos,library,goals,message,status,created_at").order("created_at", { ascending: false }).limit(200);
+      if (r.error) throw r.error;
+      res.set("Cache-Control", "private, no-store").json({ requests: r.data ?? [] });
+    } catch (e: any) { res.status(503).json({ error: "requests_unavailable", detail: String(e?.message ?? e).slice(0, 200) }); }
+  });
+  app.post("/api/ops/invite-requests/:id/status", async (req: Request, res: Response) => {
+    if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
+    const status = String(req.body?.status ?? "");
+    if (!["new", "contacted", "invited", "declined"].includes(status)) return res.status(400).json({ error: "invalid_status" });
+    if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) return res.status(404).json({ error: "request_not_found" });
+    try {
+      const r = await sbFn().from("invite_requests").update({ status }).eq("id", req.params.id).select("id,status").maybeSingle();
+      if (r.error) throw r.error;
+      if (!r.data) return res.status(404).json({ error: "request_not_found" });
+      res.json({ request: r.data });
+    } catch (e: any) { res.status(503).json({ error: "requests_unavailable" }); }
+  });
 }
 
 export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs?: number; now?: () => Date } = {}): void {
