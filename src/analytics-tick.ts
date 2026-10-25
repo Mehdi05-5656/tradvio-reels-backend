@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { analyticsTick } from "./publer-schedule.js";
 import { configurePublerRate } from "./publer-rate.js";
 import { collectLiveMetrics } from "./live-metrics.js";
+import { expireHeldWindows } from "./publish-reconcile.js";
 
 async function main() {
   const sb = createClient(
@@ -19,6 +20,12 @@ async function main() {
     console.log("[cron:live-metrics]", JSON.stringify(await collectLiveMetrics(sb)));
   } catch (e: any) {
     console.error("[cron:live-metrics] failed:", e?.message || e);
+  }
+  // Windows held before any submission and still pending after a day are closed out from saved data (no Publer calls).
+  try {
+    console.log("[cron:expire-held]", JSON.stringify(await expireHeldWindows(sb)));
+  } catch (e: any) {
+    console.error("[cron:expire-held] failed:", e?.message || e);
   }
   configurePublerRate(sb, "analytics");
   const result = await analyticsTick(sb);
