@@ -642,8 +642,14 @@ export function inPostingWindow(slotTimes: string[], minutesPT: number, before =
 }
 
 /** Publer refreshes post stats about once a day, so one pull per account every few hours is enough.
- *  Posts older than 30 days are no longer pulled, so their stored numbers stop changing. */
+ *  Posts older than 30 days leave the regular pull; a weekly long-tail pass (1–6 AM PT, one account per
+ *  run) re-reads posts 31–180 days old so their stored numbers keep moving instead of freezing. */
 export const ANALYTICS_ACCOUNT_INTERVAL_MS = 3 * 3600_000;
+export const ANALYTICS_LONG_TAIL_INTERVAL_MS = 7 * 86400_000;
+export const ANALYTICS_LONG_TAIL_DAYS = 180;
+const longTailKey = (slot: string) => `${slot}:longtail`;
+/** Quiet hours for the long-tail pass: no posting windows, Publer budget idle. */
+export const inLongTailHours = (minutesPT: number) => minutesPT >= 60 && minutesPT < 6 * 60;
 
 /**
  * Snapshot analytics for recent posts.
@@ -657,6 +663,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
   skipped?: "posting_window";
   deferred?: boolean;
   accounts_pulled?: number;
+  long_tail_accounts?: number;
   insert_errors?: number;
 }> {
   const cfg = await loadConfig(sb);
@@ -678,8 +685,27 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
     .sort((a, b) => (lastPull.get(a.phone_slot) ?? 0) - (lastPull.get(b.phone_slot) ?? 0));
   let accountsPulled = 0;
   let insertErrors = 0;
+  let longTailPulled = 0;
 
   let snapshots = 0;
+
+  // Snapshot one Publer post row. Returns false when the insert failed (counted, logged, never silent).
+  const snapshot = async (s: SlotConfig, p: any): Promise<boolean> => {
+    const a = p.analytics || {};
+    const v = (k: string) => { const x = a[k]; if (x == null) return null; if (typeof x === "object" && "value" in x) return x.value ?? null; return x; };
+    const joinKey = p.post_link || String(p.id);
+    const rawViews = v("video_views"), rawReach = v("reach");
+    const normalizedViews = rawViews != null ? rawViews : (s.provider === "tiktok" ? rawReach : null);
+    const ins = await sb.from("publer_analytics").insert({
+      publer_post_id: joinKey, phone_slot: s.phone_slot, captured_at: now.toISOString(),
+      reach: rawReach, engagement: v("engagement"), engagement_rate: v("engagement_rate"),
+      likes: v("likes"), comments: v("comments"), shares: v("shares"), saves: v("saves"), video_views: normalizedViews,
+      link_clicks: v("link_clicks"), post_clicks: v("post_clicks"), click_through_rate: v("click_through_rate"), reach_rate: v("reach_rate"), raw: p,
+    });
+    if (ins.error) { insertErrors++; console.error("[analytics] snapshot insert failed", s.phone_slot, joinKey, ins.error.message); return false; }
+    snapshots++;
+    return true;
+  };
 
   for (const s of due) {
     let page = 0;
@@ -705,18 +731,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
         const ageDays = (now.getTime() - pubAt.getTime()) / 86400_000;
         if (ageDays > 30) continue;
         const minGapMin = ageDays < 7 ? 30 : 60;
-
-        // Publer analytics fields are nested { name, value, tooltip } objects.
-        const a = p.analytics || {};
-        const v = (k: string) => {
-          const x = a[k];
-          if (x == null) return null;
-          if (typeof x === "object" && "value" in x) return x.value ?? null;
-          return x;
-        };
-
-        // Join key: prefer post_link (stable across /posts + /post_insights)
-        // then fall back to the internal post id.
+        // Join key: prefer post_link (stable across /posts + /post_insights), then the internal post id.
         const joinKey = p.post_link || String(p.id);
 
         // Get most recent snapshot for this key
@@ -730,42 +745,7 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
         const lastCap2 = latest2?.captured_at ? new Date(latest2.captured_at) : null;
         if (lastCap2 && (now.getTime() - lastCap2.getTime()) / 60000 < minGapMin) continue;
 
-        // Provider-specific views field mapping.
-        // Publer returns different analytics keys per provider:
-        //   Instagram: analytics.video_views is the play count; analytics.reach is unique reach.
-        //   TikTok:    analytics.video_views does NOT exist. analytics.reach IS the view count
-        //              per Publer's own tooltip ("Number of times this post was viewed").
-        // We normalize video_views so the dashboard's "Views" tile lights up for TikTok too.
-        const rawViews = v("video_views");
-        const rawReach = v("reach");
-        const normalizedViews = rawViews != null ? rawViews
-          : (s.provider === "tiktok" ? rawReach : null);
-
-        const ins = await sb.from("publer_analytics").insert({
-          publer_post_id: joinKey,
-          phone_slot: s.phone_slot,
-          captured_at: now.toISOString(),
-          reach: rawReach,
-          engagement: v("engagement"),
-          engagement_rate: v("engagement_rate"),
-          likes: v("likes"),
-          comments: v("comments"),
-          shares: v("shares"),
-          saves: v("saves"),
-          video_views: normalizedViews,
-          link_clicks: v("link_clicks"),
-          post_clicks: v("post_clicks"),
-          click_through_rate: v("click_through_rate"),
-          reach_rate: v("reach_rate"),
-          raw: p,
-        });
-        if (ins.error) {
-          // A lost snapshot must be visible in the cron log, not silently skipped.
-          insertErrors++;
-          console.error("[analytics] snapshot insert failed", s.phone_slot, joinKey, ins.error.message);
-          continue;
-        }
-        snapshots++;
+        await snapshot(s, p);
       }
 
       if (posts.length < 10) break;
@@ -776,8 +756,31 @@ export async function analyticsTick(sb: SupabaseClient, at: Date = new Date()): 
       .upsert({ phone_slot: s.phone_slot, pulled_at: now.toISOString() }, { onConflict: "phone_slot" });
     if (mark.error) throw new Error("analytics_pull_state_write_failed");
     accountsPulled++;
+
+    // Weekly long tail for this account, at night, one account per run, posts 31–180 days old, every post snapshotted.
+    const lastLong = lastPull.get(longTailKey(s.phone_slot)) ?? 0;
+    if (longTailPulled === 0 && inLongTailHours(ptNow(now).minutes) && now.getTime() - lastLong >= ANALYTICS_LONG_TAIL_INTERVAL_MS) {
+      const longFrom = ptNow(new Date(Math.max(now.getTime() - ANALYTICS_LONG_TAIL_DAYS * 86400_000, Date.parse("2026-09-05T07:00:00Z")))).ymd;
+      const longTo = ptNow(new Date(now.getTime() - 31 * 86400_000)).ymd;
+      let lp = 0;
+      try {
+        while (lp <= 20) {
+          const resp: any = await postInsights(cfg.workspaceId, s.publer_account_id, longFrom, longTo, { page: lp, sortBy: "scheduled_at", sortType: "DESC" });
+          const posts = resp?.posts ?? [];
+          for (const p of posts) if (p.scheduled_at) await snapshot(s, p);
+          if (posts.length < 10) break;
+          lp++;
+        }
+        const markLong = await sb.from("publer_analytics_pulls").upsert({ phone_slot: longTailKey(s.phone_slot), pulled_at: now.toISOString() }, { onConflict: "phone_slot" });
+        if (markLong.error) throw new Error("analytics_pull_state_write_failed");
+        longTailPulled++;
+      } catch (e) {
+        if (e instanceof RateBudgetDeferred) return { snapshots, deferred: true, accounts_pulled: accountsPulled, long_tail_accounts: longTailPulled, ...(insertErrors ? { insert_errors: insertErrors } : {}) };
+        throw e;
+      }
+    }
   }
-  return { snapshots, accounts_pulled: accountsPulled, ...(insertErrors ? { insert_errors: insertErrors } : {}) };
+  return { snapshots, accounts_pulled: accountsPulled, ...(longTailPulled ? { long_tail_accounts: longTailPulled } : {}), ...(insertErrors ? { insert_errors: insertErrors } : {}) };
 }
 
 // --- Discovery convenience ---------------------------------------------------

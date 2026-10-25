@@ -11,11 +11,13 @@ function fakeSb(tables: Record<string, any[]>) {
     tables,
     from(name: string) {
       const rows = (tables[name] ??= []);
-      let filters: ((r: any) => boolean)[] = [], mode = "select", patch: any = null, order: [string, boolean] | null = null;
+      let filters: ((r: any) => boolean)[] = [], mode = "select", patch: any = null, order: [string, boolean] | null = null, lim: number | null = null;
       const q: any = {
         select() { return q; },
         eq(k: string, v: any) { filters.push((r) => r[k] === v); return q; },
         gte(k: string, v: any) { filters.push((r) => String(r[k]) >= String(v)); return q; },
+        lt(k: string, v: any) { filters.push((r) => r[k] !== null && r[k] !== undefined && String(r[k]) < String(v)); return q; },
+        limit(n: number) { lim = n; return q; },
         order(k: string, o: any) { order = [k, o?.ascending !== false]; return q; },
         update(p: any) { mode = "update"; patch = p; return q; },
         insert(list: any[]) { list.forEach((r, i) => rows.push({ id: rows.length + i + 1, ...r })); return Promise.resolve({ error: null }); },
@@ -23,7 +25,8 @@ function fakeSb(tables: Record<string, any[]>) {
           const hit = rows.filter((r) => filters.every((f) => f(r)));
           if (mode === "update") { hit.forEach((r) => Object.assign(r, patch)); return Promise.resolve({ error: null }).then(res, rej); }
           if (order) { const [k, asc] = order; hit.sort((a, b) => (String(a[k]) < String(b[k]) ? -1 : 1) * (asc ? 1 : -1)); }
-          return Promise.resolve({ data: hit.map((r) => ({ ...r })), error: null }).then(res, rej);
+          const out = lim === null ? hit : hit.slice(0, lim);
+          return Promise.resolve({ data: out.map((r) => ({ ...r })), error: null }).then(res, rej);
         },
       };
       return q;
@@ -111,9 +114,11 @@ test("collector is hourly per account, dedupes unchanged numbers, deep-pages, an
   const r1: any = await collectLiveMetrics(sb, opts);
   assert.equal(r1.accounts, 2);
   assert.equal(r1.errors.length, 1);
-  assert.equal(calls.filter((u) => u.includes("instagram")).length, 2, "first run is a deep pull");
+  assert.equal(calls.filter((u) => u.includes("instagram")).length, 2, "first run is a long-tail pull (pages until the feed is older than 90 days)");
+  assert.equal(r1.long_tail, 2, "both working accounts had never had a long-tail pass");
   const rows = sb.tables.live_post_metrics;
-  assert.deepEqual(rows.map((r: any) => [r.platform_post_id, r.publer_post_id]).sort(), [["7000000000001", "T1"], ["AAAAA1", "P1"]]);
+  // The 40-day-old post is inside the 90-day long tail and is kept; the pinned 2025 post is outside it.
+  assert.deepEqual(rows.map((r: any) => [r.platform_post_id, r.publer_post_id]).sort(), [["7000000000001", "T1"], ["AAAAA1", "P1"], ["OLDOLD", null]]);
   const bad = sb.tables.live_metric_accounts.find((a: any) => a.phone_slot === "bad");
   assert.equal(bad.last_error, "scrapecreators_http_404");
   assert.equal(now.getTime() - Date.parse(bad.last_pulled_at), LIVE_INTERVAL_MS - 15 * 60_000, "retry in 15 minutes");
@@ -124,9 +129,10 @@ test("collector is hourly per account, dedupes unchanged numbers, deep-pages, an
   assert.equal(calls.length, 0);
   views = 140;
   const r3: any = await collectLiveMetrics(sb, { ...opts, now: new Date(now.getTime() + 60 * 60_000) });
-  assert.equal(calls.filter((u) => u.includes("instagram")).length, 1, "hourly pull is one page");
+  assert.equal(calls.filter((u) => u.includes("instagram")).length, 1, "hourly pull is one page; the long tail ran today already");
+  assert.equal(r3.long_tail, 0);
   assert.equal(r3.snapshots, 1, "TikTok unchanged, Instagram changed");
-  assert.equal(rows.length, 3);
+  assert.equal(rows.length, 4);
 });
 
 test("report merges live and Publer: live wins when fresh, Publer fills shares and saves, one timeline", () => {

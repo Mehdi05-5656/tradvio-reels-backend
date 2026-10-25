@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { _setPublerRateForTest, takeSlot, RateBudgetDeferred } from "../src/publer-rate.js";
 import { jobStatus, uploadFromUrl, waitForJob, postInsights } from "../src/publer.js";
-import { inPostingWindow, analyticsTick, ANALYTICS_ACCOUNT_INTERVAL_MS } from "../src/publer-schedule.js";
+import { inPostingWindow, analyticsTick, ANALYTICS_ACCOUNT_INTERVAL_MS, inLongTailHours } from "../src/publer-schedule.js";
 
 process.env.PUBLER_API_KEY = "test-key";
 const realFetch = globalThis.fetch;
@@ -178,4 +178,27 @@ test("collector skips posting windows, pulls each account at most every 3 hours,
   assert.equal(d.deferred, true);
   assert.equal(d.accounts_pulled, 1);
   assert.equal(g.writes.length, 1);
+});
+
+test("the Publer long tail runs only at night, one account per run, over posts 31-180 days old, and is marked weekly", async () => {
+  const night = new Date("2026-10-12T09:40:00Z"); // 2:40 AM PT
+  assert.equal(inLongTailHours(2 * 60 + 40), true); assert.equal(inLongTailHours(15 * 60), false); assert.equal(inLongTailHours(30), false);
+  const seen = respond([
+    { status: 200, body: { posts: [] } },                                            // regular pull, account b
+    { status: 200, body: { posts: [{ id: 1, scheduled_at: "2026-09-06T15:00:00Z", analytics: { reach: { value: 10 }, video_views: { value: 12 } } }] } }, // long tail, account b
+    { status: 200, body: { posts: [] } },                                            // regular pull, account a
+  ]);
+  _setPublerRateForTest(backend().b, { lane: "analytics", sleep: async () => {} });
+  const old = new Date(night.getTime() - 5 * 3600_000).toISOString();
+  const f = fakeDb([{ phone_slot: "a", pulled_at: old }, { phone_slot: "b", pulled_at: new Date(night.getTime() - 6 * 3600_000).toISOString() }, { phone_slot: "a:longtail", pulled_at: new Date(night.getTime() - 86400_000).toISOString() }], ["a", "b"]);
+  const r = await analyticsTick(f.db, night);
+  assert.equal(r.accounts_pulled, 2);
+  assert.equal(r.long_tail_accounts, 1, "only one account per run, and a's long tail is a day old");
+  assert.equal(r.snapshots, 1, "every long-tail post is snapshotted without the age filter");
+  const urls = seen.map((s) => new URL(s.url));
+  assert.equal(urls.length, 3);
+  const lt = urls[1].searchParams;
+  assert.equal(lt.get("to"), "2026-09-11"); // 31 days before the run, Pacific
+  assert.equal(lt.get("from"), "2026-09-05"); // never before the pipeline start
+  assert.deepEqual(f.writes.filter((w) => w[0] === "publer_analytics_pulls").map((w) => w[1].phone_slot), ["b", "b:longtail", "a"]);
 });

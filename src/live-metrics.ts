@@ -3,12 +3,24 @@
 // saves). Read-only toward social platforms; never touches publishing state or Publer's budget.
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export const LIVE_INTERVAL_MS = 55 * 60_000;     // cron runs every 15 min; each account ~hourly
-export const DEEP_INTERVAL_MS = 6 * 3600_000;    // full 7-day refresh every 6 hours
+// Cadence, overridable from the environment so credits can be tuned without a deploy:
+//   LIVE_INTERVAL_MIN   minutes between single-page pulls per account (default 55 → about hourly)
+//   LIVE_DEEP_HOURS     hours between full 7-day refreshes (default 6)
+//   LIVE_LONG_TAIL_HOURS hours between long-tail passes that re-read up to LIVE_LONG_TAIL_DAYS of posts (default 24)
+//   LIVE_LONG_TAIL_DAYS  how far back the long-tail pass reads (default 90). Publer stops at 30 days; this keeps older videos moving.
+// Cost: about one credit per page; Instagram pages hold ~12 posts, TikTok ~30.
+const envNum = (k: string, d: number) => { const v = Number(process.env[k]); return Number.isFinite(v) && v > 0 ? v : d; };
+export const LIVE_INTERVAL_MS = 55 * 60_000;     // documented default; see liveInterval()
+export const DEEP_INTERVAL_MS = 6 * 3600_000;
 export const LIVE_WINDOW_DAYS = 7;
+export const liveInterval = () => envNum("LIVE_INTERVAL_MIN", 55) * 60_000;
+export const deepInterval = () => envNum("LIVE_DEEP_HOURS", 6) * 3600_000;
+export const longTailInterval = () => envNum("LIVE_LONG_TAIL_HOURS", 24) * 3600_000;
+export const longTailDays = () => envNum("LIVE_LONG_TAIL_DAYS", 90);
 const RETRY_AFTER_ERROR_MS = 15 * 60_000;
 const DEDUPE_MS = 6 * 3600_000;                  // unchanged numbers are re-saved at most every 6h
 const MAX_DEEP_PAGES = 6;
+const MAX_LONG_PAGES = 15;
 const BASE = "https://api.scrapecreators.com";
 
 export interface LivePost {
@@ -150,18 +162,30 @@ export async function collectLiveMetrics(sb: SupabaseClient, opts: CollectOption
   const { data: accounts, error } = await sb.from("live_metric_accounts").select("*").eq("enabled", true);
   if (error) throw new Error("live_accounts_unavailable");
   const due = (accounts ?? [])
-    .filter((a: any) => !a.last_pulled_at || now.getTime() - Date.parse(a.last_pulled_at) >= LIVE_INTERVAL_MS)
+    .filter((a: any) => !a.last_pulled_at || now.getTime() - Date.parse(a.last_pulled_at) >= liveInterval())
     .sort((a: any, b: any) => (Date.parse(a.last_pulled_at ?? 0) || 0) - (Date.parse(b.last_pulled_at ?? 0) || 0));
-  const cutoff = now.getTime() - LIVE_WINDOW_DAYS * 86400_000;
-  const cutoffDay = new Date(cutoff - 86400_000).toISOString().slice(0, 10);
-  const result = { status: "ok" as "ok" | "credits_exhausted", accounts: 0, requests: 0, snapshots: 0, matched: 0, errors: [] as string[] };
+  const recentCutoff = now.getTime() - LIVE_WINDOW_DAYS * 86400_000;
+  const result = { status: "ok" as "ok" | "credits_exhausted", accounts: 0, requests: 0, snapshots: 0, matched: 0, long_tail: 0, errors: [] as string[] };
 
   for (const acct of due) {
-    const deep = !acct.last_deep_pulled_at || now.getTime() - Date.parse(acct.last_deep_pulled_at) >= DEEP_INTERVAL_MS;
+    const deep = !acct.last_deep_pulled_at || now.getTime() - Date.parse(acct.last_deep_pulled_at) >= deepInterval();
+    // Long tail: once a day re-read older posts (beyond the 7-day window) so videos Publer has stopped
+    // refreshing keep their views moving. Its last run is the newest reading we hold for an older post.
+    let longTail = false;
+    try {
+      const prev = await sb.from("live_post_metrics").select("captured_at").eq("phone_slot", acct.phone_slot)
+        .lt("posted_at", new Date(recentCutoff).toISOString()).order("captured_at", { ascending: false }).limit(1);
+      // Accounts with no older posts yet fall back to the deep-pull time, so they do not re-run the long tail every hour.
+      const last = (prev.data?.[0]?.captured_at ? Date.parse(prev.data[0].captured_at) : 0) || (Date.parse(acct.last_deep_pulled_at ?? "") || 0);
+      longTail = now.getTime() - last >= longTailInterval();
+    } catch { longTail = false; }
+    const cutoff = longTail ? now.getTime() - longTailDays() * 86400_000 : recentCutoff;
+    const cutoffDay = new Date(cutoff - 86400_000).toISOString().slice(0, 10);
+    const maxPages = longTail ? MAX_LONG_PAGES : deep ? MAX_DEEP_PAGES : 1;
     try {
       const posts: LivePost[] = [];
       let cursor: string | null = null;
-      for (let page = 0; page < (deep ? MAX_DEEP_PAGES : 1); page++) {
+      for (let page = 0; page < maxPages; page++) {
         const u = encodeURIComponent(acct.username);
         const path = acct.provider === "instagram"
           ? `/v2/instagram/user/posts?handle=${u}${cursor ? `&next_max_id=${encodeURIComponent(cursor)}` : ""}`
@@ -207,9 +231,10 @@ export async function collectLiveMetrics(sb: SupabaseClient, opts: CollectOption
       result.snapshots += rows.length;
       result.matched += mapping.size;
       result.accounts++;
+      if (longTail) result.long_tail++;
       await sb.from("live_metric_accounts").update({
-        last_pulled_at: now.toISOString(), ...(deep ? { last_deep_pulled_at: now.toISOString() } : {}),
-        last_status: `ok: ${recent.length} public posts in ${LIVE_WINDOW_DAYS} days, ${mapping.size} matched`,
+        last_pulled_at: now.toISOString(), ...(deep || longTail ? { last_deep_pulled_at: now.toISOString() } : {}),
+        last_status: `ok: ${recent.length} public posts in ${longTail ? longTailDays() : LIVE_WINDOW_DAYS} days, ${mapping.size} matched`,
         last_error: null, updated_at: now.toISOString(),
       }).eq("phone_slot", acct.phone_slot);
     } catch (e: any) {
@@ -217,7 +242,7 @@ export async function collectLiveMetrics(sb: SupabaseClient, opts: CollectOption
       result.errors.push(`${acct.phone_slot}: ${msg}`);
       // Try again in about 15 minutes instead of an hour.
       await sb.from("live_metric_accounts").update({
-        last_pulled_at: new Date(now.getTime() - LIVE_INTERVAL_MS + RETRY_AFTER_ERROR_MS).toISOString(),
+        last_pulled_at: new Date(now.getTime() - liveInterval() + RETRY_AFTER_ERROR_MS).toISOString(),
         last_status: "error", last_error: msg, updated_at: now.toISOString(),
       }).eq("phone_slot", acct.phone_slot);
       if (e instanceof CreditsExhausted) { result.status = "credits_exhausted"; break; }
