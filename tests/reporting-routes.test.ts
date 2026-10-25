@@ -44,3 +44,15 @@ test("unowned selectors, anonymous requests and unassigned customers fail closed
   assert.equal((await f.get("stranger")).body.accounts.length,0);
   assert.equal(f.scopes.length,0);
 });
+test("identical report requests are served from the per-app cache; ?fresh=1 recomputes",async t=>{
+  const f=await fixture(t);
+  const before=f.scopes.length;
+  const a=await f.get("operator","admin");assert.equal(a.status,200);
+  const reads=f.scopes.length-before;assert.ok(reads>0);
+  const b=await f.get("operator","admin");assert.equal(b.status,200);
+  assert.equal(f.scopes.length-before,reads,"second identical request did not touch the database");
+  assert.ok(b.body.cached_at,"cached responses say when they were computed");
+  const c=await f.get("operator","admin","&fresh=1");assert.equal(c.status,200);
+  assert.ok(f.scopes.length-before>reads,"fresh=1 recomputed");
+  assert.equal(c.body.cached_at,undefined);
+});

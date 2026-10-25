@@ -185,6 +185,11 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
       "Views, likes and comments refresh about hourly from public profile data; Publer's insights refresh about once a day and fill in reach, and Instagram shares and saves."]};
 }
 export function registerReportingRoutes(app:Express,sbFn:()=>any){
+  // A 7-day report over 18 accounts costs a 22k-row function call and ~800 KB; several screens ask for
+  // the same ranges and poll. Results are kept per (accounts, range): 2 minutes for ranges that include
+  // today, an hour for closed past ranges. Identical concurrent requests share one computation.
+  // ?fresh=1 bypasses the cache (the Refresh button). The cache lives per app instance.
+  const cache=new Map<string,{at:number;ttl:number;body:any}>(),inflight=new Map<string,Promise<any>>();
   app.get("/api/v2/report",async(req,res)=>{
     try{
       const range=resolveRange(req.query),sb=sbFn();
@@ -194,6 +199,23 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any){
       const slots=requested.length?visible.filter(s=>requested.includes(s.phone_slot)):visible;
       if(!slots.length)return res.json(buildReport([],[],[],range));
       const ids=slots.map(s=>s.phone_slot);
+      const key=`${[...ids].sort().join(",")}|${range.from}|${range.to}`,fresh=req.query.fresh==="1",hit=cache.get(key);
+      if(!fresh&&hit&&Date.now()-hit.at<hit.ttl){res.set("Cache-Control","private, no-store").set("X-Report-Cache","hit");return res.json({...hit.body,cached_at:new Date(hit.at).toISOString()});}
+      let pending=fresh?undefined:inflight.get(key);
+      if(!pending){
+        pending=computeReport(sb,slots,ids,range).then(result=>{
+          cache.set(key,{at:Date.now(),ttl:range.to<ptNow().ymd?3600_000:120_000,body:result});
+          if(cache.size>60)cache.delete(cache.keys().next().value as string);
+          return result;
+        }).finally(()=>inflight.delete(key));
+        inflight.set(key,pending);
+      }
+      const result=await pending;
+      res.set("Cache-Control","private, no-store").set("X-Report-Cache","miss").json(result);
+    }catch(e:any){res.status(/^invalid_date/.test(e.message)?400:503).json({error:/report_too_large/.test(e.message)?"report_too_large_choose_shorter_range":/^invalid_date/.test(e.message)?e.message:"report_unavailable"});}
+  });
+}
+async function computeReport(sb:any,slots:any[],ids:string[],range:ReturnType<typeof resolveRange>){
       const logs=await paged((a,b)=>sb.from("publer_publish_log")
         .select("id,phone_slot,queue_id,slot_local_date,slot_index,status,planned_at,attempted_at,updated_at,publer_post_id,publer_post_link,caption_used,error")
         .in("phone_slot",ids).gte("slot_local_date",range.from).lte("slot_local_date",range.to).order("id").range(a,b));
@@ -207,7 +229,5 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any){
       if(!liveOk)console.warn("[report] live metrics unavailable:",lr.error?.message??la.error?.message);
       const result:any=buildReport(slots,logs,r.data??[],range,liveOk?(lr.data??[]):[],liveOk?(la.data??[]):[]);
       result.live_metrics=liveOk?"available":"unavailable";
-      res.set("Cache-Control","private, no-store").json(result);
-    }catch(e:any){res.status(/^invalid_date/.test(e.message)?400:503).json({error:/report_too_large/.test(e.message)?"report_too_large_choose_shorter_range":/^invalid_date/.test(e.message)?e.message:"report_unavailable"});}
-  });
+      return result;
 }
