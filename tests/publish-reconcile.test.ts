@@ -60,12 +60,13 @@ test("held windows older than a day are closed: lost receipts become published, 
     ],
   });
   const r = await expireHeldWindows(sb, now);
-  assert.deepEqual(r, { examined: 3, published: 1, expired: 2, released: 1, errors: [] });
+  assert.deepEqual(r, { examined: 4, published: 1, expired: 3, released: 1, errors: [] });
   const log = (id: number) => sb.tables.publer_publish_log.find((l: any) => l.id === id);
   assert.equal(log(1).status, "published"); assert.equal(log(1).publer_post_id, "P1"); assert.equal(log(1).publer_post_link, "https://www.instagram.com/reel/LOST/");
   assert.equal(log(2).status, "failed"); assert.match(log(2).error, /^expired: held before submission/);
   assert.equal(log(4).status, "failed", "the 2 PM post belongs to the published window, not the held noon one");
-  assert.equal(log(5).status, "pending"); assert.equal(log(6).status, "pending");
+  assert.equal(log(5).status, "pending", "younger than 24 h, still in flight");
+  assert.equal(log(6).status, "failed"); assert.match(log(6).error, /^expired: submitted as job job6 but no Publer post appeared/);
   const queue = (id: string) => sb.tables.reels_manual_queue.find((q: any) => q.id === id);
   assert.equal(queue("q1").status, "posted");
   assert.equal(queue("q2").status, "pending", "released for a later window");

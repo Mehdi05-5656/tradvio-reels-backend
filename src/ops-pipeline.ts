@@ -4,6 +4,7 @@
 import type { Express, Request, Response } from "express";
 import { isAdmin } from "./auth.js";
 import { ptNow, ptDateTimeToUtc } from "./publer-schedule.js";
+import { memo } from "./cache.js";
 
 export type Health = "ok" | "warn" | "down" | "off";
 export type JobCard = { id: string; label: string; cadence: string; health: Health; last_at: string | null; note: string; details?: Record<string, number | string | null> };
@@ -173,7 +174,8 @@ export function registerOpsPipeline(app: Express, sbFn: () => any) {
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
     if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
     try {
-      const snapshot = summarizePipeline(await collectPipeline(sbFn()));
+      // Twenty parallel counts take a few seconds; every operator screen polls this, so one computation serves them all for 45 s.
+      const snapshot = summarizePipeline(await memo("ops-pipeline", 45_000, () => collectPipeline(sbFn())));
       res.set("Cache-Control", "private, no-store").json(snapshot);
     } catch (e: any) {
       console.error("[ops/pipeline]", e?.message ?? e);

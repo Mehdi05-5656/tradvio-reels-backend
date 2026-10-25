@@ -15,7 +15,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export const EXPIRE_AFTER_MS = 24 * 3600_000;
 const WINDOW_BEFORE_MS = 30 * 60_000, WINDOW_AFTER_MS = 2 * 3600_000;
 
-type PendingLog = { id: number; queue_id: string | null; phone_slot: string; slot_local_date: string; slot_index: number; planned_at: string; attempted_at: string; error: string | null };
+type PendingLog = { publer_job_id?: string | null; id: number; queue_id: string | null; phone_slot: string; slot_local_date: string; slot_index: number; planned_at: string; attempted_at: string; error: string | null };
 type Post = { key: string; id: string; link: string | null; sched: number };
 
 export type ReconcileResult = { examined: number; published: number; expired: number; released: number; errors: string[] };
@@ -24,8 +24,8 @@ export async function expireHeldWindows(sb: SupabaseClient, now = new Date()): P
   const result: ReconcileResult = { examined: 0, published: 0, expired: 0, released: 0, errors: [] };
   const cutoff = new Date(now.getTime() - EXPIRE_AFTER_MS).toISOString();
   const pend = await sb.from("publer_publish_log")
-    .select("id,queue_id,phone_slot,slot_local_date,slot_index,planned_at,attempted_at,error")
-    .eq("status", "pending").is("publer_job_id", null).is("publer_post_id", null).lt("attempted_at", cutoff)
+    .select("id,queue_id,phone_slot,slot_local_date,slot_index,planned_at,attempted_at,error,publer_job_id")
+    .eq("status", "pending").is("publer_post_id", null).lt("attempted_at", cutoff)
     .order("attempted_at", { ascending: true }).limit(200);
   if (pend.error) throw new Error(`publish_log_unavailable: ${pend.error.message}`);
   const rows = (pend.data ?? []) as PendingLog[];
@@ -72,7 +72,7 @@ export async function expireHeldWindows(sb: SupabaseClient, now = new Date()): P
           if (log.queue_id) await sb.from("reels_manual_queue").update({ status: "posted", posted_at: stamp, posted_ig_url: p.link }).eq("id", log.queue_id).eq("status", "publer_publishing");
           result.published++;
         } else {
-          const u = await sb.from("publer_publish_log").update({ status: "failed", error: `expired: held before submission, no Publer post appeared within 24 h (${(log.error ?? "").slice(0, 120)})`, updated_at: stamp }).eq("id", log.id).eq("status", "pending");
+          const u = await sb.from("publer_publish_log").update({ status: "failed", error: `expired: ${log.publer_job_id ? `submitted as job ${log.publer_job_id} but` : "held before submission,"} no Publer post appeared within 24 h (${(log.error ?? "").slice(0, 120)})`, updated_at: stamp }).eq("id", log.id).eq("status", "pending");
           if (u.error) throw new Error(u.error.message);
           result.expired++;
           if (log.queue_id) {

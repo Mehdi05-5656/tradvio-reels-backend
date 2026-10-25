@@ -8,6 +8,7 @@ import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
 import { registerReportingRoutes, shiftDay, publerThumbnail, paged } from "./reporting.js";
 import { sumLatest, effectiveStaleMinutes, interactions, engagementRatePct, fetchWindowSnapshots, type SnapshotRow } from "./analytics-util.js";
+import { memo } from "./cache.js";
 
 type SbGetter = () => SupabaseClient;
 
@@ -34,7 +35,18 @@ const rangeErrorStatus = (e: any) => (/report_too_large|invalid_report_range/.te
 export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
   harvestCaptions?: typeof import("./publer-schedule.js").harvestCaptions;
 } = {}): void {
-  registerReportingRoutes(app,sbFn,{warm:process.env.REPORT_WARM!=="0"&&process.env.NODE_ENV!=="test"});
+  const warm = process.env.REPORT_WARM !== "0" && process.env.NODE_ENV !== "test";
+  registerReportingRoutes(app,sbFn,{warm});
+  if (warm) {
+    const warmTags = async () => {
+      try {
+        const sb = sbFn(); const slots = (await loadSlots(sb)).map((s: any) => s.phone_slot); if (!slots.length) return;
+        await memo(hashtagKey(slots, HASHTAG_MIN_DATE), HASHTAG_TTL_MS, () => computeHashtags(sb, slots, ptDateTimeToUtc(HASHTAG_MIN_DATE, "00:00").toISOString()));
+      } catch (e: any) { console.warn("[hashtags] warm failed:", e?.message ?? e); }
+    };
+    setTimeout(warmTags, 45_000).unref();
+    setInterval(warmTags, 10 * 60_000).unref();
+  }
   // ==================== DEVICES ====================
 
   // List all devices with derived health metrics
@@ -62,7 +74,9 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
             .gte("attempted_at", sevenAgoIso)
             .order("attempted_at", { ascending: false }),
         ),
-        windowSnapshots(sb, visibleIds, sevenAgoIso, new Date().toISOString()),
+        // The 7-day window over every account is the slow part (several seconds); it changes only as new
+        // readings arrive, so it is shared for two minutes across requests.
+        memo(`devices-analytics|${[...visibleIds].sort().join(",")}|${admin ? "admin" : "scoped"}`, 120_000, () => windowSnapshots(sb, visibleIds, sevenAgoIso, new Date().toISOString())),
       ]);
       if (devicesRes.error) throw devicesRes.error;
 
@@ -637,48 +651,21 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       if (err1) throw err1;
       const rows = archiveRows ?? [];
 
-      const phoneSlots = Array.from(new Set(rows.map((r: any) => r.phone_slot).filter(Boolean)));
+      const phoneSlots = Array.from(new Set(rows.map((r: any) => r.phone_slot).filter(Boolean))) as string[];
+      // Newest reading per post over the whole history of these accounts (one account at a time is small), from
+      // the compact window function; it carries the poster frame and the permalink. Shared for two minutes.
       const analyticsByPostLink = new Map<string, any>();
-      const analyticsByFilename = new Map<string, any>();
       if (phoneSlots.length > 0) {
-        // Latest snapshot per post for these accounts. The database function returns one row per
-        // post, so posts whose metrics froze weeks ago are still found. If the function is not
-        // installed yet, fall back to the newest rows only (which misses frozen posts).
-        const latest = await sbFn().rpc("publer_analytics_latest", { p_slots: phoneSlots });
-        let analytics: any[];
-        if (!latest.error) {
-          analytics = (latest.data ?? []).map((a: any) => ({
-            ...a,
-            raw: { post_link: a.post_link, medias: [{ path: a.media_filename, thumbnail: a.thumbnail_url }] },
-          }));
-        } else {
-          console.warn("[archive] publer_analytics_latest unavailable, using newest rows:", latest.error.message);
-          const { data } = await sbFn()
-            .from("publer_analytics")
-            .select("publer_post_id, phone_slot, video_views, reach, likes, comments, engagement_rate, captured_at, raw")
-            .in("phone_slot", phoneSlots as string[])
-            .order("captured_at", { ascending: false })
-            .limit(2000);
-          analytics = data ?? [];
-        }
-        for (const a of analytics) {
-          const raw = (a as any).raw || {};
-          const link = raw.post_link || raw.postLink || null;
-          if (link && !analyticsByPostLink.has(link)) analyticsByPostLink.set(link, a);
-          const media = raw.medias?.[0];
-          const path = media?.path || media?.thumbnail || "";
-          if (path) {
-            const parts = String(path).split("/");
-            const fname = parts[parts.length - 1] || "";
-            if (fname && !analyticsByFilename.has(fname)) analyticsByFilename.set(fname, a);
-          }
+        const latest = await memo(`archive-latest|${[...phoneSlots].sort().join(",")}`, 120_000, () => windowSnapshots(sb, phoneSlots, ptDateTimeToUtc("2026-09-05", "00:00").toISOString(), new Date().toISOString()));
+        for (const row of latest) {
+          const link = row.raw?.post_link ?? null;
+          if (link && !analyticsByPostLink.has(link)) analyticsByPostLink.set(link, row);
         }
       }
 
       const enriched = rows.map((r: any) => {
         const link = r.posted_ig_url || null;
-        let a: any = link ? analyticsByPostLink.get(link) : null;
-        if (!a && r.filename) a = analyticsByFilename.get(r.filename);
+        const a: any = link ? analyticsByPostLink.get(link) : null;
         return {
           ...r,
           post_link: r.posted_ig_url ?? null,
@@ -686,8 +673,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
           views: a ? Number(a.video_views ?? 0) : null,
           reach: a ? Number(a.reach ?? 0) : null,
           likes: a ? Number(a.likes ?? 0) : null,
-          engagement_rate: a ? Number(a.engagement_rate ?? 0) : null,
-          thumbnail_url: a?.raw?.medias?.[0]?.thumbnail ?? null,
+          engagement_rate: a ? engagementRatePct(a) : null,
+          thumbnail_url: a ? publerThumbnail(a.raw) : null,
         };
       });
 
@@ -928,38 +915,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       const from = String(req.query.from ?? MIN_DATE);
       const fromISO = ptDateTimeToUtc(from < MIN_DATE ? MIN_DATE : from, "00:00").toISOString();
 
-      // Newest capture per post in the window: one row per post, never every hourly capture.
-      const latestByPost = await windowSnapshots(sb, phoneFilter ? [phoneFilter] : visibleIds, fromISO, new Date().toISOString());
-
-      // Extract hashtags per post and aggregate
-      const tagStats: Record<string, { count: number; total_views: number; total_reach: number; total_likes: number; er_sum: number; er_n: number; posts: string[] }> = {};
-      for (const s of latestByPost) {
-        const text = s.raw?.text ?? "";
-        const tags = extractHashtags(text);
-        for (const tag of tags) {
-          if (!tagStats[tag]) tagStats[tag] = { count: 0, total_views: 0, total_reach: 0, total_likes: 0, er_sum: 0, er_n: 0, posts: [] };
-          tagStats[tag].count++;
-          tagStats[tag].total_views += Number(s.video_views ?? 0);
-          tagStats[tag].total_reach += Number(s.reach ?? 0);
-          tagStats[tag].total_likes += Number(s.likes ?? 0);
-          const er = engagementRatePct(s);
-          if (er > 0) { tagStats[tag].er_sum += er; tagStats[tag].er_n++; }
-          if (tagStats[tag].posts.length < 5) tagStats[tag].posts.push(s.publer_post_id);
-        }
-      }
-
-      const items = Object.entries(tagStats).map(([tag, s]) => ({
-        hashtag: tag,
-        posts_count: s.count,
-        avg_views: s.count ? Math.round(s.total_views / s.count) : 0,
-        avg_reach: s.count ? Math.round(s.total_reach / s.count) : 0,
-        avg_likes: s.count ? Math.round(s.total_likes / s.count) : 0,
-        avg_engagement_rate: s.er_n ? Number((s.er_sum / s.er_n).toFixed(2)) : 0,
-        total_views: s.total_views,
-        sample_posts: s.posts,
-      }));
-      items.sort((a, b) => b.avg_views - a.avg_views);
-
+      const slotsForTags = phoneFilter ? [phoneFilter] : visibleIds;
+      const items = await memo(hashtagKey(slotsForTags, from), HASHTAG_TTL_MS, () => computeHashtags(sb, slotsForTags, fromISO));
       res.json({ from, total_hashtags: items.length, items });
     } catch (e: any) {
       res.status(rangeErrorStatus(e)).json({ error: e.message });
@@ -1656,4 +1613,43 @@ export async function evaluateAlerts(sb: SupabaseClient): Promise<any> {
   }
 
   return { fired: fired.length, alerts: fired };
+}
+
+export const HASHTAG_TTL_MS = 15 * 60_000;
+export const HASHTAG_MIN_DATE = "2026-09-05";
+export const hashtagKey = (slots: string[], from: string) => `hashtags|${[...slots].sort().join(",")}|${from}`;
+/** Average views, reach, likes and engagement per hashtag over each post's newest reading since `fromISO`. Slow (tens of seconds over every account since launch), so callers memoize it. */
+export async function computeHashtags(sb: SupabaseClient, slots: string[], fromISO: string) {
+      // Newest capture per post in the window: one row per post, never every hourly capture.
+      const latestByPost = await windowSnapshots(sb, slots, fromISO, new Date().toISOString());
+
+      // Extract hashtags per post and aggregate
+      const tagStats: Record<string, { count: number; total_views: number; total_reach: number; total_likes: number; er_sum: number; er_n: number; posts: string[] }> = {};
+      for (const s of latestByPost) {
+        const text = s.raw?.text ?? "";
+        const tags = extractHashtags(text);
+        for (const tag of tags) {
+          if (!tagStats[tag]) tagStats[tag] = { count: 0, total_views: 0, total_reach: 0, total_likes: 0, er_sum: 0, er_n: 0, posts: [] };
+          tagStats[tag].count++;
+          tagStats[tag].total_views += Number(s.video_views ?? 0);
+          tagStats[tag].total_reach += Number(s.reach ?? 0);
+          tagStats[tag].total_likes += Number(s.likes ?? 0);
+          const er = engagementRatePct(s);
+          if (er > 0) { tagStats[tag].er_sum += er; tagStats[tag].er_n++; }
+          if (tagStats[tag].posts.length < 5) tagStats[tag].posts.push(s.publer_post_id);
+        }
+      }
+
+      const items = Object.entries(tagStats).map(([tag, s]) => ({
+        hashtag: tag,
+        posts_count: s.count,
+        avg_views: s.count ? Math.round(s.total_views / s.count) : 0,
+        avg_reach: s.count ? Math.round(s.total_reach / s.count) : 0,
+        avg_likes: s.count ? Math.round(s.total_likes / s.count) : 0,
+        avg_engagement_rate: s.er_n ? Number((s.er_sum / s.er_n).toFixed(2)) : 0,
+        total_views: s.total_views,
+        sample_posts: s.posts,
+      }));
+      items.sort((a, b) => b.avg_views - a.avg_views);
+      return items;
 }
