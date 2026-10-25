@@ -44,7 +44,7 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
         await memo(hashtagKey(slots, HASHTAG_MIN_DATE), HASHTAG_TTL_MS, () => computeHashtags(sb, slots, ptDateTimeToUtc(HASHTAG_MIN_DATE, "00:00").toISOString()));
       } catch (e: any) { console.warn("[hashtags] warm failed:", e?.message ?? e); }
     };
-    setTimeout(warmTags, 45_000).unref();
+    setTimeout(warmTags, 3 * 60_000).unref(); // after the report warmer's first pass, never alongside a deploy
     setInterval(warmTags, 10 * 60_000).unref();
   }
   // ==================== DEVICES ====================
@@ -1620,8 +1620,10 @@ export const HASHTAG_MIN_DATE = "2026-09-05";
 export const hashtagKey = (slots: string[], from: string) => `hashtags|${[...slots].sort().join(",")}|${from}`;
 /** Average views, reach, likes and engagement per hashtag over each post's newest reading since `fromISO`. Slow (tens of seconds over every account since launch), so callers memoize it. */
 export async function computeHashtags(sb: SupabaseClient, slots: string[], fromISO: string) {
-      // Newest capture per post in the window: one row per post, never every hourly capture.
-      const latestByPost = await windowSnapshots(sb, slots, fromISO, new Date().toISOString());
+      // Newest capture per post in the window, one account at a time: the whole history of every account in one
+      // call is far over the function's row cap, and a parallel fan-out would starve the shared database.
+      const latestByPost: SnapshotRow[] = [];
+      for (const slot of [...new Set(slots)]) latestByPost.push(...(await windowSnapshots(sb, [slot], fromISO, new Date().toISOString())));
 
       // Extract hashtags per post and aggregate
       const tagStats: Record<string, { count: number; total_views: number; total_reach: number; total_likes: number; er_sum: number; er_n: number; posts: string[] }> = {};

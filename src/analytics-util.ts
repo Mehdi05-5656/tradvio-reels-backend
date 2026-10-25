@@ -68,15 +68,17 @@ export async function fetchWindowSnapshots(rpc: WindowRpc, slots: string[], star
   const r = await rpc({ p_slots: unique, p_start: startISO, p_end: endISO });
   if (!r.error) return latestInWindow((r.data ?? []) as SnapshotRow[], startISO);
   if (!SPLITTABLE.test(r.error.message) || depth >= 8) throw new Error(r.error.message);
-  let parts: Promise<SnapshotRow[]>[];
+  // Parts run one after another: a parallel fan-out of split queries saturates the shared database and makes
+  // every other statement hit the 8-second timeout. Results are cached upstream, so latency matters less than load.
+  const rows: SnapshotRow[] = [];
   if (unique.length > 1) {
     const mid = Math.ceil(unique.length / 2);
-    parts = [unique.slice(0, mid), unique.slice(mid)].map((part) => fetchWindowSnapshots(rpc, part, startISO, endISO, depth + 1));
+    for (const part of [unique.slice(0, mid), unique.slice(mid)]) rows.push(...(await fetchWindowSnapshots(rpc, part, startISO, endISO, depth + 1)));
   } else {
     const midISO = new Date(Math.floor((start + end) / 2)).toISOString();
-    parts = [[startISO, midISO], [midISO, endISO]].map(([a, b]) => fetchWindowSnapshots(rpc, unique, a, b, depth + 1));
+    for (const [a, b] of [[startISO, midISO], [midISO, endISO]]) rows.push(...(await fetchWindowSnapshots(rpc, unique, a, b, depth + 1)));
   }
-  return latestPerPost((await Promise.all(parts)).flat());
+  return latestPerPost(rows);
 }
 
 /**
@@ -92,16 +94,16 @@ export async function fetchCompactSnapshots(rpc: WindowRpc, slots: string[], sta
   const r = await rpc({ p_slots: unique, p_start: startISO, p_end: endISO });
   if (!r.error) return (r.data ?? []) as any[];
   if (!SPLITTABLE.test(r.error.message) || depth >= 8) throw new Error(r.error.message);
-  let parts: Promise<any[]>[];
+  const rows: any[] = [];
   if (unique.length > 1) {
     const mid = Math.ceil(unique.length / 2);
-    parts = [unique.slice(0, mid), unique.slice(mid)].map((part) => fetchCompactSnapshots(rpc, part, startISO, endISO, splitAt, depth + 1));
+    for (const part of [unique.slice(0, mid), unique.slice(mid)]) rows.push(...(await fetchCompactSnapshots(rpc, part, startISO, endISO, splitAt, depth + 1)));
   } else {
     const midISO = splitAt(start, end), mid = midISO ? Date.parse(midISO) : NaN;
     if (!(mid > start && mid < end)) throw new Error(r.error.message);
-    parts = [[startISO, midISO!], [midISO!, endISO]].map(([a, b]) => fetchCompactSnapshots(rpc, unique, a, b, splitAt, depth + 1));
+    for (const [a, b] of [[startISO, midISO!], [midISO!, endISO]]) rows.push(...(await fetchCompactSnapshots(rpc, unique, a, b, splitAt, depth + 1)));
   }
   const byId = new Map<string, any>();
-  for (const row of (await Promise.all(parts)).flat()) byId.set(String(row.id ?? `${row.phone_slot}|${row.publer_post_id}|${row.captured_at}`), row);
+  for (const row of rows) byId.set(String(row.id ?? `${row.phone_slot}|${row.publer_post_id}|${row.captured_at}`), row);
   return [...byId.values()].sort((a, b) => Date.parse(a.captured_at) - Date.parse(b.captured_at) || Number(a.id) - Number(b.id));
 }
