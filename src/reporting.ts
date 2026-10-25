@@ -184,7 +184,7 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
       "Video totals use the latest available snapshot before the selected range ends. Daily history is an as-of view, not today's lifetime total.",
       "Views, likes and comments refresh about hourly from public profile data; Publer's insights refresh about once a day and fill in reach, and Instagram shares and saves."]};
 }
-export function registerReportingRoutes(app:Express,sbFn:()=>any){
+export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:boolean}={}){
   // A 7-day report over 18 accounts costs a 22k-row function call and ~800 KB; several screens ask for
   // the same ranges and poll. Results are kept per (accounts, range): 2 minutes for ranges that include
   // today, an hour for closed past ranges. Identical concurrent requests share one computation.
@@ -214,6 +214,27 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any){
       res.set("Cache-Control","private, no-store").set("X-Report-Cache","miss").json(result);
     }catch(e:any){res.status(/^invalid_date/.test(e.message)?400:503).json({error:/report_too_large/.test(e.message)?"report_too_large_choose_shorter_range":/^invalid_date/.test(e.message)?e.message:"report_unavailable"});}
   });
+  // Warmer: the operator's screens open with today, 7 and 30 days over every account, plus the previous
+  // periods for the comparison. Recomputing those every 4 minutes keeps first loads at cache speed.
+  // Warm entries live 6 minutes; closed past ranges an hour. Off in tests (options.warm).
+  if(options.warm){
+    const warmOnce=async()=>{
+      try{
+        const sb=sbFn(),slots=await loadSlots(sb);if(!slots.length)return;
+        const ids=slots.map((s:any)=>s.phone_slot),today=ptNow().ymd;
+        const ranges=[[today,today],[shiftDay(today,-6),today],[shiftDay(today,-29),today],[shiftDay(today,-13),shiftDay(today,-7)],[shiftDay(today,-59),shiftDay(today,-30)]];
+        for(const [from,to] of ranges){
+          const key=`${[...ids].sort().join(",")}|${from}|${to}`,hit=cache.get(key);
+          if(hit&&Date.now()-hit.at<hit.ttl-30_000)continue;
+          const range=resolveRange({from,to});
+          const result=await computeReport(sb,slots,ids,range);
+          cache.set(key,{at:Date.now(),ttl:to<today?3600_000:6*60_000,body:result});
+        }
+      }catch(e:any){console.warn("[report] warm failed:",e?.message??e);}
+    };
+    setTimeout(warmOnce,15_000).unref();
+    setInterval(warmOnce,4*60_000).unref();
+  }
 }
 async function computeReport(sb:any,slots:any[],ids:string[],range:ReturnType<typeof resolveRange>){
       const logs=await paged((a,b)=>sb.from("publer_publish_log")

@@ -34,7 +34,7 @@ const rangeErrorStatus = (e: any) => (/report_too_large|invalid_report_range/.te
 export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
   harvestCaptions?: typeof import("./publer-schedule.js").harvestCaptions;
 } = {}): void {
-  registerReportingRoutes(app,sbFn);
+  registerReportingRoutes(app,sbFn,{warm:process.env.REPORT_WARM!=="0"&&process.env.NODE_ENV!=="test"});
   // ==================== DEVICES ====================
 
   // List all devices with derived health metrics

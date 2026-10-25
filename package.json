@@ -18,6 +18,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.58.0",
+    "@types/compression": "^1.8.1",
+    "compression": "^1.8.2",
     "express": "^4.21.2",
     "jose": "^5.10.0",
     "ws": "^8.18.0"

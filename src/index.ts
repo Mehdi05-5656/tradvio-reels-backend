@@ -21,6 +21,7 @@ import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { configurePublerRate } from "./publer-rate.js";
 import { corsMiddleware } from "./cors.js";
+import compression from "compression";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
 
@@ -29,6 +30,8 @@ async function main() {
   app.disable("x-powered-by");
   // Browser origins are allowlisted (src/cors.ts); curl/cron callers never send Origin and are unaffected.
   app.use(corsMiddleware());
+  // Reports are large JSON (a 30-day range is ~1.8 MB raw); gzip cuts the transfer by about 10x.
+  app.use(compression({ threshold: 1024 }));
   // Capture raw body for HMAC verification (needed by the CreatorVault webhook).
   // Attaching a verify fn to express.json makes rawBody available on req without
   // installing a separate body-consuming middleware, which would hang after json parsed.
