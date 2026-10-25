@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { summarizePipeline, registerOpsPipeline, type RawCounts } from "../src/ops-pipeline.js";
+import { summarizePipeline, registerOpsPipeline, summarizeWindows, type RawCounts } from "../src/ops-pipeline.js";
 import { accountAccess } from "../src/account-access.js";
 
 const now = new Date("2026-10-24T22:30:00Z");
 const base = (): RawCounts => ({
   sources: 877, variants: { rendered_private: 12962, running: 4, pending: 189 }, queue: { "pending|managed-variants": 11636, "posted|managed-variants": 1326, "publer_publishing|reels": 9 },
-  logs_today: { published: 72, failed: 1 }, logs_7d_published: 846, logs_total_published: 2149, held_pending: 0, last_attempt_at: "2026-10-24T22:10:00Z",
+  logs_today: { published: 72, failed: 1 }, stale_pending: 0, logs_7d_published: 846, logs_total_published: 2149, held_pending: 0, last_attempt_at: "2026-10-24T22:10:00Z",
   analytics_latest: "2026-10-24T22:00:00Z", analytics_snapshots_24h: 4100, analytics_pulls_24h: 140, measured_7d: 790, live_latest: null,
   live_accounts: { ok: 0, failed: 0, never: 18 }, features_latest: "2026-10-20T20:01:00Z", features_rows: 14742, captions_latest: "2026-09-13T10:53:00Z",
   library_control: { enabled: true, max_active: 4, max_daily_claims: 15000 }, upload: { phase: "idle", updated_at: "2026-10-24T21:15:00Z", expires_at: null },
@@ -68,4 +68,19 @@ test("route is admin-only: anonymous 401, customer 403, admin 200 with no table 
   const body: any = await r.json();
   assert.equal(body.stages.length, 6);
   assert.ok(body.jobs.some((j: any) => j.id === "publisher"));
+});
+
+test("today's windows count outcomes per window: a retried window is one published, not one failed", () => {
+  const rows = [
+    { phone_slot: "a", slot_index: 4, status: "failed", slot_local_date: "2026-10-24" },
+    { phone_slot: "a", slot_index: 4, status: "failed", slot_local_date: "2026-10-24" },
+    { phone_slot: "a", slot_index: 4, status: "published", slot_local_date: "2026-10-24" },
+    { phone_slot: "a", slot_index: 5, status: "pending", slot_local_date: "2026-10-24" },
+    { phone_slot: "b", slot_index: 4, status: "failed", slot_local_date: "2026-10-24" },
+    { phone_slot: "b", slot_index: 3, status: "published", slot_local_date: "2026-10-24" },
+  ];
+  assert.deepEqual(summarizeWindows(rows), { published: 2, pending: 1, failed: 1 });
+  const stale = summarizePipeline({ ...base(), stale_pending: 72 }, now);
+  assert.match(stale.jobs.find((j) => j.id === "publisher")!.note, /72 old pending windows/);
+  assert.equal(stale.jobs.find((j) => j.id === "publisher")!.health, "ok");
 });

@@ -14,10 +14,11 @@ export type RawCounts = {
   sources: number;
   variants: Record<string, number>;           // state -> count
   queue: Record<string, number>;              // `${status}|${bucket}` -> count
-  logs_today: Record<string, number>;         // status -> count (Pacific day)
+  logs_today: Record<string, number>;         // outcome per posting window today: published | failed | pending (a retried window counts once)
+  stale_pending: number;                      // pending windows older than 24 h that were never resolved (data debris, not in-flight)
   logs_7d_published: number;
   logs_total_published: number;
-  held_pending: number;                       // pending logs older than 45 min
+  held_pending: number;                       // pending submissions between 45 min and 24 h old: outcome unknown, never resend
   last_attempt_at: string | null;
   analytics_latest: string | null;
   analytics_snapshots_24h: number;
@@ -58,7 +59,7 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
   const health = (h: number, warn: number, down: number): Health => (h <= warn ? "ok" : h <= down ? "warn" : "down");
   const jobs: JobCard[] = [
     { id: "publisher", label: "Publisher", cadence: "every 5 min, posts in 2-hour windows 8 AM–10 PM PT", last_at: c.last_attempt_at,
-      health: c.held_pending > 0 ? "warn" : health(hoursAgo(c.last_attempt_at, now), 3, 6), note: c.held_pending ? `${c.held_pending} submissions held with an unknown outcome` : `last attempt ${ago(c.last_attempt_at, now)}`,
+      health: c.held_pending > 0 ? "warn" : health(hoursAgo(c.last_attempt_at, now), 3, 6), note: c.held_pending ? `${c.held_pending} submissions held with an unknown outcome` : c.stale_pending ? `last attempt ${ago(c.last_attempt_at, now)}; ${c.stale_pending} old pending windows never resolved` : `last attempt ${ago(c.last_attempt_at, now)}`,
       details: { published_today: publishedToday, failed_today: failedToday } },
     { id: "analytics", label: "Publer insights", cadence: "every 15 min, each account at most every 3 h, paused in posting windows", last_at: c.analytics_latest,
       health: health(hoursAgo(c.analytics_latest, now), 4, 8), note: `latest reading ${ago(c.analytics_latest, now)}`, details: { snapshots_24h: c.analytics_snapshots_24h, account_pulls_24h: c.analytics_pulls_24h } },
@@ -99,6 +100,29 @@ async function groupCount(sb: any, table: string, cols: string[], filter?: (q: a
   }
   return out;
 }
+/** Today's posting windows by outcome. A window that failed and was then published counts as published, not as a failure. */
+export function summarizeWindows(rows: { phone_slot: string; slot_index: number | null; status: string; slot_local_date?: string }[]): Record<string, number> {
+  const rank: Record<string, number> = { published: 3, pending: 2, failed: 1 };
+  const best = new Map<string, string>();
+  for (const r of rows) {
+    const k = `${r.phone_slot}|${r.slot_local_date ?? ""}|${r.slot_index ?? "?"}`;
+    const cur = best.get(k);
+    if (!cur || (rank[r.status] ?? 0) > (rank[cur] ?? 0)) best.set(k, r.status);
+  }
+  const out: Record<string, number> = {};
+  for (const s of best.values()) out[s] = (out[s] ?? 0) + 1;
+  return out;
+}
+async function windowOutcomes(sb: any, dayStart: string): Promise<Record<string, number>> {
+  const rows: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const r = await sb.from("publer_publish_log").select("phone_slot,slot_index,status,slot_local_date").gte("attempted_at", dayStart).range(from, from + 999);
+    if (r.error) throw r.error;
+    rows.push(...(r.data ?? []));
+    if ((r.data ?? []).length < 1000) break;
+  }
+  return summarizeWindows(rows);
+}
 const latest = async (sb: any, table: string, col: string, filter?: (q: any) => any): Promise<string | null> => {
   let q = sb.from(table).select(col).order(col, { ascending: false }).limit(1);
   if (filter) q = filter(q);
@@ -108,14 +132,15 @@ const latest = async (sb: any, table: string, col: string, filter?: (q: any) => 
 export async function collectPipeline(sb: any, now = new Date()): Promise<RawCounts> {
   const day = ptNow(now).ymd, dayStart = ptDateTimeToUtc(day, "00:00").toISOString();
   const h24 = new Date(now.getTime() - 24 * 3600_000).toISOString(), d7 = new Date(now.getTime() - 7 * 86400_000).toISOString(), held = new Date(now.getTime() - 45 * 60_000).toISOString();
-  const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, control, upload, rate, slots] = await Promise.all([
+  const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, control, upload, rate, slots] = await Promise.all([
     count(sb.from("library_sources").select("sha256", { count: "exact", head: true })),
     groupCount(sb, "library_variants", ["state"]),
     groupCount(sb, "reels_manual_queue", ["status", "storage_bucket"]),
-    groupCount(sb, "publer_publish_log", ["status"], (q: any) => q.gte("attempted_at", dayStart)),
+    windowOutcomes(sb, dayStart),
     count(sb.from("publer_publish_log").select("id", { count: "exact", head: true }).eq("status", "published").gte("attempted_at", d7)),
     count(sb.from("publer_publish_log").select("id", { count: "exact", head: true }).eq("status", "published")),
-    count(sb.from("publer_publish_log").select("id", { count: "exact", head: true }).eq("status", "pending").lt("attempted_at", held)),
+    count(sb.from("publer_publish_log").select("id", { count: "exact", head: true }).eq("status", "pending").lt("attempted_at", held).gte("attempted_at", h24)),
+    count(sb.from("publer_publish_log").select("id", { count: "exact", head: true }).eq("status", "pending").lt("attempted_at", h24)),
     latest(sb, "publer_publish_log", "attempted_at"),
     latest(sb, "publer_analytics", "captured_at"),
     count(sb.from("publer_analytics").select("id", { count: "exact", head: true }).gte("captured_at", h24)),
@@ -138,7 +163,7 @@ export async function collectPipeline(sb: any, now = new Date()): Promise<RawCou
     for (const row of r.data ?? []) measured.add(row.publer_post_id);
     if ((r.data ?? []).length < 1000) break;
   }
-  return { sources, variants, queue, logs_today: logsToday, logs_7d_published: logs7d, logs_total_published: logsTotal, held_pending: heldPending, last_attempt_at: lastAttempt,
+  return { sources, variants, queue, logs_today: logsToday, logs_7d_published: logs7d, logs_total_published: logsTotal, held_pending: heldPending, stale_pending: stalePending, last_attempt_at: lastAttempt,
     analytics_latest: analyticsLatest, analytics_snapshots_24h: snaps24h, analytics_pulls_24h: pulls24h, measured_7d: measured.size, live_latest: liveLatest, live_accounts: liveAccounts,
     features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, library_control: control, upload, rate, slots };
 }
