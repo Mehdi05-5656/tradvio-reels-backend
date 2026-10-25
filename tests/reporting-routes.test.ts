@@ -56,3 +56,11 @@ test("identical report requests are served from the per-app cache; ?fresh=1 reco
   assert.ok(f.scopes.length-before>reads,"fresh=1 recomputed");
   assert.equal(c.body.cached_at,undefined);
 });
+
+test("publerThumbnail accepts the compact raw.thumbnail projection and the full media shape", async () => {
+  const { publerThumbnail } = await import("../src/reporting.js");
+  assert.equal(publerThumbnail({ thumbnail: "https://cdn.publer.com/uploads/photos/thumb_a.jpg" }), "https://cdn.publer.com/uploads/photos/thumb_a.jpg");
+  assert.equal(publerThumbnail({ thumbnail: "https://evil.example/x.jpg" }), null);
+  assert.equal(publerThumbnail({ media: [{ default_thumbnail: 1, thumbnails: [{ small: "https://cdn.publer.com/a.jpg" }, { small: "https://cdn.publer.com/b.jpg" }] }] }), "https://cdn.publer.com/b.jpg");
+  assert.equal(publerThumbnail({ id: "x" }), null);
+});

@@ -24,11 +24,13 @@ export async function paged(fetchPage:(a:number,b:number)=>PromiseLike<any>,size
 const num=(v:any)=>v===null||v===undefined||v===""?null:Number.isFinite(Number(v))?Number(v):null;
 const safeLink=(v:any)=>typeof v==="string"&&/^https:\/\/(www\.)?(instagram\.com|tiktok\.com)\//.test(v)?v:null;
 // Publer stores a poster frame per post; only the small variant is publicly readable.
+// dashboard_report_snapshots projects it as raw.thumbnail; full Publer rows carry raw.media[].thumbnails.
 export function publerThumbnail(raw:any):string|null{
+  const ok=(u:any)=>typeof u==="string"&&/^https:\/\/cdn\.publer\.com\//.test(u)?u:null;
+  if(raw?.thumbnail)return ok(raw.thumbnail);
   const media=raw?.media?.[0];if(!media)return null;
   const idx=Number.isInteger(media.default_thumbnail)?media.default_thumbnail:0;
-  const url=media.thumbnails?.[idx]?.small??media.thumbnails?.[0]?.small;
-  return typeof url==="string"&&/^https:\/\/cdn\.publer\.com\//.test(url)?url:null;
+  return ok(media.thumbnails?.[idx]?.small??media.thumbnails?.[0]?.small);
 }
 const metrics=["video_views","reach","likes","comments","shares","saves"] as const;
 const sumKnown=(rows:any[],key:string)=>{const values=rows.map(r=>num(r[key])).filter(v=>v!==null) as number[];return values.length?values.reduce((a,b)=>a+b,0):null;};
