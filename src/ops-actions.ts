@@ -97,13 +97,13 @@ export function validateSchedule(body: any, now = new Date()): { ok: true; value
 }
 
 /** Record ownership, plan one variant per library source, arm the publishing policy. Same functions, same gates as the terminal path. */
-export async function scheduleAccount(sb: any, actor: string, v: Required<ScheduleInput>, gate: string | null, now = new Date()) {
+export async function scheduleAccount(sb: any, actor: string, v: Required<ScheduleInput>, gate: string | null, now = new Date(), minReady = 8) {
   const own = await sb.rpc("publer_assign_operator_ownership", { p_actor: actor, p_owner: actor, p_workspace: v.workspace_id, p_observed_at: now.toISOString(),
     p_accounts: [{ id: v.publer_account_id, platform: v.platform, label: v.label, label_is_username: v.label_is_username }] });
   if (own.error) throw new Error(`ownership: ${own.error.message}`);
   const plan = await sb.rpc("library_plan", { p_actor: actor, p_account: v.publer_account_id });
   if (plan.error) throw new Error(`plan: ${plan.error.message}`);
-  const arm = await sb.rpc("library_arm_publishing", { p_actor: actor, p_account: v.publer_account_id, p_start: v.start, p_daily: v.daily_target, p_min_ready: 8,
+  const arm = await sb.rpc("library_arm_publishing", { p_actor: actor, p_account: v.publer_account_id, p_start: v.start, p_daily: v.daily_target, p_min_ready: minReady,
     p_settings: v.platform === "tiktok" ? TIKTOK_SETTINGS : INSTAGRAM_SETTINGS,
     p_approval: `Scheduled from the Clone8 console by operator ${actor} at ${now.toISOString()}; ${v.daily_target}/day from ${v.start}; same library, caption-question-v1`, p_gate: gate });
   if (arm.error) throw new Error(`arm: ${arm.error.message}`);
@@ -170,9 +170,18 @@ export function registerOpsActions(app: Express, sbFn: () => any, deps: { render
     const v = validateSchedule(req.body, now());
     if (v.ok === false) return res.status(400).json({ error: v.error });
     const actor = (req.auth as any).user_id as string;
+    // Every account belongs to a client: library_plan() only plans that client's sources.
+    const orgId = String(req.body?.org_id ?? "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orgId)) return res.status(400).json({ error: "client_required", detail: "Pick the client this account belongs to" });
     try {
       const sb = sbFn();
+      const taken = await sb.from("client_account_setup").select("org_id").eq("publer_account_id", v.value.publer_account_id).maybeSingle();
+      if (taken.error) throw taken.error;
+      if (taken.data && taken.data.org_id !== orgId) return res.status(409).json({ error: "account_belongs_to_another_client" });
+      const setup = await sb.from("client_account_setup").upsert({ org_id: orgId, publer_account_id: v.value.publer_account_id, platform: v.value.platform, label: v.value.label, method: "blueprint_repost", daily_target: v.value.daily_target, batch_size: 8, status: "planned", start_at: v.value.start, created_by: actor, updated_at: now().toISOString() }, { onConflict: "publer_account_id" });
+      if (setup.error) throw setup.error;
       const result = await scheduleAccount(sb, actor, v.value, await defaultGate(sb), now());
+      await sb.from("client_account_setup").update({ status: "rendering", updated_at: now().toISOString() }).eq("publer_account_id", v.value.publer_account_id);
       console.log("[ops/actions] schedule account", JSON.stringify({ by: actor, account: v.value.publer_account_id, ...result }));
       res.json(result);
     } catch (e: any) {
