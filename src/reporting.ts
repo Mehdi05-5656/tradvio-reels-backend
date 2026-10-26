@@ -45,7 +45,7 @@ export function platformKey(link:any):string|null{
 }
 // Live numbers win while they are no more than 6 hours older than Publer's latest capture.
 export const LIVE_PREFERENCE_MS=6*3600_000;
-export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnType<typeof resolveRange>,live:any[]=[],liveAccounts:any[]=[]){
+export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnType<typeof resolveRange>,live:any[]=[],liveAccounts:any[]=[],now=new Date()){
   const allowed=new Set(slots.map(s=>s.phone_slot));
   logs=logs.filter(l=>allowed.has(l.phone_slot)&&l.slot_local_date>=range.from&&l.slot_local_date<=range.to);
   const prep=(rows:any[],source:string)=>rows.filter(s=>allowed.has(s.phone_slot)&&Date.parse(s.captured_at)<Date.parse(range.end))
@@ -69,49 +69,61 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
   // the live readings are used for that day and the Publer readings are set aside.
   const timeline=[...snapshots,...live]
     .sort((a,b)=>Date.parse(a.captured_at)-Date.parse(b.captured_at)||(a.source===b.source?Number(a.id)-Number(b.id):a.source==="publer"?-1:1));
+  // One bucket per Pacific day; a single-day range (Today, Yesterday) is bucketed by Pacific hour instead,
+  // "YYYY-MM-DDTHH", so the chart has a shape instead of one point. A DST day folds its repeated hour into
+  // one bucket and leaves its skipped hour empty.
+  const hourly=range.from===range.to;
+  const bucketOf=(iso:string)=>{const p=ptNow(new Date(iso));return hourly?`${p.ymd}T${p.hhmm.slice(0,2)}`:p.ymd;};
   const series:any[]=[];
-  for(let d=range.from;d<=range.to;d=shiftDay(d,1))series.push({date:d,observed_views:null,observations:0,accounts:{}});
+  if(hourly)for(let h=0;h<24;h++)series.push({date:`${range.from}T${String(h).padStart(2,"0")}`,observed_views:null,observations:0,accounts:{}});
+  else for(let d=range.from;d<=range.to;d=shiftDay(d,1))series.push({date:d,observed_views:null,observations:0,accounts:{}});
   const dayMap=new Map(series.map(d=>[d.date,d]));
   const previous=new Map<string,any>(),latestPub=new Map<string,any>(),latestLive=new Map<string,any>();
   const gains=new Map<string,number[]>(),coverage={missing_baselines:0,corrections:0,snapshots:0,posts_with_metrics:0,live_snapshots:0};
   const missing=new Set<string>(),counted=new Set<string>();
-  type DayGains={phone_slot:string;live:number[];publer:number[];liveSeed?:number;publerSeed?:number};
+  // Gains are grouped per Pacific day and post so that one source is chosen per day; each gain also
+  // remembers its bucket (the day, or the hour on a single-day report) so it lands in the right point.
+  type Gain={delta:number;bucket:string};
+  type DayGains={phone_slot:string;live:Gain[];publer:Gain[];liveSeed?:Gain;publerSeed?:Gain};
   const byDay=new Map<string,Map<string,DayGains>>();
   for(const s of timeline){
-    const key=keyOf(s),v=num(s.video_views),track=`${key}|${s.source}`,old=previous.get(track),day=ptNow(new Date(s.captured_at)).ymd;
+    const key=keyOf(s),v=num(s.video_views),track=`${key}|${s.source}`,old=previous.get(track),day=ptNow(new Date(s.captured_at)).ymd,bucket=bucketOf(s.captured_at);
     const published=s.source==="live"?s.posted_at:(s.raw?.scheduled_at??s.raw?.published_at);
     if(s.captured_at>=range.start){coverage.snapshots++;if(s.source==="live")coverage.live_snapshots++;}
     // A reading without a view count neither counts nor moves the baseline.
     if(v===null)continue;
-    if(s.captured_at>=range.start&&dayMap.has(day)){
+    if(s.captured_at>=range.start&&dayMap.has(bucket)){
       const posts=byDay.get(day)??new Map<string,DayGains>();byDay.set(day,posts);
       const g=posts.get(key)??{phone_slot:s.phone_slot,live:[],publer:[]};posts.set(key,g);
       if(old){
         const delta=v-Number(old.video_views);
         // A downward correction is excluded and the higher baseline is kept, so climbing back
         // to an earlier value is not counted as new views.
-        if(delta<0)coverage.corrections++;else{g[s.source as "live"|"publer"].push(delta);counted.add(key);}
+        if(delta<0)coverage.corrections++;else{g[s.source as "live"|"publer"].push({delta,bucket});counted.add(key);}
       } else if(published&&Date.parse(published)>=Date.parse(range.start)&&Date.parse(published)<=Date.parse(s.captured_at)){
         // First reading of a post published inside the range: its whole count is new (used once per post).
-        g[s.source==="live"?"liveSeed":"publerSeed"]=v;counted.add(key);
+        g[s.source==="live"?"liveSeed":"publerSeed"]={delta:v,bucket};counted.add(key);
       } else missing.add(key);
     }
     if(!old||v>=Number(old.video_views))previous.set(track,s);
   }
   const seeded=new Set<string>();
-  for(const d of series){
-    for(const [key,g] of byDay.get(d.date)??[]){
+  for(const day of hourly?[range.from]:series.map(d=>d.date)){
+    for(const [key,g] of byDay.get(day)??[]){
       const src=g.live.length||g.liveSeed!==undefined?"live":"publer";
       const seed=src==="live"?g.liveSeed:g.publerSeed;
       const values=[...(seed!==undefined&&!seeded.has(key)?[seed]:[]),...g[src]];
       if(seed!==undefined)seeded.add(key);
-      for(const delta of values){
+      for(const {delta,bucket} of values){
+        const d=dayMap.get(bucket);if(!d)continue;
         d.observed_views=(d.observed_views??0)+delta;d.observations++;
         d.accounts[g.phone_slot]=(d.accounts[g.phone_slot]??0)+delta;
         gains.set(g.phone_slot,[...(gains.get(g.phone_slot)??[]),delta]);
       }
     }
   }
+  // Hours of a single day that have already begun read 0 when nothing was observed; hours still ahead stay unknown.
+  if(hourly)for(const d of series)if(d.observed_views===null&&ptDateTimeToUtc(range.from,`${d.date.slice(11,13)}:00`).getTime()<=now.getTime())d.observed_views=0;
   for(const s of snapshots)latestPub.set(keyOf(s),s);
   for(const s of live)latestLive.set(keyOf(s),s);
   coverage.missing_baselines=[...missing].filter(k=>!counted.has(k)).length;
@@ -182,7 +194,7 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
       observed_views:sumKnown(accounts,"observed_views"),known_post_views:sumKnown(posts,"video_views"),
       latest_live_update:posts.map(p=>p.live_captured_at).filter(Boolean).sort().pop()??null,
       latest_publer_update:posts.map(p=>p.publer_captured_at).filter(Boolean).sort().pop()??null},
-    notes:["View gains are changes observed between saved snapshots, attributed to the later capture day; not exact time-of-view events.",
+    notes:["View gains are changes observed between saved snapshots, attributed to the later capture day (capture hour for a single day); not exact time-of-view events.",
       "Missing baselines and downward metric corrections are excluded. Unknown metrics are not zero.",
       "Video totals use the latest available snapshot before the selected range ends. Daily history is an as-of view, not today's lifetime total.",
       "Views, likes and comments refresh about hourly from public profile data; Publer's insights refresh about once a day and fill in reach, and Instagram shares and saves."]};

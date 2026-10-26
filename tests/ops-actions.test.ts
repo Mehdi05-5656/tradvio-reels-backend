@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { registerOpsActions, validateSchedule, scheduleAccount, renderApi, RENDER_JOB_COMMAND } from "../src/ops-actions.js";
+import { registerOpsActions, validateSchedule, scheduleAccount, renderApi, RENDER_JOB_COMMAND, cronRuns } from "../src/ops-actions.js";
 import { accountAccess } from "../src/account-access.js";
 import { operatorUserIds } from "../src/auth.js";
 
@@ -40,6 +40,12 @@ test("renderApi is absent without a key, and posts job and cron-run requests wit
   assert.deepEqual(await api.createJob("crn-x", RENDER_JOB_COMMAND(50)), { id: "job-1", status: "pending" });
   assert.equal(seen[0][0], "https://api.render.com/v1/services/crn-x/jobs"); assert.equal(seen[0][2], "Bearer k"); assert.match(seen[0][3], /LIBRARY_MAX_JOBS=50/); assert.match(seen[0][3], /env LIBRARY_RENDER_ENABLED=1/);
   await api.runCron("crn-c"); assert.equal(seen[1][0], "https://api.render.com/v1/cron-jobs/crn-c/runs");
+  const svc: any = async (url: string, init: any) => { seen.push([url, init.method]); return { ok: true, text: async () => JSON.stringify({ suspended: "not_suspended", serviceDetails: { lastSuccessfulRunAt: "2026-10-25T22:09:06Z" } }) }; };
+  assert.deepEqual(await renderApi({ RENDER_API_KEY: "k" }, svc)!.service("crn-f"), { lastSuccessfulRunAt: "2026-10-25T22:09:06Z", suspended: false });
+  assert.deepEqual(seen[2], ["https://api.render.com/v1/services/crn-f", "GET"]);
+  const runs = await cronRuns({ createJob: async () => { throw new Error("no"); }, runCron: async () => { throw new Error("no"); }, service: async (id) => { if (id === "crn-dbf7fau7bikc73cfh6og") throw new Error("render_api_500"); return { lastSuccessfulRunAt: id === "crn-dagu505g1s2s73cmseog" ? "2026-10-25T10:50:39Z" : null, suspended: false }; } });
+  assert.equal(runs!.captions, "2026-10-25T10:50:39Z"); assert.equal(runs!.features, null); assert.equal("render" in runs!, false);
+  assert.equal(await cronRuns(null), undefined);
   const bad: any = async () => ({ ok: false, status: 401, text: async () => "nope" });
   await assert.rejects(renderApi({ RENDER_API_KEY: "k" }, bad)!.runCron("crn-c"), /render_api_401/);
 });

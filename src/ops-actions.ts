@@ -19,16 +19,22 @@ const TIKTOK_SETTINGS = { privacy: "PUBLIC_TO_EVERYONE", comment: true, duet: fa
 const INSTAGRAM_SETTINGS = { feed: true };
 
 type Fetch = typeof fetch;
-export type RenderApi = { createJob: (serviceId: string, startCommand: string) => Promise<{ id: string; status: string }>; runCron: (cronId: string) => Promise<{ id: string; status: string }> };
+export const PUBLISHER_CRON_ID = process.env.RENDER_PUBLISHER_CRON_ID ?? "crn-daennav40ujc7380f1sg";
+export type RenderApi = {
+  createJob: (serviceId: string, startCommand: string) => Promise<{ id: string; status: string }>;
+  runCron: (cronId: string) => Promise<{ id: string; status: string }>;
+  /** A cron job's record: when it last finished with exit 0 (null when it never has) and whether it is suspended. */
+  service: (serviceId: string) => Promise<{ lastSuccessfulRunAt: string | null; suspended: boolean }>;
+};
 
 /** Thin Render API client. The key is read per call so a rotation needs no restart. */
 export function renderApi(env: Record<string, string | undefined> = process.env, f: Fetch = fetch): RenderApi | null {
   const key = env.RENDER_API_KEY;
   if (!key) return null;
-  const call = async (path: string, body?: unknown) => {
+  const call = async (path: string, body?: unknown, method: "POST" | "GET" = "POST") => {
     const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 15_000);
     try {
-      const r = await f(`https://api.render.com/v1${path}`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json", accept: "application/json" }, body: body ? JSON.stringify(body) : undefined, signal: ctrl.signal });
+      const r = await f(`https://api.render.com/v1${path}`, { method, headers: { authorization: `Bearer ${key}`, "content-type": "application/json", accept: "application/json" }, body: body ? JSON.stringify(body) : undefined, signal: ctrl.signal });
       const text = await r.text();
       if (!r.ok) throw new Error(`render_api_${r.status}: ${text.slice(0, 160)}`);
       return text ? JSON.parse(text) : {};
@@ -37,7 +43,18 @@ export function renderApi(env: Record<string, string | undefined> = process.env,
   return {
     createJob: async (serviceId, startCommand) => { const j = await call(`/services/${serviceId}/jobs`, { startCommand }); return { id: String(j.id ?? ""), status: String(j.status ?? "created") }; },
     runCron: async (cronId) => { const j = await call(`/cron-jobs/${cronId}/runs`); return { id: String(j.id ?? ""), status: String(j.status ?? "triggered") }; },
+    service: async (serviceId) => { const s = await call(`/services/${serviceId}`, undefined, "GET"); return { lastSuccessfulRunAt: typeof s?.serviceDetails?.lastSuccessfulRunAt === "string" ? s.serviceDetails.lastSuccessfulRunAt : null, suspended: s?.suspended === "suspended" }; },
   };
+}
+
+/** When each scheduled job last finished successfully, keyed by pipeline job id. A cron the API did not answer for is left out
+ *  (unknown, not "never"); without a Render key the whole thing is undefined and the pipeline falls back to table timestamps. */
+export async function cronRuns(api: RenderApi | null = renderApi()): Promise<Record<string, string | null> | undefined> {
+  if (!api) return undefined;
+  const ids: Record<string, string> = { publisher: PUBLISHER_CRON_ID, analytics: RUNNABLE_CRONS.analytics.id, captions: RUNNABLE_CRONS.captions.id, features: RUNNABLE_CRONS.features.id, render: RUNNABLE_CRONS.renderer.id, leader: RUNNABLE_CRONS.leader.id };
+  const out: Record<string, string | null> = {};
+  await Promise.all(Object.entries(ids).map(async ([job, id]) => { try { out[job] = (await api.service(id)).lastSuccessfulRunAt; } catch { /* unknown this time */ } }));
+  return out;
 }
 
 /** Where the renderer stands: variant states, live leases and the recent claim rate. */

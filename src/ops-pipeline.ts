@@ -2,6 +2,7 @@
 // Sources → Rendered → Queued → Scheduled → Published → Measured, plus job heartbeats.
 // Admin-only through the global /api gate (customers only reach the allowlist in account-access.ts).
 import type { Express, Request, Response } from "express";
+import { cronRuns, renderApi } from "./ops-actions.js";
 import { isAdmin } from "./auth.js";
 import { ptNow, ptDateTimeToUtc } from "./publer-schedule.js";
 import { memo } from "./cache.js";
@@ -37,6 +38,7 @@ export type RawCounts = {
   upload: { phase: string; updated_at: string | null; expires_at: string | null } | null;
   rate: { blocked_until: string | null; last_block_reason: string | null } | null;
   slots: { total: number; enabled: number; paused: number };
+  cron_runs?: Record<string, string | null>;   // job id -> Render's last successful run (exit 0); a job the API did not answer for is absent; undefined without a Render key
 };
 
 const hoursAgo = (iso: string | null, now: Date) => (iso ? (now.getTime() - Date.parse(iso)) / 3600_000 : Infinity);
@@ -61,6 +63,15 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
     { id: "measured", label: "Measured, 7 days", count: c.measured_7d, detail: { posts_with_readings: c.measured_7d, snapshots_24h: c.analytics_snapshots_24h } },
   ];
   const health = (h: number, warn: number, down: number): Health => (h <= warn ? "ok" : h <= down ? "warn" : "down");
+  // Render's own record of each cron (last run that exited 0). Table timestamps say when a job last wrote; the run record
+  // says whether it is executing at all, which differs when a worker runs on schedule but every item fails.
+  const runs = c.cron_runs ?? {}, ran = (job: string) => runs[job] ?? null;
+  const newest = (...xs: (string | null)[]) => xs.filter((x): x is string => !!x).sort().pop() ?? null;
+  const featuresRun = ran("features"), featuresWriteH = hoursAgo(c.features_latest, now), featuresRunH = hoursAgo(featuresRun, now);
+  const featuresRunsButSilent = featureBacklog > 0 && featuresWriteH > 3 && featuresRunH <= 3;
+  const captionsRun = ran("captions");
+  const renderStalled = pendingRender > 0 && hoursAgo(c.render_latest, now) > 1;
+  const renderNeverSucceeded = pendingRender > 0 && "render" in runs && runs.render === null;
   const jobs: JobCard[] = [
     { id: "publisher", label: "Publisher", cadence: "every 5 min, posts in 2-hour windows 8 AM–10 PM PT", last_at: c.last_attempt_at,
       health: c.held_pending > 0 ? "warn" : health(hoursAgo(c.last_attempt_at, now), 3, 6), note: c.held_pending ? `${c.held_pending} submissions held with an unknown outcome` : c.stale_pending ? `last attempt ${ago(c.last_attempt_at, now)}; ${c.stale_pending} old pending windows never resolved` : `last attempt ${ago(c.last_attempt_at, now)}`,
@@ -71,19 +82,31 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
       health: c.live_accounts.ok === 0 && c.live_latest === null ? "off" : c.live_accounts.failed > 0 ? "warn" : health(hoursAgo(c.live_latest, now), 2, 6),
       note: c.live_latest === null ? "never collected: the analytics cron has no ScrapeCreators key" : `latest ${ago(c.live_latest, now)}; ${c.live_accounts.ok} accounts ok, ${c.live_accounts.failed} failing`,
       details: { accounts_ok: c.live_accounts.ok, accounts_failed: c.live_accounts.failed, accounts_never: c.live_accounts.never } },
-    { id: "features", label: "Video features (Gemini + Whisper)", cadence: "hourly, up to 60 videos", last_at: c.features_latest,
-      health: featureBacklog === 0 ? "ok" : health(hoursAgo(c.features_latest, now), 3, 24),
-      note: featureBacklog === 0 ? `idle, all ${c.features_rows} videos processed; last write ${ago(c.features_latest, now)}` : `${featureBacklog} videos waiting; last write ${ago(c.features_latest, now)}`, details: { rows: c.features_rows, backlog: featureBacklog } },
-    { id: "captions", label: "Caption suggestions (nightly)", cadence: "10:50 UTC daily", last_at: c.captions_latest,
-      // The worker only serves the accounts in reels_devices. With no backlog it is idle, not broken; a stale latest
-      // write only matters while videos are waiting for a suggestion.
-      health: c.captions.slots === 0 ? "off" : c.captions.backlog === 0 ? "ok" : health(hoursAgo(c.captions_latest, now), 30, 72),
-      note: c.captions.slots === 0 ? "no accounts configured for suggestions" : c.captions.backlog === 0 ? `idle: all ${c.captions.pending} pending videos on ${c.captions.slots} account${c.captions.slots === 1 ? "" : "s"} have a suggestion; last write ${ago(c.captions_latest, now)}` : `${c.captions.backlog} of ${c.captions.pending} pending videos still need a suggestion; last write ${ago(c.captions_latest, now)}`,
+    { id: "features", label: "Video features (Gemini + Whisper)", cadence: "hourly, up to 60 videos", last_at: newest(c.features_latest, featuresRun),
+      // A backlog with no recent write is only "down" when the cron itself is not running. When Render shows it running
+      // on schedule but nothing lands in the table, every item is failing inside the worker (an API key, most often).
+      health: featureBacklog === 0 ? "ok" : featuresWriteH <= 3 ? "ok" : featuresRunsButSilent ? "warn" : health(featuresWriteH, 3, 24),
+      note: featureBacklog === 0 ? `idle, all ${c.features_rows} videos processed; last write ${ago(c.features_latest, now)}`
+        : featuresRunsButSilent ? `${featureBacklog} videos waiting; the hourly worker ran ${ago(featuresRun, now)} but has written nothing since ${ago(c.features_latest, now)}: every video is failing inside it, check its Gemini and Whisper keys in Render`
+        : `${featureBacklog} videos waiting; last write ${ago(c.features_latest, now)}`,
+      details: { rows: c.features_rows, backlog: featureBacklog } },
+    { id: "captions", label: "Caption suggestions (nightly)", cadence: "10:50 UTC daily", last_at: newest(c.captions_latest, captionsRun),
+      // With no backlog the worker is idle, not broken. With a backlog, what matters is that the nightly run happens:
+      // library videos already carry a library caption, and the worker upgrades a bounded number of them each night.
+      health: c.captions.slots === 0 ? "off" : c.captions.backlog === 0 ? "ok" : captionsRun ? health(hoursAgo(captionsRun, now), 30, 72) : health(hoursAgo(c.captions_latest, now), 30, 72),
+      note: c.captions.slots === 0 ? "no accounts configured for suggestions"
+        : c.captions.backlog === 0 ? `idle: all ${c.captions.pending} pending videos on ${c.captions.slots} account${c.captions.slots === 1 ? "" : "s"} have a suggestion; last write ${ago(c.captions_latest, now)}`
+        : captionsRun ? `ran ${ago(captionsRun, now)}; ${c.captions.backlog} of ${c.captions.pending} pending videos have no nightly suggestion yet (library videos post with their library caption meanwhile); last write ${ago(c.captions_latest, now)}`
+        : `${c.captions.backlog} of ${c.captions.pending} pending videos still need a suggestion; last write ${ago(c.captions_latest, now)}`,
       details: { accounts: c.captions.slots, pending: c.captions.pending, backlog: c.captions.backlog } },
     { id: "render", label: "Library renderer", cadence: "every 15 min, plus on-demand passes", last_at: c.render_latest,
-      health: !c.library_control ? "off" : !c.library_control.enabled ? "off" : blocked ? "warn" : pendingRender > 0 && hoursAgo(c.render_latest, now) > 1 ? "warn" : "ok",
-      note: !c.library_control ? "not configured" : !c.library_control.enabled ? "disabled" : pendingRender === 0 ? `idle, ${rendered} rendered` : `${running} running, ${pendingRender} pending, ${rendered} done${hoursAgo(c.render_latest, now) > 1 ? "; no renderer activity for over an hour" : ""}`,
-      details: { pending: pendingRender, max_active: c.library_control?.max_active ?? 0 } },
+      // Blocked variants (three failed attempts) are listed, not alarmed: they wait for a person and never clear by themselves.
+      // The alarm is for a renderer that should be working and is not.
+      health: !c.library_control ? "off" : !c.library_control.enabled ? "off" : renderStalled || renderNeverSucceeded ? "warn" : "ok",
+      note: !c.library_control ? "not configured" : !c.library_control.enabled ? "disabled"
+        : pendingRender === 0 ? `idle, ${rendered} rendered${blocked ? `; ${blocked} blocked after 3 attempts` : ""}`
+        : `${running} running, ${pendingRender} pending, ${rendered} done${blocked ? `, ${blocked} blocked` : ""}${renderNeverSucceeded ? "; the scheduled pass has never succeeded, check the cron's environment in Render" : renderStalled ? "; no renderer activity for over an hour" : ""}`,
+      details: { pending: pendingRender, blocked, max_active: c.library_control?.max_active ?? 0 } },
     { id: "leader", label: "Research account refresh", cadence: "daily 11:00 UTC", last_at: c.leader_latest,
       health: health(hoursAgo(c.leader_latest, now), 30, 72),
       note: c.leader_latest ? `top posts and hashtag scores refreshed ${ago(c.leader_latest, now)}` : "never refreshed" },
@@ -164,8 +187,9 @@ const latest = async (sb: any, table: string, col: string, filter?: (q: any) => 
   const r = await q; if (r.error) throw r.error; return r.data?.[0]?.[col] ?? null;
 };
 
-export async function collectPipeline(sb: any, now = new Date()): Promise<RawCounts> {
+export async function collectPipeline(sb: any, now = new Date(), runs?: () => Promise<Record<string, string | null> | undefined>): Promise<RawCounts> {
   const day = ptNow(now).ymd, dayStart = ptDateTimeToUtc(day, "00:00").toISOString();
+  const cronRunsP = runs ? runs().catch(() => undefined) : Promise.resolve(undefined);
   const h24 = new Date(now.getTime() - 24 * 3600_000).toISOString(), d7 = new Date(now.getTime() - 7 * 86400_000).toISOString(), held = new Date(now.getTime() - 45 * 60_000).toISOString();
   const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, captions, leaderLatest, renderLatest, control, upload, rate, slots] = await Promise.all([
     count(sb.from("library_sources").select("sha256", { count: "exact", head: true })),
@@ -203,16 +227,17 @@ export async function collectPipeline(sb: any, now = new Date()): Promise<RawCou
   }
   return { sources, variants, queue, logs_today: logsToday, logs_7d_published: logs7d, logs_total_published: logsTotal, held_pending: heldPending, stale_pending: stalePending, last_attempt_at: lastAttempt,
     analytics_latest: analyticsLatest, analytics_snapshots_24h: snaps24h, analytics_pulls_24h: pulls24h, measured_7d: measured.size, live_latest: liveLatest, live_accounts: liveAccounts,
-    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, leader_latest: leaderLatest, render_latest: renderLatest, library_control: control, upload, rate, slots };
+    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, leader_latest: leaderLatest, render_latest: renderLatest, library_control: control, upload, rate, slots, cron_runs: await cronRunsP };
 }
 
-export function registerOpsPipeline(app: Express, sbFn: () => any) {
+export function registerOpsPipeline(app: Express, sbFn: () => any, opts: { runs?: () => Promise<Record<string, string | null> | undefined> } = {}) {
+  const runs = opts.runs ?? (() => cronRuns(renderApi()));
   app.get("/api/ops/pipeline", async (req: Request, res: Response) => {
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
     if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
     try {
       // Twenty parallel counts take a few seconds; every operator screen polls this, so one computation serves them all for 45 s.
-      const snapshot = summarizePipeline(await memo("ops-pipeline", 45_000, () => collectPipeline(sbFn())));
+      const snapshot = summarizePipeline(await memo("ops-pipeline", 45_000, () => collectPipeline(sbFn(), new Date(), runs)));
       res.set("Cache-Control", "private, no-store").json(snapshot);
     } catch (e: any) {
       console.error("[ops/pipeline]", e?.message ?? e);

@@ -31,8 +31,9 @@ test("period changes do not sum cumulative snapshots or use future snapshots",()
     snap(4,"2026-10-12T08:00:00Z",900)
   ],range);
   assert.equal(r.totals.observed_views,35);
-  assert.equal(r.series.length,1);
-  assert.equal(r.series[0].date,"2026-10-11");
+  assert.equal(r.series.length,24);                 // a one-day range is bucketed by Pacific hour
+  assert.equal(r.series[0].date,"2026-10-11T00");
+  assert.equal(r.series.reduce((n,d)=>n+(d.observed_views??0),0),35);
   assert.equal(r.posts.length,0);
 });
 test("missing baseline stays unknown; downward corrections are flagged",()=>{
@@ -141,4 +142,21 @@ test("posts carry Publer's public thumbnail, never the private one or a foreign 
   assert.equal(r.posts[0].thumbnail,"https://cdn.publer.com/uploads/photos/thumb_b.jpg");
   const none:any=buildReport([slot()],[log(1)],[],range);
   assert.equal(none.posts[0].thumbnail,null);
+});
+test("a single-day range is bucketed by Pacific hour: started hours read 0, hours ahead stay unknown",()=>{
+  const r=buildReport([slot()],[],[
+    snap(1,"2026-10-11T06:59:00Z",100),   // 11:59 PM PT the day before: baseline only
+    snap(2,"2026-10-11T09:10:00Z",120),   // 2:10 AM PT -> bucket 02
+    snap(3,"2026-10-11T12:30:00Z",135),   // 5:30 AM PT -> bucket 05
+  ],range,[],[],new Date("2026-10-11T20:00:00Z")); // 1 PM PT
+  assert.equal(r.series.length,24);
+  assert.equal(r.series[0].date,"2026-10-11T00");
+  assert.equal(r.series[2].observed_views,20);
+  assert.equal(r.series[5].observed_views,15);
+  assert.equal(r.series[3].observed_views,0);      // began, nothing observed
+  assert.equal(r.series[13].observed_views,0);     // the current hour has begun
+  assert.equal(r.series[14].observed_views,null);  // still ahead
+  assert.equal(r.totals.observed_views,35);
+  const week=buildReport([slot()],[],[snap(1,"2026-10-11T09:10:00Z",120)],resolveRange({from:"2026-10-05",to:"2026-10-11"},new Date("2026-10-11T20:00:00Z")));
+  assert.equal(week.series.length,7); assert.equal(week.series[6].date,"2026-10-11");
 });

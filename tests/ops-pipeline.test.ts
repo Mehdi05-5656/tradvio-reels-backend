@@ -102,3 +102,29 @@ test("captionBacklog counts pending videos on the worker's accounts that lack a 
   const { captionBacklog } = await import("../src/ops-pipeline.js");
   assert.deepEqual(await captionBacklog(sb), { slots: 3, pending: 3, backlog: 1 }, "legacy and library accounts, deduplicated");
 });
+
+test("Render run records separate 'not running' from 'running but every item fails', and blocked variants do not alarm the renderer", () => {
+  const now = new Date("2026-10-26T01:00:00Z");
+  const withRuns = (runs: Record<string, string | null>, extra: Partial<RawCounts> = {}) => Object.fromEntries(summarizePipeline({ ...base(), ...extra, cron_runs: runs }, now).jobs.map((j) => [j.id, j]));
+  // Features: backlog, no write for 5 days, but the hourly cron exited 0 an hour ago -> the worker runs and fails inside.
+  const silent = withRuns({ features: "2026-10-26T00:09:00Z" }, { features_rows: 12000 }).features;
+  assert.equal(silent.health, "warn"); assert.match(silent.note, /ran 51 min ago but has written nothing since 5 days ago/); assert.equal(silent.last_at, "2026-10-26T00:09:00Z");
+  // Same backlog, cron not seen for a day -> down.
+  const dead = withRuns({ features: "2026-10-25T00:09:00Z" }, { features_rows: 12000 }).features;
+  assert.equal(dead.health, "down");
+  // Captions: a backlog with the nightly run 14 h ago is healthy; a run 40 h ago warns; none in 4 days is down.
+  const backlog = { slots: 20, pending: 13199, backlog: 12310 };
+  assert.equal(withRuns({ captions: "2026-10-25T10:50:00Z" }, { captions: backlog }).captions.health, "ok");
+  assert.match(withRuns({ captions: "2026-10-25T10:50:00Z" }, { captions: backlog }).captions.note, /^ran 14 h ago; 12310 of 13199 pending videos have no nightly suggestion yet/);
+  assert.equal(withRuns({ captions: "2026-10-24T09:00:00Z" }, { captions: backlog }).captions.health, "warn");
+  assert.equal(withRuns({ captions: "2026-10-22T09:00:00Z" }, { captions: backlog }).captions.health, "down");
+  // Renderer: 3 blocked variants are a note, not a warning, while rendering is active.
+  const active = withRuns({ render: "2026-10-26T00:45:00Z" }, { variants: { rendered_private: 13400, running: 3, pending: 1100, blocked: 3 }, render_latest: "2026-10-26T00:50:00Z" }).render;
+  assert.equal(active.health, "ok"); assert.match(active.note, /3 blocked/);
+  // A pending backlog whose scheduled pass has never succeeded warns and says why.
+  const never = withRuns({ render: null }, { variants: { rendered_private: 13400, running: 0, pending: 1100 }, render_latest: "2026-10-25T23:30:00Z" }).render;
+  assert.equal(never.health, "warn"); assert.match(never.note, /never succeeded/);
+  // Without a Render key nothing changes: table timestamps decide.
+  const legacy = Object.fromEntries(summarizePipeline({ ...base(), features_rows: 12000 }, now).jobs.map((j) => [j.id, j]));
+  assert.equal(legacy.features.health, "down");
+});
