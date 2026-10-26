@@ -218,7 +218,16 @@ export async function collectPipeline(sb: any, now = new Date(), runs?: () => Pr
     latest(sb, "library_attempts", "created_at"),
     (async () => { const r = await sb.from("library_control").select("enabled,max_active,max_daily_claims").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     // Optional: null until migration 20261026000000_library_storage_usage is applied (an unknown function is not an error here).
-    (async () => { if (typeof sb.rpc !== "function") return null; const r = await sb.rpc("library_storage_usage").catch(() => ({ error: true })); if (!r || r.error) return null; const row = Array.isArray(r.data) ? r.data[0] : r.data; return row ? { stored_bytes: Number(row.stored_bytes), stored_objects: Number(row.stored_objects), max_output_bytes: Number(row.max_output_bytes), reserve_bytes: Number(row.reserve_bytes) } : null; })(),
+    (async () => {
+      if (typeof sb.rpc !== "function") return null;
+      try {
+        // The query builder is a thenable, not a Promise: await it inside try, never .catch() on it.
+        const r = await sb.rpc("library_storage_usage");
+        if (!r || r.error) return null;
+        const row = Array.isArray(r.data) ? r.data[0] : r.data;
+        return row ? { stored_bytes: Number(row.stored_bytes), stored_objects: Number(row.stored_objects), max_output_bytes: Number(row.max_output_bytes), reserve_bytes: Number(row.reserve_bytes) } : null;
+      } catch { return null; }
+    })(),
     (async () => { const r = await sb.from("publer_workspace_upload").select("phase,updated_at,expires_at").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     (async () => { const r = await sb.from("publer_rate_state").select("blocked_until,last_block_reason").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     (async () => { const r = await sb.from("publer_slot_config").select("paused"); if (r.error) throw r.error; const rows = r.data ?? []; return { total: rows.length, enabled: rows.filter((x: any) => !x.paused).length, paused: rows.filter((x: any) => x.paused).length }; })(),

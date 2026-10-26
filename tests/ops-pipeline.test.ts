@@ -53,7 +53,8 @@ test("job health: captions with no backlog are idle, missing live metrics are of
 
 test("route is admin-only: anonymous 401, customer 403, admin 200 with no table reads for the denied", async (t) => {
   const reads: string[] = [];
-  const sb: any = { from(table: string) { reads.push(table); const q: any = { select() { return q }, order() { return q }, limit() { return q }, gte() { return q }, lt() { return q }, eq() { return q }, in() { return q }, range() { return Promise.resolve({ data: [], error: null }) }, then(resolve: any) { return Promise.resolve({ data: [], error: null, count: 0 }).then(resolve) } }; return q; } };
+  // Like supabase-js, rpc() returns a thenable with no .catch(); a missing function answers with an error, not a throw.
+  const sb: any = { rpc(name: string) { reads.push(`rpc:${name}`); return { then(resolve: any) { return Promise.resolve({ data: null, error: { message: "function not found" } }).then(resolve) } }; }, from(table: string) { reads.push(table); const q: any = { select() { return q }, order() { return q }, limit() { return q }, gte() { return q }, lt() { return q }, eq() { return q }, in() { return q }, range() { return Promise.resolve({ data: [], error: null }) }, then(resolve: any) { return Promise.resolve({ data: [], error: null, count: 0 }).then(resolve) } }; return q; } };
   const app = express();
   app.use((req: any, _res, next) => { if (req.headers["x-test-user"]) { req.auth = { user_id: req.headers["x-test-user"] }; req.profile = { role: req.headers["x-test-role"] ?? "user" }; } next(); });
   app.use(accountAccess(() => sb)); registerOpsPipeline(app, () => sb);
