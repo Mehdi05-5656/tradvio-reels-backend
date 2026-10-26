@@ -369,11 +369,18 @@ async function enrichQueueRows(rows: any[]): Promise<any[]> {
     }
   }
 
+  // 3) Archived rows (file removed after posting) keep their poster frame.
+  const posters = await Promise.all(rows.map(async (r) => {
+    if (!r.poster_path) return null;
+    try { const { data } = await sb.storage.from("managed-variants").createSignedUrl(r.poster_path, 3600); return data?.signedUrl ?? null; } catch { return null; }
+  }));
   return rows.map((r, i) => {
     const published = publishByQueueId.get(r.id) ?? { caption_used: null, hashtags_used: null };
     return {
       ...r,
       video_url: signed[i],
+      thumbnail_url: r.thumbnail_url ?? posters[i] ?? null,
+      archived: !!r.poster_path,
       caption_used: published.caption_used,
       hashtags_used: published.hashtags_used,
     };

@@ -251,6 +251,8 @@ export async function processIntake(sb: SupabaseClient, deps: Deps = {}, limit =
         } else if (item.kind === "video_file") {
           const bytes = await itemBytes(sb, f, item, MAX_SOURCE_BYTES);
           const saved = await saveSource(sb, item, bytes, { source_handle: null, source_video_id: null, provenance: `Uploaded file ${item.label ?? ""}`.trim() });
+          // The vault now holds the original under its hash; the upload copy is redundant.
+          if (isStorageKey(item.value)) { const gone = await sb.storage.from("client-intake").remove([item.value.replace(/^client-intake\//, "")]); if (gone.error) log(`intake copy not removed: ${gone.error.message}`); }
           touchedOrgs.add(item.org_id);
           await set({ status: "saved", error: null, sha256: saved.sha256, meta: { ...item.meta, bytes: bytes.length, new_source: saved.created } });
         } else {

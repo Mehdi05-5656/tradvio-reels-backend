@@ -5,6 +5,7 @@ import { configurePublerRate } from "./publer-rate.js";
 import { collectLiveMetrics } from "./live-metrics.js";
 import { expireHeldWindows } from "./publish-reconcile.js";
 import { learningTick } from "./client-learning.js";
+import { purgeTick } from "./library-archive.js";
 
 async function main() {
   const sb = createClient(
@@ -36,6 +37,13 @@ async function main() {
     console.log("[cron:learning]", JSON.stringify(await learningTick(sb)));
   } catch (e: any) {
     console.error("[cron:learning] failed:", e?.message || e);
+  }
+  // Storage stewardship: archive and remove rendered files whose post is done (off until purge_enabled).
+  try {
+    const r = await purgeTick(sb, { limit: 40 });
+    console.log("[cron:archive]", JSON.stringify({ ...r, failed: r.failed.length }));
+  } catch (e: any) {
+    console.error("[cron:archive] failed:", e?.message || e);
   }
 }
 

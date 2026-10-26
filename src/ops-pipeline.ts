@@ -35,7 +35,7 @@ export type RawCounts = {
   render_latest: string | null;                // newest library_attempts.created_at (renderer activity)
   captions: { slots: number; pending: number; backlog: number }; // every publishing account, its pending videos, and how many still lack a nightly suggestion
   library_control: { enabled: boolean; max_active: number; max_daily_claims: number } | null;
-  library_storage?: { stored_bytes: number; stored_objects: number; max_output_bytes: number; reserve_bytes: number } | null; // from library_storage_usage(); null until that function exists
+  library_storage?: { stored_bytes: number; stored_objects: number; max_output_bytes: number; reserve_bytes: number; archive_bytes?: number; raw_bytes?: number; legacy_bytes?: number; freed_bytes?: number; purged_objects?: number; posted_unpurged_bytes?: number; posted_unpurged_objects?: number; added_7d_bytes?: number; purge_enabled?: boolean; purge_candidates?: number } | null; // from library_storage_usage(); null until that function exists
   upload: { phase: string; updated_at: string | null; expires_at: string | null } | null;
   rate: { blocked_until: string | null; last_block_reason: string | null } | null;
   slots: { total: number; enabled: number; paused: number };
@@ -111,6 +111,16 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
         : pendingRender === 0 ? `idle, ${rendered} rendered${blocked ? `; ${blocked} blocked after 3 attempts` : ""}${st ? `; ${gib(st.stored_bytes)} of ${gib(st.max_output_bytes)} GiB stored` : ""}`
         : `${running} running, ${pendingRender} pending, ${rendered} done${blocked ? `, ${blocked} blocked` : ""}${storageFull ? `; storage budget reached (${gib(st!.stored_bytes)} of ${gib(st!.max_output_bytes)} GiB), nothing more is claimed until the budget is raised or posted variants are cleared` : renderNeverSucceeded ? "; the scheduled pass has never succeeded, check the cron's environment in Render" : renderStalled ? "; no renderer activity for over an hour" : ""}`,
       details: { pending: pendingRender, blocked, max_active: c.library_control?.max_active ?? 0, stored_bytes: st?.stored_bytes ?? null, max_output_bytes: st?.max_output_bytes ?? null } },
+    ...(st ? [(() => {
+      const perDay = (st.added_7d_bytes ?? 0) / 7, headroom = st.max_output_bytes - st.stored_bytes, days = perDay > 0 ? Math.floor(headroom / perDay) : null;
+      const pct = st.max_output_bytes ? st.stored_bytes / st.max_output_bytes : 0;
+      const reclaim = st.posted_unpurged_bytes ?? 0, cands = st.purge_candidates ?? 0;
+      return { id: "storage", label: "Storage", cadence: "archive pass hourly with analytics",
+        last_at: c.render_latest,
+        health: (pct >= 0.9 || (days !== null && days < 7) ? "warn" : "ok") as Health,
+        note: `${gib(st.stored_bytes)} of ${gib(st.max_output_bytes)} GiB rendered (${Math.round(pct * 100)}%)${days !== null ? `, about ${days} days to the cap at the last week's pace` : ", no growth this week"}; originals ${gib(st.raw_bytes ?? 0)} GiB; ${st.purge_enabled ? `archiving on, ${cands} posted files ready to archive (${gib(reclaim)} GiB), ${gib(st.freed_bytes ?? 0)} GiB freed so far` : `archiving off, ${gib(reclaim)} GiB of posted files could be archived`}`,
+        details: { stored_bytes: st.stored_bytes, max_output_bytes: st.max_output_bytes, posted_unpurged_bytes: reclaim, freed_bytes: st.freed_bytes ?? 0, purge_enabled: st.purge_enabled ? "yes" : "no", days_to_cap: days } };
+    })()] : []),
     { id: "leader", label: "Research account refresh", cadence: "daily 11:00 UTC", last_at: c.leader_latest,
       health: health(hoursAgo(c.leader_latest, now), 30, 72),
       note: c.leader_latest ? `top posts and hashtag scores refreshed ${ago(c.leader_latest, now)}` : "never refreshed" },
@@ -225,7 +235,9 @@ export async function collectPipeline(sb: any, now = new Date(), runs?: () => Pr
         const r = await sb.rpc("library_storage_usage");
         if (!r || r.error) return null;
         const row = Array.isArray(r.data) ? r.data[0] : r.data;
-        return row ? { stored_bytes: Number(row.stored_bytes), stored_objects: Number(row.stored_objects), max_output_bytes: Number(row.max_output_bytes), reserve_bytes: Number(row.reserve_bytes) } : null;
+        return row ? { stored_bytes: Number(row.stored_bytes), stored_objects: Number(row.stored_objects), max_output_bytes: Number(row.max_output_bytes), reserve_bytes: Number(row.reserve_bytes),
+          archive_bytes: Number(row.archive_bytes ?? 0), raw_bytes: Number(row.raw_bytes ?? 0), legacy_bytes: Number(row.legacy_bytes ?? 0), freed_bytes: Number(row.freed_bytes ?? 0), purged_objects: Number(row.purged_objects ?? 0),
+          posted_unpurged_bytes: Number(row.posted_unpurged_bytes ?? 0), posted_unpurged_objects: Number(row.posted_unpurged_objects ?? 0), added_7d_bytes: Number(row.added_7d_bytes ?? 0), purge_enabled: row.purge_enabled === true, purge_candidates: Number(row.purge_candidates ?? 0) } : null;
       } catch { return null; }
     })(),
     (async () => { const r = await sb.from("publer_workspace_upload").select("phase,updated_at,expires_at").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
