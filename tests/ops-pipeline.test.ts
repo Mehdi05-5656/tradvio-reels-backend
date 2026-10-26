@@ -128,3 +128,13 @@ test("Render run records separate 'not running' from 'running but every item fai
   const legacy = Object.fromEntries(summarizePipeline({ ...base(), features_rows: 12000 }, now).jobs.map((j) => [j.id, j]));
   assert.equal(legacy.features.health, "down");
 });
+
+test("a full storage budget explains an idle renderer with pending work", () => {
+  const now = new Date("2026-10-26T01:05:00Z");
+  const full = summarizePipeline({ ...base(), variants: { rendered_private: 13777, running: 0, pending: 1132, blocked: 3 }, render_latest: "2026-10-26T01:01:00Z",
+    library_storage: { stored_bytes: 53620937453, stored_objects: 13774, max_output_bytes: 53687091200, reserve_bytes: 67108864 }, cron_runs: { render: "2026-10-26T01:01:40Z" } }, now).jobs.find((j) => j.id === "render")!;
+  assert.equal(full.health, "warn"); assert.match(full.note, /storage budget reached \(49\.9 of 50\.0 GiB\)/);
+  const room = summarizePipeline({ ...base(), variants: { rendered_private: 13777, running: 2, pending: 1132 }, render_latest: "2026-10-26T01:01:00Z",
+    library_storage: { stored_bytes: 53620937453, stored_objects: 13774, max_output_bytes: 64424509440, reserve_bytes: 67108864 }, cron_runs: { render: "2026-10-26T01:01:40Z" } }, now).jobs.find((j) => j.id === "render")!;
+  assert.equal(room.health, "ok"); assert.doesNotMatch(room.note, /budget/);
+});

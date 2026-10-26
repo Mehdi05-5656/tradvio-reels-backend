@@ -35,6 +35,7 @@ export type RawCounts = {
   render_latest: string | null;                // newest library_attempts.created_at (renderer activity)
   captions: { slots: number; pending: number; backlog: number }; // every publishing account, its pending videos, and how many still lack a nightly suggestion
   library_control: { enabled: boolean; max_active: number; max_daily_claims: number } | null;
+  library_storage?: { stored_bytes: number; stored_objects: number; max_output_bytes: number; reserve_bytes: number } | null; // from library_storage_usage(); null until that function exists
   upload: { phase: string; updated_at: string | null; expires_at: string | null } | null;
   rate: { blocked_until: string | null; last_block_reason: string | null } | null;
   slots: { total: number; enabled: number; paused: number };
@@ -70,6 +71,9 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
   const featuresRun = ran("features"), featuresWriteH = hoursAgo(c.features_latest, now), featuresRunH = hoursAgo(featuresRun, now);
   const featuresRunsButSilent = featureBacklog > 0 && featuresWriteH > 3 && featuresRunH <= 3;
   const captionsRun = ran("captions");
+  // library_claim() refuses work once stored output plus one reserved maximum-size file would pass the budget.
+  const st = c.library_storage ?? null, gib = (b: number) => (b / 1073741824).toFixed(1);
+  const storageFull = !!st && pendingRender > 0 && st.stored_bytes + st.reserve_bytes * (running + 1) > st.max_output_bytes;
   const renderStalled = pendingRender > 0 && hoursAgo(c.render_latest, now) > 1;
   const renderNeverSucceeded = pendingRender > 0 && "render" in runs && runs.render === null;
   const jobs: JobCard[] = [
@@ -102,11 +106,11 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
     { id: "render", label: "Library renderer", cadence: "every 15 min, plus on-demand passes", last_at: c.render_latest,
       // Blocked variants (three failed attempts) are listed, not alarmed: they wait for a person and never clear by themselves.
       // The alarm is for a renderer that should be working and is not.
-      health: !c.library_control ? "off" : !c.library_control.enabled ? "off" : renderStalled || renderNeverSucceeded ? "warn" : "ok",
+      health: !c.library_control ? "off" : !c.library_control.enabled ? "off" : storageFull || renderStalled || renderNeverSucceeded ? "warn" : "ok",
       note: !c.library_control ? "not configured" : !c.library_control.enabled ? "disabled"
-        : pendingRender === 0 ? `idle, ${rendered} rendered${blocked ? `; ${blocked} blocked after 3 attempts` : ""}`
-        : `${running} running, ${pendingRender} pending, ${rendered} done${blocked ? `, ${blocked} blocked` : ""}${renderNeverSucceeded ? "; the scheduled pass has never succeeded, check the cron's environment in Render" : renderStalled ? "; no renderer activity for over an hour" : ""}`,
-      details: { pending: pendingRender, blocked, max_active: c.library_control?.max_active ?? 0 } },
+        : pendingRender === 0 ? `idle, ${rendered} rendered${blocked ? `; ${blocked} blocked after 3 attempts` : ""}${st ? `; ${gib(st.stored_bytes)} of ${gib(st.max_output_bytes)} GiB stored` : ""}`
+        : `${running} running, ${pendingRender} pending, ${rendered} done${blocked ? `, ${blocked} blocked` : ""}${storageFull ? `; storage budget reached (${gib(st!.stored_bytes)} of ${gib(st!.max_output_bytes)} GiB), nothing more is claimed until the budget is raised or posted variants are cleared` : renderNeverSucceeded ? "; the scheduled pass has never succeeded, check the cron's environment in Render" : renderStalled ? "; no renderer activity for over an hour" : ""}`,
+      details: { pending: pendingRender, blocked, max_active: c.library_control?.max_active ?? 0, stored_bytes: st?.stored_bytes ?? null, max_output_bytes: st?.max_output_bytes ?? null } },
     { id: "leader", label: "Research account refresh", cadence: "daily 11:00 UTC", last_at: c.leader_latest,
       health: health(hoursAgo(c.leader_latest, now), 30, 72),
       note: c.leader_latest ? `top posts and hashtag scores refreshed ${ago(c.leader_latest, now)}` : "never refreshed" },
@@ -191,7 +195,7 @@ export async function collectPipeline(sb: any, now = new Date(), runs?: () => Pr
   const day = ptNow(now).ymd, dayStart = ptDateTimeToUtc(day, "00:00").toISOString();
   const cronRunsP = runs ? runs().catch(() => undefined) : Promise.resolve(undefined);
   const h24 = new Date(now.getTime() - 24 * 3600_000).toISOString(), d7 = new Date(now.getTime() - 7 * 86400_000).toISOString(), held = new Date(now.getTime() - 45 * 60_000).toISOString();
-  const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, captions, leaderLatest, renderLatest, control, upload, rate, slots] = await Promise.all([
+  const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, captions, leaderLatest, renderLatest, control, storage, upload, rate, slots] = await Promise.all([
     count(sb.from("library_sources").select("sha256", { count: "exact", head: true })),
     groupCount(sb, "library_variants", ["state"]),
     groupCount(sb, "reels_manual_queue", ["status", "storage_bucket"]),
@@ -213,6 +217,8 @@ export async function collectPipeline(sb: any, now = new Date(), runs?: () => Pr
     latest(sb, "leader_posts", "last_refreshed_at"),
     latest(sb, "library_attempts", "created_at"),
     (async () => { const r = await sb.from("library_control").select("enabled,max_active,max_daily_claims").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
+    // Optional: null until migration 20261026000000_library_storage_usage is applied (an unknown function is not an error here).
+    (async () => { if (typeof sb.rpc !== "function") return null; const r = await sb.rpc("library_storage_usage").catch(() => ({ error: true })); if (!r || r.error) return null; const row = Array.isArray(r.data) ? r.data[0] : r.data; return row ? { stored_bytes: Number(row.stored_bytes), stored_objects: Number(row.stored_objects), max_output_bytes: Number(row.max_output_bytes), reserve_bytes: Number(row.reserve_bytes) } : null; })(),
     (async () => { const r = await sb.from("publer_workspace_upload").select("phase,updated_at,expires_at").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     (async () => { const r = await sb.from("publer_rate_state").select("blocked_until,last_block_reason").limit(1); if (r.error) throw r.error; return r.data?.[0] ?? null; })(),
     (async () => { const r = await sb.from("publer_slot_config").select("paused"); if (r.error) throw r.error; const rows = r.data ?? []; return { total: rows.length, enabled: rows.filter((x: any) => !x.paused).length, paused: rows.filter((x: any) => x.paused).length }; })(),
@@ -227,7 +233,7 @@ export async function collectPipeline(sb: any, now = new Date(), runs?: () => Pr
   }
   return { sources, variants, queue, logs_today: logsToday, logs_7d_published: logs7d, logs_total_published: logsTotal, held_pending: heldPending, stale_pending: stalePending, last_attempt_at: lastAttempt,
     analytics_latest: analyticsLatest, analytics_snapshots_24h: snaps24h, analytics_pulls_24h: pulls24h, measured_7d: measured.size, live_latest: liveLatest, live_accounts: liveAccounts,
-    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, leader_latest: leaderLatest, render_latest: renderLatest, library_control: control, upload, rate, slots, cron_runs: await cronRunsP };
+    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, leader_latest: leaderLatest, render_latest: renderLatest, library_control: control, library_storage: storage, upload, rate, slots, cron_runs: await cronRunsP };
 }
 
 export function registerOpsPipeline(app: Express, sbFn: () => any, opts: { runs?: () => Promise<Record<string, string | null> | undefined> } = {}) {
