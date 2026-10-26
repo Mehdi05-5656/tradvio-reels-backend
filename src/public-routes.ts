@@ -8,7 +8,7 @@ import { fetchWindowSnapshots, interactions, type SnapshotRow } from "./analytic
 import { loadSlots } from "./publer-schedule.js";
 import { paged } from "./reporting.js";
 import { isAdmin, isOperator } from "./auth.js";
-import { metaConfig, readBrowserMeta, clientIp, reportApplicationSubmitted, type FetchLike, type MetaConfig } from "./meta-capi.js";
+import { metaConfig, readBrowserMeta, outboxColumns, deliverLeadNow, type FetchLike, type MetaConfig } from "./meta-capi.js";
 
 type SbGetter = () => SupabaseClient;
 export const PIPELINE_START = "2026-09-05"; // Publer coverage start; the case study counts from here
@@ -171,12 +171,27 @@ export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs
       if (v.honeypot) return res.status(202).json({ received: true }); // looks accepted to the bot, nothing stored
       return res.status(400).json({ error: v.error });
     }
+    const outbox = outboxColumns(meta, readBrowserMeta(req.body), req);
     try {
-      const r = await sbFn().from("invite_requests").insert({ ...v.row, source: "clone8.io" }).select("id,created_at").single();
+      const sb = sbFn();
+      const base = { ...v.row, source: "clone8.io" };
+      let r = await sb.from("invite_requests").insert(outbox ? { ...base, ...outbox } : base).select("id,created_at").single();
+      // Same event id again = the browser retried a submit whose answer it never got: confirm the stored row, store nothing new.
+      if (r.error?.code === "23505" && outbox) {
+        const prior = await sb.from("invite_requests").select("id").eq("meta_event_id", outbox.meta_event_id).maybeSingle();
+        if (prior.data) return res.status(201).json({ received: true, id: prior.data.id, duplicate: true });
+      }
+      // Meta columns not migrated yet: store the application exactly as before, without a server event.
+      if (r.error && outbox && /meta_(event_id|capi)/.test(String(r.error.message ?? ""))) {
+        console.warn("[public] invite_requests has no meta_capi columns yet; stored without a server event");
+        r = await sb.from("invite_requests").insert(base).select("id,created_at").single();
+        if (r.error) throw r.error;
+        return res.status(201).json({ received: true, id: r.data.id });
+      }
       if (r.error) throw r.error;
       res.status(201).json({ received: true, id: r.data.id });
-      // Only a stored application reaches Meta (not the honeypot, not a rejected or failed submit).
-      void reportApplicationSubmitted({ cfg: meta, requestId: String(r.data.id), email: v.row.email, browser: readBrowserMeta(req.body, req), ip: clientIp(req), userAgent: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : null, time: nowFn(), fetchFn: opts.metaFetch });
+      // The application is stored and confirmed; Meta delivery can only succeed, wait for a retry, or be logged.
+      if (meta && outbox?.meta_capi_status === "pending") void deliverLeadNow(sb, meta, String(r.data.id), { fetchFn: opts.metaFetch });
     } catch (e: any) {
       console.warn("[public] invite request not stored:", e?.message ?? e);
       res.status(503).json({ error: "request_not_stored" });

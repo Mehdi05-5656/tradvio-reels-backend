@@ -16,6 +16,7 @@ import { registerClientOrgRoutes } from "./client-orgs.js";
 import { registerClientLearning } from "./client-learning.js";
 import { registerLibraryArchive } from "./library-archive.js";
 import { registerPublicRoutes, registerInviteRequestInbox } from "./public-routes.js";
+import { metaConfig, startMetaCapiLoop } from "./meta-capi.js";
 import { registerLibraryImport } from "./library-import.js";
 import { registerManagedRoutes } from "./managed-routes.js";
 import { registerGenerationRoutes } from "./generation-routes.js";
@@ -73,6 +74,7 @@ async function main() {
   registerOpsActions(app, getSb);
   registerClientOnboarding(app, getSb);
   if (process.env.INTAKE_PROCESSOR !== "0") startIntakeLoop(getSb);
+  startMetaCapiLoop(getSb, metaConfig()); // retries Lead events for clone8.io applications; off without META_* env
   registerClientOrgRoutes(app, getSb);
   registerClientLearning(app, getSb);
   registerLibraryArchive(app, getSb);
