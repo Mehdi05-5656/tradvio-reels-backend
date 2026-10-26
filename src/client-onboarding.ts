@@ -218,7 +218,7 @@ export async function processIntake(sb: SupabaseClient, deps: Deps = {}, limit =
           const text = item.kind === "pdf" ? await pdfText(bytes) : bytes.toString("utf8");
           const found = extractFromText(text);
           const added = await addChildren(sb, item, found);
-          await set({ status: "saved", meta: { ...item.meta, found: found.length, added, unsupported: found.filter((c) => c.kind === "link").length } });
+          await set({ status: "saved", error: null, meta: { ...item.meta, found: found.length, added, unsupported: found.filter((c) => c.kind === "link").length } });
         } else if (item.kind === "profile_instagram" || item.kind === "profile_tiktok") {
           if (!key) throw new Error("scrapecreators_key_missing");
           const ig = item.kind === "profile_instagram";
@@ -234,7 +234,7 @@ export async function processIntake(sb: SupabaseClient, deps: Deps = {}, limit =
           const added = await addChildren(sb, item, top.map((p) => ({ kind: ig ? "post_instagram" : "post_tiktok", value: p.post_link, label: p.caption ? p.caption.slice(0, 80) : p.platform_post_id })));
           const metaRows = await sb.from("client_intake_items").select("id,value").eq("org_id", item.org_id).eq("parent_id", item.id);
           for (const r of metaRows.data ?? []) { const p = top.find((t) => t.post_link === r.value); if (p) await sb.from("client_intake_items").update({ meta: { views: p.video_views, likes: p.likes, posted_at: p.posted_at, caption: p.caption, source_video_id: p.platform_post_id, source_handle: item.value } }).eq("id", r.id); }
-          await set({ status: "saved", meta: { ...item.meta, scanned: posts.length, picked: top.length, added } });
+          await set({ status: "saved", error: null, meta: { ...item.meta, scanned: posts.length, picked: top.length, added } });
         } else if (item.kind === "post_instagram" || item.kind === "post_tiktok") {
           if (!key) throw new Error("scrapecreators_key_missing");
           const ig = item.kind === "post_instagram";
@@ -246,12 +246,12 @@ export async function processIntake(sb: SupabaseClient, deps: Deps = {}, limit =
           const handle = item.meta?.source_handle ?? (ig ? (body?.data?.owner?.username ?? body?.data?.user?.username ?? null) : (body?.aweme_detail?.author?.unique_id ?? null));
           const saved = await saveSource(sb, item, bytes, { source_handle: handle, source_video_id: vid, provenance: `${ig ? "Instagram" : "TikTok"} post ${item.value}` });
           touchedOrgs.add(item.org_id);
-          await set({ status: "saved", sha256: saved.sha256, meta: { ...item.meta, bytes: bytes.length, new_source: saved.created } });
+          await set({ status: "saved", error: null, sha256: saved.sha256, meta: { ...item.meta, bytes: bytes.length, new_source: saved.created } });
         } else if (item.kind === "video_file") {
           const bytes = await itemBytes(sb, f, item, MAX_SOURCE_BYTES);
           const saved = await saveSource(sb, item, bytes, { source_handle: null, source_video_id: null, provenance: `Uploaded file ${item.label ?? ""}`.trim() });
           touchedOrgs.add(item.org_id);
-          await set({ status: "saved", sha256: saved.sha256, meta: { ...item.meta, bytes: bytes.length, new_source: saved.created } });
+          await set({ status: "saved", error: null, sha256: saved.sha256, meta: { ...item.meta, bytes: bytes.length, new_source: saved.created } });
         } else {
           await set({ status: "skipped", error: "not a supported source (Instagram, TikTok, Google Sheets, CSV, PDF or a video file)" });
         }
