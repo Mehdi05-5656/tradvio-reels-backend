@@ -19,25 +19,28 @@ export type LearningSummary = {
 /** Reads one client's learning state. Every query carries the client id. */
 export async function loadLearning(sb: SupabaseClient, org: { id: string; name: string; slug: string }): Promise<LearningSummary> {
   const sel = "queue_id,phone_slot,publer_post_id,source_sha256,arm,published_at,latest_read_at,views,likes,comments,shares,saves,engagement_rate,composite,rank_in_org";
-  const [run, top, bottom, counts, srcTop, srcWeak, srcCounts, experiments, leaders] = await Promise.all([
+  const [run, top, bottom, counts, srcTop, srcWeak, srcCounts, experiments, leaders, scoredCount, armCount] = await Promise.all([
     sb.from("client_learning_runs").select("ran_at,posts_scored,posts_published,sources,duration_ms").eq("org_id", org.id).order("ran_at", { ascending: false }).limit(1).maybeSingle(),
     sb.from("client_post_scores").select(sel).eq("org_id", org.id).order("rank_in_org", { ascending: true }).limit(10),
     sb.from("client_post_scores").select(sel).eq("org_id", org.id).order("rank_in_org", { ascending: false }).limit(5),
-    sb.from("client_post_scores").select("arm,views").eq("org_id", org.id),
+    sb.from("client_post_scores").select("arm,views").eq("org_id", org.id).range(0, 9999),
     sb.from("client_source_stats").select("source_sha256,posts,accounts,median_views,p75_views,avg_composite,last_posted_at,retired").eq("org_id", org.id).eq("retired", false).order("avg_composite", { ascending: false, nullsFirst: false }).limit(10),
     sb.from("client_source_stats").select("source_sha256,posts,accounts,median_views,p75_views,avg_composite,last_posted_at,retired").eq("org_id", org.id).gte("posts", 3).order("avg_composite", { ascending: true, nullsFirst: false }).limit(5),
     sb.from("client_source_stats").select("retired").eq("org_id", org.id),
     sb.from("client_experiments").select("id,hypothesis,primary_metric,minimum_per_arm,winner_arm,decided_at,evaluation,evaluated_at,registered_at").eq("org_id", org.id).order("registered_at", { ascending: false }),
     sb.from("leader_accounts").select("id,provider,handle,active,created_at").eq("org_id", org.id).order("created_at"),
+    // Exact counts: a plain select is capped at 1,000 rows by the API, which under-reported bigger clients.
+    sb.from("client_post_scores").select("queue_id", { count: "exact", head: true }).eq("org_id", org.id),
+    sb.from("client_post_scores").select("queue_id", { count: "exact", head: true }).eq("org_id", org.id).not("arm", "is", null),
   ]);
-  for (const r of [run, top, bottom, counts, srcTop, srcWeak, srcCounts, experiments, leaders]) if (r.error) throw r.error;
+  for (const r of [run, top, bottom, counts, srcTop, srcWeak, srcCounts, experiments, leaders, scoredCount, armCount]) if (r.error) throw r.error;
   const views = ((counts.data ?? []) as any[]).map((r) => Number(r.views)).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
   const median = views.length ? views[Math.floor(views.length / 2)] : null;
   const srcRows = (srcCounts.data ?? []) as any[];
   return {
     client: org,
     last_run: run.data ?? null,
-    posts: { scored: (counts.data ?? []).length, with_arm: ((counts.data ?? []) as any[]).filter((r) => r.arm).length, median_views: median, top: top.data ?? [], bottom: bottom.data ?? [] },
+    posts: { scored: scoredCount.count ?? (counts.data ?? []).length, with_arm: armCount.count ?? ((counts.data ?? []) as any[]).filter((r) => r.arm).length, median_views: median, top: top.data ?? [], bottom: bottom.data ?? [] },
     sources: { total: srcRows.length, retired: srcRows.filter((r) => r.retired).length, top: srcTop.data ?? [], weakest: srcWeak.data ?? [] },
     experiments: experiments.data ?? [],
     leaders: leaders.data ?? [],
