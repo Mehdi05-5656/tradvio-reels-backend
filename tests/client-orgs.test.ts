@@ -208,6 +208,10 @@ test("parseLearning: brand, niche, voice trimmed; hashtags as list or text, # st
   assert.equal(parseLearning({ hashtags: ["bad tag!"] }).error, "invalid_learning_hashtags");
   assert.equal(parseLearning("nope").error, "invalid_learning");
   assert.deepEqual(parseLearning(null).value, {});
+  assert.deepEqual(parseLearning({ optimize: true, exploration_share: "0.3", retire_after_posts: 8, retire_below_pct: 20, winner_weight: 0.9 }).value, { optimize: true, exploration_share: 0.3, retire_after_posts: 8, retire_below_pct: 20, winner_weight: 0.9 });
+  assert.equal(parseLearning({ optimize: "yes" }).error, "invalid_learning_optimize");
+  assert.equal(parseLearning({ exploration_share: 0.9 }).error, "invalid_learning_exploration_share");
+  assert.equal(parseLearning({ retire_after_posts: 2.5 }).error, "invalid_learning_retire_after_posts");
   assert.deepEqual(parseProfile({ learning: { niche: "x" } }).patch, { learning: { niche: "x" } });
   assert.deepEqual(parseProfile({ learning: { hashtags: ["#"] } }).patch.learning, { hashtags: [] });
 });

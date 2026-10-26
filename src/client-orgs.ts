@@ -95,7 +95,8 @@ export function parseProfile(body: any): { patch: Record<string, string | number
 }
 
 /** Learning settings: what the caption prompt knows about the client and the hashtags its library posts carry. */
-export type ClientLearning = { brand?: string; niche?: string; voice?: string; hashtags?: string[] };
+export type ClientLearning = { brand?: string; niche?: string; voice?: string; hashtags?: string[]; optimize?: boolean; exploration_share?: number; retire_after_posts?: number; retire_below_pct?: number; winner_weight?: number };
+const LEARNING_NUMBERS: Record<string, [number, number, boolean]> = { exploration_share: [0, 0.5, false], retire_after_posts: [2, 50, true], retire_below_pct: [5, 50, false], winner_weight: [0.5, 1, false] };
 const HASHTAG_RE = /^[\p{L}\p{N}_]{1,60}$/u;
 export function parseLearning(input: any): { value: ClientLearning; error?: string } {
   if (input === null || input === undefined) return { value: {} };
@@ -119,6 +120,16 @@ export function parseLearning(input: any): { value: ClientLearning; error?: stri
       if (tags.length > 30) return { value: {}, error: "invalid_learning_hashtags" };
     }
     out.hashtags = tags;
+  }
+  if ("optimize" in input && input.optimize !== null) {
+    if (typeof input.optimize !== "boolean") return { value: {}, error: "invalid_learning_optimize" };
+    out.optimize = input.optimize;
+  }
+  for (const [k, [lo, hi, integer]] of Object.entries(LEARNING_NUMBERS)) {
+    if (!(k in input) || input[k] === null || input[k] === "") continue;
+    const n = Number(input[k]);
+    if (!Number.isFinite(n) || n < lo || n > hi || (integer && !Number.isInteger(n))) return { value: {}, error: `invalid_learning_${k}` };
+    (out as any)[k] = n;
   }
   return { value: out };
 }
@@ -249,6 +260,8 @@ export function registerClientOrgRoutes(app: Express, sbFn: SbGetter): void {
       const sb = sbFn();
       const org = await loadOrg(sb, req.params.id);
       if (!org) return res.status(404).json({ error: "client_not_found" });
+      // Learning settings merge: a form that only knows brand and hashtags must not wipe the optimisation switch.
+      if (patch.learning && typeof patch.learning === "object") patch.learning = { ...((org as any).learning ?? {}), ...patch.learning };
       const r = await sb.from("client_orgs").update({ ...withRenewal(patch, org), updated_at: new Date().toISOString() }).eq("id", org.id)
         .select(`id,name,slug,created_at,archived_at,${PROFILE_COLUMNS}`).single();
       if (r.error) throw r.error;

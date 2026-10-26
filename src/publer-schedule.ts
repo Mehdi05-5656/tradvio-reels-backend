@@ -347,6 +347,8 @@ async function nextPendingQueueRow(sb: SupabaseClient, phone_slot: string): Prom
     .select("*")
     .eq("phone_slot", phone_slot)
     .eq("status", "pending")
+    // Learned order for optimising clients (queue_rank, set hourly), arrival order for everyone else.
+    .order("queue_rank", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: true })
     .limit(10);
   if (error) throw error;

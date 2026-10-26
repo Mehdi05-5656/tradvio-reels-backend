@@ -173,7 +173,8 @@ async function saveSource(sb: SupabaseClient, item: Item, bytes: Buffer, extra: 
   }
   const up = await sb.storage.from("managed-raw").upload(object_key, bytes, { contentType: "video/mp4", upsert: false });
   if (up.error && !/exists|duplicate/i.test(up.error.message)) throw new Error(`storage_write_failed: ${up.error.message}`);
-  const source = { bytes: bytes.length, sha256, object_key, duration: null, provenance: `Client intake ${item.batch_id}; item ${item.id}; ${String(extra.provenance ?? item.kind)}`, intake_item_id: item.id, ...extra };
+  const priorViews = Number(item.meta?.views);
+  const source = { bytes: bytes.length, sha256, object_key, duration: null, provenance: `Client intake ${item.batch_id}; item ${item.id}; ${String(extra.provenance ?? item.kind)}`, intake_item_id: item.id, prior_views: Number.isFinite(priorViews) && priorViews > 0 ? Math.round(priorViews) : null, ...extra };
   delete (source as any).provenance_extra;
   const ins = await sb.from("library_sources").insert({ sha256, source, enabled: true, org_id: item.org_id });
   if (ins.error) throw ins.error;

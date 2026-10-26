@@ -5,20 +5,21 @@ import { loadLearning, learningTick } from "../src/client-learning.js";
 // The panel reads only the client's rows: every table query carries the org id, and the tick calls the scoped refresh.
 function fakeDb(log: any[]) {
   return {
-    rpc: async (fn: string, args: any) => { log.push(["rpc", fn, args]); return { data: { refreshed: [], skipped: 1 }, error: null }; },
+    rpc: async (fn: string, args: any) => { log.push(["rpc", fn, args]); return { data: fn === "client_learning_settings" ? { optimize: true, exploration_share: 0.2, retire_after_posts: 6, retire_below_pct: 25, winner_weight: 0.8 } : { refreshed: [], skipped: 1 }, error: null }; },
     from(table: string) {
       const f: Record<string, any> = {};
       const q: any = {
         select(_c: string, opts?: any) { q._count = !!opts?.count; return q; }, order() { return q; }, limit() { return q; }, gte() { return q; }, range() { return q; }, not() { q._notArm = true; return q; },
-        eq(k: string, v: any) { f[k] = v; return q; },
-        async maybeSingle() { log.push([table, f]); return { data: table === "client_learning_runs" ? { ran_at: "2026-10-26T21:00:00Z", posts_scored: 862, posts_published: 1556, sources: 300, duration_ms: 900 } : null, error: null }; },
+        eq(k: string, v: any) { f[k] = v; return q; }, in(k: string, v: any) { f[k] = v; return q; },
+        async maybeSingle() { log.push([table, f]); return { data: table === "client_learning_runs" ? { ran_at: "2026-10-26T21:00:00Z", posts_scored: 862, posts_published: 1556, sources: 300, duration_ms: 900 } : table === "client_orgs" ? { learning: { optimize: true } } : null, error: null }; },
         then(res: any) {
           log.push([table, f]);
           if (q._count) return Promise.resolve({ data: null, error: null, count: table === "client_post_scores" && f.org_id === "org-a" ? (q._notArm ? 1200 : 1500) : 0 }).then(res);
           const rows = table === "client_post_scores" ? (f.org_id === "org-a" ? [{ arm: "A", views: 10 }, { arm: "B", views: 30 }, { arm: null, views: 20 }] : [])
             : table === "client_source_stats" ? [{ retired: false }, { retired: true }]
             : table === "client_experiments" ? [{ id: "caption-question-v1", winner_arm: null }]
-            : table === "leader_accounts" ? [{ id: "l1", handle: "tradvio", active: true }] : [];
+            : table === "leader_accounts" ? [{ id: "l1", handle: "tradvio", active: true }]
+            : table === "client_org_accounts" ? (f.org_id === "org-a" ? [{ phone_slot: "library_a" }] : []) : [];
           return Promise.resolve({ data: rows, error: null }).then(res);
         },
       };
@@ -34,9 +35,15 @@ test("loadLearning scopes every query to the client and summarises posts, source
   assert.deepEqual({ total: s.sources.total, retired: s.sources.retired }, { total: 2, retired: 1 });
   assert.equal(s.experiments[0].id, "caption-question-v1"); assert.equal(s.leaders[0].handle, "tradvio");
   assert.equal(s.last_run?.posts_scored, 862);
+  assert.equal(s.settings?.optimize, true); assert.deepEqual(s.learning, { optimize: true });
   const tables = log.filter((l) => l[0] !== "rpc");
-  assert.ok(tables.length >= 9);
-  assert.ok(tables.every((l) => l[1].org_id === "org-a"), "every query carries the client id");
+  assert.ok(tables.length >= 12);
+  for (const [table, f] of tables) {
+    if (table === "client_orgs") assert.equal(f.id, "org-a");
+    else if (table === "reels_manual_queue") assert.deepEqual(f.phone_slot, ["library_a"], "queue counts only over the client's own slots");
+    else assert.equal(f.org_id, "org-a", `${table} carries the client id`);
+  }
+  assert.deepEqual(log.filter((l) => l[0] === "rpc").map((l) => [l[1], l[2]]), [["client_learning_settings", { p_org: "org-a" }]]);
   const other = await loadLearning(fakeDb([]), { id: "org-b", name: "B", slug: "b" });
   assert.equal(other.posts.scored, 0);
 });
