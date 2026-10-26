@@ -1,12 +1,14 @@
 // Public, unauthenticated endpoints for the clone8.io site.
 //   GET  /api/public/case-study      aggregate numbers for the Tradvio case study (cached, no account names)
-//   POST /api/public/invite-requests "request an invite" form (stored in invite_requests; no email is sent)
+//   POST /api/public/invite-requests "request an invite" form (stored in invite_requests; no email is sent;
+//                                     a stored request is reported to Meta as Lead, see src/meta-capi.ts)
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchWindowSnapshots, interactions, type SnapshotRow } from "./analytics-util.js";
 import { loadSlots } from "./publer-schedule.js";
 import { paged } from "./reporting.js";
 import { isAdmin, isOperator } from "./auth.js";
+import { metaConfig, readBrowserMeta, clientIp, reportApplicationSubmitted, type FetchLike, type MetaConfig } from "./meta-capi.js";
 
 type SbGetter = () => SupabaseClient;
 export const PIPELINE_START = "2026-09-05"; // Publer coverage start; the case study counts from here
@@ -130,7 +132,9 @@ export function registerInviteRequestInbox(app: Express, sbFn: SbGetter): void {
   });
 }
 
-export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs?: number; now?: () => Date } = {}): void {
+export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs?: number; now?: () => Date; meta?: MetaConfig | null; metaFetch?: FetchLike } = {}): void {
+  const meta = opts.meta === undefined ? metaConfig() : opts.meta;
+  if (!meta) console.log("[public] Meta Conversions API off (META_PIXEL_ID / META_CAPI_ACCESS_TOKEN not set)");
   const ttl = opts.ttlMs ?? 15 * 60_000;
   const nowFn = opts.now ?? (() => new Date());
   let cache: { at: number; data: CaseStudy } | null = null;
@@ -171,6 +175,8 @@ export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs
       const r = await sbFn().from("invite_requests").insert({ ...v.row, source: "clone8.io" }).select("id,created_at").single();
       if (r.error) throw r.error;
       res.status(201).json({ received: true, id: r.data.id });
+      // Only a stored application reaches Meta (not the honeypot, not a rejected or failed submit).
+      void reportApplicationSubmitted({ cfg: meta, requestId: String(r.data.id), email: v.row.email, browser: readBrowserMeta(req.body, req), ip: clientIp(req), userAgent: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : null, time: nowFn(), fetchFn: opts.metaFetch });
     } catch (e: any) {
       console.warn("[public] invite request not stored:", e?.message ?? e);
       res.status(503).json({ error: "request_not_stored" });
