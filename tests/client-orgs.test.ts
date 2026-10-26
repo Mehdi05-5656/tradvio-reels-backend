@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { registerClientOrgRoutes, sha256Hex, newInviteToken, INVITE_TOKEN_RE, inviteUrl, inviteStatus, slugify, maskEmail } from "../src/client-orgs.js";
+import { registerClientOrgRoutes, sha256Hex, newInviteToken, INVITE_TOKEN_RE, inviteUrl, inviteStatus, slugify, maskEmail, parseProfile, withRenewal, addMonths, renewalDays, parseLogo, ensureRenewalAlerts } from "../src/client-orgs.js";
 import { accountAccess } from "../src/account-access.js";
 import { filterVisibleSlots } from "../src/auth.js";
 
@@ -154,4 +154,47 @@ test("invite preview is public but reveals only the organization; accepting need
   assert.equal((await s.call("GET", "/api/publer/timeline/phone_a", { "x-test-user": CLIENT })).status, 403);
   const viaOrg = await s.call("GET", "/api/publer/timeline/phone_a", { "x-test-user": CLIENT, "x-test-org-slots": "phone_a" });
   assert.notEqual(viaOrg.status, 403);
+});
+
+test("client profile: fields are validated and trimmed, blanks clear, renewal follows signed date plus term", () => {
+  const ok = parseProfile({ description: "  Trading education brand ", website: "tradvio.com", contact_email: "ops@tradvio.com", contract_value: "$12,000 / month", signed_at: "2026-10-01", term_months: "12", notes: "", unknown: "x" });
+  assert.equal(ok.error, undefined);
+  assert.deepEqual(ok.patch, { description: "Trading education brand", website: "tradvio.com", contact_email: "ops@tradvio.com", contract_value: "$12,000 / month", notes: null, signed_at: "2026-10-01", term_months: 12 });
+  assert.deepEqual(withRenewal(ok.patch).renews_at, "2027-10-01");
+  assert.equal(parseProfile({ contact_email: "not-an-email" }).error, "invalid_contact_email");
+  assert.equal(parseProfile({ signed_at: "2026-02-30" }).error, "invalid_signed_at");
+  assert.equal(parseProfile({ term_months: 0 }).error, "invalid_term_months");
+  assert.equal(parseProfile({ description: "x".repeat(2001) }).error, "invalid_description");
+  assert.equal(addMonths("2026-01-31", 1), "2026-02-28");
+  assert.equal(addMonths("2026-10-26", 6), "2027-04-26");
+  // A partial patch keeps the row's other half of the equation; an explicit date wins; clearing a half clears the date.
+  assert.equal(withRenewal({ term_months: 6 }, { signed_at: "2026-10-01", term_months: 12 }).renews_at, "2027-04-01");
+  assert.equal(withRenewal({ renews_at: "2027-01-15", term_months: 12 }, { signed_at: "2026-10-01" }).renews_at, "2027-01-15");
+  assert.equal(withRenewal({ signed_at: null }, { signed_at: "2026-10-01", term_months: 12 }).renews_at, null);
+  assert.equal(withRenewal({ description: "x" }, { signed_at: "2026-10-01", term_months: 12 }).renews_at, undefined);
+  const now = new Date("2026-10-26T09:00:00Z");
+  assert.equal(renewalDays("2026-11-25", now), 30); assert.equal(renewalDays("2026-10-26", now), 0); assert.equal(renewalDays("2026-10-20", now), -6); assert.equal(renewalDays(null, now), null);
+  const png = "data:image/png;base64," + Buffer.from("\x89PNG fake").toString("base64");
+  assert.equal(parseLogo(png)?.mime, "image/png");
+  assert.equal(parseLogo("data:image/gif;base64,R0lGODlh"), null);
+  assert.equal(parseLogo("data:image/png;base64," + "A".repeat(600 * 1024)), null);
+});
+
+test("renewal alerts: one per client per renewal date inside the 30-day window, never duplicated, overdue is critical", async () => {
+  const now = new Date("2026-10-26T09:00:00Z");
+  const orgs = [
+    { id: "o1", name: "Acme", slug: "acme", renews_at: "2026-11-10", contract_value: "$8k / mo" },
+    { id: "o2", name: "Far", slug: "far", renews_at: "2027-06-01", contract_value: null },
+    { id: "o3", name: "Late", slug: "late", renews_at: "2026-10-20", contract_value: null },
+    { id: "o4", name: "Seen", slug: "seen", renews_at: "2026-11-01", contract_value: null },
+  ];
+  const inserted: any[] = [];
+  const sb: any = { from(table: string) {
+    const q: any = { select() { return q }, is() { return q }, not() { return q }, eq() { return q }, in() { return q },
+      then(res: any) { return Promise.resolve(table === "client_orgs" ? { data: orgs, error: null } : { data: [{ payload: { org_id: "o4", renews_at: "2026-11-01" } }], error: null }).then(res) },
+      insert(rows: any[]) { inserted.push(...rows); return Promise.resolve({ error: null }) } };
+    return q; } };
+  assert.equal(await ensureRenewalAlerts(sb, now), 2);
+  assert.deepEqual(inserted.map((r) => [r.payload.org_id, r.severity, r.title]), [["o1", "info", "Acme renews in 15 days"], ["o3", "critical", "Late: renewal overdue by 6 days"]]);
+  assert.match(inserted[0].body, /Signed for \$8k \/ mo/);
 });

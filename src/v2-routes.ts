@@ -3,6 +3,7 @@
 // Old /api/* endpoints untouched.
 
 import type { Express, Request, Response } from "express";
+import { ensureRenewalAlerts } from "./client-orgs.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
@@ -176,6 +177,8 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
       const visibleIds = visible.map((s) => s.phone_slot);
       const admin = isAdmin(req);
       if (visibleIds.length === 0 && !admin) return res.json({ alerts: [] });
+      // Contract renewals surface here for operators; a failure to compute them never hides the other alerts.
+      if (admin) { try { await ensureRenewalAlerts(sb); } catch (e: any) { console.warn("[alerts] renewals:", e?.message ?? e); } }
       const showAll = req.query.all === "1";
       const limit = Math.min(Number(req.query.limit ?? 100), 500);
       let q = sb
