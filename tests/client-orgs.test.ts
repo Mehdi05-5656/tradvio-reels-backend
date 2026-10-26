@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { registerClientOrgRoutes, sha256Hex, newInviteToken, INVITE_TOKEN_RE, inviteUrl, inviteStatus, slugify, maskEmail, parseProfile, withRenewal, addMonths, renewalDays, parseLogo, ensureRenewalAlerts } from "../src/client-orgs.js";
+import { registerClientOrgRoutes, sha256Hex, newInviteToken, INVITE_TOKEN_RE, inviteUrl, inviteStatus, slugify, maskEmail, parseProfile, parseLearning, withRenewal, addMonths, renewalDays, parseLogo, ensureRenewalAlerts } from "../src/client-orgs.js";
 import { accountAccess } from "../src/account-access.js";
 import { filterVisibleSlots } from "../src/auth.js";
 
@@ -197,4 +197,17 @@ test("renewal alerts: one per client per renewal date inside the 30-day window, 
   assert.equal(await ensureRenewalAlerts(sb, now), 2);
   assert.deepEqual(inserted.map((r) => [r.payload.org_id, r.severity, r.title]), [["o1", "info", "Acme renews in 15 days"], ["o3", "critical", "Late: renewal overdue by 6 days"]]);
   assert.match(inserted[0].body, /Signed for \$8k \/ mo/);
+});
+
+
+test("parseLearning: brand, niche, voice trimmed; hashtags as list or text, # stripped, de-duplicated, validated", () => {
+  const ok = parseLearning({ brand: " @acme ", niche: "options education", voice: "calm, precise", hashtags: "#Options, trading  #Trading options" });
+  assert.equal(ok.error, undefined);
+  assert.deepEqual(ok.value, { brand: "@acme", niche: "options education", voice: "calm, precise", hashtags: ["Options", "trading"] });
+  assert.deepEqual(parseLearning({ hashtags: ["A", "a", "#B"] }).value.hashtags, ["A", "B"]);
+  assert.equal(parseLearning({ hashtags: ["bad tag!"] }).error, "invalid_learning_hashtags");
+  assert.equal(parseLearning("nope").error, "invalid_learning");
+  assert.deepEqual(parseLearning(null).value, {});
+  assert.deepEqual(parseProfile({ learning: { niche: "x" } }).patch, { learning: { niche: "x" } });
+  assert.deepEqual(parseProfile({ learning: { hashtags: ["#"] } }).patch.learning, { hashtags: [] });
 });

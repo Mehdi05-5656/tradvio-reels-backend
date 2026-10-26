@@ -18,7 +18,8 @@ import { createClient } from "@supabase/supabase-js";
 
 type LeaderRow = {
   id: string;
-  phone_slot: string;
+  org_id: string;
+  phone_slot: string | null;
   provider: "instagram" | "tiktok";
   handle: string;
   active: boolean;

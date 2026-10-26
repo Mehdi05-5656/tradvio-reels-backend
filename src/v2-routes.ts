@@ -992,14 +992,17 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
   // Admin-only endpoints. These expose leader-account historical data and
   // hashtag stats that seed the caption/hashtag suggestion pipeline.
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  // Research accounts belong to a client. ?org=<id> lists one client's; without it an admin sees every client's.
   app.get("/api/v2/leaders", async (req: Request, res: Response) => {
     try {
       if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
       const sb = sbFn();
-      const { data, error } = await sb
-        .from("leader_accounts")
-        .select("id, phone_slot, provider, handle, active, created_at")
-        .order("created_at");
+      const org = typeof req.query.org === "string" ? req.query.org : "";
+      if (org && !UUID_RE.test(org)) return res.status(400).json({ error: "invalid_org" });
+      let q = sb.from("leader_accounts").select("id, org_id, phone_slot, provider, handle, active, created_at").order("created_at");
+      if (org) q = q.eq("org_id", org);
+      const { data, error } = await q;
       if (error) throw error;
       // Enrich each with post/hashtag counts + last refresh
       const results = [] as any[];
@@ -1017,6 +1020,44 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
         });
       }
       res.json({ leaders: results });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // A new research account for a client: the next leader refresh fills its posts and scores.
+  app.post("/api/v2/leaders", async (req: Request, res: Response) => {
+    try {
+      if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
+      const org = String(req.body?.org_id ?? "");
+      const provider = String(req.body?.provider ?? "").toLowerCase();
+      const handle = String(req.body?.handle ?? "").trim().replace(/^@/, "").replace(/^https?:\/\/(www\.)?(instagram\.com|tiktok\.com)\/@?/i, "").replace(/[/?#].*$/, "");
+      if (!UUID_RE.test(org)) return res.status(400).json({ error: "client_required" });
+      if (provider !== "instagram" && provider !== "tiktok") return res.status(400).json({ error: "invalid_provider" });
+      if (!/^[A-Za-z0-9._]{1,60}$/.test(handle)) return res.status(400).json({ error: "invalid_handle" });
+      const sb = sbFn();
+      const orgRow = await sb.from("client_orgs").select("id, archived_at").eq("id", org).maybeSingle();
+      if (orgRow.error) throw orgRow.error;
+      if (!orgRow.data || orgRow.data.archived_at) return res.status(404).json({ error: "client_not_found" });
+      const ins = await sb.from("leader_accounts").insert({ org_id: org, provider, handle, active: true }).select("id, org_id, phone_slot, provider, handle, active, created_at").single();
+      if (ins.error) return /duplicate|unique/i.test(ins.error.message) ? res.status(409).json({ error: "leader_exists" }) : res.status(500).json({ error: ins.error.message });
+      console.log("[leaders] added", JSON.stringify({ by: (req.auth as any)?.user_id, org, provider, handle }));
+      res.status(201).json({ leader: { ...ins.data, post_count: 0, hashtag_count: 0, last_refreshed_at: null } });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Pause or resume a research account (the refresh and the caption worker only use active ones).
+  app.patch("/api/v2/leaders/:id", async (req: Request, res: Response) => {
+    try {
+      if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
+      if (typeof req.body?.active !== "boolean") return res.status(400).json({ error: "invalid_active" });
+      const sb = sbFn();
+      const up = await sb.from("leader_accounts").update({ active: req.body.active }).eq("id", req.params.id).select("id, org_id, provider, handle, active").maybeSingle();
+      if (up.error) throw up.error;
+      if (!up.data) return res.status(404).json({ error: "leader_not_found" });
+      res.json({ leader: up.data });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

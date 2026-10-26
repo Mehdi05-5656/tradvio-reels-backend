@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { registerOpsActions, validateSchedule, scheduleAccount, renderApi, RENDER_JOB_COMMAND, cronRuns } from "../src/ops-actions.js";
+import { registerOpsActions, validateSchedule, scheduleAccount, renderApi, RENDER_JOB_COMMAND, cronRuns, defaultGate } from "../src/ops-actions.js";
 import { accountAccess } from "../src/account-access.js";
 import { operatorUserIds } from "../src/auth.js";
 
@@ -73,4 +73,12 @@ test("routes: operator-only, 503 without a Render key, publisher not runnable, r
   const run = await post("/api/ops/actions/run/captions", {}, OP, "admin");
   assert.equal(run.status, 200); assert.equal(((await run.json()) as any).run.id, "run-crn-dagu505g1s2s73cmseog");
   assert.equal((await post("/api/ops/actions/schedule-account", { publer_account_id: "bad" }, OP, "admin")).status, 400);
+});
+
+test("defaultGate asks for the client's own gate account and never borrows another client's", async () => {
+  const calls: any[] = [];
+  const sb: any = { rpc: async (fn: string, args: any) => { calls.push([fn, args]); return { data: args.p_org === "org-a" ? "6ac981728c6bf22c85ebad8e" : null, error: null }; } };
+  assert.equal(await defaultGate(sb, "org-a"), "6ac981728c6bf22c85ebad8e");
+  assert.equal(await defaultGate(sb, "org-b"), null);
+  assert.deepEqual(calls.map((c) => c[0]), ["client_gate_for", "client_gate_for"]);
 });

@@ -110,11 +110,12 @@ export async function scheduleAccount(sb: any, actor: string, v: Required<Schedu
   return { ownership: own.data ?? 1, planned: plan.data ?? 0, armed: true, start: v.start, daily_target: v.daily_target };
 }
 
-/** The launch gate every new account inherits: the first account that published, if any policy still names one. */
-async function defaultGate(sb: any): Promise<string | null> {
-  const r = await sb.from("library_publishing_policy").select("gate_account").not("gate_account", "is", null).limit(1);
+/** The launch gate a new account inherits: the gate its own client's accounts already use, if any. A client's first
+ *  account posts without a gate; another client's gate account is never borrowed. */
+export async function defaultGate(sb: any, orgId: string): Promise<string | null> {
+  const r = await sb.rpc("client_gate_for", { p_org: orgId });
   if (r.error) throw r.error;
-  return r.data?.[0]?.gate_account ?? null;
+  return (typeof r.data === "string" && r.data) || null;
 }
 
 export function registerOpsActions(app: Express, sbFn: () => any, deps: { render?: () => RenderApi | null; now?: () => Date } = {}) {
@@ -180,7 +181,7 @@ export function registerOpsActions(app: Express, sbFn: () => any, deps: { render
       if (taken.data && taken.data.org_id !== orgId) return res.status(409).json({ error: "account_belongs_to_another_client" });
       const setup = await sb.from("client_account_setup").upsert({ org_id: orgId, publer_account_id: v.value.publer_account_id, platform: v.value.platform, label: v.value.label, method: "blueprint_repost", daily_target: v.value.daily_target, batch_size: 8, status: "planned", start_at: v.value.start, created_by: actor, updated_at: now().toISOString() }, { onConflict: "publer_account_id" });
       if (setup.error) throw setup.error;
-      const result = await scheduleAccount(sb, actor, v.value, await defaultGate(sb), now());
+      const result = await scheduleAccount(sb, actor, v.value, await defaultGate(sb, orgId), now());
       await sb.from("client_account_setup").update({ status: "rendering", updated_at: now().toISOString() }).eq("publer_account_id", v.value.publer_account_id);
       console.log("[ops/actions] schedule account", JSON.stringify({ by: actor, account: v.value.publer_account_id, ...result }));
       res.json(result);

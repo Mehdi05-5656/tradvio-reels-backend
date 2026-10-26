@@ -20,7 +20,7 @@ import {
 } from "./publer.js";
 import { parsePublishResult, retryDecision } from "./publer-safety.js";
 import {coordinatedUpload} from "./workspace-upload.js";
-import {libraryPublishingEnabled,queueMediaBucket,libraryWindowAllowed,libraryReceipt} from "./library-publishing.js";
+import {libraryPublishingEnabled,queueMediaBucket,libraryWindowAllowed,libraryReceipt,libraryHashtags} from "./library-publishing.js";
 
 const BUCKET = "reels";
 
@@ -461,8 +461,9 @@ export async function publishOne(
     }).eq("id", log.id));
 
     // 3) Publish — pull caption template + hashtag pool for this slot
+    // A library post keeps its registered caption (the client's experiment); its hashtags are the client's own.
     const { caption, hashtags, source: captionSource } = permission?
-      {caption:permission.caption,hashtags:["Trading","TradingEducation","RiskManagement"],source:"registered_caption_experiment"}:
+      await libraryHashtags(sb,slot.phone_slot,row.id).then((h)=>({caption:permission.caption,hashtags:h.hashtags,source:`registered_caption_experiment+${h.source}`})):
       await composeCaption(sb, slot.phone_slot, row.id);
     console.log("[publisher] caption source:", captionSource, "for queue", row.id);
     if(isLibrary){

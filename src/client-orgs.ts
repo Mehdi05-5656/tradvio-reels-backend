@@ -48,7 +48,7 @@ const ACCEPT_ERRORS: Record<string, number> = { invite_invalid: 404, invite_expi
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Columns on client_orgs beyond name/slug. Every one is optional; empty strings clear the field. */
-export const PROFILE_COLUMNS = "logo_url,description,industry,website,contact_name,contact_email,target_accounts,contract_value,signed_at,term_months,renews_at,notes,updated_at";
+export const PROFILE_COLUMNS = "logo_url,description,industry,website,contact_name,contact_email,target_accounts,contract_value,signed_at,term_months,renews_at,notes,learning,updated_at";
 const TEXT_LIMITS: Record<string, number> = { description: 2000, industry: 80, website: 200, contact_name: 120, contact_email: 254, target_accounts: 2000, contract_value: 120, notes: 4000 };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const validDate = (s: string) => DATE_RE.test(s) && !Number.isNaN(Date.parse(s + "T00:00:00Z")) && new Date(s + "T00:00:00Z").toISOString().slice(0, 10) === s;
@@ -86,7 +86,41 @@ export function parseProfile(body: any): { patch: Record<string, string | number
     if (v === null || v === "") patch.term_months = null;
     else { const n = Number(v); if (!Number.isInteger(n) || n < 1 || n > 120) return { patch, error: "invalid_term_months" }; patch.term_months = n; }
   }
+  if ("learning" in body) {
+    const l = parseLearning(body.learning);
+    if (l.error) return { patch, error: l.error };
+    (patch as any).learning = l.value;
+  }
   return { patch };
+}
+
+/** Learning settings: what the caption prompt knows about the client and the hashtags its library posts carry. */
+export type ClientLearning = { brand?: string; niche?: string; voice?: string; hashtags?: string[] };
+const HASHTAG_RE = /^[\p{L}\p{N}_]{1,60}$/u;
+export function parseLearning(input: any): { value: ClientLearning; error?: string } {
+  if (input === null || input === undefined) return { value: {} };
+  if (typeof input !== "object" || Array.isArray(input)) return { value: {}, error: "invalid_learning" };
+  const out: ClientLearning = {};
+  for (const k of ["brand", "niche", "voice"] as const) {
+    if (!(k in input) || input[k] === null || input[k] === "") continue;
+    if (typeof input[k] !== "string") return { value: {}, error: `invalid_learning_${k}` };
+    const t = String(input[k]).trim().slice(0, k === "voice" ? 600 : 120);
+    if (t) out[k] = t;
+  }
+  if ("hashtags" in input && input.hashtags !== null) {
+    const raw = Array.isArray(input.hashtags) ? input.hashtags : typeof input.hashtags === "string" ? input.hashtags.split(/[\s,]+/) : null;
+    if (!raw) return { value: {}, error: "invalid_learning_hashtags" };
+    const tags: string[] = [];
+    for (const r of raw) {
+      const t = String(r ?? "").trim().replace(/^#/, "");
+      if (!t) continue;
+      if (!HASHTAG_RE.test(t)) return { value: {}, error: "invalid_learning_hashtags" };
+      if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+      if (tags.length > 30) return { value: {}, error: "invalid_learning_hashtags" };
+    }
+    out.hashtags = tags;
+  }
+  return { value: out };
 }
 /** Fills renews_at from signed_at + term_months when the caller did not set it. Needs the row's current values for a partial patch. */
 export function withRenewal(patch: Record<string, any>, current: { signed_at?: string | null; term_months?: number | null } = {}): Record<string, any> {
