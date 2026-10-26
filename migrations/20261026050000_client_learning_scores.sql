@@ -107,7 +107,8 @@ BEGIN
     FROM public.live_post_metrics m JOIN pub ON pub.publer_post_id = m.publer_post_id GROUP BY m.publer_post_id
   )
   SELECT pub.*, f.first_read_at, la.captured_at AS latest_read_at, la.video_views AS views, la.likes, la.comments, la.shares, la.saves,
-    CASE WHEN coalesce(la.video_views, 0) > 0 THEN (coalesce(la.likes,0)+coalesce(la.comments,0)+coalesce(la.shares,0)+coalesce(la.saves,0))::numeric / la.video_views END AS engagement_rate
+    -- Engagement only counts once a post has 100 views; below that a single like makes a 50 % rate and swamps the score.
+    CASE WHEN coalesce(la.video_views, 0) >= 100 THEN least(1, (coalesce(la.likes,0)+coalesce(la.comments,0)+coalesce(la.shares,0)+coalesce(la.saves,0))::numeric / la.video_views) END AS engagement_rate
   FROM pub LEFT JOIN latest la ON la.publer_post_id = pub.publer_post_id LEFT JOIN first_read f ON f.publer_post_id = pub.publer_post_id;
   SELECT count(*) INTO n_posts FROM _posts;
 
