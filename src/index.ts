@@ -13,6 +13,7 @@ import { registerOpsPipeline } from "./ops-pipeline.js";
 import { registerOpsActions } from "./ops-actions.js";
 import { registerClientOnboarding, startIntakeLoop } from "./client-onboarding.js";
 import { registerClientOrgRoutes } from "./client-orgs.js";
+import { registerClientLearning } from "./client-learning.js";
 import { registerPublicRoutes, registerInviteRequestInbox } from "./public-routes.js";
 import { registerLibraryImport } from "./library-import.js";
 import { registerManagedRoutes } from "./managed-routes.js";
@@ -72,6 +73,7 @@ async function main() {
   registerClientOnboarding(app, getSb);
   if (process.env.INTAKE_PROCESSOR !== "0") startIntakeLoop(getSb);
   registerClientOrgRoutes(app, getSb);
+  registerClientLearning(app, getSb);
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
   registerManagedRoutes(app, getSb);

@@ -4,6 +4,7 @@ import { analyticsTick } from "./publer-schedule.js";
 import { configurePublerRate } from "./publer-rate.js";
 import { collectLiveMetrics } from "./live-metrics.js";
 import { expireHeldWindows } from "./publish-reconcile.js";
+import { learningTick } from "./client-learning.js";
 
 async function main() {
   const sb = createClient(
@@ -30,6 +31,12 @@ async function main() {
   configurePublerRate(sb, "analytics");
   const result = await analyticsTick(sb);
   console.log("[cron:analytics] ok", JSON.stringify(result));
+  // Per-client learning: the database scores each client's own posts at most once an hour. Never blocks analytics.
+  try {
+    console.log("[cron:learning]", JSON.stringify(await learningTick(sb)));
+  } catch (e: any) {
+    console.error("[cron:learning] failed:", e?.message || e);
+  }
 }
 
 main().catch((e) => {
