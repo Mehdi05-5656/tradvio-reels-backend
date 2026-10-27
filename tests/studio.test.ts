@@ -141,7 +141,12 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   tables.studio_customers[0].status = "canceled";
   const co = await s.call("POST", "/api/studio/checkout", { plan: "studio", interval: "year" }, { "x-test-user": ANN });
   assert.equal(co.status, 200); assert.equal(co.body.url, "https://checkout.stripe.com/cs_1");
-  assert.deepEqual([stripe.created[0].line_items[0].price, stripe.created[0].customer, stripe.created[0].metadata.user_id], ["price_uy", "cus_1", ANN]);
+  assert.deepEqual([stripe.created[0].line_items[0].price, stripe.created[0].customer, stripe.created[0].metadata.user_id, stripe.created[0].mode], ["price_uy", "cus_1", ANN, "subscription"]);
+  assert.equal("customer_creation" in stripe.created[0], false, "subscription mode refuses customer_creation");
+  tables.studio_customers[0].stripe_customer_id = null;
+  await s.call("POST", "/api/studio/checkout", { plan: "starter" }, { "x-test-user": ANN });
+  assert.deepEqual([stripe.created[1].customer, stripe.created[1].customer_email, "customer_creation" in stripe.created[1]], [undefined, "ann@synthetic.invalid", false], "a first-time buyer is identified by email only");
+  tables.studio_customers[0].stripe_customer_id = "cus_1";
   assert.equal((await s.call("POST", "/api/studio/checkout", { plan: "gold" }, { "x-test-user": ANN })).body.error, "unknown_plan");
   assert.equal((await s.call("POST", "/api/studio/portal", {}, { "x-test-user": ANN })).body.url, "https://billing.stripe.com/cus_1");
   const ev = { id: "evt_1", type: "customer.subscription.updated", data: { object: sub() } };

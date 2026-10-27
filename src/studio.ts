@@ -275,7 +275,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const session = await stripe().checkout.sessions.create({
         mode: "subscription",
         line_items: [{ price, quantity: 1 }],
-        ...(cust.data?.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email, customer_creation: "always" }),
+        // Subscription mode always creates a customer; customer_creation is only valid in payment mode.
+        ...(cust.data?.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email }),
         client_reference_id: u,
         metadata: { user_id: u, plan_id: plan.id, interval },
         subscription_data: { metadata: { user_id: u, plan_id: plan.id } },
