@@ -24,6 +24,7 @@
     "express": "^4.21.2",
     "jose": "^5.10.0",
     "pdf-parse": "^1.1.1",
+    "stripe": "^23.0.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

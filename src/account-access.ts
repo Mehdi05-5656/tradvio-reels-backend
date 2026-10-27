@@ -16,7 +16,14 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     // Invite preview: the single-use token in the path is the credential; the handler reveals only the
     // organization name and whether the link is still valid.
     if (/^\/api\/invites\/[^/]+$/.test(path) && ["GET", "HEAD"].includes(req.method)) return next();
+    // Stripe's webhook authenticates itself with a signature that the handler verifies.
+    if (path === "/api/studio/stripe/webhook" && req.method === "POST") return next();
+    // The plan catalog is public; it carries no account data.
+    if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
+    // Clone8 Studio: every route acts on the signed-in person's own plan, credits, uploads and jobs.
+    // The handlers scope each query to that person; the database functions do the same.
+    if (path.startsWith("/api/studio/") && "user_id" in req.auth && req.profile) return next();
     const read = ["GET", "HEAD"].includes(req.method);
     // All application mutations require the selected human operator. An admin
     // viewing role or the legacy shared secret must not grant write authority.

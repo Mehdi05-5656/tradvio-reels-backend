@@ -26,6 +26,7 @@ import { startIngestionWorker } from "./ingestion-worker.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { configurePublerRate } from "./publer-rate.js";
 import { corsMiddleware } from "./cors.js";
+import { registerStudio } from "./studio.js";
 import compression from "compression";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -78,6 +79,7 @@ async function main() {
   registerClientOrgRoutes(app, getSb);
   registerClientLearning(app, getSb);
   registerLibraryArchive(app, getSb);
+  registerStudio(app, getSb);
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
   registerManagedRoutes(app, getSb);
