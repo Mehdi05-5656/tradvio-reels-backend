@@ -78,9 +78,34 @@ export async function collectCaseStudy(sb: SupabaseClient, now = new Date()): Pr
 }
 
 // ---- invite requests -------------------------------------------------------------------------
-export type InviteRequestRow = { name: string; email: string; company: string; website: string | null; platforms: string | null; accounts: number | null; monthly_videos: number | null; library: string | null; goals: string | null; message: string | null };
+// Two forms write here: the homepage invite form (source "clone8.io") and the Meta-ads application page
+// (source "clone8.io/apply"), which adds the qualification answers below. Values are closed lists so the
+// inbox can label them; anything else is a 400, never silently coerced.
+export const CONTENT_STATUSES = ["yes", "some", "not_yet"] as const;
+export const LIBRARY_SIZES = ["under_25", "25_100", "100_500", "500_plus"] as const;
+export const OBJECTIVES = ["reach", "awareness", "distribution", "other"] as const;
+export const REQUEST_SOURCES = ["clone8.io", "clone8.io/apply"] as const;
+export const ATTRIBUTION_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "landing_path", "referrer_host"] as const;
+export const APPLY_COLUMNS = ["content_status", "library_size", "objective", "phone", "attribution"] as const;
+export type InviteRequestRow = {
+  name: string; email: string; company: string; website: string | null; platforms: string | null; accounts: number | null; monthly_videos: number | null; library: string | null; goals: string | null; message: string | null;
+  source: (typeof REQUEST_SOURCES)[number];
+  content_status: (typeof CONTENT_STATUSES)[number] | null; library_size: (typeof LIBRARY_SIZES)[number] | null; objective: (typeof OBJECTIVES)[number] | null;
+  phone: string | null; attribution: Record<string, string> | null;
+};
 const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 const int = (v: unknown, max: number) => { if (v === "" || v === null || v === undefined) return null; const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 && n <= max ? n : undefined; };
+/** Empty → null; a listed value → itself; anything else → undefined (rejected). */
+const pick = <T extends string>(v: unknown, list: readonly T[]): T | null | undefined => (v === "" || v === null || v === undefined ? null : typeof v === "string" && (list as readonly string[]).includes(v.trim()) ? (v.trim() as T) : undefined);
+/** Phone numbers are kept as typed (digits, spaces, +, (), -, .), 5–40 characters, so the operator can dial them. */
+const phoneOf = (v: unknown) => { if (v === "" || v === null || v === undefined) return null; if (typeof v !== "string") return undefined; const p = v.trim().replace(/\s+/g, " "); return /^\+?[0-9][0-9 ().-]{4,39}$/.test(p) ? p : undefined; };
+/** Only the allow-listed campaign keys survive; values are short strings. Never a place for personal data. */
+export function attributionOf(v: unknown): Record<string, string> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const out: Record<string, string> = {};
+  for (const k of ATTRIBUTION_KEYS) { const x = (v as any)[k]; if (typeof x === "string" && x.trim()) out[k] = x.trim().slice(0, 200); }
+  return Object.keys(out).length ? out : null;
+}
 /** The hidden "fax" field is the honeypot; a real browser leaves it empty. "website" is a real, visible field. */
 export function validateInviteRequest(body: any): { ok: true; row: InviteRequestRow } | { ok: false; error: string; honeypot?: boolean } {
   if (!body || typeof body !== "object") return { ok: false, error: "invalid_body" };
@@ -94,9 +119,40 @@ export function validateInviteRequest(body: any): { ok: true; row: InviteRequest
   const accounts = int(body.accounts, 10000), monthly_videos = int(body.monthly_videos, 100000);
   if (accounts === undefined) return { ok: false, error: "invalid_accounts" };
   if (monthly_videos === undefined) return { ok: false, error: "invalid_monthly_videos" };
+  const content_status = pick(body.content_status, CONTENT_STATUSES), library_size = pick(body.library_size, LIBRARY_SIZES), objective = pick(body.objective, OBJECTIVES);
+  if (content_status === undefined) return { ok: false, error: "invalid_content_status" };
+  if (library_size === undefined) return { ok: false, error: "invalid_library_size" };
+  if (objective === undefined) return { ok: false, error: "invalid_objective" };
+  const phone = phoneOf(body.phone);
+  if (phone === undefined) return { ok: false, error: "invalid_phone" };
   const platforms = Array.isArray(body.platforms) ? body.platforms.filter((p: unknown) => typeof p === "string").map((p: string) => p.trim().toLowerCase()).filter(Boolean).slice(0, 6).join(", ") || null : text(body.platforms, 120);
-  return { ok: true, row: { name, email, company, website: text(body.website, 200), platforms, accounts, monthly_videos, library: text(body.library, 200), goals: text(body.goals, 2000), message: text(body.message, 2000) } };
+  const source = pick(body.source, REQUEST_SOURCES) || "clone8.io";
+  return { ok: true, row: { name, email, company, website: text(body.website, 200), platforms, accounts, monthly_videos, library: text(body.library, 200), goals: text(body.goals, 2000), message: text(body.message, 2000), source, content_status, library_size, objective, phone, attribution: attributionOf(body.attribution) } };
 }
+
+export const CONTENT_STATUS_LABEL: Record<(typeof CONTENT_STATUSES)[number], string> = { yes: "yes, published", some: "some", not_yet: "not yet" };
+export const LIBRARY_SIZE_LABEL: Record<(typeof LIBRARY_SIZES)[number], string> = { under_25: "under 25 videos", "25_100": "25–100 videos", "100_500": "100–500 videos", "500_plus": "500+ videos" };
+export const OBJECTIVE_LABEL: Record<(typeof OBJECTIVES)[number], string> = { reach: "reach", awareness: "product awareness", distribution: "consistent distribution", other: "other" };
+/** Before the apply-fields migration is applied the columns do not exist: keep every answer by writing it into the
+ *  message text instead, so nothing the applicant said is lost. The warning in the log says to apply the migration. */
+export function foldApplyFields(row: InviteRequestRow): Omit<InviteRequestRow, (typeof APPLY_COLUMNS)[number]> {
+  const { content_status, library_size, objective, phone, attribution, ...rest } = row;
+  const lines = [
+    content_status ? `Published short-form videos: ${CONTENT_STATUS_LABEL[content_status]}` : null,
+    library_size ? `Existing videos: ${LIBRARY_SIZE_LABEL[library_size]}` : null,
+    objective ? `Objective: ${OBJECTIVE_LABEL[objective]}` : null,
+    phone ? `Phone (callback requested): ${phone}` : null,
+    attribution ? `Attribution: ${Object.entries(attribution).map(([k, v]) => `${k}=${v}`).join(" ")}` : null,
+  ].filter(Boolean);
+  const message = [rest.message, lines.length ? `[apply fields, migration pending]\n${lines.join("\n")}` : null].filter(Boolean).join("\n\n").slice(0, 2000) || null;
+  return { ...rest, message };
+}
+/** PostgREST reports an unknown column as PGRST204 ("Could not find the 'x' column ... in the schema cache"). */
+const missingColumn = (err: any, names: readonly string[]) => { const m = String(err?.message ?? ""); return (err?.code === "PGRST204" || /column/i.test(m)) && names.some((n) => m.includes(`'${n}'`) || m.includes(` ${n} `) || m.includes(`.${n}`)); };
+
+export const INBOX_FIELDS = ["id", "name", "email", "company", "website", "platforms", "accounts", "monthly_videos", "library", "goals", "message", "status", "created_at", "source", ...APPLY_COLUMNS] as const;
+/** What the operator inbox gets: the application, never the Meta delivery context (IP, user agent, cookies). */
+export function inboxRow(r: Record<string, unknown>): Record<string, unknown> { const o: Record<string, unknown> = {}; for (const k of INBOX_FIELDS) o[k] = r[k] ?? null; return o; }
 
 /** Tiny fixed-window limiter per client address: enough to stop a script, invisible to people. */
 export function makeLimiter(limit = 10, windowMs = 3600_000) {
@@ -113,9 +169,9 @@ export function registerInviteRequestInbox(app: Express, sbFn: SbGetter): void {
   app.get("/api/ops/invite-requests", async (req: Request, res: Response) => {
     if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
     try {
-      const r = await sbFn().from("invite_requests").select("id,name,email,company,website,platforms,accounts,monthly_videos,library,goals,message,status,created_at").order("created_at", { ascending: false }).limit(200);
+      const r = await sbFn().from("invite_requests").select("*").order("created_at", { ascending: false }).limit(200);
       if (r.error) throw r.error;
-      res.set("Cache-Control", "private, no-store").json({ requests: r.data ?? [] });
+      res.set("Cache-Control", "private, no-store").json({ requests: (r.data ?? []).map(inboxRow) });
     } catch (e: any) { res.status(503).json({ error: "requests_unavailable", detail: String(e?.message ?? e).slice(0, 200) }); }
   });
   app.post("/api/ops/invite-requests/:id/status", async (req: Request, res: Response) => {
@@ -174,17 +230,25 @@ export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs
     const outbox = outboxColumns(meta, readBrowserMeta(req.body), req);
     try {
       const sb = sbFn();
-      const base = { ...v.row, source: "clone8.io" };
-      let r = await sb.from("invite_requests").insert(outbox ? { ...base, ...outbox } : base).select("id,created_at").single();
+      let row: Record<string, unknown> = { ...v.row };
+      let withOutbox = !!outbox;
+      let r = await sb.from("invite_requests").insert(withOutbox ? { ...row, ...outbox } : row).select("id,created_at").single();
       // Same event id again = the browser retried a submit whose answer it never got: confirm the stored row, store nothing new.
       if (r.error?.code === "23505" && outbox) {
         const prior = await sb.from("invite_requests").select("id").eq("meta_event_id", outbox.meta_event_id).maybeSingle();
         if (prior.data) return res.status(201).json({ received: true, id: prior.data.id, duplicate: true });
       }
+      // Apply-page columns not migrated yet: keep the answers in the message text, so nothing is lost.
+      if (r.error && missingColumn(r.error, APPLY_COLUMNS)) {
+        console.warn("[public] invite_requests has no apply-fields columns yet (apply migration 20261027120000); answers folded into message");
+        row = foldApplyFields(v.row);
+        r = await sb.from("invite_requests").insert(withOutbox ? { ...row, ...outbox } : row).select("id,created_at").single();
+      }
       // Meta columns not migrated yet: store the application exactly as before, without a server event.
-      if (r.error && outbox && /meta_(event_id|capi)/.test(String(r.error.message ?? ""))) {
+      if (r.error && withOutbox && /meta_(event_id|capi)/.test(String(r.error.message ?? ""))) {
         console.warn("[public] invite_requests has no meta_capi columns yet; stored without a server event");
-        r = await sb.from("invite_requests").insert(base).select("id,created_at").single();
+        withOutbox = false;
+        r = await sb.from("invite_requests").insert(row).select("id,created_at").single();
         if (r.error) throw r.error;
         return res.status(201).json({ received: true, id: r.data.id });
       }

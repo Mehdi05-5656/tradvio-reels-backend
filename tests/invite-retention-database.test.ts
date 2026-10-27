@@ -11,7 +11,7 @@ test("invite request retention: 24 months from submission, active clients and ho
     CREATE TABLE public.client_orgs(id uuid PRIMARY KEY, contact_email text, archived_at timestamptz);
     CREATE TABLE public.client_org_members(org_id uuid, user_id uuid);
   `);
-  for (const f of ["20261024110000_invite_requests.sql", "20261026090000_invite_requests_meta_capi.sql"]) await db.exec(readFileSync(`migrations/${f}`, "utf8"));
+  for (const f of ["20261024110000_invite_requests.sql", "20261026090000_invite_requests_meta_capi.sql", "20261027120000_invite_requests_apply_fields.sql", "20261027120000_invite_requests_apply_fields.sql"]) await db.exec(readFileSync(`migrations/${f}`, "utf8"));
   const m = readFileSync("migrations/20261026100000_invite_requests_retention.sql", "utf8");
   await db.exec(m); await db.exec(m); // idempotent; pg_cron is absent here, so only the notice path runs
 
@@ -28,6 +28,13 @@ test("invite request retention: 24 months from submission, active clients and ho
       ('recent applicant','new@x.com','F', now() - interval '23 months', false, null);
   `);
   const names = async () => (await db.query<{ name: string }>(`SELECT name FROM invite_requests ORDER BY name`)).rows.map((r) => r.name);
+  // /apply qualification columns: closed lists enforced by the database too; an old row reads as nulls.
+  await db.exec(`INSERT INTO invite_requests(name,email,company,source,content_status,library_size,objective,phone,attribution) VALUES ('apply applicant','ana@brand.co','Brand','clone8.io/apply','some','25_100','reach','+1 415 555 0100','{"utm_content":"creative-a"}')`);
+  assert.equal((await db.query<any>(`SELECT attribution->>'utm_content' AS c, content_status FROM invite_requests WHERE name='apply applicant'`)).rows[0].c, "creative-a");
+  assert.equal((await db.query<any>(`SELECT content_status, phone FROM invite_requests WHERE name='recent applicant'`)).rows[0].content_status, null);
+  await assert.rejects(db.exec(`INSERT INTO invite_requests(name,email,company,objective) VALUES ('bad','b@b.co','B','profit')`), /check constraint|violates/i);
+  await assert.rejects(db.exec(`INSERT INTO invite_requests(name,email,company,attribution) VALUES ('bad','b@b.co','B','[1,2]')`), /check constraint|violates/i);
+  await db.exec(`DELETE FROM invite_requests WHERE name='apply applicant'`);
 
   const dry = (await db.query<any>(`SELECT * FROM invite_requests_retention_purge(true)`)).rows[0];
   assert.deepEqual(dry, { expired: 5, kept_client: 2, kept_hold: 1, deleted: 0 });
