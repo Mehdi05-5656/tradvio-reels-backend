@@ -43,6 +43,12 @@ export function planForPrice(priceId: string | null | undefined, env: Record<str
 export function stripeConfigured(env: Record<string, string | undefined> = process.env): boolean {
   return !!env.STRIPE_SECRET_KEY && PLANS.every((p) => priceIdFor(p.id, "month", env));
 }
+// Which tools accept jobs. A tool opens when its worker is deployed (and, for Recast, when the Higgsfield
+// platform key exists); until then the page is visible but Generate is disabled, so no credits can be
+// reserved for work nothing would run.
+export function toolsEnabled(env: Record<string, string | undefined> = process.env) {
+  return { blueprint: env.STUDIO_BLUEPRINT_ENABLED === "true", blueprint_plus: env.STUDIO_BLUEPRINT_PLUS_ENABLED === "true", recast: !!env.HIGGSFIELD_API_KEY && env.STUDIO_RECAST_ENABLED !== "false" };
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
@@ -211,7 +217,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
 
   app.get("/api/studio/plans", (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
-    res.json({ plans: PLANS, costs: COSTS, billing_ready: stripeConfigured(env) });
+    res.json({ plans: PLANS, costs: COSTS, billing_ready: stripeConfigured(env), tools: toolsEnabled(env) });
   });
 
   app.get("/api/studio/me", async (req, res) => {
@@ -430,6 +436,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const sb = sbFn();
       const asset = await loadAsset(sb, u, req.body?.asset_id);
       const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset);
+      if (!(toolsEnabled(env) as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
       if (r.error) throw r.error;
       log(`[studio] job ${JSON.stringify({ user: u, tool: q.tool, credits: q.credits, job: r.data?.id })}`);

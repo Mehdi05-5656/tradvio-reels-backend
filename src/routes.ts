@@ -73,6 +73,8 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
         email: req.profile.email,
         display_name: req.profile.display_name,
         capabilities: accountCapabilities(req),
+        // Accounts visible through client organizations. Zero for a self-serve person, who belongs in the Studio.
+        org_accounts: req.orgSlots?.size ?? 0,
       });
     }
     // JWT valid but no profile row yet (trigger race, extremely rare).

@@ -6,7 +6,7 @@ import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, 
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-const ENV = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_x", DASHBOARD_URL: "https://app.clone8.io",
+const ENV = { STUDIO_BLUEPRINT_ENABLED: "true", HIGGSFIELD_API_KEY: "hf_test", STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_x", DASHBOARD_URL: "https://app.clone8.io",
   STRIPE_PRICE_STARTER_MONTH: "price_sm", STRIPE_PRICE_STARTER_YEAR: "price_sy", STRIPE_PRICE_CREATOR_MONTH: "price_cm", STRIPE_PRICE_CREATOR_YEAR: "price_cy",
   STRIPE_PRICE_STUDIO_MONTH: "price_um", STRIPE_PRICE_STUDIO_YEAR: "price_uy" };
 
@@ -161,4 +161,6 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", `/api/studio/assets/${ASSET}/complete`, {}, { "x-test-user": ANN })).body.asset?.status ?? "ready", "ready");
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "launch50" }, { "x-test-user": ANN })).body.credits, 50);
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");
+  assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint_plus", asset_id: ASSET, options: { copies: 2 } }, { "x-test-user": ANN })).body.error, "tool_not_open", "a tool without a worker refuses jobs");
+  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true });
 });
