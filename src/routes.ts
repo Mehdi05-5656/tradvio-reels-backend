@@ -37,6 +37,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     // Route handler MUST verify its own auth before doing anything sensitive.
     if (req.path === "/api/creatorvault/webhook") return next();
     if (req.path === "/api/public/invite-requests") return next(); // validated and rate-limited in public-routes.ts
+    if (req.path === "/api/public/funnel-events") return next(); // counting events only; validated and rate-limited in public-routes.ts
     return requireWriteAuth(req, res, next);
   });
 
