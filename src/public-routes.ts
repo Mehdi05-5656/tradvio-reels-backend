@@ -82,7 +82,7 @@ export async function collectCaseStudy(sb: SupabaseClient, now = new Date()): Pr
 // (source "clone8.io/apply"), which adds the qualification answers below. Values are closed lists so the
 // inbox can label them; anything else is a 400, never silently coerced.
 export const CONTENT_STATUSES = ["yes", "some", "not_yet"] as const;
-export const LIBRARY_SIZES = ["under_25", "25_100", "100_500", "500_plus"] as const;
+export const LIBRARY_SIZES = ["none", "under_25", "25_100", "100_500", "500_plus"] as const;
 export const OBJECTIVES = ["reach", "awareness", "distribution", "other"] as const;
 export const TIMELINES = ["asap", "1_3_months", "exploring"] as const;
 /** Sales stages, set from the console inbox: new → contacted → qualified → call_booked → call_attended → won; declined at any point;
@@ -137,7 +137,7 @@ export function validateInviteRequest(body: any): { ok: true; row: InviteRequest
 }
 
 export const CONTENT_STATUS_LABEL: Record<(typeof CONTENT_STATUSES)[number], string> = { yes: "yes, regularly", some: "a few", not_yet: "not yet" };
-export const LIBRARY_SIZE_LABEL: Record<(typeof LIBRARY_SIZES)[number], string> = { under_25: "fewer than 25 videos", "25_100": "25 to 99 videos", "100_500": "100 to 499 videos", "500_plus": "500 or more videos" };
+export const LIBRARY_SIZE_LABEL: Record<(typeof LIBRARY_SIZES)[number], string> = { none: "no videos yet", under_25: "1 to 24 videos", "25_100": "25 to 99 videos", "100_500": "100 to 499 videos", "500_plus": "500 or more videos" };
 export const OBJECTIVE_LABEL: Record<(typeof OBJECTIVES)[number], string> = { reach: "reach", awareness: "product awareness", distribution: "consistent distribution", other: "other" };
 export const TIMELINE_LABEL: Record<(typeof TIMELINES)[number], string> = { asap: "as soon as possible", "1_3_months": "in the next 1 to 3 months", exploring: "just exploring" };
 const APPLY_LINE: Record<(typeof APPLY_COLUMNS)[number], (row: InviteRequestRow) => string | null> = {
@@ -165,7 +165,7 @@ const missingColumn = (err: any, names: readonly string[]) => { const m = String
 const missingColumns = <T extends string>(err: any, names: readonly T[]): T[] => { const m = String(err?.message ?? ""); return names.filter((n) => m.includes(`'${n}'`) || m.includes(` ${n} `) || m.includes(`.${n}`)); };
 
 // ---- First-party funnel events from clone8.io/apply: counts only, never personal data. ----
-export const FUNNEL_EVENTS = ["landing", "cta_click", "form_view", "form_start", "form_submit", "form_complete", "success_view", "booking_click"] as const;
+export const FUNNEL_EVENTS = ["landing", "cta_click", "form_view", "form_start", "step_2", "form_submit", "form_complete", "success_view", "booking_click"] as const;
 export const DEVICE_CLASSES = ["in_app", "mobile", "desktop"] as const;
 export type FunnelEventRow = { event: (typeof FUNNEL_EVENTS)[number]; path: string; visit_id: string; device: (typeof DEVICE_CLASSES)[number] | null; attribution: Record<string, string> | null; request_id: string | null };
 export function validateFunnelEvent(body: any): { ok: true; row: FunnelEventRow } | { ok: false; error: string } {

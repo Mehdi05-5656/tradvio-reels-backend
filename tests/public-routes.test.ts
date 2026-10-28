@@ -57,6 +57,8 @@ test("invite request validation and the per-address limiter", () => {
   assert.deepEqual(row.attribution, { utm_source: "meta", utm_campaign: "launch", utm_content: "creative-a", landing_path: "/apply" }, "only campaign keys survive");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", content_status: "maybe" }) as any).error, "invalid_content_status");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", library_size: "lots" }) as any).error, "invalid_library_size");
+  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", library_size: "none", platforms: ["not yet"] }) as any).row.library_size, "none", "v3: none yet is a real answer, not a rejection");
+  assert.equal((validateFunnelEvent({ event: "step_2", path: "/apply/start", visit_id: "0123456789abcdef" }) as any).row.event, "step_2");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", objective: "money" }) as any).error, "invalid_objective");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", timeline: "yesterday" }) as any).error, "invalid_timeline");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", objective: "" }) as any).row.objective, null, "objective is optional now (asked on the call)");
