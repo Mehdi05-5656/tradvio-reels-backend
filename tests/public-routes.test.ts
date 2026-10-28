@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { summarizeCaseStudy, validateInviteRequest, makeLimiter, registerPublicRoutes, registerInviteRequestInbox, foldApplyFields, inboxRow, attributionOf, type CaseStudyRaw } from "../src/public-routes.js";
+import { summarizeCaseStudy, validateInviteRequest, validateFunnelEvent, makeLimiter, registerPublicRoutes, registerInviteRequestInbox, foldApplyFields, inboxRow, attributionOf, REQUEST_STATUSES, type CaseStudyRaw } from "../src/public-routes.js";
 import { accountAccess } from "../src/account-access.js";
 
 const now = new Date("2026-10-24T22:00:00Z");
@@ -41,7 +41,7 @@ test("case study: aggregate numbers only, unknown views not counted as zero, onl
 
 test("invite request validation and the per-address limiter", () => {
   assert.deepEqual(validateInviteRequest({ name: " Jane ", email: "Jane@Example.com", company: " Northline ", website: "northline.example", platforms: ["Instagram", "TikTok"], accounts: "20", monthly_videos: "", library: "40 hours of calls", goals: "1M views" }),
-    { ok: true, row: { name: "Jane", email: "jane@example.com", company: "Northline", website: "northline.example", platforms: "instagram, tiktok", accounts: 20, monthly_videos: null, library: "40 hours of calls", goals: "1M views", message: null, source: "clone8.io", content_status: null, library_size: null, objective: null, phone: null, attribution: null } });
+    { ok: true, row: { name: "Jane", email: "jane@example.com", company: "Northline", website: "northline.example", platforms: "instagram, tiktok", accounts: 20, monthly_videos: null, library: "40 hours of calls", goals: "1M views", message: null, source: "clone8.io", content_status: null, library_size: null, objective: null, timeline: null, phone: null, attribution: null } });
   assert.equal((validateInviteRequest({ name: "", email: "a@b.co", company: "x" }) as any).error, "invalid_name");
   assert.equal((validateInviteRequest({ name: "x", email: "nope", company: "x" }) as any).error, "invalid_email");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co" }) as any).error, "invalid_company");
@@ -49,15 +49,17 @@ test("invite request validation and the per-address limiter", () => {
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", fax: "555" }) as any).honeypot, true);
   assert.equal((validateInviteRequest(null) as any).error, "invalid_body");
   // /apply qualification fields: closed lists, optional phone, allow-listed attribution, named source.
-  const apply = validateInviteRequest({ name: "Ana", email: "ana@brand.co", company: "Brand", website: "@brand", platforms: ["instagram", "tiktok"], content_status: "some", library_size: "25_100", objective: "reach", phone: " +1 (415) 555-0100 ", message: "Mostly product demos", source: "clone8.io/apply", attribution: { utm_source: "meta", utm_campaign: "launch", utm_content: "creative-a", fbclid: "no", email: "x@y.z", landing_path: "/apply" } });
+  const apply = validateInviteRequest({ name: "Ana", email: "ana@brand.co", company: "Brand", website: "@brand", platforms: ["instagram", "tiktok"], content_status: "some", library_size: "25_100", objective: "reach", timeline: "asap", phone: " +1 (415) 555-0100 ", message: "Mostly product demos", source: "clone8.io/apply", attribution: { utm_source: "meta", utm_campaign: "launch", utm_content: "creative-a", fbclid: "no", email: "x@y.z", landing_path: "/apply" } });
   assert.equal(apply.ok, true);
   const row = (apply as any).row;
-  assert.equal(row.source, "clone8.io/apply"); assert.equal(row.content_status, "some"); assert.equal(row.library_size, "25_100"); assert.equal(row.objective, "reach");
+  assert.equal(row.source, "clone8.io/apply"); assert.equal(row.content_status, "some"); assert.equal(row.library_size, "25_100"); assert.equal(row.objective, "reach"); assert.equal(row.timeline, "asap");
   assert.equal(row.phone, "+1 (415) 555-0100"); assert.equal(row.message, "Mostly product demos");
   assert.deepEqual(row.attribution, { utm_source: "meta", utm_campaign: "launch", utm_content: "creative-a", landing_path: "/apply" }, "only campaign keys survive");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", content_status: "maybe" }) as any).error, "invalid_content_status");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", library_size: "lots" }) as any).error, "invalid_library_size");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", objective: "money" }) as any).error, "invalid_objective");
+  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", timeline: "yesterday" }) as any).error, "invalid_timeline");
+  assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", objective: "" }) as any).row.objective, null, "objective is optional now (asked on the call)");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", phone: "call me" }) as any).error, "invalid_phone");
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", phone: "" }) as any).row.phone, null);
   assert.equal((validateInviteRequest({ name: "x", email: "a@b.co", company: "x", source: "evil.example" }) as any).row.source, "clone8.io", "unknown source falls back to the homepage");
@@ -66,8 +68,24 @@ test("invite request validation and the per-address limiter", () => {
   // Before the migration: every answer survives in the message text; the new columns are dropped.
   const folded = foldApplyFields(row);
   assert.equal("content_status" in folded, false); assert.equal("attribution" in folded, false); assert.equal("phone" in folded, false);
-  assert.match(folded.message!, /^Mostly product demos\n\n\[apply fields, migration pending\]\nPublished short-form videos: some\nExisting videos: 25–100 videos\nObjective: reach\nPhone \(callback requested\): \+1 \(415\) 555-0100\nAttribution: utm_source=meta utm_campaign=launch utm_content=creative-a landing_path=\/apply$/);
-  assert.equal(foldApplyFields({ ...row, content_status: null, library_size: null, objective: null, phone: null, attribution: null }).message, "Mostly product demos");
+  assert.equal("timeline" in folded, false);
+  assert.match(folded.message!, /^Mostly product demos\n\n\[apply fields, migration pending\]\nPublished short-form videos: a few\nExisting videos: 25 to 99 videos\nObjective: reach\nWants to start: as soon as possible\nPhone \(callback requested\): \+1 \(415\) 555-0100\nAttribution: utm_source=meta utm_campaign=launch utm_content=creative-a landing_path=\/apply$/);
+  assert.equal(foldApplyFields({ ...row, content_status: null, library_size: null, objective: null, timeline: null, phone: null, attribution: null }).message, "Mostly product demos");
+  // Folding only the columns a later migration adds keeps the earlier ones as columns, and a second fold appends.
+  const partly = foldApplyFields(row, ["timeline"]);
+  assert.equal(partly.content_status, "some"); assert.equal("timeline" in partly, false);
+  assert.match(partly.message!, /^Mostly product demos\n\n\[apply fields, migration pending\]\nWants to start: as soon as possible$/);
+  const twice = foldApplyFields(partly as any, ["phone"]);
+  assert.match(twice.message!, /\[apply fields, migration pending\]\nWants to start: as soon as possible\nPhone \(callback requested\)/);
+  assert.equal(REQUEST_STATUSES.includes("call_booked" as any), true);
+  // Funnel events: closed lists, a hex visit id, a short path, no free text anywhere.
+  assert.deepEqual(validateFunnelEvent({ event: "form_view", path: "/apply", visit_id: "0123456789abcdef0123", device: "in_app", attribution: { utm_content: "creative-a", email: "x@y.z" }, request_id: "" }),
+    { ok: true, row: { event: "form_view", path: "/apply", visit_id: "0123456789abcdef0123", device: "in_app", attribution: { utm_content: "creative-a" }, request_id: null } });
+  assert.equal((validateFunnelEvent({ event: "purchase", path: "/apply", visit_id: "0123456789abcdef" }) as any).error, "invalid_event");
+  assert.equal((validateFunnelEvent({ event: "landing", path: "/apply?x=1", visit_id: "0123456789abcdef" }) as any).error, "invalid_path");
+  assert.equal((validateFunnelEvent({ event: "landing", path: "/apply", visit_id: "user@example.com" }) as any).error, "invalid_visit_id");
+  assert.equal((validateFunnelEvent({ event: "landing", path: "/apply", visit_id: "0123456789abcdef", device: "tv" }) as any).error, "invalid_device");
+  assert.equal((validateFunnelEvent({ event: "form_complete", path: "/apply", visit_id: "0123456789abcdef", request_id: "nope" }) as any).error, "invalid_request_id");
   // The inbox never sees the Meta delivery context.
   const seen = inboxRow({ id: "r", name: "n", email: "e", company: "c", status: "new", created_at: "t", meta_capi_context: { ip: "1.2.3.4" }, meta_event_id: "c8_x", content_status: "yes", phone: "+1 555" });
   assert.equal("meta_capi_context" in seen, false); assert.equal("meta_event_id" in seen, false); assert.equal(seen.content_status, "yes"); assert.equal(seen.website, null); assert.equal(seen.source, null);
@@ -79,7 +97,7 @@ test("invite request validation and the per-address limiter", () => {
 
 test("public routes work without any auth; the case study is cached and the form is stored", async (t) => {
   const inserts: any[] = [];
-  let rpcCalls = 0, failApplyColumnsOnce = false;
+  let rpcCalls = 0, failApplyColumns = false, failTimelineOnce = false, funnelTableMissing = false;
   const sb: any = {
     rpc: async () => { rpcCalls++; return { data: raw().latest_all, error: null }; },
     from(table: string) {
@@ -87,7 +105,10 @@ test("public routes work without any auth; the case study is cached and the form
         select(_c: string, o?: any) { q.head = o?.head; return q; }, eq() { return q; }, gte() { return q; }, order() { return q; }, limit() { return q; }, range() { return q; }, single() { return q; },
         insert(v: any) { inserts.push({ table, v }); q.inserted = v; return q; },
         then(resolve: any) {
-          if (table === "invite_requests" && q.inserted && failApplyColumnsOnce && "content_status" in q.inserted) { failApplyColumnsOnce = false; q.inserted = null; return resolve({ data: null, error: { code: "PGRST204", message: "Could not find the 'content_status' column of 'invite_requests' in the schema cache" } }); }
+          // Like PostgREST before the apply migrations: one unknown column named per error, until none is sent.
+          if (table === "invite_requests" && q.inserted && failApplyColumns) { const col = ["content_status", "library_size", "objective", "timeline", "phone", "attribution"].find((c) => c in q.inserted); if (col) { q.inserted = null; return resolve({ data: null, error: { code: "PGRST204", message: `Could not find the '${col}' column of 'invite_requests' in the schema cache` } }); } }
+          if (table === "invite_requests" && q.inserted && failTimelineOnce && "timeline" in q.inserted) { failTimelineOnce = false; q.inserted = null; return resolve({ data: null, error: { code: "PGRST204", message: "Could not find the 'timeline' column of 'invite_requests' in the schema cache" } }); }
+          if (table === "funnel_events") return resolve({ data: null, error: funnelTableMissing ? { code: "PGRST205", message: "Could not find the table 'public.funnel_events' in the schema cache" } : null });
           if (table === "publer_slot_config") return resolve({ data: [{ phone_slot: "phone_a", provider: "instagram", daily_target: 8, paused: false }], error: null });
           if (table === "publer_publish_log") return resolve(q.head ? { count: 5, error: null } : { data: [{ attempted_at: "2026-09-06T15:03:00Z", slot_local_date: "2026-10-24" }], error: null });
           if (table === "invite_requests") return resolve({ data: { id: "req-1", created_at: now.toISOString() }, error: null });
@@ -116,16 +137,30 @@ test("public routes work without any auth; the case study is cached and the form
   assert.equal(inserts[0].v.email, "jane@example.com");
   assert.equal(inserts[0].v.source, "clone8.io");
   assert.equal(inserts[0].v.content_status, null, "homepage form stores the new columns as null");
-  const applyBody = { name: "Ana", email: "ana@brand.co", company: "Brand", website: "brand.co", platforms: ["instagram"], content_status: "yes", library_size: "100_500", objective: "distribution", phone: "+44 20 7946 0000", source: "clone8.io/apply", attribution: { utm_content: "creative-b" } };
+  const applyBody = { name: "Ana", email: "ana@brand.co", company: "Brand", website: "brand.co", platforms: ["instagram"], content_status: "yes", library_size: "100_500", timeline: "1_3_months", phone: "+44 20 7946 0000", source: "clone8.io/apply", attribution: { utm_content: "creative-b" } };
   assert.equal((await post(applyBody)).status, 201);
-  assert.equal(inserts[1].v.source, "clone8.io/apply"); assert.equal(inserts[1].v.library_size, "100_500"); assert.deepEqual(inserts[1].v.attribution, { utm_content: "creative-b" });
-  assert.equal((await post({ ...applyBody, objective: "profit" })).status, 400, "an unknown answer is refused, not coerced");
-  failApplyColumnsOnce = true;
-  assert.equal((await post(applyBody)).status, 201, "stored even before the migration");
-  assert.equal(inserts.length, 4, "one failed insert, one retry");
-  assert.equal("content_status" in inserts[3].v, false);
-  assert.match(inserts[3].v.message, /Existing videos: 100–500 videos/);
-  assert.match(inserts[3].v.message, /Phone \(callback requested\): \+44 20 7946 0000/);
+  assert.equal(inserts[1].v.source, "clone8.io/apply"); assert.equal(inserts[1].v.library_size, "100_500"); assert.equal(inserts[1].v.timeline, "1_3_months"); assert.equal(inserts[1].v.objective, null); assert.deepEqual(inserts[1].v.attribution, { utm_content: "creative-b" });
+  assert.equal((await post({ ...applyBody, timeline: "never" })).status, 400, "an unknown answer is refused, not coerced");
+  failApplyColumns = true;
+  assert.equal((await post(applyBody)).status, 201, "stored even before the migrations");
+  assert.equal(inserts.length, 9, "one failed insert per missing column (six), then the one that is stored");
+  const stored = inserts[8].v;
+  for (const c of ["content_status", "library_size", "objective", "timeline", "phone", "attribution"]) assert.equal(c in stored, false, `${c} folded`);
+  assert.match(stored.message, /^\[apply fields, migration pending\]\nPublished short-form videos: yes, regularly\nExisting videos: 100 to 499 videos\nWants to start: in the next 1 to 3 months\nPhone \(callback requested\): \+44 20 7946 0000\nAttribution: utm_content=creative-b$/);
+  failApplyColumns = false;
+  // Only the second migration pending: the first migration's columns stay columns, timeline goes into the message.
+  failTimelineOnce = true;
+  assert.equal((await post(applyBody)).status, 201);
+  assert.equal(inserts.length, 11, "one failed insert, one retry");
+  assert.equal(inserts[10].v.library_size, "100_500"); assert.equal("timeline" in inserts[10].v, false);
+  assert.match(inserts[10].v.message, /^\[apply fields, migration pending\]\nWants to start: in the next 1 to 3 months$/);
+  // Funnel events: 204 for a good event, 400 for a bad one, 204 even before the table exists (never the page's problem).
+  const ev = (b: any) => fetch(`${base}/api/public/funnel-events`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+  assert.equal((await ev({ event: "landing", path: "/apply", visit_id: "0123456789abcdef", device: "mobile", attribution: { utm_content: "creative-b" } })).status, 204);
+  assert.equal(inserts.at(-1).table, "funnel_events"); assert.equal(inserts.at(-1).v.event, "landing"); assert.deepEqual(inserts.at(-1).v.attribution, { utm_content: "creative-b" });
+  assert.equal((await ev({ event: "landing", path: "/apply", visit_id: "nope" })).status, 400);
+  funnelTableMissing = true;
+  assert.equal((await ev({ event: "form_view", path: "/apply", visit_id: "0123456789abcdef" })).status, 204, "a missing table is logged, not surfaced");
   inserts.length = 1;
   assert.equal((await post({ name: "", email: "jane@example.com", company: "x" })).status, 400);
   assert.equal((await fetch(`${base}/api/ops/invite-requests`)).status, 401, "inbox is not public");
