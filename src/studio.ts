@@ -69,7 +69,8 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const duration = Number(asset.probe?.duration);
     if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
     const model = o.model === "light" ? "light" : "full";
-    const seconds = Math.ceil(Math.min(duration, model === "light" ? 15 : 60));
+    // Higgsfield's limits: the full model trims a source to 30 s, Light uses the first 15 s. Priced on what it will render.
+    const seconds = Math.ceil(Math.min(duration, model === "light" ? 15 : 30));
     if (!UUID_RE.test(String(o.character_asset_id ?? "")) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
     const per = model === "light" ? COSTS.recast_light_second : COSTS.recast_second;
     return { tool, credits: seconds * per, options: { model, seconds, character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };

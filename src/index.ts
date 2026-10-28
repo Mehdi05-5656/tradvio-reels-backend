@@ -27,6 +27,7 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { configurePublerRate } from "./publer-rate.js";
 import { corsMiddleware } from "./cors.js";
 import { registerStudio } from "./studio.js";
+import { startRecastLoop } from "./studio-recast.js";
 import compression from "compression";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -80,6 +81,7 @@ async function main() {
   registerClientLearning(app, getSb);
   registerLibraryArchive(app, getSb);
   registerStudio(app, getSb);
+  startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
   registerManagedRoutes(app, getSb);
