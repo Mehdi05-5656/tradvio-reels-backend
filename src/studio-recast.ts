@@ -218,7 +218,7 @@ export function startRecastLoop(sbFn: () => SupabaseClient, deps: RecastDeps = {
       const job = r.data as Job | null;
       if (!job || !job.id) return;
       running++;
-      runRecastJob(sb, deps, job).then((s) => log(`[recast] ${s} ${job.id}`)).catch((e) => log(`[recast] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
+      runRecastJob(sb, { ...deps, log }, job).then((s) => log(`[recast] ${s} ${job.id}`)).catch((e) => log(`[recast] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
     } catch (e: any) { log(`[recast] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);
