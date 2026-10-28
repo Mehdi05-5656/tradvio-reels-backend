@@ -55,8 +55,8 @@ test("auth header follows the key shape; quotes stop at Higgsfield's limits", ()
   assert.equal(higgsfieldAuth(" hf_token "), "Bearer hf_token");
   assert.equal(MODELS.full, "higgsfield/genjutsu/motion-transfer/v1.0");
   assert.deepEqual(MAX_SECONDS, { full: 30, light: 15 });
-  assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 95 } }).credits, 30 * 12, "full is priced on the 30 s Higgsfield renders");
-  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 95 } }).credits, 15 * 3);
+  assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 95 } }).options.seconds, 30, "full is priced on the 30 s Higgsfield renders");
+  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 95 } }).options.seconds, 15);
 });
 
 test("submit sends the documented body and idempotency key; poll reads the video url", async () => {
@@ -67,6 +67,7 @@ test("submit sends the documented body and idempotency key; poll reads the video
   assert.deepEqual(h.calls[0].body, { video_url: "https://v", image_urls: ["https://i"], resolution: "720p" });
   assert.equal(h.calls[0].headers.authorization, "Key id123:secret456");
   assert.equal(h.calls[0].headers["idempotency-key"], JOB);
+  assert.equal(h.calls[0].body.resolution, "720p");
   assert.deepEqual(await pollRecast(deps(h.fetchFn), "req_1").then((r) => [r.status, r.videoUrl]), ["in_progress", null]);
   assert.deepEqual(await pollRecast(deps(h.fetchFn), "req_1").then((r) => [r.status, r.videoUrl]), ["completed", "https://cdn.example/out.mp4"]);
 });
@@ -83,7 +84,7 @@ test("a full recast: submit, wait, fetch, mux the sound back, store, charge the 
   assert.equal(mux.length, 1, "the full model gets its sound back");
   assert.deepEqual(sb.uploads.map((u: any) => [u.bucket, u.key, u.type]), [["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.mp4`, "video/mp4"], ["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.jpg`, "image/jpeg"]]);
   const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
-  assert.equal(done.p_credits_charged, 20 * 12, "19.4 s rounds up to 20 s at 12 a second");
+  assert.equal(done.p_credits_charged, Math.min(240, 20 * 85), "19.4 s rounds up to 20 s at the full rate, capped at the reservation");
   assert.equal(done.p_outputs[0].audio, "muxed_from_source");
   assert.equal(done.p_outputs[0].request_id, "req_1");
   const notes = sb.calls.filter((c: any) => c.name === "studio_renew").map((c: any) => c.args.p_progress.note);
@@ -99,7 +100,7 @@ test("light keeps its own audio, a photo is signed, and the charge never exceeds
   assert.equal(mux.length, 0);
   assert.equal(h.calls.find((c) => c.method === "POST").url, `${HF_BASE}/${MODELS.light}`);
   assert.deepEqual(h.calls.find((c) => c.method === "POST").body.image_urls, [`https://signed/studio-uploads/${ANN}/${PHOTO}.jpg`]);
-  assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_credits_charged, 45, "16 s × 3 = 48 would exceed the 45 reserved");
+  assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_credits_charged, 45, "16 s at the Light rate would exceed the 45 reserved");
 });
 
 test("a restart resumes polling instead of submitting again", async () => {

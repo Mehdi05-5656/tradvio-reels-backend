@@ -6,6 +6,8 @@
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { planFeatureLines, studioCosts, unitEconomics, type StudioCosts } from "./studio-pricing.js";
+import { isAdmin } from "./auth.js";
 import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
 
@@ -20,15 +22,21 @@ export type Plan = { id: PlanId; name: string; tagline: string; monthly_usd: num
 
 export const PLANS: Plan[] = [
   { id: "starter", name: "Starter", tagline: "For one creator with a library to put to work", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000, parallel: 1,
-    features: ["1,000 credits a month", "Blueprint: about 250 copies a month", "Recast: about 80 seconds a month", "1 job at a time", "Downloads in 1080×1920"] },
+    features: ["1 job at a time", "Downloads in 1080×1920"] },
   { id: "creator", name: "Creator", tagline: "For creators and small teams posting daily", monthly_usd: 79, annual_usd_per_month: 66, credits: 3500, parallel: 2, popular: true,
-    features: ["3,500 credits a month", "Blueprint: about 875 copies a month", "Recast: about 290 seconds a month", "2 jobs at a time", "Blueprint+ hooks and captions", "Priority queue"] },
+    features: ["2 jobs at a time", "Blueprint+ hooks and captions", "Priority queue"] },
   { id: "studio", name: "Studio", tagline: "For brands and agencies running many accounts", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000, parallel: 4,
-    features: ["10,000 credits a month", "Blueprint: about 2,500 copies a month", "Recast: about 830 seconds a month", "4 jobs at a time", "Blueprint+ hooks and captions", "Priority queue", "A path to managed distribution"] },
+    features: ["4 jobs at a time", "Blueprint+ hooks and captions", "Priority queue", "A path to managed distribution"] },
 ];
 
-// What a tool costs, in credits. Changing a number here changes the price shown before any job is queued.
-export const COSTS = { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 12, recast_light_second: 3 } as const;
+// What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the
+// margin target, so a price can never drift from a cost. COSTS is the value under the process environment.
+export const costsFor = (env: Record<string, string | undefined> = process.env): StudioCosts => studioCosts(env, PLANS);
+export const COSTS: StudioCosts = costsFor();
+/** Plans with the price-dependent feature lines filled in from the live costs. */
+export function plansWithFeatures(costs: StudioCosts): Plan[] {
+  return PLANS.map((p) => ({ ...p, features: [...planFeatureLines(p, costs), ...p.features] }));
+}
 
 export function planById(id: string | null | undefined): Plan | null { return PLANS.find((p) => p.id === id) ?? null; }
 
@@ -55,13 +63,13 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
 // ---------------------------------------------------------------------------------------------------
 export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast"; credits: number; options: Record<string, any>; summary: string };
 
-export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null): Quote {
+export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};
   if (tool === "blueprint" || tool === "blueprint_plus") {
     if (!asset || asset.kind !== "video") throw new StudioError("asset_required", "Pick a video first");
     const copies = Math.floor(Number(o.copies));
     if (!(copies >= 1 && copies <= 50)) throw new StudioError("invalid_copies", "Between 1 and 50 copies");
-    const per = tool === "blueprint" ? COSTS.blueprint_copy : COSTS.blueprint_plus_copy;
+    const per = tool === "blueprint" ? costs.blueprint_copy : costs.blueprint_plus_copy;
     return { tool, credits: copies * per, options: { copies }, summary: `${copies} ${copies === 1 ? "copy" : "copies"} × ${per}` };
   }
   if (tool === "recast") {
@@ -72,7 +80,7 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     // Higgsfield's limits: the full model trims a source to 30 s, Light uses the first 15 s. Priced on what it will render.
     const seconds = Math.ceil(Math.min(duration, model === "light" ? 15 : 30));
     if (!UUID_RE.test(String(o.character_asset_id ?? "")) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
-    const per = model === "light" ? COSTS.recast_light_second : COSTS.recast_second;
+    const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     return { tool, credits: seconds * per, options: { model, seconds, character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };
   }
   throw new StudioError("unknown_tool", "Unknown tool");
@@ -195,6 +203,7 @@ function kindFor(name: string, type: string): { kind: "video" | "image"; ext: "m
 
 export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: { stripe?: StripeLike | null; env?: Record<string, string | undefined>; log?: (s: string) => void } = {}): void {
   const env = deps.env ?? process.env;
+  const costs = studioCosts(env, PLANS);
   const log = deps.log ?? ((s: string) => console.log(s));
   let stripeClient: StripeLike | null | undefined = deps.stripe;
   const stripe = (): StripeLike => {
@@ -221,7 +230,14 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
 
   app.get("/api/studio/plans", (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
-    res.json({ plans: PLANS, costs: COSTS, billing_ready: stripeConfigured(env), tools: toolsEnabled(env) });
+    res.json({ plans: plansWithFeatures(costs), costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env) });
+  });
+
+  // The owner's sheet: what each unit earns, costs and yields on every plan. Admin only; nothing a customer needs.
+  app.get("/api/studio/economics", (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+    res.json(unitEconomics(env, PLANS));
   });
 
   app.get("/api/studio/me", async (req, res) => {
@@ -247,7 +263,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         onboarding: c?.onboarding ?? {},
         usage_30d: { jobs: (jobs.data ?? []).length, credits: spent },
         ledger: ledger.data ?? [],
-        costs: COSTS,
+        costs,
       });
     } catch (e) { fail(res, e); }
   });
@@ -454,7 +470,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     try {
       const asset = await loadAsset(sbFn(), u, req.body?.asset_id);
-      const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset);
+      const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset, costs);
       res.json(q);
     } catch (e) { fail(res, e); }
   });
@@ -464,7 +480,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     try {
       const sb = sbFn();
       const asset = await loadAsset(sb, u, req.body?.asset_id);
-      const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset);
+      const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset, costs);
       if (!(toolsEnabled(env) as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
       if (r.error) throw r.error;

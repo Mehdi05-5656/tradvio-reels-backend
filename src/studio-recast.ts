@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
-import { COSTS } from "./studio.js";
+import { PLANS } from "./studio.js";
+import { RECAST_RESOLUTION, studioCosts } from "./studio-pricing.js";
 
 export const HF_BASE = "https://api.higgsfield.ai";
 export const MODELS = { full: "higgsfield/genjutsu/motion-transfer/v1.0", light: "higgsfield/genjutsu-light/motion-transfer/v1.0" } as const;
@@ -132,7 +133,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       const video = await sb.storage.from("studio-uploads").createSignedUrl(asset.data.object_key, 7200);
       if (video.error || !video.data) throw video.error ?? new RecastError("source_missing");
       const images = await characterUrls(sb, deps, job);
-      const sub = await submitRecast(deps, { model, videoUrl: video.data.signedUrl, imageUrls: images, idempotencyKey: job.id });
+      const sub = await submitRecast(deps, { model, videoUrl: video.data.signedUrl, imageUrls: images, idempotencyKey: job.id, resolution: RECAST_RESOLUTION });
       requestId = sub.request_id;
       await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
       log(`[recast] submitted ${JSON.stringify({ job: job.id, model, request: requestId })}`);
@@ -182,7 +183,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     if (up1.error) throw up1.error;
     const up2 = await sb.storage.from("studio-outputs").upload(key.replace(/\.mp4$/, ".jpg"), image, { contentType: "image/jpeg", upsert: false });
     if (up2.error) log(`[recast] poster upload failed ${JSON.stringify({ job: job.id, error: up2.error.message })}`);
-    const per = model === "light" ? COSTS.recast_light_second : COSTS.recast_second;
+    const costs = studioCosts(deps.env ?? process.env, PLANS);
+    const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     const charged = Math.min(job.credits_reserved, Math.ceil(seconds) * per);
     const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native" }];
     try {
