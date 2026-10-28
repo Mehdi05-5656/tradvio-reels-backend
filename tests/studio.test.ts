@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { accountAccess, selfAuthenticatedPost } from "../src/account-access.js";
-import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, PLANS, COSTS } from "../src/studio.js";
+import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, PLANS, COSTS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -16,8 +16,11 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
   const sb: any = {
     writes, calls,
     rpc: async (name: string, args: any) => { calls.push({ name, args }); return rpc(name, args); },
-    storage: { from: () => ({ createSignedUploadUrl: async (key: string) => ({ data: { token: "tok", path: key }, error: null }), createSignedUrl: async (k: string) => ({ data: { signedUrl: `https://signed/${k}` }, error: null }),
-      createSignedUrls: async (ks: string[]) => ({ data: ks.map((k) => ({ path: k, signedUrl: `https://signed/${k}` })), error: null }), list: async () => ({ data: [{ name: `${ASSET}.mp4`, metadata: { size: 1234 } }], error: null }), remove: async () => ({ data: null, error: null }) }) },
+    storage: { from: () => ({ createSignedUploadUrl: async (key: string) => ({ data: { token: "tok", path: key }, error: null }),
+      createSignedUrl: async (k: string, _e: number, o?: any) => ({ data: { signedUrl: `https://signed/${k}${o?.download ? `?download=${encodeURIComponent(o.download)}` : ""}` }, error: null }),
+      createSignedUrls: async (ks: string[]) => ({ data: ks.map((k) => ({ path: k, signedUrl: `https://signed/${k}` })), error: null }),
+      // Storage listings answer with whatever was searched for, so an upload or a poster "exists" when asked about.
+      list: async (_dir: string, o?: any) => ({ data: [{ name: o?.search ?? `${ASSET}.mp4`, metadata: { size: 1234 } }], error: null }), remove: async () => ({ data: null, error: null }) }) },
     from(table: string) {
       let rows = () => tables[table] ?? [];
       const filters: ((r: any) => boolean)[] = [];
@@ -33,7 +36,7 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
         upsert(v: any) { pending = { table, op: "upsert", v }; rows = () => [v]; return q; },
         update(v: any) { pending = { table, op: "update", v }; return q; },
         then(resolve: any, reject: any) {
-          if (pending) { writes.push({ ...pending, filters: filters.length }); if (pending.op === "insert" && table === "studio_stripe_events" && (tables[table] ?? []).some((r) => r.id === pending.v.id)) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key" } }).then(resolve, reject); if (pending.op === "insert") (tables[table] ??= []).push(pending.v); }
+          if (pending) { writes.push({ ...pending, filters: filters.length }); if (pending.op === "insert" && table === "studio_stripe_events" && (tables[table] ?? []).some((r) => r.id === pending.v.id)) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key" } }).then(resolve, reject); if (pending.op === "insert") (tables[table] ??= []).push(pending.v); if (pending.op === "update") for (const r of (tables[table] ?? []).filter((r) => filters.every((f) => f(r)))) Object.assign(r, pending.v); }
           const out = rows().filter((r) => filters.every((f) => f(r)));
           const data = head ? null : single || maybe ? (out[0] ?? null) : out;
           return Promise.resolve({ data, error: single && !out.length ? { message: "no rows" } : null, count: head ? out.length : null }).then(resolve, reject);
@@ -197,4 +200,37 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint_plus", asset_id: ASSET, options: { copies: 2 } }, { "x-test-user": ANN })).body.error, "tool_not_open", "a tool without a worker refuses jobs");
   assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true });
+});
+
+test("download names come from the upload's name and the tool", () => {
+  assert.equal(downloadBase("v12044gd0000davhid7og65ts4lhv3b0.MP4", "blueprint"), "v12044gd0000davhid7og65ts4lhv3b0-copy");
+  assert.equal(downloadBase("My clip (final) v2.mov", "blueprint"), "My-clip-final-v2-copy");
+  assert.equal(downloadBase(null, "recast"), "clone8-recast");
+  assert.equal(downloadBase("../../etc/passwd", "blueprint"), "etc-passwd-copy");
+});
+
+test("routes: uploads carry the browser's probe and poster; finished jobs list posters and name their downloads", async (t) => {
+  const DONE = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const outputs = [1, 2].map((i) => ({ index: i, key: `${ANN}/${DONE}/lease/${i}.mp4`, poster_key: `${ANN}/${DONE}/lease/${i}.jpg`, bytes: 10, duration: 9.9 }));
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, stripe_customer_id: "cus_1", status: "active", plan_id: "creator", onboarding: {} }],
+    studio_assets: [{ id: ASSET, user_id: ANN, kind: "video", name: "Morning routine.MP4", status: "uploading", probe: null, object_key: `${ANN}/${ASSET}.mp4`, bytes: 1 }],
+    studio_jobs: [{ id: DONE, user_id: ANN, tool: "blueprint", status: "done", asset_id: ASSET, options: { copies: 2 }, credits_reserved: 8, credits_charged: 8, progress: { done: 2, total: 2 }, outputs, error_code: null, created_at: "2026-10-28T21:45:30Z", started_at: null, finished_at: null }],
+    studio_credit_ledger: [], studio_stripe_events: [] };
+  const sb = fakeSb(tables, (name) => ({ data: name === "studio_balance" ? 900 : {}, error: null }));
+  const s = await serve(sb, fakeStripe()); t.after(s.close);
+  const poster = await s.call("POST", `/api/studio/assets/${ASSET}/poster-url`, {}, { "x-test-user": ANN });
+  assert.equal(poster.status, 200); assert.equal(poster.body.key, `${ANN}/assets/${ASSET}.jpg`); assert.equal(poster.body.bucket, "studio-outputs");
+  const done = await s.call("POST", `/api/studio/assets/${ASSET}/complete`, { probe: { duration: 14.1, width: 1080, height: 1920, junk: "x" }, poster: true }, { "x-test-user": ANN });
+  assert.equal(done.status, 200);
+  assert.deepEqual(done.body.asset.probe, { duration: 14.1, width: 1080, height: 1920, poster_key: `${ANN}/assets/${ASSET}.jpg` });
+  assert.equal(done.body.asset.poster_url, `https://signed/${ANN}/assets/${ASSET}.jpg`);
+  const listed = await s.call("GET", "/api/studio/assets", undefined, { "x-test-user": ANN });
+  assert.equal(listed.body.assets[0].poster_url, `https://signed/${ANN}/assets/${ASSET}.jpg`);
+  const jobs = await s.call("GET", "/api/studio/jobs", undefined, { "x-test-user": ANN });
+  assert.equal(jobs.body.jobs[0].asset_name, "Morning routine.MP4");
+  assert.equal(jobs.body.jobs[0].outputs[0].poster_url, `https://signed/${ANN}/${DONE}/lease/1.jpg`, "the list carries posters");
+  assert.equal(jobs.body.jobs[0].outputs[0].url, undefined, "but not video links");
+  const job = await s.call("GET", `/api/studio/jobs/${DONE}`, undefined, { "x-test-user": ANN });
+  assert.equal(job.body.job.outputs[1].url, `https://signed/${ANN}/${DONE}/lease/2.mp4?download=Morning-routine-copy-02.mp4`);
+  assert.equal(job.body.job.outputs[1].poster_url, `https://signed/${ANN}/${DONE}/lease/2.jpg`);
 });

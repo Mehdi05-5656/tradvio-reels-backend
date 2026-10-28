@@ -360,12 +360,28 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     } catch (e) { fail(res, e); }
   });
 
+  // The browser may also upload a poster frame for the thumbnail grids: one signed PUT into studio-outputs.
+  app.post("/api/studio/assets/:id/poster-url", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "asset_not_found" });
+    try {
+      const sb = sbFn();
+      const a = await sb.from("studio_assets").select("id").eq("id", req.params.id).eq("user_id", u).neq("status", "deleted").maybeSingle();
+      if (a.error) throw a.error;
+      if (!a.data) return res.status(404).json({ error: "asset_not_found" });
+      const key = assetPosterKey(u, a.data.id);
+      const signed = await sb.storage.from("studio-outputs").createSignedUploadUrl(key, { upsert: true });
+      if (signed.error || !signed.data) throw signed.error ?? new Error("signing_failed");
+      res.json({ key, token: signed.data.token, path: signed.data.path, bucket: "studio-outputs" });
+    } catch (e) { fail(res, e); }
+  });
+
   app.post("/api/studio/assets/:id/complete", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "asset_not_found" });
     try {
       const sb = sbFn();
-      const a = await sb.from("studio_assets").select("id,object_key,bytes,status").eq("id", req.params.id).eq("user_id", u).maybeSingle();
+      const a = await sb.from("studio_assets").select("id,object_key,bytes,status,probe").eq("id", req.params.id).eq("user_id", u).maybeSingle();
       if (a.error) throw a.error;
       if (!a.data) return res.status(404).json({ error: "asset_not_found" });
       const dir = a.data.object_key.split("/")[0], file = a.data.object_key.split("/")[1];
@@ -374,9 +390,16 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const obj = (listed.data ?? []).find((o: any) => o.name === file);
       if (!obj) return res.status(409).json({ error: "upload_missing" });
       const bytes = Number(obj.metadata?.size ?? a.data.bytes) || a.data.bytes;
-      const r = await sb.from("studio_assets").update({ status: "ready", bytes, updated_at: new Date().toISOString() }).eq("id", a.data.id).select("id,kind,name,bytes,status,probe,created_at").single();
+      // What the browser measured (duration, size) and whether it stored a poster. A worker's ffprobe later
+      // replaces the numbers; the poster is kept unless the worker writes its own.
+      const probe = { ...(a.data.probe ?? {}), ...clientProbe(req.body?.probe) };
+      if (req.body?.poster === true) {
+        const posters = await sb.storage.from("studio-outputs").list(`${u}/assets`, { search: `${a.data.id}.jpg`, limit: 5 });
+        if (!posters.error && (posters.data ?? []).some((o: any) => o.name === `${a.data.id}.jpg`)) probe.poster_key = assetPosterKey(u, a.data.id);
+      }
+      const r = await sb.from("studio_assets").update({ status: "ready", bytes, probe, updated_at: new Date().toISOString() }).eq("id", a.data.id).select("id,kind,name,bytes,status,probe,created_at").single();
       if (r.error) throw r.error;
-      res.json({ asset: r.data });
+      res.json({ asset: (await withPosterUrls(sb, [r.data]))[0] });
     } catch (e) { fail(res, e); }
   });
 
@@ -384,9 +407,10 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     res.setHeader("Cache-Control", "private, no-store");
     const u = requireUser(req, res); if (!u) return;
     try {
-      const r = await sbFn().from("studio_assets").select("id,kind,name,bytes,status,probe,created_at").eq("user_id", u).neq("status", "deleted").order("created_at", { ascending: false }).limit(200);
+      const sb = sbFn();
+      const r = await sb.from("studio_assets").select("id,kind,name,bytes,status,probe,created_at").eq("user_id", u).neq("status", "deleted").order("created_at", { ascending: false }).limit(200);
       if (r.error) throw r.error;
-      res.json({ assets: r.data ?? [] });
+      res.json({ assets: await withPosterUrls(sb, r.data ?? []) });
     } catch (e) { fail(res, e); }
   });
 
@@ -452,9 +476,19 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     res.setHeader("Cache-Control", "private, no-store");
     const u = requireUser(req, res); if (!u) return;
     try {
-      const r = await sbFn().from("studio_jobs").select("id,tool,status,asset_id,options,credits_reserved,credits_charged,progress,outputs,error_code,created_at,started_at,finished_at").eq("user_id", u).order("created_at", { ascending: false }).limit(100);
+      const sb = sbFn();
+      const r = await sb.from("studio_jobs").select("id,tool,status,asset_id,options,credits_reserved,credits_charged,progress,outputs,error_code,created_at,started_at,finished_at").eq("user_id", u).order("created_at", { ascending: false }).limit(100);
       if (r.error) throw r.error;
-      res.json({ jobs: (r.data ?? []).map(publicJob) });
+      const jobs = await withAssetNames(sb, u, (r.data ?? []).map(publicJob));
+      // Posters for the grids: the first few of each finished job in one signing call. Videos are signed per job.
+      const keys = jobs.flatMap((j) => (j.status === "done" ? j.outputs.slice(0, LIST_POSTERS).map((o: any) => o.poster_key).filter(Boolean) : []));
+      if (keys.length) {
+        const signed = await sb.storage.from("studio-outputs").createSignedUrls(keys, 900);
+        if (signed.error) throw signed.error;
+        const urls = new Map((signed.data ?? []).map((x: any) => [x.path, x.signedUrl]));
+        for (const j of jobs) if (j.status === "done") j.outputs = j.outputs.map((o: any, i: number) => (i < LIST_POSTERS && o.poster_key ? { ...o, poster_url: urls.get(o.poster_key) ?? null } : o));
+      }
+      res.json({ jobs });
     } catch (e) { fail(res, e); }
   });
 
@@ -467,13 +501,16 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const r = await sb.from("studio_jobs").select("id,tool,status,asset_id,options,credits_reserved,credits_charged,progress,outputs,error_code,created_at,started_at,finished_at").eq("id", req.params.id).eq("user_id", u).maybeSingle();
       if (r.error) throw r.error;
       if (!r.data) return res.status(404).json({ error: "job_not_found" });
-      const job = publicJob(r.data);
+      const job = (await withAssetNames(sb, u, [publicJob(r.data)]))[0];
       if (job.status === "done" && Array.isArray(job.outputs) && job.outputs.length) {
-        const keys = job.outputs.flatMap((o: any) => [o.key, o.poster_key].filter(Boolean));
-        const signed = await sb.storage.from("studio-outputs").createSignedUrls(keys, 900);
+        const posters = job.outputs.map((o: any) => o.poster_key).filter(Boolean);
+        const signed = posters.length ? await sb.storage.from("studio-outputs").createSignedUrls(posters, 900) : { data: [], error: null };
         if (signed.error) throw signed.error;
         const urls = new Map((signed.data ?? []).map((s: any) => [s.path, s.signedUrl]));
-        job.outputs = job.outputs.map((o: any) => ({ ...o, url: urls.get(o.key) ?? null, poster_url: o.poster_key ? urls.get(o.poster_key) ?? null : null }));
+        // Each video is signed on its own so the browser saves it under a readable name.
+        const base = downloadBase(job.asset_name, job.tool);
+        const videos = await Promise.all(job.outputs.map((o: any, i: number) => sb.storage.from("studio-outputs").createSignedUrl(o.key, 900, { download: `${base}-${String(o.index ?? i + 1).padStart(2, "0")}.mp4` })));
+        job.outputs = job.outputs.map((o: any, i: number) => ({ ...o, url: videos[i].data?.signedUrl ?? null, poster_url: o.poster_key ? urls.get(o.poster_key) ?? null : null }));
       }
       res.json({ job });
     } catch (e) { fail(res, e); }
@@ -498,6 +535,39 @@ async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {
   if (!r.data || r.data.status === "deleted") throw new StudioError("asset_not_found", "Unknown video", 404);
   if (r.data.status !== "ready") throw new StudioError("asset_not_ready", "The upload has not finished", 409);
   return r.data as { id: string; kind: string; status: string; probe: any };
+}
+
+const LIST_POSTERS = 8;
+const assetPosterKey = (u: string, id: string) => `${u}/assets/${id}.jpg`;
+
+/** Numbers the browser measured on its own video element; anything else is ignored. */
+function clientProbe(p: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!p || typeof p !== "object") return out;
+  for (const k of ["duration", "width", "height"]) { const v = Number(p[k]); if (Number.isFinite(v) && v > 0 && v < 1e6) out[k] = Math.round(v * 1000) / 1000; }
+  return out;
+}
+
+/** The file name a saved copy gets: the upload's name without its extension, tidied, plus the tool. */
+export function downloadBase(assetName: string | null | undefined, tool: string): string {
+  const stem = String(assetName ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  return `${stem || "clone8"}-${tool === "recast" ? "recast" : "copy"}`;
+}
+
+async function withPosterUrls(sb: SupabaseClient, assets: any[]) {
+  const keys = assets.map((a) => a.probe?.poster_key).filter(Boolean);
+  if (!keys.length) return assets.map((a) => ({ ...a, poster_url: null }));
+  const signed = await sb.storage.from("studio-outputs").createSignedUrls(keys, 900);
+  const urls = new Map(((signed.data ?? []) as any[]).map((x) => [x.path, x.signedUrl]));
+  return assets.map((a) => ({ ...a, poster_url: a.probe?.poster_key ? urls.get(a.probe.poster_key) ?? null : null }));
+}
+
+async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[]) {
+  const ids = [...new Set(jobs.map((j) => j.asset_id).filter(Boolean))];
+  if (!ids.length) return jobs.map((j) => ({ ...j, asset_name: null }));
+  const r = await sb.from("studio_assets").select("id,name").eq("user_id", u).in("id", ids);
+  const names = new Map(((r.data ?? []) as any[]).map((a) => [a.id, a.name]));
+  return jobs.map((j) => ({ ...j, asset_name: j.asset_id ? names.get(j.asset_id) ?? null : null }));
 }
 
 function publicJob(j: any) {
