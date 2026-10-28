@@ -4,7 +4,7 @@ import { registerPublerRoutes } from "./publer-routes.js";
 import { supabase } from "./supabase.js";
 import { resolveAuth, isAdmin, resolveExternalUserId } from "./auth.js";
 import { accountCapabilities } from "./account-capabilities.js";
-import { accountAccess } from "./account-access.js";
+import { accountAccess, selfAuthenticatedPost } from "./account-access.js";
 import {queueMediaBucket} from "./library-publishing.js";
 
 const BUCKET = "reels";
@@ -33,11 +33,9 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
     if (!req.path.startsWith("/api/")) return next();
-    // Exempt paths that carry their own auth (e.g. HMAC-signed webhooks).
-    // Route handler MUST verify its own auth before doing anything sensitive.
-    if (req.path === "/api/creatorvault/webhook") return next();
-    if (req.path === "/api/public/invite-requests") return next(); // validated and rate-limited in public-routes.ts
-    if (req.path === "/api/public/funnel-events") return next(); // counting events only; validated and rate-limited in public-routes.ts
+    // Paths that carry their own auth (HMAC or Stripe signatures, the rate-limited invite form) are listed once
+    // in account-access.ts. Each handler MUST verify its own credential before doing anything sensitive.
+    if (selfAuthenticatedPost(req.path, req.method)) return next();
     return requireWriteAuth(req, res, next);
   });
 

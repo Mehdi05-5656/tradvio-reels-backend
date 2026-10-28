@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { accountAccess } from "../src/account-access.js";
+import { accountAccess, selfAuthenticatedPost } from "../src/account-access.js";
 import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, PLANS, COSTS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -119,7 +119,36 @@ test("checkout links the customer, subscription events mirror the plan, paid inv
   assert.match(await applyStripeEvent(sb, stripe, { type: "customer.subscription.deleted", data: { object: sub({ status: "canceled", metadata: {} }) } }), /canceled/);
   assert.equal(await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_3", customer: "cus_other", parent: { subscription_details: { subscription: "sub_1" } } } } }), "invoice for unknown customer");
   assert.equal(await applyStripeEvent(sb, stripe, { type: "payment_intent.created", data: { object: {} } }), "ignored");
-  delete process.env.STRIPE_PRICE_CREATOR_MONTH;
+  // Annual billing: one invoice a year pays for twelve months of credits, granted at once.
+  process.env.STRIPE_PRICE_CREATOR_YEAR = "price_cy";
+  const annual = fakeStripe({ sub_1: sub({ items: { data: [{ price: { id: "price_cy", recurring: { interval: "year" } }, current_period_start: 1761523200, current_period_end: 1793059200 }] } }) });
+  assert.match(await applyStripeEvent(sb, annual, { type: "invoice.paid", data: { object: { id: "in_year", customer: "cus_1", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_1" } } } } }), /granted 42000/);
+  const year = sb.calls.filter((c: any) => c.name === "studio_grant").at(-1);
+  assert.deepEqual([year.args.p_credits, year.args.p_ref, year.args.p_expire_previous, year.args.p_note], [42000, "in_year", true, "Creator annual subscription_create"]);
+  delete process.env.STRIPE_PRICE_CREATOR_MONTH; delete process.env.STRIPE_PRICE_CREATOR_YEAR;
+});
+
+test("Stripe's webhook is exempt from both request guards; everything else still needs a session", async (t) => {
+  assert.equal(selfAuthenticatedPost("/api/studio/stripe/webhook", "POST"), true);
+  assert.equal(selfAuthenticatedPost("/api/studio/stripe/webhook/", "POST"), true, "a trailing slash is the same route");
+  assert.equal(selfAuthenticatedPost("/api/studio/stripe/webhook", "GET"), false);
+  assert.equal(selfAuthenticatedPost("/api/creatorvault/webhook", "POST"), true);
+  assert.equal(selfAuthenticatedPost("/api/public/invite-requests", "POST"), true);
+  assert.equal(selfAuthenticatedPost("/api/public/funnel-events", "POST"), true);
+  for (const p of ["/api/studio/checkout", "/api/studio/jobs", "/api/studio/promo", "/api/studio/me"]) assert.equal(selfAuthenticatedPost(p, "POST"), false, p);
+  // The production chain: the access boundary, then the mutation guard from routes.ts, then the Studio routes.
+  const sb = fakeSb({ studio_customers: [], studio_stripe_events: [] }, () => ({ data: {}, error: null }));
+  const app = express();
+  app.use(express.json({ verify: (req: any, _res, buf) => { req.rawBody = buf.toString("utf8"); } }));
+  app.use(accountAccess(() => sb));
+  app.use((req: any, res, next) => { if (["GET", "HEAD", "OPTIONS"].includes(req.method) || !req.path.startsWith("/api/") || selfAuthenticatedPost(req.path, req.method) || req.auth) return next(); res.status(401).json({ error: "unauthorized" }); });
+  registerStudio(app, () => sb, { stripe: fakeStripe(), env: ENV, log: () => {} });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r)); t.after(() => server.close());
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const post = async (path: string, headers: Record<string, string> = {}) => (await fetch(base + path, { method: "POST", headers: { "content-type": "application/json", "user-agent": "Stripe/1.0", ...headers }, body: JSON.stringify({ id: "evt_x", type: "invoice.paid", data: { object: {} } }) })).status;
+  assert.equal(await post("/api/studio/stripe/webhook", { "stripe-signature": "bad" }), 400, "reaches the handler, which rejects the signature itself");
+  assert.equal(await post("/api/studio/stripe/webhook", { "stripe-signature": "good" }), 200);
+  assert.equal(await post("/api/studio/checkout"), 401, "a sessionless POST anywhere else is refused");
 });
 
 test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", async (t) => {

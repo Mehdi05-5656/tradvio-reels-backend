@@ -169,9 +169,12 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     const reason = String(obj.billing_reason ?? "");
     // A new period replaces what was left; a mid-cycle upgrade adds its credits on top.
     const expire = reason === "subscription_cycle" || reason === "subscription_create" || reason === "";
-    const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: s.plan.credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: `${s.plan.name} ${reason || "invoice"}` });
+    // Credits are priced per month. An annual invoice pays for twelve of them at once, so it grants the
+    // year's credits in one go; they last until the next annual invoice replaces them.
+    const credits = s.plan.credits * (s.interval === "year" ? 12 : 1);
+    const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: `${s.plan.name} ${s.interval === "year" ? "annual " : ""}${reason || "invoice"}` });
     if (g.error) throw g.error;
-    return `invoice.paid → ${g.data?.granted ? "granted" : "already granted"} ${s.plan.credits} (${reason || "invoice"})`;
+    return `invoice.paid → ${g.data?.granted ? "granted" : "already granted"} ${credits} (${reason || "invoice"})`;
   }
   return "ignored";
 }

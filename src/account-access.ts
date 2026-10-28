@@ -2,6 +2,16 @@ import type { Request, Response, NextFunction } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isAdmin, isOperator } from "./auth.js";
 
+// POSTs that carry their own credential instead of a session: HMAC-signed webhooks (CreatorVault), Stripe's
+// signed webhook, and the rate-limited public forms of clone8.io (invite requests, funnel counters). The access
+// boundary below and the mutation guard in routes.ts both consult this one list, so a route exempted from one
+// can never be blocked by the other (both Stripe and the funnel endpoint were 401'd that way in production).
+export function selfAuthenticatedPost(path: string, method: string): boolean {
+  if (method !== "POST") return false;
+  const p = path.replace(/\/+$/, "");
+  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/studio/stripe/webhook";
+}
+
 // Default-deny legacy/global routes. Ownership is checked on the server, never
 // inferred from a client-supplied role, external user id, or slot name.
 export function accountAccess(sbFn: () => SupabaseClient) {
@@ -9,16 +19,12 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     const path = req.path.replace(/\/+$/, "");
     if (!path.startsWith("/api/") || req.method === "OPTIONS") return next();
     if (path === "/api/bootstrap" && ["GET", "HEAD"].includes(req.method)) return next();
-    if (path === "/api/creatorvault/webhook" && req.method === "POST") return next();
-    // Public site: aggregate case-study numbers, the invite-request form and the apply page's funnel counters. No account data.
+    if (selfAuthenticatedPost(path, req.method)) return next();
+    // Public site: aggregate case-study numbers. No account data (the public POST forms are in the list above).
     if (path === "/api/public/case-study" && ["GET", "HEAD"].includes(req.method)) return next();
-    if (path === "/api/public/invite-requests" && req.method === "POST") return next();
-    if (path === "/api/public/funnel-events" && req.method === "POST") return next();
     // Invite preview: the single-use token in the path is the credential; the handler reveals only the
     // organization name and whether the link is still valid.
     if (/^\/api\/invites\/[^/]+$/.test(path) && ["GET", "HEAD"].includes(req.method)) return next();
-    // Stripe's webhook authenticates itself with a signature that the handler verifies.
-    if (path === "/api/studio/stripe/webhook" && req.method === "POST") return next();
     // The plan catalog is public; it carries no account data.
     if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
