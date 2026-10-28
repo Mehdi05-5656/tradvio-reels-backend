@@ -84,14 +84,18 @@ export async function collectCaseStudy(sb: SupabaseClient, now = new Date()): Pr
 export const CONTENT_STATUSES = ["yes", "some", "not_yet"] as const;
 export const LIBRARY_SIZES = ["under_25", "25_100", "100_500", "500_plus"] as const;
 export const OBJECTIVES = ["reach", "awareness", "distribution", "other"] as const;
+export const TIMELINES = ["asap", "1_3_months", "exploring"] as const;
+/** Sales stages, set from the console inbox: new → contacted → qualified → call_booked → call_attended → won; declined at any point;
+ *  invited = a dashboard invitation was sent (the original flow, still used after a win). */
+export const REQUEST_STATUSES = ["new", "contacted", "qualified", "call_booked", "call_attended", "won", "invited", "declined"] as const;
 export const REQUEST_SOURCES = ["clone8.io", "clone8.io/apply"] as const;
 export const ATTRIBUTION_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "landing_path", "referrer_host"] as const;
-export const APPLY_COLUMNS = ["content_status", "library_size", "objective", "phone", "attribution"] as const;
+export const APPLY_COLUMNS = ["content_status", "library_size", "objective", "timeline", "phone", "attribution"] as const;
 export type InviteRequestRow = {
   name: string; email: string; company: string; website: string | null; platforms: string | null; accounts: number | null; monthly_videos: number | null; library: string | null; goals: string | null; message: string | null;
   source: (typeof REQUEST_SOURCES)[number];
   content_status: (typeof CONTENT_STATUSES)[number] | null; library_size: (typeof LIBRARY_SIZES)[number] | null; objective: (typeof OBJECTIVES)[number] | null;
-  phone: string | null; attribution: Record<string, string> | null;
+  timeline: (typeof TIMELINES)[number] | null; phone: string | null; attribution: Record<string, string> | null;
 };
 const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 const int = (v: unknown, max: number) => { if (v === "" || v === null || v === undefined) return null; const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 && n <= max ? n : undefined; };
@@ -123,32 +127,57 @@ export function validateInviteRequest(body: any): { ok: true; row: InviteRequest
   if (content_status === undefined) return { ok: false, error: "invalid_content_status" };
   if (library_size === undefined) return { ok: false, error: "invalid_library_size" };
   if (objective === undefined) return { ok: false, error: "invalid_objective" };
+  const timeline = pick(body.timeline, TIMELINES);
+  if (timeline === undefined) return { ok: false, error: "invalid_timeline" };
   const phone = phoneOf(body.phone);
   if (phone === undefined) return { ok: false, error: "invalid_phone" };
   const platforms = Array.isArray(body.platforms) ? body.platforms.filter((p: unknown) => typeof p === "string").map((p: string) => p.trim().toLowerCase()).filter(Boolean).slice(0, 6).join(", ") || null : text(body.platforms, 120);
   const source = pick(body.source, REQUEST_SOURCES) || "clone8.io";
-  return { ok: true, row: { name, email, company, website: text(body.website, 200), platforms, accounts, monthly_videos, library: text(body.library, 200), goals: text(body.goals, 2000), message: text(body.message, 2000), source, content_status, library_size, objective, phone, attribution: attributionOf(body.attribution) } };
+  return { ok: true, row: { name, email, company, website: text(body.website, 200), platforms, accounts, monthly_videos, library: text(body.library, 200), goals: text(body.goals, 2000), message: text(body.message, 2000), source, content_status, library_size, objective, timeline, phone, attribution: attributionOf(body.attribution) } };
 }
 
-export const CONTENT_STATUS_LABEL: Record<(typeof CONTENT_STATUSES)[number], string> = { yes: "yes, published", some: "some", not_yet: "not yet" };
-export const LIBRARY_SIZE_LABEL: Record<(typeof LIBRARY_SIZES)[number], string> = { under_25: "under 25 videos", "25_100": "25–100 videos", "100_500": "100–500 videos", "500_plus": "500+ videos" };
+export const CONTENT_STATUS_LABEL: Record<(typeof CONTENT_STATUSES)[number], string> = { yes: "yes, regularly", some: "a few", not_yet: "not yet" };
+export const LIBRARY_SIZE_LABEL: Record<(typeof LIBRARY_SIZES)[number], string> = { under_25: "fewer than 25 videos", "25_100": "25 to 99 videos", "100_500": "100 to 499 videos", "500_plus": "500 or more videos" };
 export const OBJECTIVE_LABEL: Record<(typeof OBJECTIVES)[number], string> = { reach: "reach", awareness: "product awareness", distribution: "consistent distribution", other: "other" };
-/** Before the apply-fields migration is applied the columns do not exist: keep every answer by writing it into the
- *  message text instead, so nothing the applicant said is lost. The warning in the log says to apply the migration. */
-export function foldApplyFields(row: InviteRequestRow): Omit<InviteRequestRow, (typeof APPLY_COLUMNS)[number]> {
-  const { content_status, library_size, objective, phone, attribution, ...rest } = row;
-  const lines = [
-    content_status ? `Published short-form videos: ${CONTENT_STATUS_LABEL[content_status]}` : null,
-    library_size ? `Existing videos: ${LIBRARY_SIZE_LABEL[library_size]}` : null,
-    objective ? `Objective: ${OBJECTIVE_LABEL[objective]}` : null,
-    phone ? `Phone (callback requested): ${phone}` : null,
-    attribution ? `Attribution: ${Object.entries(attribution).map(([k, v]) => `${k}=${v}`).join(" ")}` : null,
-  ].filter(Boolean);
-  const message = [rest.message, lines.length ? `[apply fields, migration pending]\n${lines.join("\n")}` : null].filter(Boolean).join("\n\n").slice(0, 2000) || null;
-  return { ...rest, message };
+export const TIMELINE_LABEL: Record<(typeof TIMELINES)[number], string> = { asap: "as soon as possible", "1_3_months": "in the next 1 to 3 months", exploring: "just exploring" };
+const APPLY_LINE: Record<(typeof APPLY_COLUMNS)[number], (row: InviteRequestRow) => string | null> = {
+  content_status: (r) => (r.content_status ? `Published short-form videos: ${CONTENT_STATUS_LABEL[r.content_status]}` : null),
+  library_size: (r) => (r.library_size ? `Existing videos: ${LIBRARY_SIZE_LABEL[r.library_size]}` : null),
+  objective: (r) => (r.objective ? `Objective: ${OBJECTIVE_LABEL[r.objective]}` : null),
+  timeline: (r) => (r.timeline ? `Wants to start: ${TIMELINE_LABEL[r.timeline]}` : null),
+  phone: (r) => (r.phone ? `Phone (callback requested): ${r.phone}` : null),
+  attribution: (r) => (r.attribution ? `Attribution: ${Object.entries(r.attribution).map(([k, v]) => `${k}=${v}`).join(" ")}` : null),
+};
+/** Before an apply-fields migration is applied its columns do not exist: keep those answers by writing them into the
+ *  message text instead, so nothing the applicant said is lost. `only` names the missing columns (default: all of
+ *  them); the others stay as columns. The warning in the log says to apply the migration. */
+export function foldApplyFields(row: InviteRequestRow, only: readonly (typeof APPLY_COLUMNS)[number][] = APPLY_COLUMNS): Partial<InviteRequestRow> & Omit<InviteRequestRow, (typeof APPLY_COLUMNS)[number]> {
+  const out: any = { ...row };
+  const lines: string[] = [];
+  for (const k of APPLY_COLUMNS) { if (!only.includes(k)) continue; const line = APPLY_LINE[k](row); if (line) lines.push(line); delete out[k]; }
+  const already = typeof row.message === "string" && row.message.includes("[apply fields, migration pending]");
+  out.message = [row.message, lines.length ? `${already ? "" : "[apply fields, migration pending]\n"}${lines.join("\n")}` : null].filter(Boolean).join(already ? "\n" : "\n\n").slice(0, 2000) || null;
+  return out;
 }
 /** PostgREST reports an unknown column as PGRST204 ("Could not find the 'x' column ... in the schema cache"). */
 const missingColumn = (err: any, names: readonly string[]) => { const m = String(err?.message ?? ""); return (err?.code === "PGRST204" || /column/i.test(m)) && names.some((n) => m.includes(`'${n}'`) || m.includes(` ${n} `) || m.includes(`.${n}`)); };
+/** Which of `names` the error complains about (PostgREST names one column per error). */
+const missingColumns = <T extends string>(err: any, names: readonly T[]): T[] => { const m = String(err?.message ?? ""); return names.filter((n) => m.includes(`'${n}'`) || m.includes(` ${n} `) || m.includes(`.${n}`)); };
+
+// ---- First-party funnel events from clone8.io/apply: counts only, never personal data. ----
+export const FUNNEL_EVENTS = ["landing", "cta_click", "form_view", "form_start", "form_submit", "form_complete", "success_view", "booking_click"] as const;
+export const DEVICE_CLASSES = ["in_app", "mobile", "desktop"] as const;
+export type FunnelEventRow = { event: (typeof FUNNEL_EVENTS)[number]; path: string; visit_id: string; device: (typeof DEVICE_CLASSES)[number] | null; attribution: Record<string, string> | null; request_id: string | null };
+export function validateFunnelEvent(body: any): { ok: true; row: FunnelEventRow } | { ok: false; error: string } {
+  if (!body || typeof body !== "object") return { ok: false, error: "invalid_body" };
+  const event = pick(body.event, FUNNEL_EVENTS); if (!event) return { ok: false, error: "invalid_event" };
+  const path = typeof body.path === "string" && /^\/[A-Za-z0-9/_.-]{0,79}$/.test(body.path) ? body.path : null; if (!path) return { ok: false, error: "invalid_path" };
+  const visit_id = typeof body.visit_id === "string" && /^[0-9a-f]{16,32}$/.test(body.visit_id) ? body.visit_id : null; if (!visit_id) return { ok: false, error: "invalid_visit_id" };
+  const device = pick(body.device, DEVICE_CLASSES); if (device === undefined) return { ok: false, error: "invalid_device" };
+  const request_id = body.request_id === undefined || body.request_id === null || body.request_id === "" ? null : typeof body.request_id === "string" && /^[0-9a-f-]{36}$/i.test(body.request_id) ? body.request_id : undefined;
+  if (request_id === undefined) return { ok: false, error: "invalid_request_id" };
+  return { ok: true, row: { event, path, visit_id, device, attribution: attributionOf(body.attribution), request_id } };
+}
 
 export const INBOX_FIELDS = ["id", "name", "email", "company", "website", "platforms", "accounts", "monthly_videos", "library", "goals", "message", "status", "created_at", "source", ...APPLY_COLUMNS] as const;
 /** What the operator inbox gets: the application, never the Meta delivery context (IP, user agent, cookies). */
@@ -177,7 +206,7 @@ export function registerInviteRequestInbox(app: Express, sbFn: SbGetter): void {
   app.post("/api/ops/invite-requests/:id/status", async (req: Request, res: Response) => {
     if (!isOperator(req)) return res.status(403).json({ error: "operator_required" });
     const status = String(req.body?.status ?? "");
-    if (!["new", "contacted", "invited", "declined"].includes(status)) return res.status(400).json({ error: "invalid_status" });
+    if (!(REQUEST_STATUSES as readonly string[]).includes(status)) return res.status(400).json({ error: "invalid_status" });
     if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) return res.status(404).json({ error: "request_not_found" });
     try {
       const r = await sbFn().from("invite_requests").update({ status }).eq("id", req.params.id).select("id,status").maybeSingle();
@@ -238,10 +267,12 @@ export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs
         const prior = await sb.from("invite_requests").select("id").eq("meta_event_id", outbox.meta_event_id).maybeSingle();
         if (prior.data) return res.status(201).json({ received: true, id: prior.data.id, duplicate: true });
       }
-      // Apply-page columns not migrated yet: keep the answers in the message text, so nothing is lost.
-      if (r.error && missingColumn(r.error, APPLY_COLUMNS)) {
-        console.warn("[public] invite_requests has no apply-fields columns yet (apply migration 20261027120000); answers folded into message");
-        row = foldApplyFields(v.row);
+      // Apply-page columns not migrated yet: keep those answers in the message text, so nothing is lost. PostgREST names
+      // one missing column per error, so fold and retry until the insert gets past them (at most one retry per column).
+      for (let i = 0; r.error && missingColumn(r.error, APPLY_COLUMNS) && i < APPLY_COLUMNS.length; i++) {
+        const missing = missingColumns(r.error, APPLY_COLUMNS);
+        console.warn(`[public] invite_requests is missing column(s) ${missing.join(", ") || "(apply fields)"} (apply migrations 20261027120000 / 20261028090000); answers folded into message`);
+        row = foldApplyFields(row as InviteRequestRow, missing.length ? missing : APPLY_COLUMNS);
         r = await sb.from("invite_requests").insert(withOutbox ? { ...row, ...outbox } : row).select("id,created_at").single();
       }
       // Meta columns not migrated yet: store the application exactly as before, without a server event.
@@ -260,5 +291,26 @@ export function registerPublicRoutes(app: Express, sbFn: SbGetter, opts: { ttlMs
       console.warn("[public] invite request not stored:", e?.message ?? e);
       res.status(503).json({ error: "request_not_stored" });
     }
+  });
+
+  // Funnel events: fire-and-forget counters from the application page. Always 204 to a well-formed event, even when
+  // the table is not migrated yet (logged once), so the page never waits on or reacts to measurement.
+  const allowEvents = makeLimiter(240);
+  let funnelTableMissingLogged = false;
+  app.post("/api/public/funnel-events", async (req: Request, res: Response) => {
+    publicHeaders(res);
+    res.setHeader("Cache-Control", "no-store");
+    const key = String(req.headers["x-forwarded-for"] ?? req.socket?.remoteAddress ?? "unknown").split(",")[0].trim();
+    if (!allowEvents(key)) return res.status(429).json({ error: "too_many_requests" });
+    const v = validateFunnelEvent(req.body);
+    if (v.ok === false) return res.status(400).json({ error: v.error });
+    try {
+      const r = await sbFn().from("funnel_events").insert(v.row);
+      if (r.error) {
+        if (/funnel_events/.test(String(r.error.message ?? "")) || r.error.code === "42P01" || r.error.code === "PGRST205") { if (!funnelTableMissingLogged) { funnelTableMissingLogged = true; console.warn("[public] funnel_events table missing (migration 20261028090100); events dropped"); } }
+        else console.warn("[public] funnel event not stored:", r.error.message);
+      }
+    } catch (e: any) { console.warn("[public] funnel event not stored:", e?.message ?? e); }
+    res.status(204).end();
   });
 }

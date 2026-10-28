@@ -10,9 +10,10 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (!path.startsWith("/api/") || req.method === "OPTIONS") return next();
     if (path === "/api/bootstrap" && ["GET", "HEAD"].includes(req.method)) return next();
     if (path === "/api/creatorvault/webhook" && req.method === "POST") return next();
-    // Public site: aggregate case-study numbers and the invite-request form. No account data.
+    // Public site: aggregate case-study numbers, the invite-request form and the apply page's funnel counters. No account data.
     if (path === "/api/public/case-study" && ["GET", "HEAD"].includes(req.method)) return next();
     if (path === "/api/public/invite-requests" && req.method === "POST") return next();
+    if (path === "/api/public/funnel-events" && req.method === "POST") return next();
     // Invite preview: the single-use token in the path is the credential; the handler reveals only the
     // organization name and whether the link is still valid.
     if (/^\/api\/invites\/[^/]+$/.test(path) && ["GET", "HEAD"].includes(req.method)) return next();

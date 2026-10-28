@@ -11,7 +11,7 @@ test("invite request retention: 24 months from submission, active clients and ho
     CREATE TABLE public.client_orgs(id uuid PRIMARY KEY, contact_email text, archived_at timestamptz);
     CREATE TABLE public.client_org_members(org_id uuid, user_id uuid);
   `);
-  for (const f of ["20261024110000_invite_requests.sql", "20261026090000_invite_requests_meta_capi.sql", "20261027120000_invite_requests_apply_fields.sql", "20261027120000_invite_requests_apply_fields.sql"]) await db.exec(readFileSync(`migrations/${f}`, "utf8"));
+  for (const f of ["20261024110000_invite_requests.sql", "20261026090000_invite_requests_meta_capi.sql", "20261027120000_invite_requests_apply_fields.sql", "20261027120000_invite_requests_apply_fields.sql", "20261028090000_invite_requests_timeline_pipeline.sql", "20261028090000_invite_requests_timeline_pipeline.sql", "20261028090100_funnel_events.sql", "20261028090100_funnel_events.sql"]) await db.exec(readFileSync(`migrations/${f}`, "utf8"));
   const m = readFileSync("migrations/20261026100000_invite_requests_retention.sql", "utf8");
   await db.exec(m); await db.exec(m); // idempotent; pg_cron is absent here, so only the notice path runs
 
@@ -34,7 +34,20 @@ test("invite request retention: 24 months from submission, active clients and ho
   assert.equal((await db.query<any>(`SELECT content_status, phone FROM invite_requests WHERE name='recent applicant'`)).rows[0].content_status, null);
   await assert.rejects(db.exec(`INSERT INTO invite_requests(name,email,company,objective) VALUES ('bad','b@b.co','B','profit')`), /check constraint|violates/i);
   await assert.rejects(db.exec(`INSERT INTO invite_requests(name,email,company,attribution) VALUES ('bad','b@b.co','B','[1,2]')`), /check constraint|violates/i);
-  await db.exec(`DELETE FROM invite_requests WHERE name='apply applicant'`);
+  // Second apply migration: timeline is a closed list; every sales stage is a valid status, old values included.
+  await db.exec(`INSERT INTO invite_requests(name,email,company,source,timeline,status) VALUES ('timeline applicant','t@brand.co','Brand','clone8.io/apply','1_3_months','call_booked')`);
+  for (const st of ["new", "contacted", "qualified", "call_booked", "call_attended", "won", "invited", "declined"]) await db.exec(`UPDATE invite_requests SET status='${st}' WHERE name='timeline applicant'`);
+  await assert.rejects(db.exec(`UPDATE invite_requests SET status='maybe' WHERE name='timeline applicant'`), /check constraint|violates/i);
+  await assert.rejects(db.exec(`INSERT INTO invite_requests(name,email,company,timeline) VALUES ('bad','b@b.co','B','tomorrow')`), /check constraint|violates/i);
+  await db.exec(`DELETE FROM invite_requests WHERE name IN ('apply applicant','timeline applicant')`);
+  // Funnel events: counts only, constrained ids, 13-month retention.
+  await db.exec(`INSERT INTO funnel_events(event,path,visit_id,device,attribution,created_at) VALUES ('landing','/apply','0123456789abcdef','mobile','{"utm_content":"creative-a"}', now() - interval '14 months'), ('form_view','/apply','0123456789abcdef','mobile',null, now())`);
+  await assert.rejects(db.exec(`INSERT INTO funnel_events(event,path,visit_id) VALUES ('purchase','/apply','0123456789abcdef')`), /check constraint|violates/i);
+  await assert.rejects(db.exec(`INSERT INTO funnel_events(event,path,visit_id) VALUES ('landing','/apply','ana@brand.co')`), /check constraint|violates/i);
+  assert.equal((await db.query<any>(`SELECT funnel_events_retention_purge(true) AS n`)).rows[0].n, 1);
+  assert.equal((await db.query<any>(`SELECT count(*)::int AS n FROM funnel_events`)).rows[0].n, 2, "dry run deletes nothing");
+  assert.equal((await db.query<any>(`SELECT funnel_events_retention_purge(false) AS n`)).rows[0].n, 1);
+  assert.equal((await db.query<any>(`SELECT count(*)::int AS n FROM funnel_events`)).rows[0].n, 1);
 
   const dry = (await db.query<any>(`SELECT * FROM invite_requests_retention_purge(true)`)).rows[0];
   assert.deepEqual(dry, { expired: 5, kept_client: 2, kept_hold: 1, deleted: 0 });
