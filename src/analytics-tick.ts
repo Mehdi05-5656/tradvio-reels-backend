@@ -6,6 +6,7 @@ import { collectLiveMetrics } from "./live-metrics.js";
 import { expireHeldWindows } from "./publish-reconcile.js";
 import { learningTick } from "./client-learning.js";
 import { purgeTick } from "./library-archive.js";
+import { evaluateAlerts } from "./v2-routes.js";
 
 async function main() {
   const sb = createClient(
@@ -44,6 +45,14 @@ async function main() {
     console.log("[cron:archive]", JSON.stringify({ ...r, failed: r.failed.length }));
   } catch (e: any) {
     console.error("[cron:archive] failed:", e?.message || e);
+  }
+  // Alerts: nothing else runs the evaluator on a schedule (dist/alert-tick.cjs exists but no Render job calls it), so the
+  // viral, underperformer, cron-health, queue-runway and Studio rules fire from here, every 15 minutes, deduped by the rules.
+  try {
+    const r = await evaluateAlerts(sb);
+    console.log("[cron:alerts]", JSON.stringify({ fired: r.fired, types: (r.alerts ?? []).map((a: any) => a.type) }));
+  } catch (e: any) {
+    console.error("[cron:alerts] failed:", e?.message || e);
   }
 }
 
