@@ -172,6 +172,7 @@ test("a turn: the model proposes a plan through the tool, the plan is priced and
   assert.equal(result.ok, true);
   assert.equal(result.plan.total_credits, out.plan!.total_credits);
   assert.equal(asked[0].model, "claude-sonnet-5-5");
+  assert.ok(!("temperature" in asked[0]), "the API rejects temperature for this model");
   assert.ok(sb.writes.some((w: any) => w.table === "studio_conversations" && w.op === "update" && w.v.plan?.id === out.plan!.id));
 });
 

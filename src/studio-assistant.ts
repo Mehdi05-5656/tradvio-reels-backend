@@ -85,7 +85,8 @@ async function claude(deps: AssistantDeps, body: Record<string, any>): Promise<a
   const r = await (deps.fetch ?? fetch)("https://api.anthropic.com/v1/messages", {
     method: "POST", redirect: "error", signal: AbortSignal.timeout(90_000),
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-    body: JSON.stringify({ model: env.STUDIO_ASSISTANT_MODEL || DEFAULT_MODEL, max_tokens: 1400, temperature: 0.2, ...body }),
+    // no temperature: the current models reject the parameter ("deprecated for this model", seen live Oct 29 2026)
+    body: JSON.stringify({ model: env.STUDIO_ASSISTANT_MODEL || DEFAULT_MODEL, max_tokens: 1400, ...body }),
   }).catch(() => { throw new AssistantError("assistant_unavailable", "The assistant did not answer", 503); });
   if (!r.ok) {
     const text = await r.text().catch(() => "");
