@@ -27,6 +27,8 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (/^\/api\/invites\/[^/]+$/.test(path) && ["GET", "HEAD"].includes(req.method)) return next();
     // The plan catalog is public; it carries no account data.
     if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
+    // So is the instrument catalog: the models on offer, their settings and price hints, nothing per person.
+    if (path === "/api/studio/instruments" && ["GET", "HEAD"].includes(req.method)) return next();
     if (!req.auth) return res.status(401).json({ error: "unauthorized" });
     // Clone8 Studio: every route acts on the signed-in person's own plan, credits, uploads and jobs.
     // The handlers scope each query to that person; the database functions do the same.
