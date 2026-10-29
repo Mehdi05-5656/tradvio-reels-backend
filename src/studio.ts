@@ -79,13 +79,22 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const duration = Number(asset.probe?.duration);
     if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
     const model = o.model === "light" ? "light" : "full";
-    // Higgsfield's limits: the full model trims a source to 30 s, Light uses the first 15 s. Priced on what it will render.
-    const seconds = Math.ceil(Math.min(duration, model === "light" ? 15 : 30));
+    // Higgsfield's limits: the full model trims a source to 30 s, Light uses the first 15 s. They bill the input's container
+    // duration rounded up, and a re-encoded 4.00 s file reads a hair over 4, so a tenth of a second is added before rounding.
+    const seconds = billableSeconds(duration, model === "light" ? 15 : 30);
     if (!UUID_RE.test(String(o.character_asset_id ?? "")) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     return { tool, credits: seconds * per, options: { model, seconds, character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };
   }
   throw new StudioError("unknown_tool", "Unknown tool");
+}
+
+/** Seconds Higgsfield will bill for an input of `duration`. Longer sources are trimmed to the model's cap and billed exactly
+ *  that (15.27 s Light runs billed 15); shorter ones bill the container duration rounded up, and a re-encoded 4.00 s file reads
+ *  a hair over 4 (a 4.0 s Full run billed 5), so a tenth of a second is added before rounding. */
+export function billableSeconds(duration: number, cap: number): number {
+  if (!(duration > 0)) return 1;
+  return duration >= cap ? cap : Math.max(1, Math.ceil(duration + 0.1));
 }
 
 export class StudioError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }

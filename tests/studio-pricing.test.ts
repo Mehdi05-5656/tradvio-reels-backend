@@ -29,7 +29,7 @@ test("a confirmed Higgsfield discount halves the Recast prices; nonsense values 
   assert.deepEqual([d.recast_second, d.recast_light_second], [43, 13]);
   const e = studioCosts({ HIGGSFIELD_DISCOUNT: "0.15" }, PLANS);
   assert.deepEqual([e.recast_second, e.recast_light_second], [72, 22], "the account's actual 15% discount");
-  assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, d).credits, 430);
+  assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, d).credits, 11 * 43, "a 10 s file bills 11 at Higgsfield");
 });
 
 test("plan cards say what the credits buy, from the same numbers", () => {

@@ -48,7 +48,7 @@ function fakeSb(job: any, opts: { renew?: boolean; completeError?: any; failErro
 }
 
 const job = (over: any = {}) => ({ id: JOB, user_id: ANN, lease_token: TOKEN, asset_id: ASSET, options: { model: "full", seconds: 20, character: "noah", character_asset_id: null }, credits_reserved: 240, progress: {}, attempts: 1, ...over });
-const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, prescale: async (_s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, ...over });
+const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, prescale: async (_s: string, t: string, max?: number) => { (globalThis as any).__lastPrescaleMax = max; await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, ...over });
 
 test("auth header follows the key shape; quotes stop at Higgsfield's limits", () => {
   assert.equal(higgsfieldAuth("id:secret"), "Key id:secret");
@@ -82,10 +82,11 @@ test("a full recast: submit, wait, fetch, mux the sound back, store, charge the 
   assert.deepEqual(submit.body.image_urls, ["https://app.clone8.io/presets/noah.jpg"]);
   assert.equal(h.calls.filter((c) => c.url.endsWith("/status")).length, 3);
   assert.equal(mux.length, 1, "the full model gets its sound back");
+  assert.equal((globalThis as any).__lastPrescaleMax, 30, "the scaled copy is cut to what the model uses, so the bill matches the quote");
   assert.deepEqual(sb.uploads.map((u: any) => [u.bucket, u.key, u.type]), [["studio-outputs", `${ANN}/${JOB}/${TOKEN}/input-720p.mp4`, "video/mp4"], ["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.mp4`, "video/mp4"], ["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.jpg`, "image/jpeg"]]);
   assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_outputs[0].input_key, `${ANN}/${JOB}/${TOKEN}/input-720p.mp4`);
   const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
-  assert.equal(done.p_credits_charged, Math.min(240, 20 * 85), "19.4 s rounds up to 20 s at the full rate, capped at the reservation");
+  assert.equal(done.p_credits_charged, 240, "a 20 s source bills 21 at Higgsfield; the charge is capped at the reservation");
   assert.equal(done.p_outputs[0].audio, "muxed_from_source");
   assert.equal(done.p_outputs[0].request_id, "req_1");
   const notes = sb.calls.filter((c: any) => c.name === "studio_renew").map((c: any) => c.args.p_progress.note);
@@ -159,8 +160,9 @@ test("real ffmpeg: a 1080×1920 source is scaled to 720×1280 and a landscape on
     for (const [size, want] of [["1080x1920", [720, 1280]], ["1920x1080", [1280, 720]], ["540x960", [540, 960]]] as const) {
       const src = join(dir, `src-${size}.mp4`), out = join(dir, `out-${size}.mp4`);
       execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", `testsrc=size=${size}:rate=30`, "-f", "lavfi", "-i", "sine=frequency=440", "-t", "1", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-shortest", src]);
-      await prescaleSource(src, out);
+      await prescaleSource(src, out, size === "540x960" ? 0.5 : undefined);
       const d = await probeDimensions(out);
+      if (size === "540x960") assert.ok((await probeSeconds(out)) < 0.8, "the copy is cut to the cap");
       assert.deepEqual([d.width, d.height], want, size);
       const streams = execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", out]).toString().trim().split("\n").sort();
       assert.deepEqual(streams, ["audio", "video"]);

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { accountAccess, selfAuthenticatedPost } from "../src/account-access.js";
-import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, PLANS, COSTS } from "../src/studio.js";
+import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, PLANS, COSTS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -79,7 +79,8 @@ test("quotes: blueprint by copies, recast by seconds, with validation", () => {
   assert.throws(() => quote("blueprint", { copies: 51 }, video), { code: "invalid_copies" });
   assert.throws(() => quote("blueprint", { copies: 1 }, { kind: "image" }), { code: "asset_required" });
   const r = quote("recast", { character: "noah" }, video);
-  assert.deepEqual([r.credits, r.options.seconds, r.options.model], [24 * COSTS.recast_second, 24, "full"]);
+  assert.deepEqual([r.credits, r.options.seconds, r.options.model], [24 * COSTS.recast_second, 24, "full"], "a 23.4 s file bills 24 s at Higgsfield (container rounding)");
+  assert.deepEqual([billableSeconds(4, 30), billableSeconds(3.7, 30), billableSeconds(15.27, 15), billableSeconds(30, 30), billableSeconds(0, 30)], [5, 4, 15, 30, 1]);
   assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 40 } }).credits, 15 * COSTS.recast_light_second, "light caps at 15 s");
   assert.throws(() => quote("recast", {}, video), { code: "character_required" });
   assert.throws(() => quote("recast", { character: "noah" }, { kind: "video" }), { code: "asset_not_inspected" });
