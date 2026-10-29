@@ -20,8 +20,11 @@ export const HIGGSFIELD_RATES: Record<"full" | "light", Record<Resolution, numbe
 export const RECAST_RESOLUTION: Resolution = "720p";
 /** What a Blueprint copy costs us: about 18 s of a $25/month worker, 6 MB stored for 30 days, one download. Blueprint+ adds two Claude calls. */
 export const BLUEPRINT_COPY_COST_USD = 0.001, BLUEPRINT_PLUS_COPY_COST_USD = 0.04;
+/** A character image from Higgsfield Soul (standard, 2K): $0.094 an image at list (open.higgsfield.ai, Oct 29, 2026). The AI Influencer
+ *  sheet ($0.05, human or animal mode) has no published request schema yet; Soul is the documented endpoint. */
+export const CHARACTER_IMAGE_COST_USD = 0.094;
 /** Product floors: never price below these even when the cost would allow it. */
-export const PRICE_FLOORS = { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 1, recast_light_second: 1 };
+export const PRICE_FLOORS = { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 1, recast_light_second: 1, character_image: 4 };
 
 /** Net USD per credit for one charge: price less Stripe's cut, divided by the credits it buys. */
 export function netPerCredit(priceUsd: number, credits: number): number {
@@ -44,7 +47,9 @@ export function higgsfieldCostPerSecond(model: "full" | "light", env?: Record<st
   return HIGGSFIELD_RATES[model][resolution] * (1 - higgsfieldDiscount(env));
 }
 
-export type StudioCosts = { blueprint_copy: number; blueprint_plus_copy: number; recast_second: number; recast_light_second: number };
+/** Credits per unit. Swap, Restyle and Trend ride on Genjutsu at the same per-second rates as Recast (Full) and Recast Light,
+ *  so they share recast_second / recast_light_second; a character image has its own unit. */
+export type StudioCosts = { blueprint_copy: number; blueprint_plus_copy: number; recast_second: number; recast_light_second: number; character_image: number };
 export function studioCosts(env: Record<string, string | undefined> = process.env, plans: PlanLike[]): StudioCosts {
   const floor = creditValueFloor(plans);
   return {
@@ -52,6 +57,7 @@ export function studioCosts(env: Record<string, string | undefined> = process.en
     blueprint_plus_copy: Math.max(PRICE_FLOORS.blueprint_plus_copy, creditsForCost(BLUEPRINT_PLUS_COPY_COST_USD, floor)),
     recast_second: Math.max(PRICE_FLOORS.recast_second, creditsForCost(higgsfieldCostPerSecond("full", env), floor)),
     recast_light_second: Math.max(PRICE_FLOORS.recast_light_second, creditsForCost(higgsfieldCostPerSecond("light", env), floor)),
+    character_image: Math.max(PRICE_FLOORS.character_image, creditsForCost(CHARACTER_IMAGE_COST_USD * (1 - higgsfieldDiscount(env)), floor)),
   };
 }
 
@@ -71,6 +77,7 @@ export function unitEconomics(env: Record<string, string | undefined> = process.
     { tool: "blueprint_plus_copy", credits: costs.blueprint_plus_copy, cost_usd: BLUEPRINT_PLUS_COPY_COST_USD },
     { tool: "recast_second", credits: costs.recast_second, cost_usd: higgsfieldCostPerSecond("full", env) },
     { tool: "recast_light_second", credits: costs.recast_light_second, cost_usd: higgsfieldCostPerSecond("light", env) },
+    { tool: "character_image", credits: costs.character_image, cost_usd: CHARACTER_IMAGE_COST_USD * (1 - discount) },
   ];
   const rows = plans.flatMap((p) => (["month", "year"] as const).map((interval) => {
     const net = netPerCredit(interval === "month" ? p.monthly_usd : p.annual_usd_per_month, p.credits);

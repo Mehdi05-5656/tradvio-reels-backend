@@ -5,6 +5,7 @@ import { PGlite } from "@electric-sql/pglite";
 
 const MIGRATION = "migrations/20261027000000_studio_foundation.sql";
 const MIGRATION2 = "migrations/20261029000000_studio_referrals_notices.sql";
+const MIGRATION3 = "migrations/20261030000000_studio_genjutsu_suite.sql";
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
@@ -22,6 +23,8 @@ async function setup(t: any) {
   await db.exec(await readFile(MIGRATION, "utf8")); // idempotent
   await db.exec(await readFile(MIGRATION2, "utf8"));
   await db.exec(await readFile(MIGRATION2, "utf8")); // idempotent
+  await db.exec(await readFile(MIGRATION3, "utf8"));
+  await db.exec(await readFile(MIGRATION3, "utf8")); // idempotent
   const rpc = async (fn: string, args: any[]) => (await db.query<any>(`SELECT to_jsonb(${fn}(${args.map((_, i) => `$${i + 1}`).join(",")})) r`, args)).rows[0].r;
   const balance = async (u: string) => (await db.query<any>("SELECT studio_balance($1) b", [u])).rows[0].b as number;
   const subscribe = (u: string, parallel = 2) => rpc("studio_apply_subscription", [u, "cus_test1", "sub_test1", "starter", "month", "active", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z", false, 1000, parallel]);

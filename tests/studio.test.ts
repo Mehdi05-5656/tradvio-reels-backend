@@ -213,7 +213,7 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "launch50" }, { "x-test-user": ANN })).body.credits, 50);
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint_plus", asset_id: ASSET, options: { copies: 2 } }, { "x-test-user": ANN })).body.error, "tool_not_open", "a tool without a worker refuses jobs");
-  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false });
+  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false, swap: true, restyle: true, trend: true, character: true });
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "recast", asset_id: ASSET, options: { character: "noah", model: "full" } }, { "x-test-user": ANN })).body.error, "model_not_open", "the full model is closed until measured");
 });
 
@@ -291,4 +291,47 @@ test("the operator overview: customers with plan and balance, run-rate, tools, f
   const ann = o.customers.find((c: any) => c.user_id === ANN);
   assert.deepEqual([ann.email, ann.plan, ann.balance, ann.jobs_30d, ann.intent], ["ann@synthetic.invalid", "creator", 41980, 2, "blueprint"]);
   assert.equal(o.customers.find((c: any) => c.user_id === BOB).email, null, "no auth record, no email, no crash");
+});
+
+test("quotes for the Genjutsu suite: swap and trend price like recast, restyle like the full model, a character is one unit", () => {
+  const video = { kind: "video", probe: { duration: 23.4 } };
+  const swap = quote("swap", { model: "light", character: "noah", prompt: "  make it a tabby cat  " }, video);
+  assert.deepEqual([swap.credits, swap.options.seconds, swap.options.model, swap.options.prompt], [15 * COSTS.recast_light_second, 15, "light", "make it a tabby cat"]);
+  assert.equal(quote("swap", { model: "full", character_asset_id: ASSET }, video).credits, 24 * COSTS.recast_second);
+  assert.throws(() => quote("swap", { model: "full" }, video), (e: any) => e.code === "character_required");
+  const style = "11111111-1111-4111-8111-111111111111";
+  const re = quote("restyle", { style_id: style, style_name: "Knitted Yarn World" }, video);
+  assert.deepEqual([re.credits, re.options.model, re.options.style_id, re.options.style_name], [24 * COSTS.recast_second, "full", style, "Knitted Yarn World"]);
+  assert.throws(() => quote("restyle", { style_id: "yarn" }, video), (e: any) => e.code === "style_required");
+  const tr = quote("trend", { trend_id: "desk-talk", model: "light", character: "maya" }, null);
+  assert.deepEqual([tr.credits, tr.options.trend_id, tr.options.seconds], [6 * COSTS.recast_light_second, "desk-talk", 6], "a 5 s clip bills 6 at Higgsfield's rounding");
+  assert.throws(() => quote("trend", { trend_id: "nope", character: "maya" }, null), (e: any) => e.code === "trend_required");
+  const ch = quote("character", { mode: "animal", prompt: "a tabby cat in a watermelon helmet" }, null);
+  assert.deepEqual([ch.credits, ch.options.mode], [COSTS.character_image, "animal"]);
+  assert.throws(() => quote("character", { prompt: "" }, null), (e: any) => e.code === "prompt_required");
+});
+
+test("routes: the trends catalog, the styles catalog through the key, and a swap job", async (t) => {
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, stripe_customer_id: "cus_1", status: "active", plan_id: "creator", onboarding: {} }],
+    studio_assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", probe: { duration: 10 }, object_key: `${ANN}/${ASSET}.mp4`, bytes: 1 }], studio_jobs: [], studio_credit_ledger: [], studio_stripe_events: [] };
+  const sb = fakeSb(tables, (name, args) => name === "studio_balance" ? { data: 5000, error: null } : name === "studio_create_job" ? { data: { id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", status: "queued", tool: args.p_tool, credits_reserved: args.p_credits, options: args.p_options }, error: null } : { data: {}, error: null });
+  const app = express();
+  app.use(express.json({ verify: (req: any, _res, buf) => { req.rawBody = buf.toString("utf8"); } }));
+  app.use((req: any, _res, next) => { const u = req.headers["x-test-user"]; if (u) { req.auth = { user_id: u, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: u }; } next(); });
+  let styleCalls = 0;
+  registerStudio(app, () => sb, { stripe: fakeStripe(), env: { ...ENV, STUDIO_RECAST_FULL_ENABLED: "true" }, log: () => {}, styles: async () => { styleCalls++; return [{ id: "11111111-1111-4111-8111-111111111111", name: "Knitted Yarn World", preview_url: null }]; } });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r)); t.after(() => server.close());
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const call = async (method: string, path: string, body?: any, headers: Record<string, string> = {}) => { const res = await fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: res.status, body: await res.json().catch(() => null) }; };
+  const plans = await call("GET", "/api/studio/plans");
+  assert.deepEqual([plans.body.tools.swap, plans.body.tools.restyle, plans.body.tools.trend, plans.body.tools.character], [true, true, true, true], "the suite opens with the key");
+  assert.ok(plans.body.costs.character_image >= 4);
+  const trends = await call("GET", "/api/studio/trends");
+  assert.equal(trends.body.trends[0].id, "desk-talk"); assert.match(trends.body.trends[0].video_url, /^https:\/\/app\.clone8\.io\/trends\/desk-talk\.mp4$/);
+  const styles = await call("GET", "/api/studio/styles"); await call("GET", "/api/studio/styles");
+  assert.equal(styles.body.styles[0].name, "Knitted Yarn World"); assert.equal(styleCalls, 1, "the catalog is cached");
+  const job = await call("POST", "/api/studio/jobs", { tool: "swap", asset_id: ASSET, options: { model: "full", character: "noah", prompt: "a tabby cat" } }, { "x-test-user": ANN });
+  assert.equal(job.status, 201); assert.equal(job.body.job.tool, "swap"); assert.equal(job.body.job.credits_reserved, 11 * COSTS.recast_second);
+  assert.equal((await call("POST", "/api/studio/jobs", { tool: "trend", options: { trend_id: "pitch-15", model: "light", character: "noah" } }, { "x-test-user": ANN })).status, 201, "a trend needs no upload");
+  assert.equal((await call("POST", "/api/studio/jobs", { tool: "character", options: { mode: "animal", prompt: "a corgi in a suit" } }, { "x-test-user": ANN })).status, 201);
 });

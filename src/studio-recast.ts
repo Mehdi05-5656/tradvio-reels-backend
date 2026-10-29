@@ -11,9 +11,27 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { PLANS, billableSeconds } from "./studio.js";
 import { RECAST_RESOLUTION, studioCosts } from "./studio-pricing.js";
+import { trendById, trendClipUrl } from "./studio-trends.js";
 
 export const HF_BASE = "https://api.higgsfield.ai";
 export const MODELS = { full: "higgsfield/genjutsu/motion-transfer/v1.0", light: "higgsfield/genjutsu-light/motion-transfer/v1.0" } as const;
+/** The Genjutsu suite shares one runner. Recast and Trend are motion transfer (the reference image performs the video);
+ *  Swap is object swap (the reference replaces the person or thing in the person's own video, scene kept); Restyle redraws
+ *  the video in a Higgsfield preset style. Light variants use the first 15 s and keep the source audio. */
+export type SuiteTool = "recast" | "swap" | "restyle" | "trend";
+export const SUITE_TOOLS: SuiteTool[] = ["recast", "swap", "restyle", "trend"];
+export const ENDPOINTS: Record<SuiteTool, { full: string; light: string | null }> = {
+  recast: { full: "higgsfield/genjutsu/motion-transfer/v1.0", light: "higgsfield/genjutsu-light/motion-transfer/v1.0" },
+  trend: { full: "higgsfield/genjutsu/motion-transfer/v1.0", light: "higgsfield/genjutsu-light/motion-transfer/v1.0" },
+  swap: { full: "higgsfield/genjutsu/object-swap/v1.0", light: "higgsfield/genjutsu-light/object-swap/v1.0" },
+  restyle: { full: "higgsfield/genjutsu/restyle/v1.0", light: null },
+};
+export function endpointFor(tool: SuiteTool, model: "full" | "light"): string {
+  const e = ENDPOINTS[tool] ?? ENDPOINTS.recast;
+  return (model === "light" && e.light) || e.full;
+}
+/** What the swap model is told when the person wrote nothing. */
+export const SWAP_DEFAULT_PROMPT = "Replace the person in the video with the character in the reference image. Keep the background, camera, framing, lighting, motion and audio exactly as in the source video.";
 /** What the models accept: the full model trims sources to 30 s, Light uses the first 15 s and keeps audio. */
 export const MAX_SECONDS = { full: 30, light: 15 } as const;
 export const MIN_SECONDS = 4;
@@ -49,11 +67,15 @@ async function hf(deps: RecastDeps, path: string, init: RequestInit & { idempote
   return body;
 }
 
-export async function submitRecast(deps: RecastDeps, p: { model: "full" | "light"; videoUrl: string; imageUrls: string[]; prompt?: string; resolution?: "480p" | "720p" | "1080p"; idempotencyKey: string }) {
-  const body: any = { video_url: p.videoUrl, image_urls: p.imageUrls.slice(0, 8) };
+export async function submitRecast(deps: RecastDeps, p: { tool?: SuiteTool; model: "full" | "light"; videoUrl: string; imageUrls: string[]; prompt?: string; presetId?: string; resolution?: "480p" | "720p" | "1080p"; idempotencyKey: string }) {
+  const tool = p.tool ?? "recast";
+  const body: any = { video_url: p.videoUrl };
+  // Restyle takes the style id and optional character references; the others take 1–8 ordered references.
+  if (tool === "restyle") { body.preset_id = p.presetId; if (p.imageUrls.length) body.image_urls = p.imageUrls.slice(0, 5); }
+  else body.image_urls = p.imageUrls.slice(0, 8);
   if (p.prompt) body.prompt = p.prompt;
   if (p.resolution) body.resolution = p.resolution;
-  const r = await hf(deps, `/${MODELS[p.model]}`, { method: "POST", body: JSON.stringify(body), idempotency: p.idempotencyKey });
+  const r = await hf(deps, `/${endpointFor(tool, p.model)}`, { method: "POST", body: JSON.stringify(body), idempotency: p.idempotencyKey });
   if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
   return { request_id: String(r.request_id), status: String(r.status ?? "queued"), status_url: r.status_url ? String(r.status_url) : `${HF_BASE}/requests/${r.request_id}/status` };
 }
@@ -93,7 +115,7 @@ export async function makePoster(video: string, target: string) {
   await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-ss", "0.5", "-i", video, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", target], undefined, 60_000);
 }
 
-type Job = { id: string; user_id: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number };
+type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number };
 
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
   const r = await sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: { ...(job.progress ?? {}), ...progress } });
@@ -103,8 +125,9 @@ async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>
 }
 
 /** Where the character comes from: the person's own photo (signed) or a preset served by the dashboard. */
-async function characterUrls(sb: SupabaseClient, deps: RecastDeps, job: Job): Promise<string[]> {
+async function characterUrls(sb: SupabaseClient, deps: RecastDeps, job: Job, optional = false): Promise<string[]> {
   const o = job.options ?? {};
+  if (optional && !o.character_asset_id && !o.character) return [];
   if (o.character_asset_id) {
     if (!UUID_RE.test(String(o.character_asset_id))) throw new RecastError("character_invalid");
     const a = await sb.from("studio_assets").select("object_key,kind,status").eq("id", o.character_asset_id).eq("user_id", job.user_id).maybeSingle();
@@ -133,36 +156,53 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
   };
   let dir: string | null = null;
   try {
-    const model: "full" | "light" = job.options?.model === "light" ? "light" : "full";
-    if (!job.asset_id) throw new RecastError("source_missing");
-    const asset = await sb.from("studio_assets").select("id,object_key,kind,status,probe,name").eq("id", job.asset_id).eq("user_id", job.user_id).maybeSingle();
-    if (asset.error) throw asset.error;
-    if (!asset.data || asset.data.kind !== "video" || asset.data.status !== "ready") throw new RecastError("source_not_ready");
-    const sourceSeconds = Number(asset.data.probe?.duration ?? 0);
-    if (sourceSeconds && sourceSeconds < MIN_SECONDS) throw new RecastError("source_too_short_recast");
+    const tool: SuiteTool = (SUITE_TOOLS as string[]).includes(String(job.tool)) ? (job.tool as SuiteTool) : "recast";
+    const model: "full" | "light" = tool !== "restyle" && job.options?.model === "light" ? "light" : "full";
+    // The source: the person's own video, or for a Trend one of our driving clips served by the dashboard host.
+    const trend = tool === "trend" ? trendById(job.options?.trend_id) : null;
+    if (tool === "trend" && !trend) throw new RecastError("trend_unavailable");
+    let sourceKey: string | null = null, sourceSeconds = 0, drivingUrl: string | null = null;
+    if (trend) {
+      const base = (deps.env?.STUDIO_PRESET_BASE ?? deps.env?.DASHBOARD_URL ?? process.env.STUDIO_PRESET_BASE ?? process.env.DASHBOARD_URL ?? "https://app.clone8.io");
+      drivingUrl = trendClipUrl(base, trend.id); sourceSeconds = trend.seconds;
+      const head = await (deps.fetch ?? fetch)(drivingUrl, { method: "HEAD", signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      if (!head || !head.ok) throw new RecastError("trend_unavailable", `trend ${trend.id} is not published`);
+    } else {
+      if (!job.asset_id) throw new RecastError("source_missing");
+      const asset = await sb.from("studio_assets").select("id,object_key,kind,status,probe,name").eq("id", job.asset_id).eq("user_id", job.user_id).maybeSingle();
+      if (asset.error) throw asset.error;
+      if (!asset.data || asset.data.kind !== "video" || asset.data.status !== "ready") throw new RecastError("source_not_ready");
+      sourceKey = asset.data.object_key; sourceSeconds = Number(asset.data.probe?.duration ?? 0);
+      if (sourceSeconds && sourceSeconds < MIN_SECONDS) throw new RecastError("source_too_short_recast");
+    }
 
     // 1. Submit (or pick up a request we already made before a restart).
     let requestId: string | null = job.progress?.request_id ?? null;
     if (!requestId) {
       await renew(sb, job, { done: 0, total: 1, note: "Preparing your video" });
-      // Scale the source to 720p first: Higgsfield bills by the input's resolution, and renders 720p regardless.
-      dir = await mkdtemp(join(tmpdir(), "studio-recast-"));
-      const original = join(dir, "original.mp4"), scaled = join(dir, "scaled.mp4");
-      const src = await sb.storage.from("studio-uploads").download(asset.data.object_key);
-      if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
-      await writeFile(original, Buffer.from(await src.data.arrayBuffer()));
-      await (deps.prescale ?? prescaleSource)(original, scaled, MAX_SECONDS[model]);
-      const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-720p.mp4`;
-      const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(scaled), { contentType: "video/mp4", upsert: true });
-      if (put.error) throw put.error;
-      const video = await sb.storage.from("studio-outputs").createSignedUrl(inputKey, 7200);
-      if (video.error || !video.data) throw video.error ?? new RecastError("source_missing");
-      await renew(sb, job, { note: "Sending your video to the renderer", input_key: inputKey });
-      const images = await characterUrls(sb, deps, job);
-      const sub = await submitRecast(deps, { model, videoUrl: video.data.signedUrl, imageUrls: images, idempotencyKey: job.id, resolution: RECAST_RESOLUTION });
+      let videoUrl = drivingUrl;
+      if (!videoUrl) {
+        // Scale the source to 720p first: Higgsfield bills by the input's resolution, and renders 720p regardless.
+        dir = await mkdtemp(join(tmpdir(), "studio-recast-"));
+        const original = join(dir, "original.mp4"), scaled = join(dir, "scaled.mp4");
+        const src = await sb.storage.from("studio-uploads").download(sourceKey!);
+        if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
+        await writeFile(original, Buffer.from(await src.data.arrayBuffer()));
+        await (deps.prescale ?? prescaleSource)(original, scaled, MAX_SECONDS[model]);
+        const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-720p.mp4`;
+        const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(scaled), { contentType: "video/mp4", upsert: true });
+        if (put.error) throw put.error;
+        const video = await sb.storage.from("studio-outputs").createSignedUrl(inputKey, 7200);
+        if (video.error || !video.data) throw video.error ?? new RecastError("source_missing");
+        videoUrl = video.data.signedUrl;
+        await renew(sb, job, { note: "Sending your video to the renderer", input_key: inputKey });
+      } else await renew(sb, job, { note: "Sending the clip to the renderer" });
+      const images = await characterUrls(sb, deps, job, tool === "restyle");
+      const prompt = tool === "swap" ? (String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT) : tool === "restyle" ? String(job.options?.prompt ?? "").trim() || undefined : undefined;
+      const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.id, resolution: RECAST_RESOLUTION });
       requestId = sub.request_id;
       await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
-      log(`[recast] submitted ${JSON.stringify({ job: job.id, model, request: requestId })}`);
+      log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, request: requestId })}`);
     }
 
     // 2. Wait. Every poll renews the lease; the job stays ours as long as we are alive.
@@ -194,10 +234,16 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     await writeFile(raw, bytes);
     let final = raw;
     if (model === "full") {
-      await renew(sb, job, { note: "Putting your sound back" });
-      const src = await sb.storage.from("studio-uploads").download(asset.data.object_key);
-      if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
-      await writeFile(source, Buffer.from(await src.data.arrayBuffer()));
+      await renew(sb, job, { note: drivingUrl ? "Putting the sound back" : "Putting your sound back" });
+      if (drivingUrl) {
+        const dv = await (deps.fetch ?? fetch)(drivingUrl, { signal: AbortSignal.timeout(120_000) });
+        if (!dv.ok) throw new RecastError("trend_unavailable", `clip ${dv.status}`, true);
+        await writeFile(source, Buffer.from(await dv.arrayBuffer()));
+      } else {
+        const src = await sb.storage.from("studio-uploads").download(sourceKey!);
+        if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
+        await writeFile(source, Buffer.from(await src.data.arrayBuffer()));
+      }
       await (deps.mux ?? muxAudio)(raw, source, out);
       final = out;
     }
@@ -214,7 +260,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     // Higgsfield bills the input's seconds (rounded up), and the output can come back a little shorter: charge the larger.
     const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, MAX_SECONDS[model]));
     const charged = Math.min(job.credits_reserved, billed * per);
-    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null }];
+    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null }];
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;
@@ -243,10 +289,16 @@ export function startRecastLoop(sbFn: () => SupabaseClient, deps: RecastDeps = {
     if (running >= maxParallel) return;
     try {
       const sb = sbFn();
-      const r = await sb.rpc("studio_claim", { p_tool: "recast", p_worker: worker });
-      if (r.error) throw r.error;
-      const job = r.data as Job | null;
-      if (!job || !job.id) return;
+      // One claim per tick, trying each tool of the suite in turn so a busy Recast queue never starves a Swap.
+      let job: Job | null = null;
+      for (const tool of SUITE_TOOLS) {
+        if (tool !== "recast" && env[`STUDIO_${tool.toUpperCase()}_ENABLED`] === "false") continue;
+        const r = await sb.rpc("studio_claim", { p_tool: tool, p_worker: worker });
+        if (r.error) throw r.error;
+        const j = r.data as Job | null;
+        if (j && j.id) { job = { ...j, tool: j.tool ?? tool }; break; }
+      }
+      if (!job) return;
       running++;
       runRecastJob(sb, { ...deps, log }, job).then((s) => log(`[recast] ${s} ${job.id}`)).catch((e) => log(`[recast] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
     } catch (e: any) { log(`[recast] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }

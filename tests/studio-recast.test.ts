@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, MODELS, MAX_SECONDS, HF_BASE } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -187,3 +187,16 @@ test("real ffmpeg: the source audio is muxed onto a silent output, probed and po
 });
 
 function hasFfmpeg() { try { execFileSync("ffmpeg", ["-version"], { stdio: "ignore" }); execFileSync("ffprobe", ["-version"], { stdio: "ignore" }); return true; } catch { return false; } }
+
+test("the suite picks the right Genjutsu endpoint and body per tool", async () => {
+  assert.equal(endpointFor("swap", "full"), "higgsfield/genjutsu/object-swap/v1.0");
+  assert.equal(endpointFor("swap", "light"), "higgsfield/genjutsu-light/object-swap/v1.0");
+  assert.equal(endpointFor("trend", "light"), "higgsfield/genjutsu-light/motion-transfer/v1.0");
+  assert.equal(endpointFor("restyle", "light"), "higgsfield/genjutsu/restyle/v1.0", "restyle has no light model");
+  const calls: any[] = [];
+  const fetchFn: any = async (url: string, init: any) => { calls.push({ url, body: JSON.parse(init.body) }); return new Response(JSON.stringify({ request_id: "r1", status: "queued" }), { status: 200 }); };
+  await submitRecast({ fetch: fetchFn, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "swap", model: "full", videoUrl: "https://v/1.mp4", imageUrls: ["https://i/cat.jpg"], prompt: SWAP_DEFAULT_PROMPT, idempotencyKey: "job-1", resolution: "720p" });
+  await submitRecast({ fetch: fetchFn, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "restyle", model: "full", videoUrl: "https://v/1.mp4", imageUrls: [], presetId: "11111111-1111-4111-8111-111111111111", idempotencyKey: "job-2", resolution: "720p" });
+  assert.match(calls[0].url, /object-swap\/v1\.0$/); assert.deepEqual(Object.keys(calls[0].body).sort(), ["image_urls", "prompt", "resolution", "video_url"]);
+  assert.match(calls[1].url, /restyle\/v1\.0$/); assert.deepEqual(calls[1].body, { video_url: "https://v/1.mp4", preset_id: "11111111-1111-4111-8111-111111111111", resolution: "720p" }, "restyle sends the style id and no empty image list");
+});

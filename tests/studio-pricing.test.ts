@@ -13,7 +13,7 @@ test("prices are derived from cost at the margin target, never typed in", () => 
   assert.equal(creditsForCost(0.681, floor), 85, "full Recast at 720p list");
   assert.equal(creditsForCost(0.20, floor), 25, "Light at its measured $0.20 a second");
   const c = studioCosts({}, PLANS);
-  assert.deepEqual(c, { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 85, recast_light_second: 25 });
+  assert.deepEqual(c, { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 85, recast_light_second: 25, character_image: 12 });
   assert.deepEqual(COSTS, c, "the exported constant is the same derivation under the process environment");
   for (const [tool, credits, cost] of [["recast_second", c.recast_second, HIGGSFIELD_RATES.full["720p"]], ["recast_light_second", c.recast_light_second, HIGGSFIELD_RATES.light["720p"]]] as const) {
     const margin = (credits * floor - cost) / (credits * floor);

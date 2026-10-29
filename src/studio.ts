@@ -9,6 +9,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { isAdmin } from "./auth.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
+import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
 import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
 
@@ -63,13 +64,21 @@ export function stripeConfigured(env: Record<string, string | undefined> = proce
 export function toolsEnabled(env: Record<string, string | undefined> = process.env) {
   const recast = !!env.HIGGSFIELD_API_KEY && env.STUDIO_RECAST_ENABLED !== "false";
   // The full Genjutsu model stays closed until a paid run has measured what Higgsfield bills for it.
-  return { blueprint: env.STUDIO_BLUEPRINT_ENABLED === "true", blueprint_plus: env.STUDIO_BLUEPRINT_PLUS_ENABLED === "true", recast, recast_full: recast && env.STUDIO_RECAST_FULL_ENABLED === "true" };
+  // The Genjutsu suite (swap, restyle, trend) rides on the same key and runner; each can be closed on its own.
+  return { blueprint: env.STUDIO_BLUEPRINT_ENABLED === "true", blueprint_plus: env.STUDIO_BLUEPRINT_PLUS_ENABLED === "true", recast, recast_full: recast && env.STUDIO_RECAST_FULL_ENABLED === "true",
+    swap: recast && env.STUDIO_SWAP_ENABLED !== "false", restyle: recast && env.STUDIO_RESTYLE_ENABLED !== "false", trend: recast && env.STUDIO_TREND_ENABLED !== "false" && STUDIO_TRENDS.length > 0,
+    character: recast && env.STUDIO_CHARACTER_ENABLED !== "false" };
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
 // ---------------------------------------------------------------------------------------------------
-export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast"; credits: number; options: Record<string, any>; summary: string };
+export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character"; credits: number; options: Record<string, any>; summary: string };
+const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
+const characterChoice = (o: any) => {
+  if (!UUID_OPT(o.character_asset_id) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
+  return { character: o.character ?? null, character_asset_id: o.character_asset_id ?? null };
+};
 
 export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};
@@ -91,6 +100,47 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     if (!UUID_RE.test(String(o.character_asset_id ?? "")) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     return { tool, credits: seconds * per, options: { model, seconds, character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };
+  }
+  if (tool === "swap") {
+    // Object swap: the person or thing in the video replaced by the reference image, scene and motion kept. Same Genjutsu
+    // rates as Recast; Light keeps the source audio and the first 15 s, Full renders up to 30 s and gets the audio muxed back.
+    if (!asset || asset.kind !== "video") throw new StudioError("asset_required", "Pick a video first");
+    const duration = Number(asset.probe?.duration);
+    if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
+    const model = o.model === "light" ? "light" : "full";
+    const seconds = billableSeconds(duration, model === "light" ? 15 : 30);
+    const who = characterChoice(o);
+    const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
+    const per = model === "light" ? costs.recast_light_second : costs.recast_second;
+    return { tool, credits: seconds * per, options: { model, seconds, ...who, prompt }, summary: `${seconds} s × ${per}` };
+  }
+  if (tool === "restyle") {
+    // Restyle: every frame redrawn in a Higgsfield style; motion, camera and audio stay. Full model only, up to 30 s.
+    if (!asset || asset.kind !== "video") throw new StudioError("asset_required", "Pick a video first");
+    const duration = Number(asset.probe?.duration);
+    if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
+    if (!UUID_OPT(o.style_id)) throw new StudioError("style_required", "Pick a style");
+    const seconds = billableSeconds(duration, 30);
+    const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
+    const style_name = typeof o.style_name === "string" ? o.style_name.slice(0, 80) : null;
+    return { tool, credits: seconds * costs.recast_second, options: { model: "full", seconds, style_id: o.style_id, style_name, prompt, character_asset_id: UUID_OPT(o.character_asset_id) ? o.character_asset_id : null }, summary: `${seconds} s × ${costs.recast_second}` };
+  }
+  if (tool === "trend") {
+    // Trend: one of our driving clips performed by the person's character. The clip's length sets the price.
+    const trend = trendById(o.trend_id);
+    if (!trend) throw new StudioError("trend_required", "Pick a trend");
+    const model = o.model === "light" ? "light" : "full";
+    const seconds = billableSeconds(trend.seconds, model === "light" ? 15 : 30);
+    const who = characterChoice(o);
+    const per = model === "light" ? costs.recast_light_second : costs.recast_second;
+    return { tool, credits: seconds * per, options: { model, seconds, trend_id: trend.id, trend_name: trend.name, ...who }, summary: `${seconds} s × ${per}` };
+  }
+  if (tool === "character") {
+    // Character: a reusable character image from a prompt (human or animal), saved to the library for Recast, Swap and Trend.
+    const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
+    if (prompt.length < 3) throw new StudioError("prompt_required", "Describe the character");
+    const mode = o.mode === "animal" ? "animal" : "human";
+    return { tool, credits: costs.character_image, options: { mode, prompt }, summary: `1 image × ${costs.character_image}` };
   }
   throw new StudioError("unknown_tool", "Unknown tool");
 }
@@ -234,7 +284,19 @@ function kindFor(name: string, type: string): { kind: "video" | "image"; ext: "m
   return null;
 }
 
-export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: { stripe?: StripeLike | null; env?: Record<string, string | undefined>; log?: (s: string) => void } = {}): void {
+export type StudioStyle = { id: string; name: string; preview_url: string | null };
+/** GET the restyle presets from Higgsfield's platform API. */
+export async function fetchStyles(env: Record<string, string | undefined> = process.env, fetchFn: typeof fetch = fetch): Promise<StudioStyle[]> {
+  const key = env.HIGGSFIELD_API_KEY; if (!key) return [];
+  const auth = key.includes(":") ? `Key ${key.trim()}` : `Bearer ${key.trim()}`;
+  const r = await fetchFn("https://api.higgsfield.ai/models/higgsfield/genjutsu/restyle/v1.0/presets", { headers: { authorization: auth, accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!r.ok) throw new Error(`styles ${r.status}`);
+  const body: any = await r.json();
+  const list: any[] = Array.isArray(body) ? body : Array.isArray(body?.presets) ? body.presets : Array.isArray(body?.items) ? body.items : [];
+  return list.filter((p) => UUID_RE.test(String(p?.id ?? ""))).map((p) => ({ id: String(p.id), name: String(p.name ?? "Style").slice(0, 80), preview_url: typeof p.preview_url === "string" ? p.preview_url : null }));
+}
+
+export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: { stripe?: StripeLike | null; env?: Record<string, string | undefined>; log?: (s: string) => void; styles?: (env: Record<string, string | undefined>) => Promise<StudioStyle[]> } = {}): void {
   const env = deps.env ?? process.env;
   const costs = studioCosts(env, PLANS);
   const log = deps.log ?? ((s: string) => console.log(s));
@@ -264,6 +326,25 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   app.get("/api/studio/plans", (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     res.json({ plans: plansWithFeatures(costs), costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env), packs: PACKS.map((p) => ({ ...p, available: !!packPriceIdFor(p.id, env) })) });
+  });
+
+  // The Trends catalog: our driving clips, served by the dashboard host next to the preset portraits.
+  app.get("/api/studio/trends", (_req, res) => {
+    res.setHeader("Cache-Control", "private, max-age=300");
+    const base = env.STUDIO_PRESET_BASE ?? env.DASHBOARD_URL ?? "https://app.clone8.io";
+    res.json({ trends: STUDIO_TRENDS.map((t) => ({ ...t, video_url: trendClipUrl(base, t.id), poster_url: trendPosterUrl(base, t.id) })) });
+  });
+
+  // Higgsfield's restyle presets, fetched with our key and cached for an hour. Empty without a key, never an error.
+  let stylesCache: { at: number; styles: any[] } | null = null;
+  app.get("/api/studio/styles", async (_req, res) => {
+    res.setHeader("Cache-Control", "private, max-age=300");
+    try {
+      if (stylesCache && Date.now() - stylesCache.at < 3600_000) return res.json({ styles: stylesCache.styles });
+      const styles = await (deps.styles ?? fetchStyles)(env);
+      stylesCache = { at: Date.now(), styles };
+      res.json({ styles });
+    } catch (e: any) { log(`[studio] styles ${String(e?.message ?? e).slice(0, 200)}`); res.json({ styles: stylesCache?.styles ?? [] }); }
   });
 
   // The operator console's Studio tab: who pays, what they run, what failed, what was refunded. Admin only.
@@ -586,7 +667,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset, costs);
       const tools = toolsEnabled(env);
       if (!(tools as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
-      if (q.tool === "recast" && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
+      if ((q.tool === "recast" || q.tool === "swap" || q.tool === "trend") && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);
@@ -634,7 +715,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         const urls = new Map((signed.data ?? []).map((s: any) => [s.path, s.signedUrl]));
         // Each video is signed on its own so the browser saves it under a readable name.
         const base = downloadBase(job.asset_name, job.tool);
-        const videos = await Promise.all(job.outputs.map((o: any, i: number) => sb.storage.from("studio-outputs").createSignedUrl(o.key, 900, { download: `${base}-${String(o.index ?? i + 1).padStart(2, "0")}.mp4` })));
+        const videos = await Promise.all(job.outputs.map((o: any, i: number) => sb.storage.from("studio-outputs").createSignedUrl(o.key, 900, { download: `${base}-${String(o.index ?? i + 1).padStart(2, "0")}.${String(o.key).split(".").pop() || "mp4"}` })));
         job.outputs = job.outputs.map((o: any, i: number) => ({ ...o, url: videos[i].data?.signedUrl ?? null, poster_url: o.poster_key ? urls.get(o.poster_key) ?? null : null }));
       }
       res.json({ job });
@@ -731,7 +812,8 @@ function clientProbe(p: any): Record<string, number> {
 /** The file name a saved copy gets: the upload's name without its extension, tidied, plus the tool. */
 export function downloadBase(assetName: string | null | undefined, tool: string): string {
   const stem = String(assetName ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  return `${stem || "clone8"}-${tool === "recast" ? "recast" : "copy"}`;
+  const word = ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character" } as Record<string, string>)[tool] ?? "copy";
+  return `${stem || "clone8"}-${word}`;
 }
 
 async function withPosterUrls(sb: SupabaseClient, assets: any[]) {
