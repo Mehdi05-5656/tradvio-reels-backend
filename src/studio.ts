@@ -246,9 +246,21 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     const customer = typeof obj.customer === "string" ? obj.customer : obj.customer?.id ?? null;
     const subId = invoiceSubscriptionId(obj);
     if (!subId) return "invoice without subscription";
-    const userId = await userForCustomer(sb, customer);
-    if (!userId) return "invoice for unknown customer";
+    // Stripe sends checkout.session.completed, customer.subscription.created and invoice.paid within the same second, and
+    // the invoice can land first, before anything has linked the Stripe customer to a person. The subscription carries the
+    // user id in its metadata (set at checkout), so resolve through it and write the link here. If that also fails, throw:
+    // the event is then stored with its error and Stripe retries it minutes later, instead of a silent "unknown customer".
     const sub = await stripe.subscriptions.retrieve(subId);
+    let userId = await userForCustomer(sb, customer);
+    if (!userId) {
+      const fromSub = typeof sub?.metadata?.user_id === "string" && UUID_RE.test(sub.metadata.user_id) ? sub.metadata.user_id : null;
+      if (!fromSub) throw new Error(`invoice ${obj.id} for unknown customer ${customer ?? "?"} and subscription without user_id; left for retry`);
+      userId = fromSub;
+      if (customer) {
+        const link = await sb.from("studio_customers").upsert({ user_id: userId, stripe_customer_id: customer, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+        if (link.error) throw link.error;
+      }
+    }
     const s = await applySubscription(sb, userId, sub);
     if (!s.plan) return "invoice for unknown plan";
     const reason = String(obj.billing_reason ?? "");

@@ -121,7 +121,9 @@ test("checkout links the customer, subscription events mirror the plan, paid inv
   await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_2", customer: "cus_1", billing_reason: "subscription_update", parent: { subscription_details: { subscription: "sub_1" } } } } });
   assert.equal(sb.calls.slice(upgrade).find((c: any) => c.name === "studio_grant").args.p_expire_previous, false, "an upgrade mid-cycle adds credits without expiring the rest");
   assert.match(await applyStripeEvent(sb, stripe, { type: "customer.subscription.deleted", data: { object: sub({ status: "canceled", metadata: {} }) } }), /canceled/);
-  assert.equal(await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_3", customer: "cus_other", parent: { subscription_details: { subscription: "sub_1" } } } } }), "invoice for unknown customer");
+  // An invoice for a customer we have not linked yet, whose subscription names the person: linked and granted (the webhook race).
+  assert.match(await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_3", customer: "cus_other", parent: { subscription_details: { subscription: "sub_1" } } } } }), /granted 3500/);
+  assert.ok(sb.writes.some((w: any) => w.table === "studio_customers" && w.op === "upsert" && w.v.stripe_customer_id === "cus_other"), "the link is written from the subscription's user id");
   assert.equal(await applyStripeEvent(sb, stripe, { type: "payment_intent.created", data: { object: {} } }), "ignored");
   // Annual billing: one invoice a year pays for twelve months of credits, granted at once.
   process.env.STRIPE_PRICE_CREATOR_YEAR = "price_cy";
@@ -334,4 +336,20 @@ test("routes: the trends catalog, the styles catalog through the key, and a swap
   assert.equal(job.status, 201); assert.equal(job.body.job.tool, "swap"); assert.equal(job.body.job.credits_reserved, 11 * COSTS.recast_second);
   assert.equal((await call("POST", "/api/studio/jobs", { tool: "trend", options: { trend_id: "pitch-15", model: "light", character: "noah" } }, { "x-test-user": ANN })).status, 201, "a trend needs no upload");
   assert.equal((await call("POST", "/api/studio/jobs", { tool: "character", options: { mode: "animal", prompt: "a corgi in a suit" } }, { "x-test-user": ANN })).status, 201);
+});
+
+test("invoice.paid that arrives before the customer link still grants, by the subscription's user id; one with no clue is left for retry", async () => {
+  const NEW = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: NEW, stripe_customer_id: null, status: "none", plan_id: null, onboarding: {} }], studio_credit_ledger: [], studio_stripe_events: [] };
+  const grants: any[] = [];
+  const sb = fakeSb(tables, (name, args) => { if (name === "studio_grant") { grants.push(args); return { data: { granted: true }, error: null }; } if (name === "studio_referral_reward") return { data: { granted: false }, error: null }; return { data: {}, error: null }; });
+  const stripe = fakeStripe({ sub_new: sub({ id: "sub_new", customer: "cus_new", metadata: { user_id: NEW }, items: { data: [{ price: { id: "price_cy", recurring: { interval: "year" } }, current_period_start: 1761523200, current_period_end: 1793059200 }] } }) });
+  process.env.STRIPE_PRICE_CREATOR_YEAR = "price_cy";
+  const out = await applyStripeEvent(sb, stripe, { id: "evt_race", type: "invoice.paid", data: { object: { id: "in_race", customer: "cus_new", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_new" } } } } });
+  assert.match(out, /granted 42000/);
+  assert.deepEqual([grants[0].p_user, grants[0].p_credits, grants[0].p_ref, grants[0].p_expire_previous], [NEW, 42000, "in_race", true]);
+  assert.ok(sb.writes.some((w: any) => w.table === "studio_customers" && w.op === "upsert" && w.v.stripe_customer_id === "cus_new"), "the customer link is written on the way");
+  const stripe2 = fakeStripe({ sub_x: sub({ id: "sub_x", customer: "cus_x", metadata: {} }) });
+  await assert.rejects(() => applyStripeEvent(sb, stripe2, { id: "evt_x", type: "invoice.paid", data: { object: { id: "in_x", customer: "cus_x", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_x" } } } } }), /unknown customer/, "no user anywhere: throw so Stripe retries");
+  delete process.env.STRIPE_PRICE_CREATOR_YEAR;
 });
