@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { netPerCredit, creditValueFloor, creditsForCost, higgsfieldDiscount, studioCosts, planFeatureLines, unitEconomics, HIGGSFIELD_RATES, MARGIN_TARGET } from "../src/studio-pricing.js";
+import { netPerCredit, creditValueFloor, creditsForCost, higgsfieldDiscount, studioCosts, planFeatureLines, unitEconomics, packsClearFloor, PACKS, HIGGSFIELD_RATES, MARGIN_TARGET } from "../src/studio-pricing.js";
 import { PLANS, COSTS, quote } from "../src/studio.js";
 
 test("a credit's worth: Stripe's cut comes off first, the floor is the cheapest plan", () => {
@@ -42,4 +42,10 @@ test("the economics sheet shows every plan and tool at or above the target", () 
   assert.equal(e.rows.length, PLANS.length * 2);
   for (const r of e.rows) for (const t of r.tools) assert.ok(t.margin >= MARGIN_TARGET - 0.001, `${r.plan} ${r.interval} ${t.tool} ${t.margin}`);
   assert.equal(e.resolution, "720p");
+});
+
+test("credit packs never undercut the plans' per-credit value", () => {
+  assert.ok(packsClearFloor(PLANS));
+  for (const p of PACKS) assert.ok(netPerCredit(p.usd, p.credits) > creditValueFloor(PLANS), p.id);
+  assert.deepEqual(PACKS.map((p) => p.credits), [500, 2000, 6000]);
 });

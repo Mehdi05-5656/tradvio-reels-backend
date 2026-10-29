@@ -88,7 +88,7 @@ export const TIMELINES = ["asap", "1_3_months", "exploring"] as const;
 /** Sales stages, set from the console inbox: new → contacted → qualified → call_booked → call_attended → won; declined at any point;
  *  invited = a dashboard invitation was sent (the original flow, still used after a win). */
 export const REQUEST_STATUSES = ["new", "contacted", "qualified", "call_booked", "call_attended", "won", "invited", "declined"] as const;
-export const REQUEST_SOURCES = ["clone8.io", "clone8.io/apply"] as const;
+export const REQUEST_SOURCES = ["clone8.io", "clone8.io/apply", "studio"] as const;
 export const ATTRIBUTION_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "landing_path", "referrer_host"] as const;
 export const APPLY_COLUMNS = ["content_status", "library_size", "objective", "timeline", "phone", "attribution"] as const;
 export type InviteRequestRow = {

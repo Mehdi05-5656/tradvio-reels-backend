@@ -6,7 +6,7 @@
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { planFeatureLines, studioCosts, unitEconomics, type StudioCosts } from "./studio-pricing.js";
+import { planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { isAdmin } from "./auth.js";
 import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
@@ -42,6 +42,9 @@ export function planById(id: string | null | undefined): Plan | null { return PL
 
 export function priceIdFor(plan: PlanId, interval: Interval, env: Record<string, string | undefined> = process.env): string | null {
   return env[`STRIPE_PRICE_${plan.toUpperCase()}_${interval.toUpperCase()}`] || null;
+}
+export function packPriceIdFor(packId: string, env: Record<string, string | undefined> = process.env): string | null {
+  return env[`STRIPE_PRICE_${packId.toUpperCase()}`] || null;
 }
 export function planForPrice(priceId: string | null | undefined, env: Record<string, string | undefined> = process.env): { plan: Plan; interval: Interval } | null {
   if (!priceId) return null;
@@ -167,6 +170,15 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
       const link = await sb.from("studio_customers").upsert({ user_id: userId, stripe_customer_id: customer, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
       if (link.error) throw link.error;
     }
+    // A credit pack: one payment, credits on top, never expired by the next renewal. The session id makes the grant unique.
+    if (obj.mode === "payment") {
+      const pack = packById(obj.metadata?.pack);
+      if (!pack) return "payment checkout without a known pack";
+      if (obj.payment_status && obj.payment_status !== "paid") return `pack checkout ${obj.payment_status}`;
+      const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: pack.credits, p_ref: String(obj.id), p_expire_previous: false, p_note: `${pack.name} pack` });
+      if (g.error) throw g.error;
+      return `pack → ${g.data?.granted ? "granted" : "already granted"} ${pack.credits}`;
+    }
     if (subId) { const sub = await stripe.subscriptions.retrieve(subId); const s = await applySubscription(sb, userId, { ...sub, metadata: { ...(sub.metadata ?? {}), user_id: userId } }); return `checkout → ${s.plan?.id ?? "unknown plan"} ${s.status}`; }
     return "checkout linked customer";
   }
@@ -241,7 +253,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
 
   app.get("/api/studio/plans", (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
-    res.json({ plans: plansWithFeatures(costs), costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env) });
+    res.json({ plans: plansWithFeatures(costs), costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env), packs: PACKS.map((p) => ({ ...p, available: !!packPriceIdFor(p.id, env) })) });
   });
 
   // The owner's sheet: what each unit earns, costs and yields on every plan. Admin only; nothing a customer needs.
@@ -316,6 +328,35 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         cancel_url: `${dashboard()}/#studio/pricing?checkout=canceled`,
       });
       log(`[studio] checkout ${JSON.stringify({ user: u, plan: plan.id, interval, session: session.id })}`);
+      res.json({ url: session.url });
+    } catch (e) { fail(res, e); }
+  });
+
+  // One-off credit pack: Stripe Checkout in payment mode; the webhook grants the credits when it is paid.
+  app.post("/api/studio/checkout-pack", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const pack = packById(req.body?.pack);
+    if (!pack) return res.status(400).json({ error: "unknown_pack" });
+    const price = packPriceIdFor(pack.id, env);
+    if (!price) return res.status(503).json({ error: "billing_unavailable", detail: "That pack is not configured in Stripe yet" });
+    try {
+      const sb = sbFn();
+      const cust = await sb.from("studio_customers").select("stripe_customer_id,status").eq("user_id", u).maybeSingle();
+      if (cust.error) throw cust.error;
+      // Credits are spendable only with an active plan; a pack bought without one would sit unusable.
+      if (!cust.data || !["active", "trialing"].includes(cust.data.status)) return res.status(409).json({ error: "subscription_required" });
+      const email = req.auth && "email" in req.auth ? (req.auth as any).email : undefined;
+      const session = await stripe().checkout.sessions.create({
+        mode: "payment",
+        line_items: [{ price, quantity: 1 }],
+        ...(cust.data.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email, customer_creation: "always" }),
+        client_reference_id: u,
+        metadata: { user_id: u, pack: pack.id, credits: String(pack.credits) },
+        success_url: `${dashboard()}/#studio/account?pack=success`,
+        cancel_url: `${dashboard()}/#studio/account?pack=canceled`,
+        allow_promotion_codes: true,
+      });
+      log(`[studio] pack checkout ${JSON.stringify({ user: u, pack: pack.id, session: session.id })}`);
       res.json({ url: session.url });
     } catch (e) { fail(res, e); }
   });

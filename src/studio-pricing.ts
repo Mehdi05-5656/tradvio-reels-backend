@@ -77,3 +77,18 @@ export function unitEconomics(env: Record<string, string | undefined> = process.
   return { margin_target: MARGIN_TARGET, higgsfield_discount: discount, resolution: RECAST_RESOLUTION, credit_value_floor: round(creditValueFloor(plans), 5), costs, rates: HIGGSFIELD_RATES, rows };
 }
 const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
+
+/** One-off credit packs: a single Stripe payment, credits added on top of the plan's, never expired by a renewal.
+ *  Priced above the plans' per-credit value on purpose (the plan is the better deal; packs are for a busy month). */
+export type Pack = { id: "pack_500" | "pack_2000" | "pack_6000"; credits: number; usd: number; name: string };
+export const PACKS: Pack[] = [
+  { id: "pack_500", credits: 500, usd: 19, name: "500 credits" },
+  { id: "pack_2000", credits: 2000, usd: 59, name: "2,000 credits" },
+  { id: "pack_6000", credits: 6000, usd: 149, name: "6,000 credits" },
+];
+export const packById = (id: unknown): Pack | null => PACKS.find((p) => p.id === id) ?? null;
+/** Every pack must earn at least the credit-value floor, or a pack would undercut the margin the plans are priced on. */
+export function packsClearFloor(plans: PlanLike[]): boolean {
+  const floor = creditValueFloor(plans);
+  return PACKS.every((p) => netPerCredit(p.usd, p.credits) >= floor);
+}

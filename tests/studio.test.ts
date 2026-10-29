@@ -6,7 +6,7 @@ import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, 
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-const ENV = { STUDIO_BLUEPRINT_ENABLED: "true", HIGGSFIELD_API_KEY: "hf_test", STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_x", DASHBOARD_URL: "https://app.clone8.io",
+const ENV = { STUDIO_BLUEPRINT_ENABLED: "true", HIGGSFIELD_API_KEY: "hf_test", STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_x", DASHBOARD_URL: "https://app.clone8.io", STRIPE_PRICE_PACK_500: "price_p500", STRIPE_PRICE_PACK_2000: "price_p2000",
   STRIPE_PRICE_STARTER_MONTH: "price_sm", STRIPE_PRICE_STARTER_YEAR: "price_sy", STRIPE_PRICE_CREATOR_MONTH: "price_cm", STRIPE_PRICE_CREATOR_YEAR: "price_cy",
   STRIPE_PRICE_STUDIO_MONTH: "price_um", STRIPE_PRICE_STUDIO_YEAR: "price_uy" };
 
@@ -235,4 +235,29 @@ test("routes: uploads carry the browser's probe and poster; finished jobs list p
   const job = await s.call("GET", `/api/studio/jobs/${DONE}`, undefined, { "x-test-user": ANN });
   assert.equal(job.body.job.outputs[1].url, `https://signed/${ANN}/${DONE}/lease/2.mp4?download=Morning-routine-copy-02.mp4`);
   assert.equal(job.body.job.outputs[1].poster_url, `https://signed/${ANN}/${DONE}/lease/2.jpg`);
+});
+
+test("credit packs: a payment-mode checkout, granted once by the webhook, only with an active plan", async (t) => {
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, stripe_customer_id: "cus_1", status: "active", plan_id: "creator", onboarding: {} }], studio_assets: [], studio_jobs: [], studio_credit_ledger: [], studio_stripe_events: [] };
+  const sb = fakeSb(tables, (name) => ({ data: name === "studio_balance" ? 900 : name === "studio_grant" ? { granted: true } : {}, error: null }));
+  const stripe = fakeStripe();
+  const s = await serve(sb, stripe); t.after(s.close);
+  const catalog = await s.call("GET", "/api/studio/plans");
+  assert.deepEqual(catalog.body.packs.map((p: any) => [p.id, p.credits, p.usd, p.available]), [["pack_500", 500, 19, true], ["pack_2000", 2000, 59, true], ["pack_6000", 6000, 149, false]]);
+  const co = await s.call("POST", "/api/studio/checkout-pack", { pack: "pack_2000" }, { "x-test-user": ANN });
+  assert.equal(co.status, 200); assert.equal(co.body.url, "https://checkout.stripe.com/cs_1");
+  const created = stripe.created.at(-1);
+  assert.deepEqual([created.mode, created.line_items[0].price, created.customer, created.metadata.pack, created.metadata.credits], ["payment", "price_p2000", "cus_1", "pack_2000", "2000"]);
+  assert.equal((await s.call("POST", "/api/studio/checkout-pack", { pack: "pack_6000" }, { "x-test-user": ANN })).status, 503, "an unconfigured pack");
+  assert.equal((await s.call("POST", "/api/studio/checkout-pack", { pack: "pack_9" }, { "x-test-user": ANN })).body.error, "unknown_pack");
+  tables.studio_customers[0].status = "canceled";
+  assert.equal((await s.call("POST", "/api/studio/checkout-pack", { pack: "pack_500" }, { "x-test-user": ANN })).body.error, "subscription_required");
+  const ev = { id: "evt_pack", type: "checkout.session.completed", data: { object: { id: "cs_pack_1", mode: "payment", payment_status: "paid", customer: "cus_1", metadata: { user_id: ANN, pack: "pack_2000", credits: "2000" } } } };
+  assert.deepEqual((await s.call("POST", "/api/studio/stripe/webhook", ev, { "stripe-signature": "good" })).body, { received: true });
+  const grant = sb.calls.find((c: any) => c.name === "studio_grant");
+  assert.deepEqual([grant.args.p_user, grant.args.p_credits, grant.args.p_ref, grant.args.p_expire_previous, grant.args.p_note], [ANN, 2000, "cs_pack_1", false, "2,000 credits pack"]);
+  assert.deepEqual((await s.call("POST", "/api/studio/stripe/webhook", ev, { "stripe-signature": "good" })).body, { received: true, duplicate: true });
+  const unpaid = { id: "evt_pack2", type: "checkout.session.completed", data: { object: { id: "cs_pack_2", mode: "payment", payment_status: "unpaid", customer: "cus_1", metadata: { user_id: ANN, pack: "pack_500" } } } };
+  await s.call("POST", "/api/studio/stripe/webhook", unpaid, { "stripe-signature": "good" });
+  assert.equal(sb.calls.filter((c: any) => c.name === "studio_grant").length, 1, "an unpaid session grants nothing");
 });
