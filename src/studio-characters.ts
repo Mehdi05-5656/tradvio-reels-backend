@@ -3,6 +3,10 @@
 // is then a reference for Recast, Swap and Trend like an uploaded photo. Runs as a timer loop in the web service.
 // Soul standard accepts resolution 720p or 1080p (the first live run was refused with "2K", Oct 29, 2026).
 import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { command } from "./video-render.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLANS } from "./studio.js";
 import { studioCosts } from "./studio-pricing.js";
@@ -11,7 +15,18 @@ import { higgsfieldAuth, RecastError, HF_BASE } from "./studio-recast.js";
 export const SOUL_ENDPOINT = "higgsfield-ai/soul/standard";
 const POLL_MS = 5_000, MAX_WAIT_MS = 10 * 60_000, IMAGE_LIMIT = 33_554_432;
 
-export type CharacterDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; now?: () => number };
+export type CharacterDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; now?: () => number; toJpeg?: (png: Buffer) => Promise<Buffer> };
+
+/** PNG (or WebP) bytes to JPEG bytes with ffmpeg. */
+export async function toJpeg(input: Buffer): Promise<Buffer> {
+  const dir = await mkdtemp(join(tmpdir(), "studio-character-"));
+  try {
+    const src = join(dir, "in.img"), out = join(dir, "out.jpg");
+    await writeFile(src, input);
+    await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", src, "-frames:v", "1", "-q:v", "2", "-pix_fmt", "yuvj420p", out], undefined, 60_000);
+    return await readFile(out);
+  } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
+}
 type Job = { id: string; user_id: string; lease_token: string; options: any; credits_reserved: number; progress: any; attempts: number };
 
 /** The portrait prompt: the person's words, framed so the result works as a Genjutsu reference (one subject, facing the camera). */
@@ -87,19 +102,22 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
     if (!result?.imageUrl) throw new RecastError("recast_bad_output", "completed without an image url");
     const dl = await (deps.fetch ?? fetch)(result.imageUrl, { signal: AbortSignal.timeout(120_000) });
     if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
-    const bytes = Buffer.from(await dl.arrayBuffer());
+    let bytes: Buffer = Buffer.from(await dl.arrayBuffer());
     if (!bytes.length || bytes.length > IMAGE_LIMIT) throw new RecastError("output_too_large");
-    const ct = String(dl.headers.get("content-type") ?? ""), ext = /png/.test(ct) ? "png" : "jpg";
+    // Soul returns PNG; the storage buckets accept JPEG, so the portrait is re-encoded (quality 92) before it is stored.
+    const ct = String(dl.headers.get("content-type") ?? "");
+    if (/png|webp/.test(ct) || bytes[0] === 0x89) bytes = await (deps.toJpeg ?? toJpeg)(bytes);
+    const ext = "jpg";
     // The character joins the library as a ready image asset, so every tool can pick it like an uploaded photo.
     const assetId = randomUUID(), key = `${job.user_id}/${assetId}.${ext}`;
     const name = `Character: ${String(job.options?.prompt ?? "").trim().slice(0, 60) || "untitled"}`;
-    const up = await sb.storage.from("studio-uploads").upload(key, bytes, { contentType: ext === "png" ? "image/png" : "image/jpeg", upsert: false });
+    const up = await sb.storage.from("studio-uploads").upload(key, bytes, { contentType: "image/jpeg", upsert: false });
     if (up.error) throw up.error;
     const ins = await sb.from("studio_assets").insert({ id: assetId, user_id: job.user_id, kind: "image", name, object_key: key, bytes: bytes.length, status: "ready", probe: { character: true, mode: job.options?.mode ?? "human" } });
     if (ins.error) throw ins.error;
     // A copy in studio-outputs is what the job panel shows and signs, like every other tool's output.
     const outKey = `${job.user_id}/${job.id}/${job.lease_token}/1.${ext}`;
-    const out = await sb.storage.from("studio-outputs").upload(outKey, bytes, { contentType: ext === "png" ? "image/png" : "image/jpeg", upsert: false });
+    const out = await sb.storage.from("studio-outputs").upload(outKey, bytes, { contentType: "image/jpeg", upsert: false });
     if (out.error) log(`[character] output copy failed ${JSON.stringify({ job: job.id, error: out.error.message })}`);
     const costs = studioCosts(deps.env ?? process.env, PLANS);
     const charged = Math.min(job.credits_reserved, costs.character_image);
