@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { accountAccess, selfAuthenticatedPost } from "../src/account-access.js";
-import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, PLANS, COSTS } from "../src/studio.js";
+import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, studioOverview, PLANS, COSTS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -260,4 +260,22 @@ test("credit packs: a payment-mode checkout, granted once by the webhook, only w
   const unpaid = { id: "evt_pack2", type: "checkout.session.completed", data: { object: { id: "cs_pack_2", mode: "payment", payment_status: "unpaid", customer: "cus_1", metadata: { user_id: ANN, pack: "pack_500" } } } };
   await s.call("POST", "/api/studio/stripe/webhook", unpaid, { "stripe-signature": "good" });
   assert.equal(sb.calls.filter((c: any) => c.name === "studio_grant").length, 1, "an unpaid session grants nothing");
+});
+
+test("the operator overview: customers with plan and balance, run-rate, tools, failures, refunds and packs", async () => {
+  const BOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const tables: Record<string, any[]> = {
+    studio_customers: [{ user_id: ANN, plan_id: "creator", billing_interval: "year", status: "active", onboarding: { intent: "blueprint" }, created_at: "2026-10-01T00:00:00Z" }, { user_id: BOB, plan_id: "starter", billing_interval: "month", status: "canceled", onboarding: {}, created_at: "2026-10-02T00:00:00Z" }],
+    studio_jobs: [{ id: "j1", user_id: ANN, tool: "blueprint", status: "done", credits_reserved: 20, credits_charged: 20, options: { copies: 5 }, created_at: "2026-10-28T00:00:00Z", started_at: "2026-10-28T00:00:00Z", finished_at: "2026-10-28T00:02:00Z" }, { id: "j2", user_id: ANN, tool: "recast", status: "failed", error_code: "recast_nsfw", credits_reserved: 165, credits_charged: 0, options: {}, created_at: "2026-10-28T01:00:00Z" }],
+    studio_credit_ledger: [{ user_id: ANN, delta: 2000, reason: "grant", note: "2,000 credits pack", created_at: "2026-10-28T00:00:00Z" }, { user_id: ANN, delta: 165, reason: "refund", note: "recast_nsfw", created_at: "2026-10-28T01:00:00Z" }, { user_id: ANN, delta: 42000, reason: "grant", note: "Creator annual subscription_create", created_at: "2026-10-28T00:00:00Z" }],
+  };
+  const sb = fakeSb(tables, (name, args) => ({ data: name === "studio_balance" ? (args.p_user === ANN ? 41980 : 0) : {}, error: null }));
+  sb.auth = { admin: { listUsers: async () => ({ data: { users: [{ id: ANN, email: "ann@synthetic.invalid" }] } }) } };
+  const o = await studioOverview(sb, ENV, new Date("2026-10-29T00:00:00Z"));
+  assert.deepEqual(o.totals, { customers: 2, active: 1, mrr_usd: 66, jobs_30d: 2, failed_30d: 1, credits_charged_30d: 20, refunded_30d: 165, pack_credits_30d: 2000, pack_sales_30d: 1 });
+  assert.deepEqual(o.failures, [{ code: "recast_nsfw", count: 1 }]);
+  assert.equal(o.tools.find((t: any) => t.tool === "blueprint").avg_seconds, 120);
+  const ann = o.customers.find((c: any) => c.user_id === ANN);
+  assert.deepEqual([ann.email, ann.plan, ann.balance, ann.jobs_30d, ann.intent], ["ann@synthetic.invalid", "creator", 41980, 2, "blueprint"]);
+  assert.equal(o.customers.find((c: any) => c.user_id === BOB).email, null, "no auth record, no email, no crash");
 });

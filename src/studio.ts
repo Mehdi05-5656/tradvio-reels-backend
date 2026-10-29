@@ -256,6 +256,13 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     res.json({ plans: plansWithFeatures(costs), costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env), packs: PACKS.map((p) => ({ ...p, available: !!packPriceIdFor(p.id, env) })) });
   });
 
+  // The operator console's Studio tab: who pays, what they run, what failed, what was refunded. Admin only.
+  app.get("/api/ops/studio/overview", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    if (!isAdmin(req)) return res.status(403).json({ error: "forbidden" });
+    try { res.json(await studioOverview(sbFn(), env)); } catch (e) { fail(res, e); }
+  });
+
   // The owner's sheet: what each unit earns, costs and yields on every plan. Admin only; nothing a customer needs.
   app.get("/api/studio/economics", (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
@@ -596,6 +603,52 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       res.json({ job: publicJob(r.data) });
     } catch (e) { fail(res, e); }
   });
+}
+
+/** Everything the operator console shows about the Studio: customers with their plan and balance, revenue run-rate,
+ *  the last 30 days of jobs, failures by reason, refunds and pack sales. Emails come from auth when the client has it. */
+export async function studioOverview(sb: SupabaseClient, env: Record<string, string | undefined> = process.env, now = new Date()) {
+  const since = new Date(now.getTime() - 30 * 86400000).toISOString();
+  const [customers, jobs, ledger] = await Promise.all([
+    sb.from("studio_customers").select("user_id,plan_id,billing_interval,status,period_end,cancel_at_period_end,credits_per_period,onboarding,created_at,updated_at").order("created_at", { ascending: false }).limit(500),
+    sb.from("studio_jobs").select("id,user_id,tool,status,credits_reserved,credits_charged,error_code,options,created_at,started_at,finished_at").gte("created_at", since).order("created_at", { ascending: false }).limit(2000),
+    sb.from("studio_credit_ledger").select("user_id,delta,reason,ref,note,created_at").gte("created_at", since).limit(5000),
+  ]);
+  for (const r of [customers, jobs, ledger]) if (r.error) throw r.error;
+  const rows = (customers.data ?? []) as any[];
+  const emails = new Map<string, string>();
+  const admin = (sb as any).auth?.admin;
+  if (admin?.listUsers) {
+    try { const u = await admin.listUsers({ page: 1, perPage: 1000 }); for (const x of (u.data?.users ?? []) as any[]) emails.set(x.id, x.email ?? ""); } catch { /* emails stay blank */ }
+  }
+  const balances = await Promise.all(rows.map(async (c) => { const b = await sb.rpc("studio_balance", { p_user: c.user_id }); return [c.user_id, Number(b.data ?? 0)] as const; }));
+  const balance = new Map(balances);
+  const jobList = (jobs.data ?? []) as any[];
+  const byUser = new Map<string, { jobs: number; credits: number; last: string | null }>();
+  for (const j of jobList) { const r = byUser.get(j.user_id) ?? { jobs: 0, credits: 0, last: null }; r.jobs++; r.credits += j.credits_charged ?? 0; r.last = r.last ?? j.created_at; byUser.set(j.user_id, r); }
+  const active = rows.filter((c) => c.status === "active" || c.status === "trialing");
+  const mrr = active.reduce((n, c) => { const p = planById(c.plan_id); if (!p) return n; return n + (c.billing_interval === "year" ? p.annual_usd_per_month : p.monthly_usd); }, 0);
+  const led = (ledger.data ?? []) as any[];
+  const packs = led.filter((l) => l.reason === "grant" && /pack$/.test(String(l.note ?? "")));
+  const refunds = led.filter((l) => l.reason === "refund");
+  const failures = jobList.filter((j) => j.status === "failed");
+  const byReason: Record<string, number> = {};
+  for (const f of failures) byReason[f.error_code ?? "unknown"] = (byReason[f.error_code ?? "unknown"] ?? 0) + 1;
+  const byTool: Record<string, { jobs: number; done: number; failed: number; credits: number; seconds: number }> = {};
+  for (const j of jobList) {
+    const t = byTool[j.tool] ?? (byTool[j.tool] = { jobs: 0, done: 0, failed: 0, credits: 0, seconds: 0 });
+    t.jobs++; if (j.status === "done") t.done++; if (j.status === "failed") t.failed++; t.credits += j.credits_charged ?? 0;
+    if (j.started_at && j.finished_at) t.seconds += (Date.parse(j.finished_at) - Date.parse(j.started_at)) / 1000;
+  }
+  return {
+    generated_at: now.toISOString(), window_days: 30,
+    totals: { customers: rows.length, active: active.length, mrr_usd: mrr, jobs_30d: jobList.length, failed_30d: failures.length, credits_charged_30d: jobList.reduce((n, j) => n + (j.credits_charged ?? 0), 0), refunded_30d: refunds.reduce((n, l) => n + l.delta, 0), pack_credits_30d: packs.reduce((n, l) => n + l.delta, 0), pack_sales_30d: packs.length },
+    tools: Object.entries(byTool).map(([tool, t]) => ({ tool, ...t, avg_seconds: t.done ? Math.round(t.seconds / t.done) : null })),
+    failures: Object.entries(byReason).map(([code, count]) => ({ code, count })).sort((a, b) => b.count - a.count),
+    customers: rows.map((c) => ({ user_id: c.user_id, email: emails.get(c.user_id) ?? null, plan: c.plan_id, interval: c.billing_interval, status: c.status, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, balance: balance.get(c.user_id) ?? 0, intent: c.onboarding?.intent ?? null, jobs_30d: byUser.get(c.user_id)?.jobs ?? 0, credits_30d: byUser.get(c.user_id)?.credits ?? 0, last_job_at: byUser.get(c.user_id)?.last ?? null, since: c.created_at })),
+    recent_failures: failures.slice(0, 20).map((j) => ({ id: j.id, user_id: j.user_id, tool: j.tool, code: j.error_code, created_at: j.created_at })),
+    tools_enabled: toolsEnabled(env),
+  };
 }
 
 async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {
