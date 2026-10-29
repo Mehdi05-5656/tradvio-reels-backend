@@ -55,7 +55,9 @@ export function stripeConfigured(env: Record<string, string | undefined> = proce
 // platform key exists); until then the page is visible but Generate is disabled, so no credits can be
 // reserved for work nothing would run.
 export function toolsEnabled(env: Record<string, string | undefined> = process.env) {
-  return { blueprint: env.STUDIO_BLUEPRINT_ENABLED === "true", blueprint_plus: env.STUDIO_BLUEPRINT_PLUS_ENABLED === "true", recast: !!env.HIGGSFIELD_API_KEY && env.STUDIO_RECAST_ENABLED !== "false" };
+  const recast = !!env.HIGGSFIELD_API_KEY && env.STUDIO_RECAST_ENABLED !== "false";
+  // The full Genjutsu model stays closed until a paid run has measured what Higgsfield bills for it.
+  return { blueprint: env.STUDIO_BLUEPRINT_ENABLED === "true", blueprint_plus: env.STUDIO_BLUEPRINT_PLUS_ENABLED === "true", recast, recast_full: recast && env.STUDIO_RECAST_FULL_ENABLED === "true" };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -481,7 +483,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const sb = sbFn();
       const asset = await loadAsset(sb, u, req.body?.asset_id);
       const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset, costs);
-      if (!(toolsEnabled(env) as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
+      const tools = toolsEnabled(env);
+      if (!(tools as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
+      if (q.tool === "recast" && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
       if (r.error) throw r.error;
       log(`[studio] job ${JSON.stringify({ user: u, tool: q.tool, credits: q.credits, job: r.data?.id })}`);

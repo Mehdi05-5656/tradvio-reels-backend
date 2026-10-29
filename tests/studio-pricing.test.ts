@@ -11,9 +11,9 @@ test("a credit's worth: Stripe's cut comes off first, the floor is the cheapest 
 test("prices are derived from cost at the margin target, never typed in", () => {
   const floor = creditValueFloor(PLANS);
   assert.equal(creditsForCost(0.681, floor), 85, "full Recast at 720p list");
-  assert.equal(creditsForCost(0.10, floor), 13, "Light at 720p list");
+  assert.equal(creditsForCost(0.20, floor), 25, "Light at its measured $0.20 a second");
   const c = studioCosts({}, PLANS);
-  assert.deepEqual(c, { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 85, recast_light_second: 13 });
+  assert.deepEqual(c, { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 85, recast_light_second: 25 });
   assert.deepEqual(COSTS, c, "the exported constant is the same derivation under the process environment");
   for (const [tool, credits, cost] of [["recast_second", c.recast_second, HIGGSFIELD_RATES.full["720p"]], ["recast_light_second", c.recast_light_second, HIGGSFIELD_RATES.light["720p"]]] as const) {
     const margin = (credits * floor - cost) / (credits * floor);
@@ -26,13 +26,15 @@ test("a confirmed Higgsfield discount halves the Recast prices; nonsense values 
   assert.equal(higgsfieldDiscount({ HIGGSFIELD_DISCOUNT: "banana" }), 0);
   assert.equal(higgsfieldDiscount({ HIGGSFIELD_DISCOUNT: "5" }), 0.9);
   const d = studioCosts({ HIGGSFIELD_DISCOUNT: "0.5" }, PLANS);
-  assert.deepEqual([d.recast_second, d.recast_light_second], [43, 7]);
+  assert.deepEqual([d.recast_second, d.recast_light_second], [43, 13]);
+  const e = studioCosts({ HIGGSFIELD_DISCOUNT: "0.15" }, PLANS);
+  assert.deepEqual([e.recast_second, e.recast_light_second], [72, 22], "the account's actual 15% discount");
   assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, d).credits, 430);
 });
 
 test("plan cards say what the credits buy, from the same numbers", () => {
   const lines = planFeatureLines(PLANS[1], studioCosts({}, PLANS));
-  assert.deepEqual(lines, ["3,500 credits a month", "Blueprint: about 875 copies a month", "Recast: about 41 seconds a month (269 on Light)"]);
+  assert.deepEqual(lines, ["3,500 credits a month", "Blueprint: about 875 copies a month", "Recast: about 41 seconds a month (140 on Light)"]);
 });
 
 test("the economics sheet shows every plan and tool at or above the target", () => {

@@ -191,7 +191,7 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   const job = await s.call("POST", "/api/studio/jobs", { tool: "blueprint", asset_id: ASSET, options: { copies: 10 } }, { "x-test-user": ANN });
   assert.equal(job.status, 201); assert.equal(job.body.job.credits_reserved, 40);
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint", asset_id: ASSET, options: { copies: 50 } }, { "x-test-user": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" })).body.error, "asset_not_found", "another person's asset");
-  assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "recast", asset_id: ASSET, options: { character: "noah", model: "full" } }, { "x-test-user": ANN })).status, 201);
+  assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "recast", asset_id: ASSET, options: { character: "noah", model: "light" } }, { "x-test-user": ANN })).status, 201);
   const up = await s.call("POST", "/api/studio/assets/upload-url", { name: "clip.mp4", size: 1234, type: "video/mp4" }, { "x-test-user": ANN });
   assert.equal(up.status, 200); assert.match(up.body.key, new RegExp(`^${ANN}/[0-9a-f-]{36}\\.mp4$`));
   assert.equal((await s.call("POST", "/api/studio/assets/upload-url", { name: "x.exe", size: 10, type: "" }, { "x-test-user": ANN })).body.error, "invalid_file");
@@ -199,7 +199,8 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "launch50" }, { "x-test-user": ANN })).body.credits, 50);
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint_plus", asset_id: ASSET, options: { copies: 2 } }, { "x-test-user": ANN })).body.error, "tool_not_open", "a tool without a worker refuses jobs");
-  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true });
+  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false });
+  assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "recast", asset_id: ASSET, options: { character: "noah", model: "full" } }, { "x-test-user": ANN })).body.error, "model_not_open", "the full model is closed until measured");
 });
 
 test("download names come from the upload's name and the tool", () => {

@@ -9,10 +9,12 @@ export type PlanLike = { id: string; monthly_usd: number; annual_usd_per_month: 
 export const STRIPE_FEE = { rate: 0.029, fixed: 0.30 };
 /** We keep at least this share of net revenue on every tool, at the cheapest plan. */
 export const MARGIN_TARGET = 0.5;
-/** Higgsfield list prices, USD per second of input video, rounded up to whole seconds (open.higgsfield.ai, Oct 28 2026). */
+/** Higgsfield list prices, USD per second of input video, rounded up to whole seconds (open.higgsfield.ai, Oct 28 2026).
+ *  Light is what four paid runs measured, not what the page says: $0.20 a second whatever the input (1080p or 720p) or the
+ *  requested output. The full model's rates are the page's and are unmeasured; it stays closed until a paid run prices it. */
 export const HIGGSFIELD_RATES: Record<"full" | "light", Record<Resolution, number>> = {
   full: { "480p": 0.318, "720p": 0.681, "1080p": 1.632 },
-  light: { "480p": 0.05, "720p": 0.10, "1080p": 0.20 },
+  light: { "480p": 0.20, "720p": 0.20, "1080p": 0.20 },
 };
 /** The resolution we render at; pinned on every request so a default change on their side cannot move our cost. */
 export const RECAST_RESOLUTION: Resolution = "720p";
