@@ -6,6 +6,7 @@ import { cronRuns, renderApi } from "./ops-actions.js";
 import { isAdmin } from "./auth.js";
 import { ptNow, ptDateTimeToUtc } from "./publer-schedule.js";
 import { memo } from "./cache.js";
+import { collectStudioHealth, studioJobCards, type StudioHealthCounts } from "./studio-health.js";
 
 export type Health = "ok" | "warn" | "down" | "off";
 export type JobCard = { id: string; label: string; cadence: string; health: Health; last_at: string | null; note: string; details?: Record<string, number | string | null> };
@@ -40,6 +41,7 @@ export type RawCounts = {
   rate: { blocked_until: string | null; last_block_reason: string | null } | null;
   slots: { total: number; enabled: number; paused: number };
   cron_runs?: Record<string, string | null>;   // job id -> Render's last successful run (exit 0); a job the API did not answer for is absent; undefined without a Render key
+  studio?: StudioHealthCounts | null;          // Clone8 Studio queues and the Stripe webhook (studio-health.ts); null when unreadable, absent in older callers
 };
 
 const hoursAgo = (iso: string | null, now: Date) => (iso ? (now.getTime() - Date.parse(iso)) / 3600_000 : Infinity);
@@ -130,6 +132,8 @@ export function summarizePipeline(c: RawCounts, now = new Date()): PipelineSnaps
     { id: "rate", label: "Request budget", cadence: "shared across processes", last_at: null,
       health: c.rate?.blocked_until && Date.parse(c.rate.blocked_until) > now.getTime() ? "warn" : "ok",
       note: c.rate?.blocked_until && Date.parse(c.rate.blocked_until) > now.getTime() ? `blocked until ${c.rate.blocked_until} (${c.rate.last_block_reason ?? "no reason"})` : "not blocked" },
+    // The self-serve Studio: its workers and the billing webhook, from the same counts the alert evaluator uses.
+    ...(c.studio ? studioJobCards(c.studio, now) : []),
   ];
   return { generated_at: now.toISOString(), day: ptNow(now).ymd, stages, jobs, accounts: c.slots };
 }
@@ -204,6 +208,7 @@ const latest = async (sb: any, table: string, col: string, filter?: (q: any) => 
 export async function collectPipeline(sb: any, now = new Date(), runs?: () => Promise<Record<string, string | null> | undefined>): Promise<RawCounts> {
   const day = ptNow(now).ymd, dayStart = ptDateTimeToUtc(day, "00:00").toISOString();
   const cronRunsP = runs ? runs().catch(() => undefined) : Promise.resolve(undefined);
+  const studioP = collectStudioHealth(sb, now);
   const h24 = new Date(now.getTime() - 24 * 3600_000).toISOString(), d7 = new Date(now.getTime() - 7 * 86400_000).toISOString(), held = new Date(now.getTime() - 45 * 60_000).toISOString();
   const [sources, variants, queue, logsToday, logs7d, logsTotal, heldPending, stalePending, lastAttempt, analyticsLatest, snaps24h, pulls24h, liveLatest, liveAccounts, featuresLatest, featuresRows, captionsLatest, captions, leaderLatest, renderLatest, control, storage, upload, rate, slots] = await Promise.all([
     count(sb.from("library_sources").select("sha256", { count: "exact", head: true })),
@@ -254,7 +259,7 @@ export async function collectPipeline(sb: any, now = new Date(), runs?: () => Pr
   }
   return { sources, variants, queue, logs_today: logsToday, logs_7d_published: logs7d, logs_total_published: logsTotal, held_pending: heldPending, stale_pending: stalePending, last_attempt_at: lastAttempt,
     analytics_latest: analyticsLatest, analytics_snapshots_24h: snaps24h, analytics_pulls_24h: pulls24h, measured_7d: measured.size, live_latest: liveLatest, live_accounts: liveAccounts,
-    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, leader_latest: leaderLatest, render_latest: renderLatest, library_control: control, library_storage: storage, upload, rate, slots, cron_runs: await cronRunsP };
+    features_latest: featuresLatest, features_rows: featuresRows, captions_latest: captionsLatest, captions, leader_latest: leaderLatest, render_latest: renderLatest, library_control: control, library_storage: storage, upload, rate, slots, cron_runs: await cronRunsP, studio: await studioP };
 }
 
 export function registerOpsPipeline(app: Express, sbFn: () => any, opts: { runs?: () => Promise<Record<string, string | null> | undefined> } = {}) {

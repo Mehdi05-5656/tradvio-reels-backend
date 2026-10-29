@@ -139,3 +139,14 @@ test("a full storage budget explains an idle renderer with pending work", () => 
     library_storage: { stored_bytes: 53620937453, stored_objects: 13774, max_output_bytes: 64424509440, reserve_bytes: 67108864 }, cron_runs: { render: "2026-10-26T01:01:40Z" } }, now).jobs.find((j) => j.id === "render")!;
   assert.equal(room.health, "ok"); assert.doesNotMatch(room.note, /budget/);
 });
+
+test("studio cards ride along in the snapshot when the Studio counts are present, and are absent when not", () => {
+  const without = summarizePipeline(base(), now).jobs.map((j) => j.id);
+  assert.equal(without.some((id) => id.startsWith("studio_")), false);
+  const studio = { tools: { blueprint: { queued: 0, running: 0, stale_running: 0, oldest_queued_at: null, latest_finished_at: "2026-10-24T21:00:00Z", done_24h: 3, failed_24h: 0, total: 3 },
+    recast: { queued: 1, running: 0, stale_running: 0, oldest_queued_at: "2026-10-24T21:30:00Z", latest_finished_at: null, done_24h: 0, failed_24h: 0, total: 1 } },
+    webhook: { total: 5, latest_received_at: "2026-10-24T22:00:00Z", unprocessed_old: 0, errors_24h: 0 } };
+  const jobs = Object.fromEntries(summarizePipeline({ ...base(), studio }, now).jobs.map((j) => [j.id, j]));
+  assert.equal(jobs.studio_blueprint.health, "ok"); assert.equal(jobs.studio_recast.health, "down", "an hour-old queued job with nothing running");
+  assert.equal(jobs.studio_stripe.health, "ok");
+});

@@ -8,6 +8,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { isAdmin } from "./auth.js";
+import { checkUpload, checkJobRate } from "./studio-limits.js";
 import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
 
@@ -467,6 +468,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (!(size > 0 && size <= 536870912)) return res.status(400).json({ error: "file_too_large", detail: "at most 512 MB" });
     try {
       const sb = sbFn();
+      // Per-plan library limits (studio-limits.ts): files kept and bytes stored. Credits do not bound uploads, these do.
+      const limit = await checkUpload(sb, u, size);
+      if (limit) throw new StudioError(limit.code, limit.message, limit.status);
       const id = randomUUID(), key = `${u}/${id}.${k.ext}`;
       const row = await sb.from("studio_assets").insert({ id, user_id: u, kind: k.kind, name, object_key: key, bytes: size, status: "uploading" }).select("id").single();
       if (row.error) throw row.error;
@@ -583,6 +587,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const tools = toolsEnabled(env);
       if (!(tools as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       if (q.tool === "recast" && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
+      // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
+      const limit = await checkJobRate(sb, u);
+      if (limit) throw new StudioError(limit.code, limit.message, limit.status);
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
       if (r.error) throw r.error;
       log(`[studio] job ${JSON.stringify({ user: u, tool: q.tool, credits: q.credits, job: r.data?.id })}`);

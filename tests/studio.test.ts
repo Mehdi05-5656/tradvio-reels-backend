@@ -196,6 +196,19 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   const up = await s.call("POST", "/api/studio/assets/upload-url", { name: "clip.mp4", size: 1234, type: "video/mp4" }, { "x-test-user": ANN });
   assert.equal(up.status, 200); assert.match(up.body.key, new RegExp(`^${ANN}/[0-9a-f-]{36}\\.mp4$`));
   assert.equal((await s.call("POST", "/api/studio/assets/upload-url", { name: "x.exe", size: 10, type: "" }, { "x-test-user": ANN })).body.error, "invalid_file");
+  // Plan limits (studio-limits.ts): Ann is on Creator (200 files, 30 GB, 40 jobs an hour). Fill the library, then the hour.
+  const kept = tables.studio_assets.length;
+  for (let i = 0; i < 200; i++) tables.studio_assets.push({ id: `${i}`, user_id: ANN, kind: "video", status: i % 2 ? "ready" : "uploading", bytes: 1 });
+  assert.equal((await s.call("POST", "/api/studio/assets/upload-url", { name: "clip.mp4", size: 1234, type: "video/mp4" }, { "x-test-user": ANN })).body.error, "too_many_files");
+  tables.studio_assets.length = kept;
+  tables.studio_assets.push({ id: "big", user_id: ANN, kind: "video", status: "ready", bytes: 30 * 1024 ** 3 - 100 });
+  const full = await s.call("POST", "/api/studio/assets/upload-url", { name: "clip.mp4", size: 1234, type: "video/mp4" }, { "x-test-user": ANN });
+  assert.equal(full.status, 409); assert.equal(full.body.error, "storage_full");
+  tables.studio_assets.pop();
+  for (let i = 0; i < 40; i++) tables.studio_jobs.push({ id: `j${i}`, user_id: ANN, tool: "blueprint", status: "done", created_at: new Date(Date.now() - 10 * 60_000).toISOString() });
+  const limited = await s.call("POST", "/api/studio/jobs", { tool: "blueprint", asset_id: ASSET, options: { copies: 1 } }, { "x-test-user": ANN });
+  assert.equal(limited.status, 429); assert.equal(limited.body.error, "rate_limited");
+  tables.studio_jobs.length = 0;
   assert.equal((await s.call("POST", `/api/studio/assets/${ASSET}/complete`, {}, { "x-test-user": ANN })).body.asset?.status ?? "ready", "ready");
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "launch50" }, { "x-test-user": ANN })).body.credits, 50);
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");

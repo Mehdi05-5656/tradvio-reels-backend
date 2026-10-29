@@ -3,6 +3,7 @@
 // Old /api/* endpoints untouched.
 
 import type { Express, Request, Response } from "express";
+import { collectStudioHealth, studioAlerts } from "./studio-health.js";
 import { ensureRenewalAlerts } from "./client-orgs.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule";
@@ -1646,6 +1647,27 @@ export async function evaluateAlerts(sb: SupabaseClient): Promise<any> {
           },
           metric_value: Number(top.video_views ?? 0),
         });
+      }
+    }
+  }
+
+  // ---- 6. Clone8 Studio: stalled queues, failure rate, webhook lag (studio-health.ts) ----
+  // On by default with the defaults in STUDIO_ALERT_DEFAULTS; a reels_alert_rules row of type studio_health (no phone_slot)
+  // overrides the thresholds through its config, or switches these off when disabled.
+  {
+    const ruleRow = await sb.from("reels_alert_rules").select("enabled,config").eq("rule_type", "studio_health").is("phone_slot", null).limit(1);
+    const rule = ruleRow.data?.[0];
+    if (!rule || rule.enabled) {
+      const counts = await collectStudioHealth(sb);
+      if (counts) {
+        const since = new Date(Date.now() - 6 * 3600_000).toISOString();
+        for (const a of studioAlerts(counts, new Date(), rule?.config ?? {})) {
+          let q = sb.from("reels_alerts").select("id").eq("type", a.type).gte("fired_at", since).limit(1);
+          if (a.payload.tool) q = q.contains("payload", { tool: a.payload.tool });
+          const { data: existing } = await q;
+          if (existing && existing.length > 0) continue;
+          fired.push(a);
+        }
       }
     }
   }
