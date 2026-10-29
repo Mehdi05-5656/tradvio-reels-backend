@@ -327,7 +327,7 @@ test("routes: the trends catalog, the styles catalog through the key, and a swap
   assert.deepEqual([plans.body.tools.swap, plans.body.tools.restyle, plans.body.tools.trend, plans.body.tools.character], [true, true, true, true], "the suite opens with the key");
   assert.ok(plans.body.costs.character_image >= 4);
   const trends = await call("GET", "/api/studio/trends");
-  assert.equal(trends.body.trends[0].id, "desk-talk"); assert.match(trends.body.trends[0].video_url, /^https:\/\/app\.clone8\.io\/trends\/desk-talk\.mp4$/);
+  assert.equal(trends.body.trends[0].id, "thumbs-up"); assert.match(trends.body.trends[0].video_url, /^https:\/\/app\.clone8\.io\/trends\/thumbs-up\.mp4$/);
   const styles = await call("GET", "/api/studio/styles"); await call("GET", "/api/studio/styles");
   assert.equal(styles.body.styles[0].name, "Knitted Yarn World"); assert.equal(styleCalls, 1, "the catalog is cached");
   const job = await call("POST", "/api/studio/jobs", { tool: "swap", asset_id: ASSET, options: { model: "full", character: "noah", prompt: "a tabby cat" } }, { "x-test-user": ANN });
