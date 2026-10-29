@@ -73,6 +73,16 @@ function fakeSb(rows: Record<string, any[]>, fail = false) {
     return q;
   } };
 }
+test("studio health: a provider-side failure (our balance or key) is a critical alert and takes the recast card down", () => {
+  const c = quiet(); c.provider = { failures_1h: 1, latest_code: "recast_balance", latest_at: min(4), tools: ["trend"] };
+  const a = studioAlerts(c, now);
+  assert.equal(a.length, 1); assert.equal(a[0].type, "studio_provider_refused"); assert.equal(a[0].severity, "critical"); assert.match(a[0].body, /open\.higgsfield\.ai/);
+  const cards = Object.fromEntries(studioJobCards(c, now).map((x) => [x.id, x]));
+  assert.equal(cards.studio_recast.health, "down"); assert.match(cards.studio_recast.note, /refused our account 1 time/);
+  const old = quiet(); old.provider = { failures_1h: 0, latest_code: null, latest_at: null, tools: [] };
+  assert.equal(studioAlerts(old, now).length, 0);
+});
+
 test("studio health: the collector groups by tool and reads the webhook table; a missing table yields null", async () => {
   const rows = {
     studio_jobs: [
@@ -80,6 +90,7 @@ test("studio health: the collector groups by tool and reads the webhook table; a
       { tool: "blueprint", status: "running", created_at: min(20), lease_until: min(-5) },
       { tool: "recast", status: "running", created_at: min(30), lease_until: min(2) },
       { tool: "blueprint", status: "done", finished_at: min(60) }, { tool: "blueprint", status: "failed", finished_at: min(30) }, { tool: "recast", status: "done", finished_at: min(2000) },
+      { tool: "trend", status: "failed", finished_at: min(10), error_code: "recast_balance" }, { tool: "swap", status: "failed", finished_at: min(90), error_code: "recast_balance" },
     ],
     studio_stripe_events: [
       { id: "evt_1", received_at: min(50), processed_at: min(50), error: null },
@@ -92,5 +103,6 @@ test("studio health: the collector groups by tool and reads the webhook table; a
   assert.deepEqual(c.tools.blueprint, { queued: 1, running: 1, stale_running: 0, oldest_queued_at: min(3), latest_finished_at: min(30), done_24h: 1, failed_24h: 1, total: 4 });
   assert.deepEqual(c.tools.recast, { queued: 0, running: 1, stale_running: 1, oldest_queued_at: null, latest_finished_at: null, done_24h: 0, failed_24h: 0, total: 2 }, "a finish older than a day does not count; an expired lease does");
   assert.deepEqual(c.webhook, { total: 4, latest_received_at: min(5), unprocessed_old: 1, errors_24h: 1 }, "only the event unprocessed for over 10 min counts as lagging");
+  assert.deepEqual(c.provider, { failures_1h: 1, latest_code: "recast_balance", latest_at: min(10), tools: ["trend"] }, "only the last hour's provider refusals count");
   assert.equal(await collectStudioHealth(fakeSb(rows, true), now), null);
 });

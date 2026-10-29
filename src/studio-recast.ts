@@ -80,6 +80,14 @@ export async function submitRecast(deps: RecastDeps, p: { tool?: SuiteTool; mode
   return { request_id: String(r.request_id), status: String(r.status ?? "queued"), status_url: r.status_url ? String(r.status_url) : `${HF_BASE}/requests/${r.request_id}/status` };
 }
 
+/** A "failed" status whose message is about OUR account (platform balance, key) is an ops failure, not the customer's video. */
+export function failureCode(raw: any): "recast_failed" | "recast_balance" | "recast_auth" {
+  const text = typeof raw?.error === "string" ? raw.error : typeof raw?.message === "string" ? raw.message : JSON.stringify(raw ?? "");
+  if (/credit balance|insufficient (credits|balance|funds)|top up/i.test(text)) return "recast_balance";
+  if (/api key|unauthori[sz]ed|forbidden/i.test(text)) return "recast_auth";
+  return "recast_failed";
+}
+
 export async function pollRecast(deps: RecastDeps, requestId: string): Promise<{ status: string; videoUrl: string | null; raw: any }> {
   const r = await hf(deps, `/requests/${encodeURIComponent(requestId)}/status`, { method: "GET" });
   const status = String(r?.status ?? "unknown").toLowerCase();
@@ -216,7 +224,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       if (st.status === "completed") { result = st; break; }
       if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
         log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
-        throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? "recast_failed" : "recast_canceled");
+        throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
       }
       await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In Higgsfield's queue" });
       await sleep(POLL_MS);

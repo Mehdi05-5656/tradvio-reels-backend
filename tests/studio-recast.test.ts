@@ -119,6 +119,10 @@ test("failures: Higgsfield failed/nsfw refund for good, a 429 while polling is r
     assert.equal(await runRecastJob(sb, deps(h.fetchFn), job()), "failed");
     assert.deepEqual([sb.calls.at(-1).args.p_reason, sb.calls.at(-1).args.p_retry], [code, false]);
   }
+  const broke = fakeHiggsfield([{ status: "failed", error: "Your credit balance is too low to complete this request. Please top up your balance and try again." }]);
+  const sbb = fakeSb(job());
+  assert.equal(await runRecastJob(sbb, deps(broke.fetchFn), job()), "failed");
+  assert.deepEqual([sbb.calls.at(-1).args.p_reason, sbb.calls.at(-1).args.p_retry], ["recast_balance", false], "our empty platform balance is not blamed on the customer's video");
   const h = fakeHiggsfield([429, { status: "completed", video: { url: "https://cdn.example/out.mp4" } }]);
   const sb = fakeSb(job());
   assert.equal(await runRecastJob(sb, deps(h.fetchFn), job()), "done", "a transient 429 is waited out");

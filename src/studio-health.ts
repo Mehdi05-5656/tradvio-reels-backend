@@ -6,7 +6,10 @@ export type ToolHealth = { queued: number; running: number; stale_running: numbe
 export type StudioHealthCounts = {
   tools: Record<string, ToolHealth>;
   webhook: { total: number; latest_received_at: string | null; unprocessed_old: number; errors_24h: number };
+  /** Jobs that failed in the last hour because Higgsfield refused OUR account (balance, key), by tool. Every job fails the same way until a person acts. */
+  provider?: { failures_1h: number; latest_code: string | null; latest_at: string | null; tools: string[] };
 };
+export const PROVIDER_CODES = ["recast_balance", "recast_auth", "recast_not_configured"];
 
 export const STUDIO_TOOLS: Record<string, { label: string; cadence: string; queue_warn_min: number; queue_down_min: number }> = {
   blueprint: { label: "Studio: Blueprint worker", cadence: "Render background worker, polls every 5 s", queue_warn_min: 10, queue_down_min: 30 },
@@ -26,7 +29,7 @@ export async function collectStudioHealth(sb: any, now = new Date()): Promise<St
     const h24 = new Date(now.getTime() - 24 * 3600_000).toISOString(), lag = new Date(now.getTime() - WEBHOOK_LAG_MIN * 60_000).toISOString();
     const [open, finished, total, evTotal, evLatest, evOld, evErr] = await Promise.all([
       sb.from("studio_jobs").select("tool,status,created_at,lease_until").in("status", ["queued", "running"]).limit(1000),
-      sb.from("studio_jobs").select("tool,status,finished_at").in("status", ["done", "failed"]).gte("finished_at", h24).limit(5000),
+      sb.from("studio_jobs").select("tool,status,finished_at,error_code").in("status", ["done", "failed"]).gte("finished_at", h24).limit(5000),
       sb.from("studio_jobs").select("tool").limit(5000),
       sb.from("studio_stripe_events").select("id", { count: "exact", head: true }),
       sb.from("studio_stripe_events").select("received_at").order("received_at", { ascending: false }).limit(1),
@@ -43,12 +46,19 @@ export async function collectStudioHealth(sb: any, now = new Date()): Promise<St
       if (j.status === "queued") { t.queued++; if (!t.oldest_queued_at || j.created_at < t.oldest_queued_at) t.oldest_queued_at = j.created_at; }
       else { t.running++; if (j.lease_until && Date.parse(j.lease_until) < now.getTime()) t.stale_running++; }
     }
+    const h1 = new Date(now.getTime() - 3600_000).toISOString();
+    const provider = { failures_1h: 0, latest_code: null as string | null, latest_at: null as string | null, tools: [] as string[] };
     for (const j of finished.data ?? []) {
       const t = tool(j.tool);
       if (j.status === "done") t.done_24h++; else t.failed_24h++;
       if (j.finished_at && (!t.latest_finished_at || j.finished_at > t.latest_finished_at)) t.latest_finished_at = j.finished_at;
+      if (j.status === "failed" && PROVIDER_CODES.includes(String(j.error_code)) && j.finished_at >= h1) {
+        provider.failures_1h++;
+        if (!provider.tools.includes(j.tool)) provider.tools.push(j.tool);
+        if (!provider.latest_at || j.finished_at > provider.latest_at) { provider.latest_at = j.finished_at; provider.latest_code = String(j.error_code); }
+      }
     }
-    return { tools, webhook: { total: Number(evTotal.count ?? 0), latest_received_at: evLatest.data?.[0]?.received_at ?? null, unprocessed_old: Number(evOld.count ?? 0), errors_24h: Number(evErr.count ?? 0) } };
+    return { tools, provider, webhook: { total: Number(evTotal.count ?? 0), latest_received_at: evLatest.data?.[0]?.received_at ?? null, unprocessed_old: Number(evOld.count ?? 0), errors_24h: Number(evErr.count ?? 0) } };
   } catch { return null; }
 }
 
@@ -65,8 +75,10 @@ export function studioJobCards(c: StudioHealthCounts, now = new Date()): JobCard
     const waited = t.queued > 0 ? minutesAgo(t.oldest_queued_at, now) ?? 0 : 0;
     const rate = failureRate(t);
     const stalled = t.running === 0 && waited >= meta.queue_down_min, slow = waited >= meta.queue_warn_min;
-    const health: Health = t.total === 0 ? "off" : stalled ? "down" : slow || t.stale_running > 0 || (rate !== null && rate >= 0.3) ? "warn" : "ok";
+    const refused = id === "recast" && (c.provider?.failures_1h ?? 0) > 0;
+    const health: Health = t.total === 0 ? "off" : stalled || refused ? "down" : slow || t.stale_running > 0 || (rate !== null && rate >= 0.3) ? "warn" : "ok";
     const parts: string[] = [];
+    if (refused) parts.push(`Higgsfield refused our account ${c.provider!.failures_1h} time${c.provider!.failures_1h === 1 ? "" : "s"} in the last hour (${c.provider!.latest_code}): every render fails until it is fixed`);
     if (t.total === 0) parts.push("no jobs yet");
     else if (t.queued === 0 && t.running === 0) parts.push(`idle; last finished ${ago(t.latest_finished_at, now)}`);
     else parts.push(`${t.running} running, ${t.queued} queued${t.queued ? ` (oldest waiting ${Math.round(waited)} min)` : ""}`);
@@ -103,6 +115,11 @@ export function studioAlerts(c: StudioHealthCounts, now = new Date(), cfg: Parti
       title: `Studio ${id}: ${Math.round(rate * 100)}% of jobs failed in the last day`,
       body: `${t.failed_24h} of ${t.done_24h + t.failed_24h} finished jobs failed and were refunded. Look at the error codes on the Clients page.`, payload: { tool: id, failed_24h: t.failed_24h, done_24h: t.done_24h }, metric_value: rate, threshold_value: k.failure_rate });
   }
+  const p = c.provider;
+  if (p && p.failures_1h > 0) out.push({ type: "studio_provider_refused", severity: "critical", phone_slot: null,
+    title: `Studio: Higgsfield refused our account (${p.latest_code}), ${p.failures_1h} job${p.failures_1h === 1 ? "" : "s"} failed in the last hour`,
+    body: p.latest_code === "recast_balance" ? "The platform balance at open.higgsfield.ai is too low for the next render. Every Recast, Swap, Style and Trend job fails and is refunded until it is topped up." : "The platform key was refused. Check HIGGSFIELD_API_KEY on the web service and the key's status at open.higgsfield.ai.",
+    payload: { code: p.latest_code, tools: p.tools, latest_at: p.latest_at }, metric_value: p.failures_1h, threshold_value: 0 });
   const w = c.webhook;
   if (w.unprocessed_old > 0 || w.errors_24h > 0) out.push({ type: "studio_webhook_lag", severity: "warning", phone_slot: null,
     title: `Stripe webhook: ${w.unprocessed_old} unprocessed, ${w.errors_24h} failed`,
