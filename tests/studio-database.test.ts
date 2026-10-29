@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 
 const MIGRATION = "migrations/20261027000000_studio_foundation.sql";
+const MIGRATION2 = "migrations/20261029000000_studio_referrals_notices.sql";
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
@@ -19,6 +20,8 @@ async function setup(t: any) {
   `);
   await db.exec(await readFile(MIGRATION, "utf8"));
   await db.exec(await readFile(MIGRATION, "utf8")); // idempotent
+  await db.exec(await readFile(MIGRATION2, "utf8"));
+  await db.exec(await readFile(MIGRATION2, "utf8")); // idempotent
   const rpc = async (fn: string, args: any[]) => (await db.query<any>(`SELECT to_jsonb(${fn}(${args.map((_, i) => `$${i + 1}`).join(",")})) r`, args)).rows[0].r;
   const balance = async (u: string) => (await db.query<any>("SELECT studio_balance($1) b", [u])).rows[0].b as number;
   const subscribe = (u: string, parallel = 2) => rpc("studio_apply_subscription", [u, "cus_test1", "sub_test1", "starter", "month", "active", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z", false, 1000, parallel]);
@@ -131,4 +134,48 @@ test("anon and authenticated roles cannot touch studio tables or functions", asy
   await assert.rejects(db.query("SELECT * FROM studio_customers"), /permission denied/);
   await assert.rejects(db.query(`SELECT studio_balance('${ANN}')`), /permission denied/);
   await db.exec("RESET ROLE");
+});
+
+test("referrals: a stable code, applied once before paying, rewards both sides once on the first invoice", async (t) => {
+  const { db, rpc, balance, subscribe } = await setup(t);
+  const code = await rpc("studio_referral_code", [ANN]);
+  assert.match(code, /^[A-Z2-9]{8}$/);
+  assert.equal(await rpc("studio_referral_code", [ANN]), code, "same code every time");
+  assert.deepEqual(await rpc("studio_apply_referral", [ANN, code]), { applied: false, reason: "own_code" });
+  assert.deepEqual(await rpc("studio_apply_referral", [BOB, "NOPE2222"]), { applied: false, reason: "unknown_code" });
+  assert.deepEqual(await rpc("studio_apply_referral", [BOB, code.toLowerCase()]), { applied: true, referrer: ANN });
+  assert.deepEqual(await rpc("studio_apply_referral", [BOB, code]), { applied: false, reason: "already_referred" });
+  assert.deepEqual(await rpc("studio_referral_reward", [ANN, 500]), { granted: false }, "nobody referred Ann");
+  await subscribe(BOB);
+  assert.deepEqual(await rpc("studio_referral_reward", [BOB, 500]), { granted: true, referrer: ANN, credits: 500 });
+  assert.deepEqual([await balance(ANN), await balance(BOB)], [500, 500]);
+  assert.deepEqual(await rpc("studio_referral_reward", [BOB, 500]), { granted: false }, "never twice");
+  assert.deepEqual([await balance(ANN), await balance(BOB)], [500, 500]);
+  const refs = (await db.query<any>("SELECT user_id, ref FROM studio_credit_ledger WHERE reason='promo' ORDER BY user_id")).rows;
+  assert.deepEqual(refs, [{ user_id: ANN, ref: `referral:${BOB}` }, { user_id: BOB, ref: `referred:${ANN}` }]);
+  // A paying customer cannot be referred afterwards.
+  await rpc("studio_apply_subscription", [ANN, "cus_test2", "sub_test2", "starter", "month", "active", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z", false, 1000, 2]);
+  const CAL = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await db.exec(`INSERT INTO auth.users VALUES ('${CAL}','cal@synthetic.invalid','{}')`);
+  const bobCode = await rpc("studio_referral_code", [BOB]);
+  assert.equal((await rpc("studio_apply_referral", [ANN, bobCode])).reason, "already_customer");
+  assert.equal((await rpc("studio_apply_referral", [CAL, bobCode])).applied, true);
+});
+
+test("notices: finished jobs are listed once, then marked", async (t) => {
+  const { db, rpc, subscribe, asset } = await setup(t);
+  await subscribe(ANN);
+  await rpc("studio_grant", [ANN, 1000, "in_1", true, null]);
+  const a = await asset(ANN);
+  const job = await rpc("studio_create_job", [ANN, "blueprint", a, { copies: 2 }, 8]);
+  assert.deepEqual(await rpc("studio_jobs_to_notify", [50]).catch(() => null), null, "set-returning: queried below instead");
+  let rows = (await db.query<any>("SELECT id FROM studio_jobs_to_notify(50)")).rows;
+  assert.equal(rows.length, 0, "a queued job is not final");
+  const claimed = await rpc("studio_claim", ["blueprint", "w1"]);
+  await rpc("studio_complete", [claimed.id, claimed.lease_token, [{ key: "k" }], 8]);
+  rows = (await db.query<any>("SELECT id FROM studio_jobs_to_notify(50)")).rows;
+  assert.deepEqual(rows.map((r: any) => r.id), [job.id]);
+  await db.query("SELECT studio_mark_notified($1)", [job.id]);
+  rows = (await db.query<any>("SELECT id FROM studio_jobs_to_notify(50)")).rows;
+  assert.equal(rows.length, 0);
 });

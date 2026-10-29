@@ -31,6 +31,8 @@ export const PLANS: Plan[] = [
 
 // What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the
 // margin target, so a price can never drift from a cost. COSTS is the value under the process environment.
+/** What each side receives when a referred person pays their first invoice. */
+export const REFERRAL_CREDITS = 500;
 export const costsFor = (env: Record<string, string | undefined> = process.env): StudioCosts => studioCosts(env, PLANS);
 export const COSTS: StudioCosts = costsFor();
 /** Plans with the price-dependent feature lines filled in from the live costs. */
@@ -206,7 +208,14 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     const credits = s.plan.credits * (s.interval === "year" ? 12 : 1);
     const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: `${s.plan.name} ${s.interval === "year" ? "annual " : ""}${reason || "invoice"}` });
     if (g.error) throw g.error;
-    return `invoice.paid → ${g.data?.granted ? "granted" : "already granted"} ${credits} (${reason || "invoice"})`;
+    // The first paid invoice of a referred person credits both sides, once; the function is a no-op otherwise.
+    let referral = "";
+    if (reason === "subscription_create" && g.data?.granted) {
+      const r = await sb.rpc("studio_referral_reward", { p_user: userId, p_credits: REFERRAL_CREDITS });
+      if (r.error) throw r.error;
+      if (r.data?.granted) referral = `, referral ${REFERRAL_CREDITS} both ways`;
+    }
+    return `invoice.paid → ${g.data?.granted ? "granted" : "already granted"} ${credits} (${reason || "invoice"})${referral}`;
   }
   return "ignored";
 }
@@ -277,7 +286,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const sb = sbFn();
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const [cust, bal, jobs, ledger] = await Promise.all([
-        sb.from("studio_customers").select("plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id").eq("user_id", u).maybeSingle(),
+        sb.from("studio_customers").select("plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id,referral_code,referred_by,email_opt_out").eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
         sb.from("studio_jobs").select("id,tool,status,credits_reserved,credits_charged,created_at").eq("user_id", u).gte("created_at", since).order("created_at", { ascending: false }).limit(200),
         sb.from("studio_credit_ledger").select("delta,reason,job_id,ref,note,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(50),
@@ -294,6 +303,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         usage_30d: { jobs: (jobs.data ?? []).length, credits: spent },
         ledger: ledger.data ?? [],
         costs,
+        referral: await referralInfo(sb, u, c, ledger.data ?? []),
+        email_opt_out: !!c?.email_opt_out,
       });
     } catch (e) { fail(res, e); }
   });
@@ -365,6 +376,32 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       });
       log(`[studio] pack checkout ${JSON.stringify({ user: u, pack: pack.id, session: session.id })}`);
       res.json({ url: session.url });
+    } catch (e) { fail(res, e); }
+  });
+
+  // A referral code from a friend's link, applied once, before any plan is paid.
+  app.post("/api/studio/referral", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const code = String(req.body?.code ?? "").trim().toUpperCase();
+    if (!/^[A-Z2-9]{8}$/.test(code)) return res.status(400).json({ error: "invalid_code" });
+    try {
+      const r = await sbFn().rpc("studio_apply_referral", { p_user: u, p_code: code });
+      if (r.error) throw r.error;
+      if (r.data?.applied) log(`[studio] referral ${JSON.stringify({ user: u, referrer: r.data.referrer })}`);
+      res.json(r.data);
+    } catch (e) { fail(res, e); }
+  });
+
+  // Email notices on or off.
+  app.post("/api/studio/notices", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const optOut = req.body?.email_opt_out === true;
+    try {
+      const sb = sbFn();
+      await sb.rpc("studio_lock_customer", { p_user: u });
+      const r = await sb.from("studio_customers").update({ email_opt_out: optOut, updated_at: new Date().toISOString() }).eq("user_id", u);
+      if (r.error) throw r.error;
+      res.json({ email_opt_out: optOut });
     } catch (e) { fail(res, e); }
   });
 
@@ -649,6 +686,15 @@ export async function studioOverview(sb: SupabaseClient, env: Record<string, str
     recent_failures: failures.slice(0, 20).map((j) => ({ id: j.id, user_id: j.user_id, tool: j.tool, code: j.error_code, created_at: j.created_at })),
     tools_enabled: toolsEnabled(env),
   };
+}
+
+/** The person's referral link and what it earned. The code is minted on first sight; a missing migration yields nulls. */
+async function referralInfo(sb: SupabaseClient, u: string, c: any, ledger: any[]) {
+  let code: string | null = c?.referral_code ?? null;
+  if (!code) { const r = await sb.rpc("studio_referral_code", { p_user: u }); code = r.error ? null : (r.data as string | null); }
+  const earned = ledger.filter((l) => l.reason === "promo" && String(l.ref ?? "").startsWith("referral:")).reduce((n, l) => n + l.delta, 0);
+  const referred = ledger.filter((l) => l.reason === "promo" && String(l.ref ?? "").startsWith("referral:")).length;
+  return { code, url: code ? `${(process.env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "")}/#signup?ref=${code}` : null, credits_each: REFERRAL_CREDITS, referred, earned, referred_by: !!c?.referred_by };
 }
 
 async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {

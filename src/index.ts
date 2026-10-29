@@ -28,6 +28,7 @@ import { configurePublerRate } from "./publer-rate.js";
 import { corsMiddleware } from "./cors.js";
 import { registerStudio } from "./studio.js";
 import { startRecastLoop } from "./studio-recast.js";
+import { startNoticesLoop } from "./studio-notices.js";
 import compression from "compression";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -82,6 +83,7 @@ async function main() {
   registerLibraryArchive(app, getSb);
   registerStudio(app, getSb);
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
+  startNoticesLoop(getSb); // Clone8 Studio emails: only runs when RESEND_API_KEY is set
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
   registerManagedRoutes(app, getSb);
