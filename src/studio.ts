@@ -70,7 +70,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     swap: recast && env.STUDIO_SWAP_ENABLED !== "false", restyle: recast && env.STUDIO_RESTYLE_ENABLED !== "false", trend: recast && env.STUDIO_TREND_ENABLED !== "false" && STUDIO_TRENDS.length > 0,
     character: recast && env.STUDIO_CHARACTER_ENABLED !== "false",
     // Instruments: every other platform model through one generic tool; opened by flag, narrowed by allow/hidden lists.
-    instrument: instrumentsEnabled(env).length > 0 };
+    instrument: instrumentsEnabled(env).length > 0,
+    // The assistant: a Claude key and not switched off.
+    assistant: !!env.ANTHROPIC_API_KEY && env.STUDIO_ASSISTANT_ENABLED !== "false" };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -828,7 +830,7 @@ async function referralInfo(sb: SupabaseClient, u: string, c: any, ledger: any[]
   return { code, url: code ? `${(process.env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "")}/#signup?ref=${code}` : null, credits_each: REFERRAL_CREDITS, referred, earned, referred_by: !!c?.referred_by };
 }
 
-async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {
+export async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {
   if (assetId == null) return null;
   if (!UUID_RE.test(String(assetId))) throw new StudioError("asset_not_found", "Unknown video", 404);
   const r = await sb.from("studio_assets").select("id,kind,status,probe").eq("id", assetId).eq("user_id", u).maybeSingle();
@@ -864,7 +866,7 @@ async function withPosterUrls(sb: SupabaseClient, assets: any[]) {
   return assets.map((a) => ({ ...a, poster_url: a.probe?.poster_key ? urls.get(a.probe.poster_key) ?? null : null }));
 }
 
-async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[]) {
+export async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[]) {
   const ids = [...new Set(jobs.map((j) => j.asset_id).filter(Boolean))];
   if (!ids.length) return jobs.map((j) => ({ ...j, asset_name: null }));
   const r = await sb.from("studio_assets").select("id,name").eq("user_id", u).in("id", ids);
@@ -872,7 +874,7 @@ async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[]) {
   return jobs.map((j) => ({ ...j, asset_name: j.asset_id ? names.get(j.asset_id) ?? null : null }));
 }
 
-function publicJob(j: any) {
+export function publicJob(j: any) {
   return { id: j.id, tool: j.tool, status: j.status, asset_id: j.asset_id, options: j.options ?? {}, credits_reserved: j.credits_reserved, credits_charged: j.credits_charged,
     progress: j.progress ?? {}, outputs: Array.isArray(j.outputs) ? j.outputs : [], error_code: j.error_code, created_at: j.created_at, started_at: j.started_at, finished_at: j.finished_at };
 }

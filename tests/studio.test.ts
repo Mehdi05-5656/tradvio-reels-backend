@@ -215,7 +215,7 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "launch50" }, { "x-test-user": ANN })).body.credits, 50);
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint_plus", asset_id: ASSET, options: { copies: 2 } }, { "x-test-user": ANN })).body.error, "tool_not_open", "a tool without a worker refuses jobs");
-  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false, swap: true, restyle: true, trend: true, character: true, instrument: false });
+  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false, swap: true, restyle: true, trend: true, character: true, instrument: false, assistant: false });
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "recast", asset_id: ASSET, options: { character: "noah", model: "full" } }, { "x-test-user": ANN })).body.error, "model_not_open", "the full model is closed until measured");
 });
 

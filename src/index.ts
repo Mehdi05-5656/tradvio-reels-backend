@@ -30,6 +30,7 @@ import { registerStudio } from "./studio.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
 import { startInstrumentLoop } from "./studio-instruments.js";
+import { registerAssistant, startAssistantLoop } from "./studio-assistant.js";
 import { startNoticesLoop } from "./studio-notices.js";
 import compression from "compression";
 import WebSocket from "ws";
@@ -84,9 +85,11 @@ async function main() {
   registerClientLearning(app, getSb);
   registerLibraryArchive(app, getSb);
   registerStudio(app, getSb);
+  registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
   startCharacterLoop(getSb); // Studio characters (Soul portraits); off without HIGGSFIELD_API_KEY
   startInstrumentLoop(getSb); // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
+  startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
   startNoticesLoop(getSb); // Clone8 Studio emails: only runs when RESEND_API_KEY is set
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
