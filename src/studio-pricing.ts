@@ -56,9 +56,11 @@ export function studioCosts(env: Record<string, string | undefined> = process.en
 }
 
 /** The plan card lines that depend on prices, so they can never drift from the quote. */
-export function planFeatureLines(plan: PlanLike, costs: StudioCosts): string[] {
+export function planFeatureLines(plan: PlanLike, _costs: StudioCosts): string[] {
+  // Only the credits: the owner chose (Oct 29, 2026) not to translate a plan into copies and seconds on the cards. The
+  // per-tool prices stay visible on the pricing pages and on every Generate button.
   const n = (x: number) => new Intl.NumberFormat("en-US").format(Math.floor(x));
-  return [`${n(plan.credits)} credits a month`, `Blueprint: about ${n(plan.credits / costs.blueprint_copy)} copies a month`, `Recast: about ${n(plan.credits / costs.recast_second)} seconds a month (${n(plan.credits / costs.recast_light_second)} on Light)`];
+  return [`${n(plan.credits)} credits a month`];
 }
 
 /** The sheet, for the owner: per plan and tool, what a unit earns, what it costs, the margin. */

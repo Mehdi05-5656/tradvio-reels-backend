@@ -32,9 +32,9 @@ test("a confirmed Higgsfield discount halves the Recast prices; nonsense values 
   assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, d).credits, 11 * 43, "a 10 s file bills 11 at Higgsfield");
 });
 
-test("plan cards say what the credits buy, from the same numbers", () => {
+test("plan cards state the credits only; copies and seconds are not promised per plan", () => {
   const lines = planFeatureLines(PLANS[1], studioCosts({}, PLANS));
-  assert.deepEqual(lines, ["3,500 credits a month", "Blueprint: about 875 copies a month", "Recast: about 41 seconds a month (140 on Light)"]);
+  assert.deepEqual(lines, ["3,500 credits a month"]);
 });
 
 test("the economics sheet shows every plan and tool at or above the target", () => {
