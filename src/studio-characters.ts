@@ -1,6 +1,7 @@
 // Clone8 Studio: the Character runner. A queued character job asks Higgsfield Soul for one portrait from the person's
 // description (human or animal), stores it as an image asset in their library, and charges one character unit. The asset
 // is then a reference for Recast, Swap and Trend like an uploaded photo. Runs as a timer loop in the web service.
+// Soul standard accepts resolution 720p or 1080p (the first live run was refused with "2K", Oct 29, 2026).
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLANS } from "./studio.js";
@@ -37,7 +38,7 @@ async function hf(deps: CharacterDeps, path: string, init: RequestInit & { idemp
 }
 
 export async function submitCharacter(deps: CharacterDeps, p: { prompt: string; idempotencyKey: string }) {
-  const r = await hf(deps, `/${SOUL_ENDPOINT}`, { method: "POST", body: JSON.stringify({ prompt: p.prompt, num_images: 1, resolution: "2K", aspect_ratio: "3:4" }), idempotency: p.idempotencyKey });
+  const r = await hf(deps, `/${SOUL_ENDPOINT}`, { method: "POST", body: JSON.stringify({ prompt: p.prompt, num_images: 1, resolution: "1080p", aspect_ratio: "3:4" }), idempotency: p.idempotencyKey });
   if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
   return { request_id: String(r.request_id) };
 }
