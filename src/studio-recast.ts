@@ -23,6 +23,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export type RecastDeps = {
   fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>;
   now?: () => number; mux?: (output: string, source: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number>; poster?: (video: string, target: string) => Promise<void>;
+  prescale?: (source: string, target: string) => Promise<void>;
 };
 
 /** The platform console issues "id:secret" keys (sent as `Key id:secret`); the newer SDK keys are bearer tokens. */
@@ -62,6 +63,19 @@ export async function pollRecast(deps: RecastDeps, requestId: string): Promise<{
   const status = String(r?.status ?? "unknown").toLowerCase();
   const videoUrl = r?.video?.url ?? r?.videos?.[0]?.url ?? r?.output?.video?.url ?? null;
   return { status, videoUrl: typeof videoUrl === "string" ? videoUrl : null, raw: r };
+}
+
+/** Higgsfield bills by the input's resolution (a 1080×1920 source bills at the 1080p rate whatever output we ask for),
+ *  and the output comes back at 720p anyway. So the source is scaled to fit 720×1280 before it leaves, sound untouched. */
+export const INPUT_MAX_SHORT = 720, INPUT_MAX_LONG = 1280;
+export async function prescaleSource(source: string, target: string) {
+  const vf = `scale='if(gt(iw,ih),min(${INPUT_MAX_LONG},iw),min(${INPUT_MAX_SHORT},iw))':'if(gt(iw,ih),min(${INPUT_MAX_SHORT},ih),min(${INPUT_MAX_LONG},ih))':force_original_aspect_ratio=decrease:force_divisible_by=2`;
+  await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", target], undefined, 240_000);
+}
+export async function probeDimensions(path: string): Promise<{ width: number; height: number }> {
+  const raw = await command("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", path], undefined, 30_000);
+  const [w, h] = raw.toString().trim().split(",").map(Number);
+  return { width: w, height: h };
 }
 
 /** The full model returns picture only: put the person's own sound back, cut to the output's length. */
@@ -129,9 +143,20 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     // 1. Submit (or pick up a request we already made before a restart).
     let requestId: string | null = job.progress?.request_id ?? null;
     if (!requestId) {
-      await renew(sb, job, { done: 0, total: 1, note: "Sending your video to the renderer" });
-      const video = await sb.storage.from("studio-uploads").createSignedUrl(asset.data.object_key, 7200);
+      await renew(sb, job, { done: 0, total: 1, note: "Preparing your video" });
+      // Scale the source to 720p first: Higgsfield bills by the input's resolution, and renders 720p regardless.
+      dir = await mkdtemp(join(tmpdir(), "studio-recast-"));
+      const original = join(dir, "original.mp4"), scaled = join(dir, "scaled.mp4");
+      const src = await sb.storage.from("studio-uploads").download(asset.data.object_key);
+      if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
+      await writeFile(original, Buffer.from(await src.data.arrayBuffer()));
+      await (deps.prescale ?? prescaleSource)(original, scaled);
+      const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-720p.mp4`;
+      const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(scaled), { contentType: "video/mp4", upsert: true });
+      if (put.error) throw put.error;
+      const video = await sb.storage.from("studio-outputs").createSignedUrl(inputKey, 7200);
       if (video.error || !video.data) throw video.error ?? new RecastError("source_missing");
+      await renew(sb, job, { note: "Sending your video to the renderer", input_key: inputKey });
       const images = await characterUrls(sb, deps, job);
       const sub = await submitRecast(deps, { model, videoUrl: video.data.signedUrl, imageUrls: images, idempotencyKey: job.id, resolution: RECAST_RESOLUTION });
       requestId = sub.request_id;
@@ -159,7 +184,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
 
     // 3. Fetch the result, put the sound back, make a poster, store everything.
     await renew(sb, job, { note: "Fetching the result" });
-    dir = await mkdtemp(join(tmpdir(), "studio-recast-"));
+    dir = dir ?? await mkdtemp(join(tmpdir(), "studio-recast-"));
     const raw = join(dir, "raw.mp4"), source = join(dir, "source.mp4"), out = join(dir, "out.mp4"), still = join(dir, "out.jpg");
     const dl = await (deps.fetch ?? fetch)(result.videoUrl, { signal: AbortSignal.timeout(300_000) });
     if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
@@ -186,7 +211,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const costs = studioCosts(deps.env ?? process.env, PLANS);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     const charged = Math.min(job.credits_reserved, Math.ceil(seconds) * per);
-    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native" }];
+    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null }];
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;

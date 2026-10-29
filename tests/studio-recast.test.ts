@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, MODELS, MAX_SECONDS, HF_BASE } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, MODELS, MAX_SECONDS, HF_BASE } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -48,7 +48,7 @@ function fakeSb(job: any, opts: { renew?: boolean; completeError?: any; failErro
 }
 
 const job = (over: any = {}) => ({ id: JOB, user_id: ANN, lease_token: TOKEN, asset_id: ASSET, options: { model: "full", seconds: 20, character: "noah", character_asset_id: null }, credits_reserved: 240, progress: {}, attempts: 1, ...over });
-const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, ...over });
+const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, prescale: async (_s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, ...over });
 
 test("auth header follows the key shape; quotes stop at Higgsfield's limits", () => {
   assert.equal(higgsfieldAuth("id:secret"), "Key id:secret");
@@ -78,17 +78,18 @@ test("a full recast: submit, wait, fetch, mux the sound back, store, charge the 
   const mux: any[] = [];
   assert.equal(await runRecastJob(sb, deps(h.fetchFn, { mux: async (r: string, s: string, t: string) => { mux.push([r, s]); await (await import("node:fs/promises")).writeFile(t, "muxed"); } }), job()), "done");
   const submit = h.calls.find((c) => c.method === "POST");
-  assert.equal(submit.body.video_url, `https://signed/studio-uploads/${ANN}/${ASSET}.mp4`);
+  assert.equal(submit.body.video_url, `https://signed/studio-outputs/${ANN}/${JOB}/${TOKEN}/input-720p.mp4`, "the 720p copy is what Higgsfield sees");
   assert.deepEqual(submit.body.image_urls, ["https://app.clone8.io/presets/noah.jpg"]);
   assert.equal(h.calls.filter((c) => c.url.endsWith("/status")).length, 3);
   assert.equal(mux.length, 1, "the full model gets its sound back");
-  assert.deepEqual(sb.uploads.map((u: any) => [u.bucket, u.key, u.type]), [["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.mp4`, "video/mp4"], ["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.jpg`, "image/jpeg"]]);
+  assert.deepEqual(sb.uploads.map((u: any) => [u.bucket, u.key, u.type]), [["studio-outputs", `${ANN}/${JOB}/${TOKEN}/input-720p.mp4`, "video/mp4"], ["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.mp4`, "video/mp4"], ["studio-outputs", `${ANN}/${JOB}/${TOKEN}/1.jpg`, "image/jpeg"]]);
+  assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_outputs[0].input_key, `${ANN}/${JOB}/${TOKEN}/input-720p.mp4`);
   const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
   assert.equal(done.p_credits_charged, Math.min(240, 20 * 85), "19.4 s rounds up to 20 s at the full rate, capped at the reservation");
   assert.equal(done.p_outputs[0].audio, "muxed_from_source");
   assert.equal(done.p_outputs[0].request_id, "req_1");
   const notes = sb.calls.filter((c: any) => c.name === "studio_renew").map((c: any) => c.args.p_progress.note);
-  assert.ok(notes.includes("Sending your video to the renderer") && notes.includes("Rendering your recast") && notes.includes("Putting your sound back"), notes.join(" | "));
+  assert.ok(notes.includes("Preparing your video") && notes.includes("Sending your video to the renderer") && notes.includes("Rendering your recast") && notes.includes("Putting your sound back"), notes.join(" | "));
   assert.equal(sb.calls.find((c: any) => c.name === "studio_renew" && c.args.p_progress.request_id).args.p_progress.request_id, "req_1", "the request id is written down for a restart");
 });
 
@@ -150,6 +151,21 @@ test("an uncertain completion is reported, never turned into a refund", async ()
   assert.equal(sb.calls.filter((c: any) => c.name === "studio_fail").length, 0);
   const sb2 = fakeSb(job(), { failError: new Error("down") });
   assert.equal(await runRecastJob(sb2, deps(fakeHiggsfield([{ status: "failed" }]).fetchFn), job()), "failure_unconfirmed");
+});
+
+test("real ffmpeg: a 1080×1920 source is scaled to 720×1280 and a landscape one to 1280×720, sound kept", { skip: !hasFfmpeg() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "recast-scale-"));
+  try {
+    for (const [size, want] of [["1080x1920", [720, 1280]], ["1920x1080", [1280, 720]], ["540x960", [540, 960]]] as const) {
+      const src = join(dir, `src-${size}.mp4`), out = join(dir, `out-${size}.mp4`);
+      execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", `testsrc=size=${size}:rate=30`, "-f", "lavfi", "-i", "sine=frequency=440", "-t", "1", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-shortest", src]);
+      await prescaleSource(src, out);
+      const d = await probeDimensions(out);
+      assert.deepEqual([d.width, d.height], want, size);
+      const streams = execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", out]).toString().trim().split("\n").sort();
+      assert.deepEqual(streams, ["audio", "video"]);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("real ffmpeg: the source audio is muxed onto a silent output, probed and postered", { skip: !hasFfmpeg() }, async () => {
