@@ -29,6 +29,7 @@ import { corsMiddleware } from "./cors.js";
 import { registerStudio } from "./studio.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
+import { startInstrumentLoop } from "./studio-instruments.js";
 import { startNoticesLoop } from "./studio-notices.js";
 import compression from "compression";
 import WebSocket from "ws";
@@ -85,6 +86,7 @@ async function main() {
   registerStudio(app, getSb);
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
   startCharacterLoop(getSb); // Studio characters (Soul portraits); off without HIGGSFIELD_API_KEY
+  startInstrumentLoop(getSb); // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
   startNoticesLoop(getSb); // Clone8 Studio emails: only runs when RESEND_API_KEY is set
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);

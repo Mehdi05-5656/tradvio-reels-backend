@@ -10,6 +10,7 @@ import { planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type Stu
 import { isAdmin } from "./auth.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
+import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
 import { randomUUID } from "node:crypto";
 import Stripe from "stripe";
 
@@ -67,13 +68,15 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
   // The Genjutsu suite (swap, restyle, trend) rides on the same key and runner; each can be closed on its own.
   return { blueprint: env.STUDIO_BLUEPRINT_ENABLED === "true", blueprint_plus: env.STUDIO_BLUEPRINT_PLUS_ENABLED === "true", recast, recast_full: recast && env.STUDIO_RECAST_FULL_ENABLED === "true",
     swap: recast && env.STUDIO_SWAP_ENABLED !== "false", restyle: recast && env.STUDIO_RESTYLE_ENABLED !== "false", trend: recast && env.STUDIO_TREND_ENABLED !== "false" && STUDIO_TRENDS.length > 0,
-    character: recast && env.STUDIO_CHARACTER_ENABLED !== "false" };
+    character: recast && env.STUDIO_CHARACTER_ENABLED !== "false",
+    // Instruments: every other platform model through one generic tool; opened by flag, narrowed by allow/hidden lists.
+    instrument: instrumentsEnabled(env).length > 0 };
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
 // ---------------------------------------------------------------------------------------------------
-export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character"; credits: number; options: Record<string, any>; summary: string };
+export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument"; credits: number; options: Record<string, any>; summary: string };
 const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const characterChoice = (o: any) => {
   if (!UUID_OPT(o.character_asset_id) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
@@ -321,7 +324,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   const dashboard = () => (env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "");
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
-    if (e instanceof StudioError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof StudioError || e instanceof InstrumentError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
@@ -661,13 +664,38 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     } catch (e) { fail(res, e); }
   });
 
+  // Instruments: the catalog the dashboard draws forms from. Public like /plans; nothing in it is per person.
+  app.get("/api/studio/instruments", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.json({ instruments: instrumentsEnabled(env).map((m) => publicInstrument(m, env, PLANS)) });
+  });
+  /** The person's assets as signed URLs for an instrument quote or estimate (10 minutes is plenty for an estimate). */
+  const resolveAssets = (sb: SupabaseClient, u: string) => async (ids: string[]) => {
+    const r = await sb.from("studio_assets").select("id,kind,status,object_key,probe").eq("user_id", u).in("id", ids);
+    if (r.error) throw r.error;
+    const out = new Map<string, { url: string; kind: string; seconds: number | null }>();
+    for (const a of (r.data ?? []) as any[]) {
+      if (a.status !== "ready") continue;
+      const s = await sb.storage.from("studio-uploads").createSignedUrl(a.object_key, 600);
+      if (s.error || !s.data) continue;
+      out.set(a.id, { url: s.data.signedUrl, kind: a.kind, seconds: Number(a.probe?.duration) > 0 ? Number(a.probe.duration) : null });
+    }
+    return out;
+  };
+  const quoteFor = async (sb: SupabaseClient, u: string, body: any): Promise<Quote> => {
+    if (String(body?.tool ?? "") === "instrument") {
+      const q: InstrumentQuote = await quoteInstrument({ env, log }, PLANS, body?.options, resolveAssets(sb, u));
+      return q;
+    }
+    const asset = await loadAsset(sb, u, body?.asset_id);
+    return quote(String(body?.tool ?? ""), body?.options, asset, costs);
+  };
+
   // Jobs
   app.post("/api/studio/quote", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     try {
-      const asset = await loadAsset(sbFn(), u, req.body?.asset_id);
-      const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset, costs);
-      res.json(q);
+      res.json(await quoteFor(sbFn(), u, req.body));
     } catch (e) { fail(res, e); }
   });
 
@@ -675,8 +703,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     try {
       const sb = sbFn();
-      const asset = await loadAsset(sb, u, req.body?.asset_id);
-      const q = quote(String(req.body?.tool ?? ""), req.body?.options, asset, costs);
+      const q = await quoteFor(sb, u, req.body);
+      const asset = q.tool === "instrument" ? null : await loadAsset(sb, u, req.body?.asset_id);
       const tools = toolsEnabled(env);
       if (!(tools as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       if ((q.tool === "recast" || q.tool === "swap" || q.tool === "trend") && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
@@ -824,7 +852,7 @@ function clientProbe(p: any): Record<string, number> {
 /** The file name a saved copy gets: the upload's name without its extension, tidied, plus the tool. */
 export function downloadBase(assetName: string | null | undefined, tool: string): string {
   const stem = String(assetName ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  const word = ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character" } as Record<string, string>)[tool] ?? "copy";
+  const word = ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render" } as Record<string, string>)[tool] ?? "copy";
   return `${stem || "clone8"}-${word}`;
 }
 
