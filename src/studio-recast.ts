@@ -218,7 +218,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
         throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? "recast_failed" : "recast_canceled");
       }
-      await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? "Rendering your recast" : "In Higgsfield's queue" });
+      await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In Higgsfield's queue" });
       await sleep(POLL_MS);
     }
     if (!result?.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url");
