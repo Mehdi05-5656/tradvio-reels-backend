@@ -285,12 +285,15 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     try {
       const sb = sbFn();
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
-      const [cust, bal, jobs, ledger] = await Promise.all([
-        sb.from("studio_customers").select("plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id,referral_code,referred_by,email_opt_out").eq("user_id", u).maybeSingle(),
+      const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id";
+      const [cust0, bal, jobs, ledger] = await Promise.all([
+        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out`).eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
         sb.from("studio_jobs").select("id,tool,status,credits_reserved,credits_charged,created_at").eq("user_id", u).gte("created_at", since).order("created_at", { ascending: false }).limit(200),
         sb.from("studio_credit_ledger").select("delta,reason,job_id,ref,note,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(50),
       ]);
+      // Before the referrals migration those three columns do not exist: read the row without them, referral stays empty.
+      const cust = cust0.error && /referral_code|referred_by|email_opt_out/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
       for (const r of [cust, bal, jobs, ledger]) if (r.error) throw r.error;
       const c: any = cust.data ?? null;
       const plan = planById(c?.plan_id);
