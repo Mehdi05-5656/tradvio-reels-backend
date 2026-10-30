@@ -27,12 +27,14 @@ const MAX_TOOL_ROUNDS = 5, MAX_MESSAGES = 60, LINK_LIMIT = 536_870_912;
 export class AssistantError extends Error { constructor(public code: string, message = code, public status = 400) { super(message); } }
 
 export type Attachment = { asset_id: string; name: string; kind: string; seconds: number | null };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean };
+/** A choice card: faces the assistant offers to generate so the person can pick one (or upload their own instead). */
+export type Choice = { id: string; kind: "characters"; prompt: string; mode: "human" | "animal"; count: number; credits: number; status: "offered" | "generating" | "ready" | "picked" | "failed"; job_id?: string | null; options?: Array<{ asset_id: string; name: string; poster_key?: string | null; url?: string | null }>; picked?: string | null; error_code?: string | null };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null };
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: "video" | "image"; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
 export type RunStep = { index: number; job_id: string | null; asset_id: string | null; status: "waiting" | "queued" | "running" | "done" | "failed" | "canceled" | "skipped"; error_code?: string | null };
 export type Run = { plan_id: string; status: "running" | "done" | "failed" | "canceled"; steps: RunStep[]; started_at: string; finished_at?: string | null; note?: string | null };
-export type Conversation = { id: string; user_id: string; title: string; status: string; messages: Message[]; plan: Plan | null; run: Run | null; summary?: string | null; summary_through?: number; created_at: string; updated_at: string };
+export type Conversation = { id: string; user_id: string; title: string; status: string; messages: Message[]; plan: Plan | null; run: Run | null; summary?: string | null; summary_through?: number; automation_id?: string | null; created_at: string; updated_at: string };
 /** What a streaming turn reports while it works: a new round of model text, a text delta, or a status line for a tool. */
 export type TurnEvent = { type: "round" } | { type: "delta"; text: string } | { type: "status"; text: string };
 export type MemoryNote = { id: string; note: string; created_at: string };
@@ -80,6 +82,16 @@ export const TOOLS = [
     name: "fetch_link",
     description: "Fetch a TikTok or Instagram video link into the person's library so it can be used as a source. Returns the new asset (id, name, seconds). YouTube is not supported; ask for the file instead.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
+  },
+  {
+    name: "preview_characters",
+    description: "Offer the person four portrait options of a character they described, to pick a face before a swap, recast or trend. Nothing is generated until they press the button on the card (it costs a few credits); they can upload their own photo instead. Call it once per description, then wait for their pick, which arrives as an attached image.",
+    input_schema: { type: "object", additionalProperties: false, properties: { prompt: { type: "string", description: "The character in plain words, under 300 characters" }, mode: { type: "string", enum: ["human", "animal"] } }, required: ["prompt", "mode"] },
+  },
+  {
+    name: "save_automation",
+    description: "Save this chat's confirmed plan as an automation: the same steps and settings with the source video as an open input, so the person can run it again from the Automations page by dropping a new file. Only after a plan was confirmed in this chat.",
+    input_schema: { type: "object", additionalProperties: false, properties: { name: { type: "string", description: "Three to six words" } }, required: ["name"] },
   },
   {
     name: "remember",
@@ -190,7 +202,17 @@ function jobLabel(j: any): string {
 // ---------------------------------------------------------------------------------------------------
 // Plans: validate what the model proposed, price every step, keep "$N" references for the run.
 // ---------------------------------------------------------------------------------------------------
-type Ctx = { sb: SupabaseClient; u: string; env: Record<string, string | undefined>; assets: Map<string, any>; styles: StudioStyle[]; deps: AssistantDeps; tools: Record<string, boolean> };
+export type Ctx = { sb: SupabaseClient; u: string; env: Record<string, string | undefined>; assets: Map<string, any>; styles: StudioStyle[]; deps: AssistantDeps; tools: Record<string, boolean> };
+/** Everything pricePlan needs for one person: their ready assets, the styles, the open tools. */
+export async function buildCtx(sb: SupabaseClient, deps: AssistantDeps, u: string): Promise<Ctx> {
+  const env = deps.env ?? process.env;
+  const [assets, styles] = await Promise.all([
+    sb.from("studio_assets").select("id,kind,name,object_key,probe,status").eq("user_id", u).eq("status", "ready").limit(400),
+    (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[]),
+  ]);
+  if (assets.error) throw assets.error;
+  return { sb, u, env, assets: new Map(((assets.data ?? []) as any[]).map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools: toolsEnabled(env) };
+}
 
 export function expectedOutput(tool: string, options: any, sourceSeconds: number | null, instOutput?: "video" | "image"): { output: "video" | "image"; seconds: number | null } {
   if (tool === "character") return { output: "image", seconds: null };
@@ -407,8 +429,9 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
   const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
-  let plan: Plan | null = null;
+  let plan: Plan | null = null, choice: Choice | null = null, saved: { id: string; name: string } | null = null;
   let text = "", streamed = "", interrupted = false;
+  const costs = costsFor(env);
   try {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     events?.({ type: "round" }); streamed = "";
@@ -425,7 +448,22 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         if (use.name === "propose_plan") events?.({ type: "status", text: "Pricing the plan" });
         else if (use.name === "fetch_link") events?.({ type: "status", text: "Fetching the link" });
         else if (use.name === "remember") events?.({ type: "status", text: "Saving a note" });
-        if (use.name === "remember") {
+        else if (use.name === "preview_characters") events?.({ type: "status", text: "Preparing options" });
+        else if (use.name === "save_automation") events?.({ type: "status", text: "Saving the automation" });
+        if (use.name === "preview_characters") {
+          if (!tools.character) throw new AssistantError("plan_invalid", "Characters are not taking jobs right now");
+          const q = quote("character", { mode: use.input?.mode, prompt: use.input?.prompt, count: 4 }, null, costs);
+          choice = { id: randomUUID(), kind: "characters", prompt: q.options.prompt, mode: q.options.mode, count: 4, credits: q.credits, status: "offered" };
+          result = { ok: true, offered: { options: 4, credits: q.credits, note: "The card is shown; nothing runs until the person presses Show options. They may upload a photo instead. Wait for their pick." } };
+        } else if (use.name === "save_automation") {
+          if (!convo.plan || convo.plan.status !== "confirmed") result = { ok: false, error: "no_confirmed_plan", detail: "Only a plan that was confirmed in this chat can be saved" };
+          else {
+            const { createAutomation } = await import("./studio-automations.js");
+            const a = await createAutomation(sb, convo.user_id, { name: String(use.input?.name ?? convo.title), plan: convo.plan, conversation_id: convo.id });
+            saved = { id: a.id, name: a.name };
+            result = { ok: true, automation: { id: a.id, name: a.name, inputs: a.inputs.map((i: any) => i.label) }, note: "Tell the person it is on the Automations page and what it takes as input." };
+          }
+        } else if (use.name === "remember") {
           const note = String(use.input?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
           if (note.length < 3) result = { ok: false, error: "note_empty" };
           else if (memory.length >= MEMORY_LIMIT) result = { ok: false, error: "memory_full", detail: `${MEMORY_LIMIT} notes already; the person can clear some under Memory` };
@@ -458,7 +496,9 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     log(`[assistant] turn ${convo.id} stopped by the person`);
   }
   if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}) };
+  if (!text && choice) text = "Here are four takes on that. Pick the one you like, or upload a photo instead.";
+  if (!text && saved) text = `Saved as "${saved.name}". Find it under Automations and drop a new video to run it again.`;
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}) };
   convo.messages = [...convo.messages, assistant];
   if (plan) { if (convo.plan && convo.plan.status === "proposed") convo.plan.status = "superseded"; convo.plan = plan; convo.title = plan.title; }
   convo.updated_at = now();
@@ -645,7 +685,7 @@ export function startAssistantLoop(sbFn: () => SupabaseClient, deps: AssistantDe
 // ---------------------------------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------------------------------
-async function hydrateJobs(sb: SupabaseClient, u: string, ids: string[]) {
+export async function hydrateJobs(sb: SupabaseClient, u: string, ids: string[]) {
   if (!ids.length) return [];
   const r = await sb.from("studio_jobs").select("id,tool,status,asset_id,options,credits_reserved,credits_charged,progress,outputs,error_code,created_at,started_at,finished_at").in("id", ids).eq("user_id", u);
   if (r.error) throw r.error;
@@ -661,8 +701,32 @@ async function hydrateJobs(sb: SupabaseClient, u: string, ids: string[]) {
   }
   return jobs;
 }
-const publicConversation = (c: any, jobs: any[] = []) => ({ id: c.id, title: c.title, status: c.status, messages: c.messages ?? [], plan: c.plan ?? null, run: c.run ?? null, jobs, summary: c.summary ?? null, summary_through: c.summary_through ?? 0, created_at: c.created_at, updated_at: c.updated_at });
+export const publicConversation = (c: any, jobs: any[] = []) => ({ id: c.id, title: c.title, status: c.status, messages: c.messages ?? [], plan: c.plan ?? null, run: c.run ?? null, jobs, summary: c.summary ?? null, summary_through: c.summary_through ?? 0, automation_id: c.automation_id ?? null, created_at: c.created_at, updated_at: c.updated_at });
 const escapeLike = (q: string) => q.replace(/[\\%_]/g, (m) => `\\${m}`);
+
+/** Choice cards whose job finished become ready (options = the character assets) or failed; option posters are signed. Persists when something changed. */
+export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversation): Promise<Conversation> {
+  const pending = c.messages.filter((m) => m.choice?.status === "generating" && m.choice.job_id);
+  let changed = false;
+  if (pending.length) {
+    const r = await sb.from("studio_jobs").select("id,status,outputs,error_code").in("id", pending.map((m) => m.choice!.job_id!)).eq("user_id", u);
+    if (r.error) throw r.error;
+    for (const m of pending) {
+      const j = (r.data ?? []).find((x: any) => x.id === m.choice!.job_id);
+      if (!j) continue;
+      if (j.status === "done") { m.choice!.status = "ready"; m.choice!.options = (j.outputs ?? []).filter((o: any) => o.asset_id).map((o: any, i: number) => ({ asset_id: o.asset_id, name: `Option ${i + 1}`, poster_key: o.poster_key ?? o.key ?? null })); changed = true; }
+      else if (j.status === "failed" || j.status === "canceled") { m.choice!.status = "failed"; m.choice!.error_code = j.error_code ?? j.status; changed = true; }
+    }
+  }
+  if (changed) { const w = await sb.from("studio_conversations").update({ messages: c.messages }).eq("id", c.id).eq("user_id", u); if (w.error) throw w.error; }
+  const keys = c.messages.flatMap((m) => (m.choice?.options ?? []).map((o) => o.poster_key).filter(Boolean) as string[]);
+  if (keys.length) {
+    const signed = await sb.storage.from("studio-outputs").createSignedUrls(keys, 900);
+    const urls = new Map(((signed.data ?? []) as any[]).map((x) => [x.path, x.signedUrl]));
+    for (const m of c.messages) for (const o of m.choice?.options ?? []) o.url = o.poster_key ? urls.get(o.poster_key) ?? null : null;
+  }
+  return c;
+}
 
 export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps: AssistantDeps = {}): void {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
@@ -682,9 +746,48 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     return r.data as Conversation;
   };
   const respond = async (sb: SupabaseClient, u: string, c: Conversation, res: Response, status = 200) => {
+    await hydrateChoices(sb, u, c);
     const ids = (c.run?.steps ?? []).map((s) => s.job_id).filter(Boolean) as string[];
     res.status(status).json({ conversation: publicConversation(c, await hydrateJobs(sb, u, ids)), assistant: toolsEnabled(env).assistant });
   };
+  // Choice cards: the person presses Show options (a character job for four portraits, credits reserved like any job),
+  // then picks one; the pick is recorded on the card and the interface sends the picked image as the next message.
+  app.post("/api/studio/assistant/conversations/:id/choices/:choiceId/generate", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn();
+      const c = await load(sb, u, req.params.id);
+      const m = c.messages.find((x) => x.choice?.id === req.params.choiceId);
+      if (!m?.choice) throw new AssistantError("choice_not_found", "No such card", 404);
+      if (m.choice.status !== "offered" && m.choice.status !== "failed") throw new AssistantError("choice_done", "Those options were already made", 409);
+      const limit = await checkJobRate(sb, u);
+      if (limit) throw new AssistantError(limit.code, limit.message, limit.status);
+      const q = quote("character", { mode: m.choice.mode, prompt: m.choice.prompt, count: 4 }, null, costsFor(env));
+      const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: "character", p_asset: null, p_options: q.options, p_credits: q.credits });
+      if (r.error) { const msg = String(r.error.message ?? r.error); if (/insufficient_credits/.test(msg)) throw new AssistantError("insufficient_credits", "Not enough credits for the options", 402); if (/too_many_jobs/.test(msg)) throw new AssistantError("too_many_jobs", "Your jobs are all busy; try again in a moment", 429); throw r.error; }
+      m.choice.status = "generating"; m.choice.job_id = r.data.id; m.choice.credits = q.credits; m.choice.error_code = null;
+      const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
+      if (w.error) throw w.error;
+      log(`[assistant] choice ${m.choice.id} job ${r.data.id}`);
+      await respond(sb, u, c, res);
+    } catch (e) { fail(res, e); }
+  });
+  app.post("/api/studio/assistant/conversations/:id/choices/:choiceId/pick", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn();
+      const c = await load(sb, u, req.params.id);
+      await hydrateChoices(sb, u, c);
+      const m = c.messages.find((x) => x.choice?.id === req.params.choiceId);
+      if (!m?.choice) throw new AssistantError("choice_not_found", "No such card", 404);
+      const id = String(req.body?.asset_id ?? "");
+      if (!(m.choice.options ?? []).some((o) => o.asset_id === id)) throw new AssistantError("choice_invalid", "Pick one of the options");
+      m.choice.status = "picked"; m.choice.picked = id;
+      const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
+      if (w.error) throw w.error;
+      await respond(sb, u, c, res);
+    } catch (e) { fail(res, e); }
+  });
 
   app.get("/api/studio/assistant/conversations", async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");

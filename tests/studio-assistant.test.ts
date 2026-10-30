@@ -5,7 +5,8 @@ import { writeFile } from "node:fs/promises";
 import { accountAccess } from "../src/account-access.js";
 import { COSTS, PLANS } from "../src/studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS } from "../src/studio-knowledge.js";
-import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
+import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
+import { templateFromPlan, instantiate, createAutomation, runAutomation, registerAutomations } from "../src/studio-automations.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CAT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CONVO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ENV: Record<string, string | undefined> = { HIGGSFIELD_API_KEY: "id:secret", STUDIO_INSTRUMENTS_ENABLED: "true", STUDIO_BLUEPRINT_ENABLED: "true", STUDIO_RECAST_FULL_ENABLED: "true", ANTHROPIC_API_KEY: "sk-test", SCRAPECREATORS_API_KEY: "sc-test" };
@@ -45,6 +46,7 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
             writes.push({ ...pending, filters: filters.length });
             if (pending.op === "delete") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); tables[table] = (tables[table] ?? []).filter((r) => !hit.includes(r)); rows = () => []; filters.length = 0; }
             if (pending.op === "insert" && table === "studio_assistant_memory") { if ((tables[table] ?? []).some((r) => r.note.toLowerCase() === pending.v.note.toLowerCase())) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } }).then(resolve, reject); const v = { id: `note-${(tables[table] ?? []).length + 1}`, created_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
+            else if (pending.op === "insert" && table === "studio_automations") { const v = { id: `a${(tables[table] ?? []).length + 1}aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`, runs: 0, last_run_at: null, description: null, created_at: "2026-10-29T00:00:00Z", updated_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
             else if (pending.op === "insert") { const v = { id: CONVO, title: "New chat", status: "open", messages: [], plan: null, run: null, summary: null, summary_through: 0, created_at: "2026-10-29T00:00:00Z", updated_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
             if (pending.op === "update") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); for (const r of hit) Object.assign(r, pending.v); rows = () => hit; filters.length = 0; }
           }
@@ -58,7 +60,7 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
   };
   return sb;
 }
-const baseTables = () => ({ studio_assets: [video, cat], studio_customers: [{ user_id: ANN, plan_id: "creator", status: "active", parallel_jobs: 2 }], studio_jobs: [] as any[], studio_conversations: [] as any[], studio_assistant_memory: [] as any[] });
+const baseTables = () => ({ studio_assets: [video, cat], studio_customers: [{ user_id: ANN, plan_id: "creator", status: "active", parallel_jobs: 2 }], studio_jobs: [] as any[], studio_conversations: [] as any[], studio_assistant_memory: [] as any[], studio_automations: [] as any[] });
 const rpcs = (tables: Record<string, any[]>) => (name: string, args: any) => {
   if (name === "studio_balance") return { data: 5000, error: null };
   if (name === "studio_create_job") { const j = { id: `job-${tables.studio_jobs.length + 1}`, user_id: ANN, tool: args.p_tool, status: "queued", asset_id: args.p_asset, options: args.p_options, credits_reserved: args.p_credits, outputs: [], progress: {}, created_at: "2026-10-29T00:00:00Z" }; tables.studio_jobs.push(j); return { data: j, error: null }; }
@@ -104,7 +106,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,remember");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,preview_characters,save_automation,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {
@@ -331,6 +333,7 @@ async function serve(sb: any, fetchFn: any) {
   app.use((req: any, _res, next) => { const u = req.headers["x-test-user"]; if (u) { req.auth = { user_id: u, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: u }; } next(); });
   app.use(accountAccess(() => sb));
   registerAssistant(app, () => sb, deps(fetchFn));
+  registerAutomations(app, () => sb, deps(fetchFn));
   const server = app.listen(0); await new Promise((r) => server.once("listening", r));
   const port = (server.address() as any).port, base = `http://127.0.0.1:${port}`;
   const call = async (method: string, path: string, body?: any, headers: Record<string, string> = { "x-test-user": ANN }) => {
@@ -527,5 +530,116 @@ test("routes: rename, delete (canceling queued steps), search, memory list and d
     assert.ok(sb.calls.some((x: any) => x.name === "studio_cancel"), "the queued job was canceled");
     assert.equal(tables.studio_conversations.length, 0);
     assert.equal((await s.call("GET", `/api/studio/assistant/conversations/${id}`)).status, 404);
+  } finally { await s.close(); }
+});
+
+
+test("choice cards: the model offers four faces, the person generates them (a character job), the card fills from the job, and a pick is recorded", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn } = fakeClaude([
+    toolReply("preview_characters", { prompt: "a silver-haired astronaut in her 50s", mode: "human" }),
+    textReply("Four takes on the astronaut. Pick one, or upload a photo instead."),
+  ]);
+  const s = await serve(sb, fetchFn);
+  try {
+    const made = await s.call("POST", "/api/studio/assistant/conversations"); const id = made.body.conversation.id;
+    const msg = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "swap me for a silver-haired astronaut" });
+    assert.equal(msg.status, 200, JSON.stringify(msg.body));
+    const card = msg.body.conversation.messages[1].choice;
+    assert.ok(card, "the assistant message carries a card");
+    assert.equal(card.status, "offered"); assert.equal(card.count, 4); assert.equal(card.credits, 4 * COSTS.character_image); assert.equal(card.mode, "human");
+    assert.equal(msg.body.conversation.plan, null, "no plan before the pick");
+    // generate: one character job for four portraits
+    const gen = await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/generate`);
+    assert.equal(gen.status, 200, JSON.stringify(gen.body));
+    assert.equal(gen.body.conversation.messages[1].choice.status, "generating");
+    const created = sb.calls.filter((x: any) => x.name === "studio_create_job");
+    assert.equal(created.length, 1); assert.equal(created[0].args.p_tool, "character"); assert.equal(created[0].args.p_options.count, 4); assert.equal(created[0].args.p_credits, 4 * COSTS.character_image);
+    assert.equal((await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/generate`)).body.error, "choice_done");
+    // the job finishes with four assets: the card is ready with signed posters
+    const job = tables.studio_jobs[0]; job.status = "done"; job.outputs = [1, 2, 3, 4].map((i) => ({ index: i, key: `${ANN}/job-1/${i}.jpg`, poster_key: `${ANN}/job-1/${i}.jpg`, kind: "image", asset_id: `0000000${i}-0000-4000-8000-00000000000${i}` }));
+    const read = await s.call("GET", `/api/studio/assistant/conversations/${id}`);
+    const ready = read.body.conversation.messages[1].choice;
+    assert.equal(ready.status, "ready"); assert.equal(ready.options.length, 4); assert.equal(ready.options[2].name, "Option 3"); assert.match(ready.options[0].url, /^https:\/\/signed\//);
+    assert.equal(tables.studio_conversations[0].messages[1].choice.status, "ready", "the settled card is saved");
+    // pick
+    assert.equal((await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/pick`, { asset_id: "nope" })).body.error, "choice_invalid");
+    const pick = await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/pick`, { asset_id: ready.options[1].asset_id });
+    assert.equal(pick.status, 200); assert.equal(pick.body.conversation.messages[1].choice.status, "picked"); assert.equal(pick.body.conversation.messages[1].choice.picked, ready.options[1].asset_id);
+  } finally { await s.close(); }
+});
+
+test("a failed options job marks the card failed and lets the person try again", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const c = convo({ messages: [{ id: "m1", role: "assistant", text: "Pick", at: "2026-10-29T00:00:00Z", choice: { id: "ch1", kind: "characters", prompt: "a fox", mode: "animal", count: 4, credits: 40, status: "generating", job_id: "job-9" } }] });
+  tables.studio_conversations.push(c); tables.studio_jobs.push({ id: "job-9", user_id: ANN, status: "failed", error_code: "recast_nsfw", outputs: [] });
+  await hydrateChoices(sb, ANN, c);
+  assert.equal(c.messages[0].choice!.status, "failed"); assert.equal(c.messages[0].choice!.error_code, "recast_nsfw");
+});
+
+test("automations: a confirmed plan becomes a recipe with the video as an open input and the made character fixed; running it on a new file prices and starts a run", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const ctx = ctxFor(sb);
+  const plan = await pricePlan(ctx as any, { title: "Cat podcast, ten originals", steps: [
+    { tool: "swap", label: "Host becomes the cat", source: VID, options: { model: "light", character_asset_id: CAT, prompt: "keep the mic" } },
+    { tool: "blueprint", label: "Ten originals", source: "$1", options: { copies: 10 } },
+  ] });
+  const t = templateFromPlan(plan, new Map([[VID, "podcast.mp4"]]));
+  assert.deepEqual(t.inputs, [{ key: "video_1", kind: "video", label: "The video", from_name: "podcast.mp4" }]);
+  assert.equal(t.steps[0].source, "{video_1}"); assert.equal(t.steps[0].options.character_asset_id, CAT, "the cat stays"); assert.equal(t.steps[0].options.seconds, undefined, "seconds are recomputed per file");
+  assert.equal(t.steps[1].source, "$1"); assert.equal(t.steps[1].options.copies, 10);
+  assert.throws(() => instantiate(t.steps, t.inputs, {}), (e: any) => e.code === "input_missing" && /The video/.test(e.message));
+  assert.equal(instantiate(t.steps, t.inputs, { video_1: VID }).steps[0].source, VID);
+  // saving needs a confirmed plan with a video in it
+  await assert.rejects(createAutomation(sb, ANN, { name: "x", plan: await pricePlan(ctx as any, { title: "x", steps: [{ tool: "character", label: "fox", options: { mode: "animal", prompt: "a fox" } }] }) }), (e: any) => e.code === "automation_no_input");
+  plan.status = "confirmed";
+  const a = await createAutomation(sb, ANN, { name: "  Cat podcast  ", plan, conversation_id: CONVO });
+  assert.equal(a.name, "Cat podcast"); assert.equal(tables.studio_automations.length, 1);
+  // run on another video: a conversation is created with the plan confirmed and the first job started
+  const other = { ...video, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", name: "episode-2.mp4", object_key: `${ANN}/ffffffff-ffff-4fff-8fff-ffffffffffff.mp4`, probe: { duration: 8 } };
+  tables.studio_assets.push(other);
+  const out = await runAutomation(sb, deps(fakeClaude([]).fetchFn), a, { video_1: other.id });
+  assert.equal(out.automation_id, a.id); assert.equal(out.status, "running"); assert.equal(out.plan!.status, "confirmed");
+  assert.equal(out.title, "Cat podcast · episode-2");
+  assert.equal(out.plan!.steps[0].credits, 9 * COSTS.recast_light_second, "priced on the new file (8 s rounds to 9)");
+  assert.equal(out.run!.steps[0].status, "queued"); assert.equal(sb.calls.filter((x: any) => x.name === "studio_create_job")[0].args.p_asset, other.id);
+  assert.equal(tables.studio_automations[0].runs, 1);
+  await assert.rejects(runAutomation(sb, deps(fakeClaude([]).fetchFn), a, {}), (e: any) => e.code === "input_missing");
+  await assert.rejects(runAutomation(sb, deps(fakeClaude([]).fetchFn), a, { video_1: CAT }), (e: any) => e.code === "input_invalid");
+});
+
+test("automation routes: save from a chat (and from the save_automation tool), list, get with runs, rename and edit copies, quote, run, delete", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn } = fakeClaude([
+    toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }),
+    textReply("Five originals for 20 credits. Confirm in the card."),
+    toolReply("save_automation", { name: "Five originals of anything" }),
+    textReply("Saved. Find it under Automations."),
+  ]);
+  const s = await serve(sb, fetchFn);
+  try {
+    const made = await s.call("POST", "/api/studio/assistant/conversations"); const id = made.body.conversation.id;
+    const msg = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "five originals of my podcast" });
+    assert.equal((await s.call("POST", "/api/studio/automations", { conversation_id: id })).body.error, "no_confirmed_plan", "not before Confirm");
+    await s.call("POST", `/api/studio/assistant/conversations/${id}/confirm`, { plan_id: msg.body.conversation.plan.id });
+    const saved = await s.call("POST", "/api/studio/automations", { conversation_id: id, name: "Podcast originals" });
+    assert.equal(saved.status, 201, JSON.stringify(saved.body)); assert.equal(saved.body.automation.name, "Podcast originals"); assert.equal(saved.body.automation.inputs[0].from_name, "podcast.mp4");
+    // the tool path
+    const viaTool = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "make this an automation" });
+    assert.equal(viaTool.status, 200, JSON.stringify(viaTool.body)); assert.match(viaTool.body.conversation.messages.at(-1).text, /Saved/);
+    const list = await s.call("GET", "/api/studio/automations");
+    assert.equal(list.body.automations.length, 2); assert.equal(list.body.automations.some((a: any) => a.name === "Five originals of anything"), true);
+    const aid = saved.body.automation.id;
+    const renamed = await s.call("PATCH", `/api/studio/automations/${aid}`, { name: "Podcast, 8 originals", steps: [{ index: 1, options: { copies: 8 } }] });
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.body)); assert.equal(renamed.body.automation.steps[0].options.copies, 8);
+    const q = await s.call("POST", `/api/studio/automations/${aid}/quote`, { inputs: { video_1: VID } });
+    assert.equal(q.status, 200, JSON.stringify(q.body)); assert.equal(q.body.credits, 8 * COSTS.blueprint_copy);
+    assert.equal((await s.call("POST", `/api/studio/automations/${aid}/quote`, { inputs: {} })).body.error, "input_missing");
+    const run = await s.call("POST", `/api/studio/automations/${aid}/run`, { inputs: { video_1: VID } });
+    assert.equal(run.status, 201, JSON.stringify(run.body)); assert.equal(run.body.conversation.status, "running"); assert.equal(run.body.conversation.automation_id, aid); assert.equal(run.body.conversation.jobs.length, 1);
+    const got = await s.call("GET", `/api/studio/automations/${aid}`);
+    assert.equal(got.body.automation.runs, 1); assert.equal(got.body.runs.length, 1); assert.equal(got.body.runs[0].run_status, "running");
+    assert.equal((await s.call("DELETE", `/api/studio/automations/${aid}`)).body.deleted, aid);
+    assert.equal((await s.call("GET", `/api/studio/automations/${aid}`)).status, 404);
   } finally { await s.close(); }
 });

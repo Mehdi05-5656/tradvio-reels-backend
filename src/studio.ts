@@ -145,7 +145,9 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
     if (prompt.length < 3) throw new StudioError("prompt_required", "Describe the character");
     const mode = o.mode === "animal" ? "animal" : "human";
-    return { tool, credits: costs.character_image, options: { mode, prompt }, summary: `1 image × ${costs.character_image}` };
+    // Soul draws one portrait or a set of four; four options let the person pick a face before anything else runs.
+    const count = Number(o.count) === 4 ? 4 : 1;
+    return { tool, credits: count * costs.character_image, options: { mode, prompt, count }, summary: `${count} ${count === 1 ? "image" : "images"} × ${costs.character_image}` };
   }
   throw new StudioError("unknown_tool", "Unknown tool");
 }

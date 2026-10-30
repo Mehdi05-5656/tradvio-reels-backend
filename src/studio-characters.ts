@@ -52,16 +52,17 @@ async function hf(deps: CharacterDeps, path: string, init: RequestInit & { idemp
   return body;
 }
 
-export async function submitCharacter(deps: CharacterDeps, p: { prompt: string; idempotencyKey: string }) {
-  const r = await hf(deps, `/${SOUL_ENDPOINT}`, { method: "POST", body: JSON.stringify({ prompt: p.prompt, num_images: 1, resolution: "1080p", aspect_ratio: "3:4" }), idempotency: p.idempotencyKey });
+export async function submitCharacter(deps: CharacterDeps, p: { prompt: string; idempotencyKey: string; count?: number }) {
+  const r = await hf(deps, `/${SOUL_ENDPOINT}`, { method: "POST", body: JSON.stringify({ prompt: p.prompt, num_images: p.count === 4 ? 4 : 1, resolution: "1080p", aspect_ratio: "3:4" }), idempotency: p.idempotencyKey });
   if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
   return { request_id: String(r.request_id) };
 }
-export async function pollCharacter(deps: CharacterDeps, requestId: string): Promise<{ status: string; imageUrl: string | null; raw: any }> {
+export async function pollCharacter(deps: CharacterDeps, requestId: string): Promise<{ status: string; imageUrl: string | null; imageUrls: string[]; raw: any }> {
   const r = await hf(deps, `/requests/${encodeURIComponent(requestId)}/status`, { method: "GET" });
   const status = String(r?.status ?? "unknown").toLowerCase();
-  const url = r?.images?.[0]?.url ?? r?.image?.url ?? r?.output?.images?.[0]?.url ?? null;
-  return { status, imageUrl: typeof url === "string" ? url : null, raw: r };
+  const list: any[] = Array.isArray(r?.images) ? r.images : Array.isArray(r?.output?.images) ? r.output.images : r?.image ? [r.image] : [];
+  const imageUrls = list.map((x) => x?.url).filter((u): u is string => typeof u === "string");
+  return { status, imageUrl: imageUrls[0] ?? null, imageUrls, raw: r };
 }
 
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
@@ -82,16 +83,16 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
     let requestId: string | null = job.progress?.request_id ?? null;
     if (!requestId) {
       await renew(sb, job, { done: 0, total: 1, note: "Describing your character to the renderer" });
-      const sub = await submitCharacter(deps, { prompt: characterPrompt(job.options), idempotencyKey: job.id });
+      const sub = await submitCharacter(deps, { prompt: characterPrompt(job.options), idempotencyKey: job.id, count: Number(job.options?.count) === 4 ? 4 : 1 });
       requestId = sub.request_id;
       await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "Drawing your character" });
       log(`[character] submitted ${JSON.stringify({ job: job.id, request: requestId })}`);
     }
     const started = Date.parse(job.progress?.submitted_at ?? "") || now();
-    let result: { imageUrl: string | null } | null = null;
+    let result: { imageUrl: string | null; imageUrls: string[] } | null = null;
     for (;;) {
       if (now() - started > MAX_WAIT_MS) throw new RecastError("recast_timeout");
-      let st: { status: string; imageUrl: string | null; raw: any };
+      let st: { status: string; imageUrl: string | null; imageUrls: string[]; raw: any };
       try { st = await pollCharacter(deps, requestId); }
       catch (e: any) { if (e instanceof RecastError && e.retry) { await renew(sb, job, { note: "Waiting for the renderer" }); await sleep(POLL_MS); continue; } throw e; }
       if (st.status === "completed") { result = st; break; }
@@ -99,29 +100,36 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
       await renew(sb, job, { note: "Drawing your character" });
       await sleep(POLL_MS);
     }
-    if (!result?.imageUrl) throw new RecastError("recast_bad_output", "completed without an image url");
-    const dl = await (deps.fetch ?? fetch)(result.imageUrl, { signal: AbortSignal.timeout(120_000) });
-    if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
-    let bytes: Buffer = Buffer.from(await dl.arrayBuffer());
-    if (!bytes.length || bytes.length > IMAGE_LIMIT) throw new RecastError("output_too_large");
-    // Soul returns PNG; the storage buckets accept JPEG, so the portrait is re-encoded (quality 92) before it is stored.
-    const ct = String(dl.headers.get("content-type") ?? "");
-    if (/png|webp/.test(ct) || bytes[0] === 0x89) bytes = await (deps.toJpeg ?? toJpeg)(bytes);
-    const ext = "jpg";
-    // The character joins the library as a ready image asset, so every tool can pick it like an uploaded photo.
-    const assetId = randomUUID(), key = `${job.user_id}/${assetId}.${ext}`;
-    const name = `Character: ${String(job.options?.prompt ?? "").trim().slice(0, 60) || "untitled"}`;
-    const up = await sb.storage.from("studio-uploads").upload(key, bytes, { contentType: "image/jpeg", upsert: false });
-    if (up.error) throw up.error;
-    const ins = await sb.from("studio_assets").insert({ id: assetId, user_id: job.user_id, kind: "image", name, object_key: key, bytes: bytes.length, status: "ready", probe: { character: true, mode: job.options?.mode ?? "human" } });
-    if (ins.error) throw ins.error;
-    // A copy in studio-outputs is what the job panel shows and signs, like every other tool's output.
-    const outKey = `${job.user_id}/${job.id}/${job.lease_token}/1.${ext}`;
-    const out = await sb.storage.from("studio-outputs").upload(outKey, bytes, { contentType: "image/jpeg", upsert: false });
-    if (out.error) log(`[character] output copy failed ${JSON.stringify({ job: job.id, error: out.error.message })}`);
+    const want = Number(job.options?.count) === 4 ? 4 : 1;
+    const urls = (result?.imageUrls ?? []).slice(0, want);
+    if (!urls.length) throw new RecastError("recast_bad_output", "completed without an image url");
     const costs = studioCosts(deps.env ?? process.env, PLANS);
-    const charged = Math.min(job.credits_reserved, costs.character_image);
-    const outputs = [{ index: 1, key: out.error ? key : outKey, poster_key: out.error ? undefined : outKey, kind: "image", asset_id: assetId, bytes: bytes.length, request_id: requestId, tool: "character" }];
+    const outputs: any[] = [];
+    const base = `Character: ${String(job.options?.prompt ?? "").trim().slice(0, 60) || "untitled"}`;
+    for (const [i, url] of urls.entries()) {
+      const dl = await (deps.fetch ?? fetch)(url, { signal: AbortSignal.timeout(120_000) });
+      if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
+      let bytes: Buffer = Buffer.from(await dl.arrayBuffer());
+      if (!bytes.length || bytes.length > IMAGE_LIMIT) throw new RecastError("output_too_large");
+      // Soul returns PNG; the storage buckets accept JPEG, so the portrait is re-encoded (quality 92) before it is stored.
+      const ct = String(dl.headers.get("content-type") ?? "");
+      if (/png|webp/.test(ct) || bytes[0] === 0x89) bytes = await (deps.toJpeg ?? toJpeg)(bytes);
+      const ext = "jpg";
+      // Each character joins the library as a ready image asset, so every tool can pick it like an uploaded photo.
+      const assetId = randomUUID(), key = `${job.user_id}/${assetId}.${ext}`;
+      const name = urls.length > 1 ? `${base} (${i + 1})` : base;
+      const up = await sb.storage.from("studio-uploads").upload(key, bytes, { contentType: "image/jpeg", upsert: false });
+      if (up.error) throw up.error;
+      const ins = await sb.from("studio_assets").insert({ id: assetId, user_id: job.user_id, kind: "image", name, object_key: key, bytes: bytes.length, status: "ready", probe: { character: true, mode: job.options?.mode ?? "human", prompt: String(job.options?.prompt ?? "").slice(0, 200) } });
+      if (ins.error) throw ins.error;
+      // A copy in studio-outputs is what the job panel shows and signs, like every other tool's output.
+      const outKey = `${job.user_id}/${job.id}/${job.lease_token}/${i + 1}.${ext}`;
+      const out = await sb.storage.from("studio-outputs").upload(outKey, bytes, { contentType: "image/jpeg", upsert: false });
+      if (out.error) log(`[character] output copy failed ${JSON.stringify({ job: job.id, error: out.error.message })}`);
+      outputs.push({ index: i + 1, key: out.error ? key : outKey, poster_key: out.error ? undefined : outKey, kind: "image", asset_id: assetId, bytes: bytes.length, request_id: requestId, tool: "character" });
+    }
+    const assetId = outputs[0].asset_id;
+    const charged = Math.min(job.credits_reserved, outputs.length * costs.character_image);
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;
