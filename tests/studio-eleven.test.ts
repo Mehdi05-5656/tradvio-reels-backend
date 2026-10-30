@@ -4,6 +4,7 @@ import express from "express";
 import { allInstruments, instrumentsEnabled, instrumentById, validateParams, tableUnits, tableUsd, unitLabel, quoteInstrument, publicInstrument, runInstrumentJob } from "../src/studio-instruments.js";
 import { ELEVEN_BASE, elevenEnabled, matchVoices, listVoices, resetVoiceCache, registerVoices, type Voice } from "../src/studio-eleven.js";
 import { PLANS } from "../src/studio.js";
+import { buildSystemPrompt } from "../src/studio-knowledge.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", VOICE = "JBFqnCBsd6RMkjVDRZzb";
 const ENV = { HIGGSFIELD_API_KEY: "id:secret", ELEVENLABS_API_KEY: "xi-test", STUDIO_INSTRUMENTS_ENABLED: "true" };
@@ -169,4 +170,15 @@ test("voices: the library is fetched once, matched by words in the description, 
     const s2 = off.listen(0); const p2 = (s2.address() as any).port;
     try { const r2: any = await (await fetch(`http://127.0.0.1:${p2}/api/studio/voices`)).json(); assert.deepEqual(r2, { voices: [], enabled: false }); } finally { s2.close(); }
   } finally { server.close(); }
+});
+
+test("the prompt names every audio setting, so the model can ask for a 10-second track or a voice id", () => {
+  const prompt = buildSystemPrompt({ tools: { blueprint: true, blueprint_plus: true, recast: true, swap: true, restyle: true, trend: true, character: true, instrument: true, assistant: true }, costs: { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 72, recast_light_second: 22, character_image: 10 }, plans: PLANS, env: ENV, styles: [], today: "2026-10-29",
+    user: { plan: "creator", status: "active", balance: 100, parallel_jobs: 2, assets: [], recent_jobs: [] } });
+  const music = prompt.split("\n").find((l) => l.startsWith("- audio/music"))!;
+  assert.match(music, /length_seconds 10-300/);
+  const tts = prompt.split("\n").find((l) => l.startsWith("- audio/text-to-speech"))!;
+  assert.match(tts, /voice_id voice id from preview_voices, required/); assert.match(tts, /model natural\/expressive\/fast/);
+  const dub = prompt.split("\n").find((l) => l.startsWith("- audio/dubbing"))!;
+  assert.match(dub, /target_language en\/es\/fr/);
 });

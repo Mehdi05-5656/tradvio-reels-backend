@@ -51,6 +51,13 @@ function instrumentLine(m: Instrument, plans: PlanLike[], env: Record<string, st
   if (props.resolution?.enum) bits.push(`resolution ${props.resolution.enum.join("/")}`);
   if (props.aspect_ratio?.enum) bits.push(`aspect ${props.aspect_ratio.enum.join("/")}`);
   if (props.batch_size) bits.push(`batch_size ${props.batch_size.enum ? props.batch_size.enum.join("/") : `${props.batch_size.minimum ?? 1}-${props.batch_size.maximum ?? 4}`}`);
+  // small schemas (every audio instrument, most editors) are listed in full so the model knows each setting by name
+  const named = new Set(["duration", "resolution", "aspect_ratio", "batch_size"]);
+  const rest = Object.entries(props).filter(([n, d]: [string, any]) => !named.has(n) && d && typeof d === "object" && d.type !== "object" && d.type !== "array");
+  if (rest.length && rest.length <= 8) for (const [n, d] of rest as Array<[string, any]>) {
+    const range = d.enum ? d.enum.slice(0, 12).join("/") + (d.enum.length > 12 ? "/…" : "") : d.minimum != null || d.maximum != null ? `${d.minimum ?? "?"}-${d.maximum ?? "?"}` : d.format === "voice" ? "voice id from preview_voices" : d.type === "boolean" ? "true/false" : d.maxLength ? `text up to ${d.maxLength} chars` : d.type ?? "text";
+    bits.push(`${n} ${range}${m.required.includes(n) ? ", required" : ""}${d.default != null ? ` (default ${d.default})` : ""}`);
+  }
   const media = Object.entries(m.media_fields).filter(([, k]) => k !== "audio").map(([n, k]) => `${n} (${k}${m.required.includes(n) ? ", required" : ""})`);
   return `- ${m.id} | ${m.title} | ${m.kind} | makes ${m.output} | ${price}${media.length ? ` | media: ${media.join(", ")}` : ""}${bits.length ? ` | ${bits.join("; ")}` : ""}`;
 }
