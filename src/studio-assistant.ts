@@ -403,7 +403,7 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
     body = meta && meta.ok ? await meta.json().catch(() => null) : null;
     const ms = Number(body?.durationMs ?? body?.lengthSeconds * 1000);
     const maxSeconds = linkMaxSeconds(env);
-    if (ms > 0 && ms / 1000 > maxSeconds) throw new AssistantError("link_too_long", `That video is ${Math.round(ms / 60000)} minutes; links can be up to ${Math.round(maxSeconds / 60)} minutes`);
+    if (ms > 0 && ms / 1000 > maxSeconds) throw new AssistantError("link_too_long", `That video is ${Math.round(ms / 60000)} minutes by its listing (${String(body?.title ?? "").slice(0, 60) || "no title"}); links can be up to ${Math.round(maxSeconds / 60)} minutes`);
     try {
       const got = await (deps.download ?? ((a, b, o) => import("./studio-youtube.js").then((m) => m.downloadYouTube(a, b, { ...o, fetch: fetchFn, env }))))(url, file, { maxBytes: LINK_LIMIT, maxSeconds });
       ytTitle = got.title;

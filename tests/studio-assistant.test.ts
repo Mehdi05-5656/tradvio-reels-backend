@@ -733,6 +733,10 @@ test("YouTube helpers: the binary for this machine, the id in every link shape, 
   assert.equal(classifyYtDlpError("ERROR: File is larger than max-filesize").code, "link_too_large");
   assert.equal(classifyYtDlpError("abc: Private video. Sign in if you've been granted access").code, "link_no_media");
   assert.equal(classifyYtDlpError("something odd").code, "link_fetch_failed");
-  const args = ytDlpArgs("https://youtu.be/x", "/tmp/v.mp4", { maxBytes: 10, maxSeconds: 600 });
-  assert.ok(args.includes("--no-playlist")); assert.equal(args[args.indexOf("--max-filesize") + 1], "10"); assert.equal(args[args.indexOf("--match-filter") + 1], "duration <= 600"); assert.equal(args[args.length - 1], "https://youtu.be/x");
+  const args = ytDlpArgs("https://youtu.be/x", "/tmp/v.mp4", { maxBytes: 10, maxSeconds: 600, node: "/usr/bin/node" });
+  assert.ok(args.includes("--no-playlist")); assert.ok(args.includes("--force-ipv4")); assert.equal(args[args.indexOf("--max-filesize") + 1], "10"); assert.equal(args[args.indexOf("--match-filter") + 1], "duration <= 600"); assert.equal(args[args.length - 1], "https://youtu.be/x");
+  assert.equal(args[args.indexOf("--js-runtimes") + 1], "node:/usr/bin/node"); assert.ok(args.indexOf("--no-js-runtimes") < args.indexOf("--js-runtimes"), "deno is turned off before node is named");
+  assert.ok(!args.includes("--proxy") && !args.includes("--cookies"), "no proxy or cookies unless given");
+  const viaProxy = ytDlpArgs("https://youtu.be/x", "/tmp/v.mp4", { maxBytes: 10, maxSeconds: 600, proxy: "socks5://u:p@proxy.example:1080", cookies: "/tmp/c.txt" });
+  assert.equal(viaProxy[viaProxy.indexOf("--proxy") + 1], "socks5://u:p@proxy.example:1080"); assert.equal(viaProxy[viaProxy.indexOf("--cookies") + 1], "/tmp/c.txt");
 });

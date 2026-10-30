@@ -50,11 +50,16 @@ export function classifyYtDlpError(stderr: string): LinkError {
   return new LinkError("link_fetch_failed", `The video could not be downloaded: ${stderr.replace(/\s+/g, " ").trim().slice(-200)}`);
 }
 
-/** yt-dlp's arguments: best MP4 up to 1080p with sound, merged with ffmpeg, capped in size and length, no playlists. */
-export function ytDlpArgs(url: string, target: string, o: { maxBytes: number; maxSeconds: number }): string[] {
+/** yt-dlp's arguments: best MP4 up to 1080p with sound, merged with ffmpeg, capped in size and length, no playlists.
+ *  Node serves as the JavaScript runtime YouTube's challenges need (the official build carries the solver scripts).
+ *  STUDIO_YT_PROXY (an http(s):// or socks5:// URL, ideally residential) and a cookies file are passed when given. */
+export function ytDlpArgs(url: string, target: string, o: { maxBytes: number; maxSeconds: number; proxy?: string | null; cookies?: string | null; node?: string | null }): string[] {
   return [
     "--no-playlist", "--no-warnings", "--no-progress", "--no-cache-dir", "--quiet",
-    "--socket-timeout", "30", "--retries", "2",
+    "--force-ipv4", "--socket-timeout", "30", "--retries", "2",
+    ...(o.node === null ? [] : ["--no-js-runtimes", "--js-runtimes", `node:${o.node ?? process.execPath}`]),
+    ...(o.proxy ? ["--proxy", o.proxy] : []),
+    ...(o.cookies ? ["--cookies", o.cookies] : []),
     "--max-filesize", String(o.maxBytes),
     "--match-filter", `duration <= ${Math.floor(o.maxSeconds)}`,
     "-f", "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/b[height<=1080]/b",
@@ -64,10 +69,20 @@ export function ytDlpArgs(url: string, target: string, o: { maxBytes: number; ma
   ];
 }
 
+/** The cookies file for YouTube, when STUDIO_YT_COOKIES (base64 of a Netscape cookies file) is set; written once. */
+async function cookiesFile(env: Record<string, string | undefined>): Promise<string | null> {
+  const b64 = env.STUDIO_YT_COOKIES; if (!b64) return null;
+  const dir = join(tmpdir(), "clone8-bin"), file = join(dir, "yt-cookies.txt");
+  await mkdir(dir, { recursive: true });
+  await writeFile(file, Buffer.from(b64, "base64"), { mode: 0o600 });
+  return file;
+}
+
 /** Downloads a YouTube video or Short to `target` (an .mp4 path). Resolves with the title yt-dlp saw. */
 export async function downloadYouTube(url: string, target: string, o: DownloadOpts): Promise<{ title: string | null }> {
   const bin = await ensureYtDlp(o);
-  const args = [...ytDlpArgs(url, target, o), "--print", "after_move:title"];
+  const env = o.env ?? process.env;
+  const args = [...ytDlpArgs(url, target, { ...o, proxy: env.STUDIO_YT_PROXY || null, cookies: await cookiesFile(env) }), "--print", "after_move:title"];
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", killed = false;
