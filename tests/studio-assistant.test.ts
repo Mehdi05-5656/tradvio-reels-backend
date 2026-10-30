@@ -498,6 +498,8 @@ test("routes: rename, delete (canceling queued steps), search, memory list and d
   const { fetchFn } = fakeClaude([
     toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }, "Pricing."),
     textReply("Five originals for 20 credits. Confirm in the card."),
+    toolReply("preview_characters", { prompt: "a cat", mode: "animal" }),
+    textReply("Pick a cat."),
   ]);
   tables.studio_assistant_memory.push({ id: "aaaaaaaa-0000-4000-8000-000000000001", user_id: ANN, note: "Prefers Light", created_at: "2026-10-29T00:00:00Z" });
   const s = await serve(sb, fetchFn);
@@ -512,6 +514,11 @@ test("routes: rename, delete (canceling queued steps), search, memory list and d
     assert.deepEqual(events.map((e) => e.event), ["round", "delta", "delta", "status", "round", "delta", "delta", "done"]);
     const done = events[events.length - 1].data;
     assert.equal(done.conversation.plan.total_credits, 5 * COSTS.blueprint_copy); assert.equal(done.conversation.messages.length, 2); assert.equal(done.conversation.summary_through, 0);
+    // a streamed face card arrives with its pictures signed, like a plain read
+    const faces = await fetch(`http://127.0.0.1:${(s as any).port}/api/studio/assistant/conversations/${id}/messages`, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream", "x-test-user": ANN }, body: JSON.stringify({ text: "make it a cat" }) });
+    const raw2 = await faces.text();
+    const done2 = JSON.parse(raw2.split("\n\n").filter((x) => x.startsWith("event: done")).map((x) => x.slice(x.indexOf("data: ") + 6))[0]);
+    assert.match(done2.conversation.messages.at(-1).choice.existing[0].url, /^https:\/\/signed\//);
     // rename
     const renamed = await s.call("PATCH", `/api/studio/assistant/conversations/${id}`, { title: "  Podcast  originals " });
     assert.equal(renamed.status, 200); assert.equal(renamed.body.conversation.title, "Podcast originals");

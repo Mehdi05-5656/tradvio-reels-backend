@@ -977,6 +977,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       try {
         const out = await runTurn(sb, turnDeps, c, { text, attachments, links }, (e) => send(e.type, e));
         finished = true;
+        await hydrateChoices(sb, u, out); // signed pictures on the cards, same as a plain read
         const ids2 = (out.run?.steps ?? []).map((s) => s.job_id).filter(Boolean) as string[];
         send("done", { conversation: publicConversation(out, await hydrateJobs(sb, u, ids2)), assistant: toolsEnabled(env).assistant });
         void afterwards(out);
