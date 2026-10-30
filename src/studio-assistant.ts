@@ -186,7 +186,7 @@ export async function claude(deps: AssistantDeps, body: Record<string, any>, onT
 // ---------------------------------------------------------------------------------------------------
 async function userContext(sb: SupabaseClient, u: string): Promise<{ user: KnowledgeUser; assets: any[]; memory: MemoryNote[] }> {
   const [assets, cust, bal, jobs, mem] = await Promise.all([
-    sb.from("studio_assets").select("id,kind,name,probe,status,bytes").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(60),
+    sb.from("studio_assets").select("id,kind,name,object_key,probe,status,bytes").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(60),
     sb.from("studio_customers").select("plan_id,status,parallel_jobs").eq("user_id", u).maybeSingle(),
     sb.rpc("studio_balance", { p_user: u }),
     sb.from("studio_jobs").select("id,tool,status,options,asset_id,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(8),
