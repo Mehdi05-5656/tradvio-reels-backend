@@ -40,6 +40,7 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },
         insert(v: any) { pending = { table, op: "insert", v }; rows = () => (Array.isArray(v) ? v : [v]); return q; },
         update(v: any) { pending = { table, op: "update", v }; return q; },
+        upsert(v: any) { pending = { table, op: "upsert", v }; return q; },
         delete() { pending = { table, op: "delete" }; return q; },
         then(resolve: any, reject: any) {
           if (pending) {
@@ -47,7 +48,9 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
             if (pending.op === "delete") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); tables[table] = (tables[table] ?? []).filter((r) => !hit.includes(r)); rows = () => []; filters.length = 0; }
             if (pending.op === "insert" && table === "studio_assistant_memory") { if ((tables[table] ?? []).some((r) => r.note.toLowerCase() === pending.v.note.toLowerCase())) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } }).then(resolve, reject); const v = { id: `note-${(tables[table] ?? []).length + 1}`, created_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
             else if (pending.op === "insert" && table === "studio_automations") { const v = { id: `a${(tables[table] ?? []).length + 1}aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`, runs: 0, last_run_at: null, description: null, created_at: "2026-10-29T00:00:00Z", updated_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
+            else if (pending.op === "insert" && table === "studio_social_posts") { const v = { id: `post${(tables[table] ?? []).length + 1}-0000-4000-8000-000000000000`, results: [], error: null, provider_post_id: null, created_at: "2026-10-30T00:00:00Z", updated_at: "2026-10-30T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
             else if (pending.op === "insert") { const v = { id: CONVO, title: "New chat", status: "open", messages: [], plan: null, run: null, summary: null, summary_through: 0, created_at: "2026-10-29T00:00:00Z", updated_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
+            if (pending.op === "upsert") { const t = (tables[table] ??= []); const hit = t.find((r) => r.user_id === pending.v.user_id); if (hit) Object.assign(hit, pending.v); else t.push({ ...pending.v }); rows = () => [hit ?? pending.v]; }
             if (pending.op === "update") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); for (const r of hit) Object.assign(r, pending.v); rows = () => hit; filters.length = 0; }
           }
           const out = rows().filter((r) => filters.every((f) => f(r)));
@@ -106,7 +109,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,preview_voices,preview_characters,save_automation,remember");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,preview_voices,preview_characters,offer_post,save_automation,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {
@@ -765,4 +768,107 @@ test("plans: a cast is resolved member by member (presets, made characters, \"$N
   assert.equal(st.estimate, true, "a member made by an earlier step settles when it starts");
   assert.ok(st.credits > 0);
   await assert.rejects(pricePlan(ctx, { title: "x", steps: [{ tool: "recast", label: "x", source: VID, options: { model: "light", cast: [{ character: "Noah" }, { character: "nobody-here" }] } }] }), (e: any) => e.code === "plan_invalid");
+});
+
+
+// ---------------------------------------------------------------------------------------------------
+// Posting from the chat: the assistant knows what is linked, offers a publish card after a run and on request, and the
+// card's buttons post through the same path as the Publish page. Ayrshare is faked; nothing is called for real.
+const SOCIAL_ENV: Record<string, string | undefined> = { ...ENV, STUDIO_SOCIAL_ENABLED: "true", AYRSHARE_API_KEY: "ayr-test" };
+function withAyr(base: any) {
+  const calls: any[] = [];
+  const f = async (url: string, init: any) => {
+    if (!url.startsWith("https://api.ayrshare.com/api")) return base(url, init);
+    const path = url.slice("https://api.ayrshare.com/api".length), body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method: init.method, path, body, headers: init.headers });
+    if (path === "/user") return new Response(JSON.stringify({ activeSocialAccounts: ["tiktok", "youtube"], displayNames: [{ platform: "tiktok", username: "ann" }, { platform: "youtube", username: "Ann", channelTitle: "Ann Makes" }] }));
+    if (path === "/post" && init.method === "POST") return new Response(JSON.stringify({ status: "success", posts: [body.scheduleDate ? { status: "scheduled", id: "ayr-1" } : { status: "success", id: "ayr-1", postIds: body.platforms.map((p: string) => ({ platform: p, status: "success", id: "x", postUrl: `https://${p}.example/1` })) }] }));
+    return new Response("{}");
+  };
+  return { f, calls };
+}
+const JOBV = "55555555-5555-4555-8555-555555555555";
+const doneVideoJob = () => ({ id: JOBV, user_id: ANN, tool: "blueprint", status: "done", options: { copies: 2 }, finished_at: new Date().toISOString(), outputs: [{ index: 1, key: `${ANN}/${JOBV}/01.mp4`, poster_key: `${ANN}/${JOBV}/01.jpg`, kind: "video" }, { index: 2, key: `${ANN}/${JOBV}/02.mp4`, kind: "video" }], created_at: "2026-10-30T00:00:00Z" });
+
+test("knowledge: posting is taught only when on, with what is linked and the quiet rule", () => {
+  const base = { tools: { blueprint: true }, costs: COSTS, plans: PLANS, env: ENV, styles: [], user: { plan: "creator", status: "active", balance: 100, parallel_jobs: 2, assets: [], recent_jobs: [] } } as any;
+  assert.equal(buildSystemPrompt(base).includes("Posting to their socials"), false);
+  const on = buildSystemPrompt({ ...base, social: { enabled: true, linked: ["tiktok", "youtube"], quiet: false } });
+  assert.match(on, /Linked right now: TikTok, YouTube/);
+  assert.match(on, /Nothing is posted until they press the button/);
+  assert.match(buildSystemPrompt({ ...base, social: { enabled: true, linked: [], quiet: true } }), /not now/);
+  assert.equal(/ayrshare/i.test(on), false, "the provider is never named");
+});
+
+test("a finished run offers its final videos for posting; with nothing linked and a recent no, it stays quiet", async () => {
+  for (const [linked, prefs, expectCard] of [[true, [], true], [false, [], true], [false, [{ user_id: ANN, connect_dismissed_at: new Date().toISOString(), connect_dismissals: 1 }], false]] as const) {
+    const tables = { ...baseTables(), studio_social_profiles: linked ? [{ user_id: ANN, profile_key: "pk", accounts: [{ platform: "tiktok" }] }] : [], studio_social_prefs: [...prefs] } as any;
+    const sb = fakeSb(tables, rpcs(tables));
+    const ctx = ctxFor(sb);
+    const plan = await pricePlan(ctx as any, { title: "Two originals", steps: [{ tool: "blueprint", label: "Two originals", source: VID, options: { copies: 2 } }] });
+    const c = convo({ plan }); tables.studio_conversations.push(c);
+    startRun(c);
+    const d = deps(fakeClaude([]).fetchFn, { env: SOCIAL_ENV });
+    await advanceRun(sb, d, c);
+    Object.assign(tables.studio_jobs[0], { status: "done", outputs: [{ index: 1, key: `${ANN}/job-1/01.mp4`, poster_key: `${ANN}/job-1/01.jpg`, kind: "video" }, { index: 2, key: `${ANN}/job-1/02.mp4`, kind: "video" }] });
+    await advanceRun(sb, d, c);
+    const last = c.messages[c.messages.length - 1];
+    assert.equal(c.run!.status, "done");
+    assert.equal(!!last.publish, expectCard, `linked=${linked} quiet=${prefs.length > 0}`);
+    if (expectCard) {
+      assert.equal(last.publish!.items.length, 2); assert.equal(last.publish!.auto, true);
+      assert.match(last.text, linked ? /post now or schedule/ : /Connect your socials/);
+    } else assert.match(last.text, /results are in the cards/);
+  }
+});
+
+test("offer_post: the assistant shows a card for the latest video, prefilled with what was asked", async () => {
+  const tables = { ...baseTables(), studio_jobs: [doneVideoJob()], studio_social_profiles: [{ user_id: ANN, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_social_prefs: [] } as any;
+  const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn, asked } = fakeClaude([toolReply("offer_post", { videos: ["latest"], action: "schedule", platforms: ["tiktok", "instagram"], note: "playful" }), textReply("Pick a time on the card.")]);
+  const c = convo(); tables.studio_conversations.push(c);
+  const out = await runTurn(sb, deps(fetchFn, { env: SOCIAL_ENV }), c, { text: "schedule my latest video on tiktok and instagram", attachments: [], links: [] });
+  const card = out.messages[out.messages.length - 1].publish!;
+  assert.equal(card.items.length, 2); assert.equal(card.items[0].job_id, JOBV);
+  assert.equal(card.suggested!.action, "schedule"); assert.deepEqual(card.suggested!.platforms, ["tiktok", "instagram"]); assert.equal(card.suggested!.note, "playful");
+  const toolResult = JSON.parse(asked[1].messages.at(-1).content[0].content);
+  assert.match(toolResult.note, /instagram is not linked/);
+  assert.match(asked[0].system, /Linked right now: TikTok/);
+});
+
+test("publish card routes: linking is noticed once, Post now goes out through the shared path, a used card is closed, Ignore closes", async () => {
+  const tables = { ...baseTables(), studio_jobs: [doneVideoJob()], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", accounts: [] }], studio_social_prefs: [], studio_social_posts: [] } as any;
+  const sb = fakeSb(tables, rpcs(tables));
+  const c = convo({ messages: [
+    { id: "m1", role: "assistant", text: "All done.", at: "2026-10-30T00:00:00Z", publish: { id: "card-1", items: [{ job_id: JOBV, output_key: `${ANN}/${JOBV}/01.mp4` }], status: "open", linked_seen: [] } },
+    { id: "m2", role: "assistant", text: "Another.", at: "2026-10-30T00:00:01Z", publish: { id: "card-2", items: [{ job_id: JOBV, output_key: `${ANN}/${JOBV}/02.mp4` }], status: "open", linked_seen: [] } },
+  ] as any });
+  tables.studio_conversations.push(c);
+  const ayr = withAyr(fakeClaude([]).fetchFn);
+  const app = express(); app.use(express.json());
+  app.use((req: any, _res, next) => { req.auth = { user_id: ANN, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: ANN }; next(); });
+  app.use(accountAccess(() => sb));
+  registerAssistant(app, () => sb, deps(ayr.f, { env: SOCIAL_ENV }));
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as any).port}/api/studio/assistant/conversations/${CONVO}`;
+  const post = async (path: string, body: any = {}) => { const r = await fetch(base + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; };
+  try {
+    const l1 = await post("/social-linked");
+    assert.match(l1.body.conversation.messages.at(-1).text, /TikTok and YouTube are linked/);
+    const n = l1.body.conversation.messages.length;
+    assert.equal((await post("/social-linked")).body.conversation.messages.length, n, "the same networks are announced once");
+    const sent = await post("/publish/card-2", { action: "now", platforms: ["tiktok"], caption: "Launch day" });
+    assert.equal(sent.status, 200);
+    const msgs = sent.body.conversation.messages;
+    assert.equal(msgs.find((m: any) => m.publish?.id === "card-2").publish.status, "sent");
+    assert.match(msgs.at(-1).text, /On its way to TikTok/);
+    assert.equal(tables.studio_social_posts.length, 1);
+    assert.equal(tables.studio_social_posts[0].conversation_id, CONVO);
+    const postCall = ayr.calls.find((x) => x.path === "/post");
+    assert.equal(postCall.headers["Profile-Key"], "pk-ann"); assert.equal(postCall.body.post, "Launch day");
+    assert.equal((await post("/publish/card-2", { action: "now", platforms: ["tiktok"] })).body.error, "card_closed");
+    const ig = await post("/publish/card-1/ignore");
+    assert.equal(ig.body.conversation.messages.find((m: any) => m.publish?.id === "card-1").publish.status, "ignored");
+    assert.equal(tables.studio_social_prefs.length, 0, "with networks linked, ignoring is not a no to linking");
+  } finally { await new Promise((r) => server.close(r)); }
 });

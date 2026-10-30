@@ -9,6 +9,8 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
+import { getSocialProvider } from "./social-provider.js";
+import { createPosts, socialSnapshot } from "./studio-social.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +50,16 @@ export function matchingCharacters<T extends { kind: string; name?: string; prob
 export type VoiceCard = { id: string; description: string; voices: Array<{ id: string; name: string; labels: Record<string, string>; preview_url: string | null }>; picked?: string | null; status: "open" | "done" };
 /** A people card: the faces found in a clip, for the person to say who gets swapped (all that apply). */
 export type PeopleCard = { id: string; asset_id: string; asset_name: string; reason: string; people: Array<{ index: number; label: string; url?: string | null; key?: string | null }>; status: "open" | "done" };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; context?: string | null };
+/** A publish card: videos to post on the person's own linked networks, now or on a schedule. Nothing is posted until they
+ *  press Post or Schedule on it; with nothing linked it walks them through linking and picks up again when they are back. */
+export type PublishItem = { job_id?: string | null; output_key?: string | null; asset_id?: string | null; poster_key?: string | null; url?: string | null };
+export type PublishCard = {
+  id: string; items: PublishItem[]; status: "open" | "sent" | "ignored"; auto?: boolean;
+  suggested?: { action?: "now" | "schedule" | null; schedule_at?: string | null; platforms?: string[]; caption?: string | null; note?: string | null };
+  /** networks already acknowledged in this chat, so a new link is announced once */
+  linked_seen?: string[]; post_ids?: string[]; outcome?: string | null;
+};
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; publish?: PublishCard | null; context?: string | null };
 export type OutputKind = "video" | "image" | "audio" | "text";
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: OutputKind; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
@@ -124,6 +135,21 @@ export const TOOLS = [
     name: "preview_characters",
     description: "Offer the person four portrait options of a character they described, to pick a face before a swap, recast or trend. Nothing is generated until they press the button on the card (it costs a few credits); they can upload their own photo instead. Call it once per description, then wait for their pick, which arrives as an attached image.",
     input_schema: { type: "object", additionalProperties: false, properties: { prompt: { type: "string", description: "The character in plain words, under 300 characters" }, mode: { type: "string", enum: ["human", "animal"] } }, required: ["prompt", "mode"] },
+  },
+  {
+    name: "offer_post",
+    description: "Show the posting card for videos the person wants on their own socials: their linked networks to tick, a caption (the card can write one from the video, or they type theirs), Post now or Schedule with a date and time, and Ignore. Use it when they ask to post, publish, upload or schedule a video, and when they say yes to posting a result. Nothing is posted until they press Post or Schedule on the card; never say something was posted or scheduled before the card reports it. With nothing linked the card asks them to connect first; you will be told when they have.",
+    input_schema: {
+      type: "object", additionalProperties: false, required: ["videos"],
+      properties: {
+        videos: { type: "array", minItems: 1, maxItems: 25, items: { type: "string" }, description: "\"latest\" for this chat's newest finished videos, a job id from this chat's results, or a library video asset id" },
+        action: { type: "string", enum: ["now", "schedule"], description: "What they asked for, when they said" },
+        schedule_at: { type: "string", description: "ISO 8601 with offset, only when they gave an exact day and time" },
+        platforms: { type: "array", items: { type: "string", enum: ["tiktok", "instagram", "youtube", "facebook", "linkedin", "threads", "bluesky", "twitter"] }, description: "Networks they named; leave out to let them tick" },
+        caption: { type: "string", description: "Only the exact caption text they gave you" },
+        note: { type: "string", description: "Their wishes for the caption (tone, a call to action, a product name), for the caption writer" },
+      },
+    },
   },
   {
     name: "save_automation",
@@ -508,12 +534,12 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const user: Message = { id: randomUUID(), role: "user", text: input.text.slice(0, 4000), attachments: input.attachments, links: input.links, at: now() };
   convo.messages = [...convo.messages, user];
   if (convo.title === "New chat" && input.text.trim()) convo.title = input.text.trim().replace(/\s+/g, " ").slice(0, 60);
-  const [{ user: ku, assets, memory }, styles] = await Promise.all([userContext(sb, convo.user_id), (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[])]);
+  const [{ user: ku, assets, memory }, styles, social] = await Promise.all([userContext(sb, convo.user_id), (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[]), socialSnapshot(sb, convo.user_id, env).catch(() => ({ enabled: false, linked: [] as string[], quiet: false }))]);
   const tools = toolsEnabled(env);
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
-  const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null });
+  const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null, social });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
-  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, saved: { id: string; name: string } | null = null;
+  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, saved: { id: string; name: string } | null = null, publish: PublishCard | null = null;
   // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes
   const peopleNotes: string[] = [];
   for (const a of input.attachments.filter((x) => x.kind === "video").slice(0, 2)) {
@@ -546,7 +572,16 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         else if (use.name === "choose_people") events?.({ type: "status", text: "Finding the faces" });
         else if (use.name === "preview_voices") events?.({ type: "status", text: "Picking voices" });
         else if (use.name === "save_automation") events?.({ type: "status", text: "Saving the automation" });
-        if (use.name === "preview_voices") {
+        else if (use.name === "offer_post") events?.({ type: "status", text: "Getting the post ready" });
+        if (use.name === "offer_post") {
+          if (!social.enabled) throw new AssistantError("plan_invalid", "Posting to socials is not switched on yet");
+          const items = await publishItems(sb, convo, ctx, (Array.isArray(use.input?.videos) ? use.input.videos : []).map(String));
+          if (!items.length) throw new AssistantError("plan_invalid", "No finished video matches; use \"latest\", a job id from this chat or a library video asset id");
+          const named = (Array.isArray(use.input?.platforms) ? use.input.platforms : []).map(String);
+          publish = { id: randomUUID(), items, status: "open", linked_seen: social.linked, suggested: { action: use.input?.action === "schedule" ? "schedule" : use.input?.action === "now" ? "now" : null, schedule_at: typeof use.input?.schedule_at === "string" && !Number.isNaN(Date.parse(use.input.schedule_at)) ? new Date(use.input.schedule_at).toISOString() : null, platforms: named, caption: use.input?.caption ? String(use.input.caption).slice(0, 2200) : null, note: use.input?.note ? String(use.input.note).slice(0, 300) : null } };
+          const unlinked = named.filter((n: string) => !social.linked.includes(n));
+          result = { ok: true, videos: items.length, linked: social.linked, note: social.linked.length ? `The card is shown with ${social.linked.join(", ")} to tick${unlinked.length ? `; ${unlinked.join(", ")} ${unlinked.length === 1 ? "is" : "are"} not linked, the card lets them link it` : ""}. In one short line, say what happens next (pick, caption, Post or Schedule). Do not list the card's contents.` : "Nothing is linked yet: the card asks them to connect their socials first, on a secure page in a new tab. Say that in one line; you will be told when something is linked." };
+        } else if (use.name === "preview_voices") {
           const { listVoices, matchVoices, elevenEnabled } = await import("./studio-eleven.js");
           if (!elevenEnabled(env)) throw new AssistantError("plan_invalid", "Voices are not switched on");
           const found = matchVoices(await listVoices({ env, fetch: deps.fetch }), String(use.input?.description ?? ""), 4);
@@ -615,7 +650,8 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   if (!text && people) text = "Tick who gets swapped, or choose everyone.";
   if (!text && voices) text = "Play the samples and pick a voice.";
   if (!text && saved) text = `Saved as "${saved.name}". Find it under Automations and drop a new video to run it again.`;
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}) };
+  if (!text && publish) text = social.linked.length ? "Pick where it goes, then post it now or schedule it." : "Connect your socials below and I will post it from here.";
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}), ...(publish ? { publish } : {}) };
   const voicePick = input.text.match(/^Use the voice .* \(voice ([A-Za-z0-9]+)\)/);
   if (voicePick) for (const m of convo.messages) if (m.voices?.status === "open") { m.voices.status = "done"; m.voices.picked = voicePick[1]; }
   if (/^(swap|change) (only|these|everyone)/i.test(input.text)) for (const m of convo.messages) if (m.people?.status === "open") m.people.status = "done";
@@ -788,7 +824,22 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
         log(`[assistant] step ${st.index} job ${r.data.id} ${ps.tool} ${credits}`);
       }
     }
-    if (run.status === "running" && run.steps.every((s) => s.status === "done")) finish("done", `All ${run.steps.length === 1 ? "done" : `${run.steps.length} steps are done`}. The results are in the cards above and in your library.`);
+    if (run.status === "running" && run.steps.every((s) => s.status === "done")) {
+      finish("done", `All ${run.steps.length === 1 ? "done" : `${run.steps.length} steps are done`}. The results are in the cards above and in your library.`);
+      // Finished videos: offer to post them (or, with nothing linked and no recent "not now", to link first).
+      try {
+        const social = await socialSnapshot(sb, convo.user_id, env);
+        const finals = run.steps.filter((st) => !run.steps.some((o) => o.index > st.index && refsOf(plan.steps[o.index - 1]).includes(st.index)));
+        const items: PublishItem[] = finals.flatMap((st) => ((jobs.get(st.job_id ?? "")?.outputs ?? []) as any[]).filter(isVideoOutput).map((o) => ({ job_id: st.job_id, output_key: o.key, poster_key: o.poster_key ?? null }))).slice(0, 25);
+        if (social.enabled && items.length && !social.quiet) {
+          const last = convo.messages[convo.messages.length - 1];
+          last.publish = { id: randomUUID(), items, status: "open", auto: true, linked_seen: social.linked };
+          last.text = social.linked.length
+            ? `All done. Want ${items.length > 1 ? "these" : "it"} on your socials? Pick where, let me write the caption from the video or write your own, then post now or schedule.`
+            : `All done. The results are in the cards above and in your library. Want ${items.length > 1 ? "these" : "it"} on TikTok, Instagram or YouTube? Connect your socials once and I can post or schedule from here.`;
+        }
+      } catch (e: any) { log(`[assistant] publish offer ${convo.id}: ${String(e?.message ?? e).slice(0, 160)}`); }
+    }
   } catch (e: any) {
     const code = e instanceof AssistantError || e instanceof StudioError ? e.code : "run_failed";
     log(`[assistant] run ${convo.id} ${code}: ${String(e?.message ?? e).slice(0, 200)}`);
@@ -857,13 +908,14 @@ export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversat
     }
   }
   if (changed) { const w = await sb.from("studio_conversations").update({ messages: c.messages }).eq("id", c.id).eq("user_id", u); if (w.error) throw w.error; }
-  const keys = c.messages.flatMap((m) => [...[...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])].map((o) => o.poster_key), ...(m.people?.people ?? []).map((p) => p.key)].filter(Boolean) as string[]);
+  const keys = c.messages.flatMap((m) => [...[...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])].map((o) => o.poster_key), ...(m.people?.people ?? []).map((p) => p.key), ...(m.publish?.items ?? []).map((i) => i.poster_key)].filter(Boolean) as string[]);
   if (keys.length) {
     const signed = await sb.storage.from("studio-outputs").createSignedUrls([...new Set(keys)], 900);
     const urls = new Map(((signed.data ?? []) as any[]).map((x) => [x.path, x.signedUrl]));
     for (const m of c.messages) {
       for (const o of [...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])]) o.url = o.poster_key ? urls.get(o.poster_key) ?? null : null;
       for (const p of m.people?.people ?? []) p.url = p.key ? urls.get(p.key) ?? null : null;
+      for (const i of m.publish?.items ?? []) i.url = i.poster_key ? urls.get(i.poster_key) ?? null : null;
     }
   }
   // a made character without a poster file shows its own picture from the uploads bucket
@@ -874,6 +926,40 @@ export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversat
     for (const m of c.messages) for (const o of m.choice?.existing ?? []) if (!o.url && o.object_key) o.url = urls.get(o.object_key) ?? null;
   }
   return c;
+}
+
+const isVideoOutput = (o: any) => !!o && (o.kind ? o.kind === "video" : /\.mp4$/i.test(String(o.key ?? "")));
+const NETWORK_NAMES: Record<string, string> = { tiktok: "TikTok", instagram: "Instagram", youtube: "YouTube", facebook: "Facebook", twitter: "X", linkedin: "LinkedIn", threads: "Threads", bluesky: "Bluesky" };
+const listNames = (xs: string[]) => { const n = xs.map((x) => NETWORK_NAMES[x] ?? x); return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`; };
+
+/** The videos an offer_post call points at: "latest" (this chat's finished results, else the newest finished video),
+ *  a job id (its videos) or a library video. Only the person's own, finished, at most 25. */
+export async function publishItems(sb: SupabaseClient, convo: Conversation, ctx: Ctx, refs: string[]): Promise<PublishItem[]> {
+  const out: PublishItem[] = [], jobIds = new Set<string>();
+  for (const raw of refs) {
+    const v = raw.trim().toLowerCase();
+    if (v === "latest") {
+      const steps = convo.run?.steps ?? [], plan = convo.plan;
+      const finals = steps.filter((st) => st.job_id && !steps.some((o) => o.index > st.index && plan && refsOf(plan.steps[o.index - 1]).includes(st.index)));
+      if (finals.length) for (const st of finals) jobIds.add(st.job_id!);
+      else {
+        const r = await sb.from("studio_jobs").select("id,status,outputs").eq("user_id", convo.user_id).eq("status", "done").order("created_at", { ascending: false }).limit(10);
+        const j = ((r.data ?? []) as any[]).find((x) => (x.outputs ?? []).some(isVideoOutput));
+        if (j) jobIds.add(j.id);
+      }
+    } else if (UUID_RE.test(v)) {
+      const a = ctx.assets.get(v);
+      if (a) { if (a.kind === "video") out.push({ asset_id: a.id, poster_key: a.probe?.poster_key ?? null }); }
+      else jobIds.add(v);
+    }
+  }
+  if (jobIds.size) {
+    const r = await sb.from("studio_jobs").select("id,status,outputs").eq("user_id", convo.user_id).in("id", [...jobIds]);
+    if (r.error) throw r.error;
+    for (const j of (r.data ?? []) as any[]) if (j.status === "done") for (const o of (j.outputs ?? []).filter(isVideoOutput)) out.push({ job_id: j.id, output_key: o.key, poster_key: o.poster_key ?? null });
+  }
+  const seen = new Set<string>();
+  return out.filter((i) => { const k = i.asset_id ?? `${i.job_id}:${i.output_key}`; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 25);
 }
 
 export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps: AssistantDeps = {}): void {
@@ -898,6 +984,80 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     const ids = (c.run?.steps ?? []).map((s) => s.job_id).filter(Boolean) as string[];
     res.status(status).json({ conversation: publicConversation(c, await hydrateJobs(sb, u, ids)), assistant: toolsEnabled(env).assistant });
   };
+  // Publish cards: Post now / Schedule sends through the same path as the Publish page; Ignore closes the card (and,
+  // with nothing linked, quiets the unasked offer for a while); social-linked is called by the interface when it sees
+  // new networks after the linking page, so the chat can say so and carry on, like a connector coming back.
+  const publishCard = (c: Conversation, id: string) => { const m = c.messages.find((x) => x.publish?.id === id); if (!m?.publish) throw new AssistantError("card_not_found", "No such card", 404); return m.publish; };
+  const save = async (sb: SupabaseClient, u: string, c: Conversation) => { c.updated_at = new Date().toISOString(); const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: c.updated_at }).eq("id", c.id).eq("user_id", u); if (w.error) throw w.error; };
+  const say = (c: Conversation, text: string) => { c.messages = [...c.messages, { id: randomUUID(), role: "assistant", text, at: new Date().toISOString() }]; };
+  app.post("/api/studio/assistant/conversations/:id/publish/:cardId", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn(), c = await load(sb, u, req.params.id), card = publishCard(c, req.params.cardId);
+      if (card.status !== "open") throw new AssistantError("card_closed", "That card was already used", 409);
+      const p = getSocialProvider({ env, fetch: deps.fetch, log });
+      if (!p) throw new AssistantError("social_off", "Posting to socials is not switched on yet", 503);
+      const b = req.body ?? {}, schedule = b.action === "schedule";
+      const items = card.items.map((i) => (i.asset_id ? { asset_id: i.asset_id } : { job_id: i.job_id, output_key: i.output_key }));
+      let posts: any[];
+      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options }, { conversationId: c.id, log }); }
+      catch (e: any) { if (e?.code) throw new AssistantError(e.code, e.message, e.status ?? 400); throw e; }
+      const ok = posts.filter((x) => x.status !== "failed"), nets = listNames([...new Set(posts.flatMap((x) => x.platforms as string[]))]);
+      const when = typeof b.when_label === "string" ? b.when_label.replace(/[^\w ,:.'-]/g, "").slice(0, 60) : "";
+      if (!ok.length) { say(c, `That did not go out: ${posts[0]?.error ?? "the networks refused it"}. Fix it on the card and try again.`); }
+      else {
+        card.status = "sent"; card.post_ids = posts.map((x) => x.id);
+        card.outcome = schedule ? `Scheduled${when ? ` for ${when}` : ""} on ${nets}` : `Sent to ${nets}`;
+        const n = ok.length > 1 ? `${ok.length} videos` : "it";
+        say(c, schedule
+          ? `Scheduled: ${n} go${ok.length > 1 ? "" : "es"} out${when ? ` ${when}` : ""} on ${nets}${ok.length > 1 && b.spacing_minutes ? `, ${b.spacing_minutes >= 60 ? `${Math.round(b.spacing_minutes / 60)} h` : `${b.spacing_minutes} min`} apart` : ""}. You can change or cancel ${ok.length > 1 ? "them" : "it"} on the Publish page.${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}`
+          : `On its way to ${nets}. The links show on the card as each network finishes; TikTok takes a minute or two.${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}`);
+      }
+      await save(sb, u, c);
+      log(`[assistant] publish card ${card.id} ${schedule ? "scheduled" : "sent"} ${ok.length}/${posts.length}`);
+      await respond(sb, u, c, res);
+    } catch (e) { fail(res, e); }
+  });
+  app.post("/api/studio/assistant/conversations/:id/publish/:cardId/ignore", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn(), c = await load(sb, u, req.params.id), card = publishCard(c, req.params.cardId);
+      if (card.status === "open") {
+        card.status = "ignored";
+        const social = await socialSnapshot(sb, u, env).catch(() => null);
+        if (social && !social.linked.length) {
+          const prev = await sb.from("studio_social_prefs").select("connect_dismissals").eq("user_id", u).maybeSingle();
+          await sb.from("studio_social_prefs").upsert({ user_id: u, connect_dismissed_at: new Date().toISOString(), connect_dismissals: Number(prev.data?.connect_dismissals ?? 0) + 1, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+        }
+        await save(sb, u, c);
+      }
+      await respond(sb, u, c, res);
+    } catch (e) { fail(res, e); }
+  });
+  app.post("/api/studio/assistant/conversations/:id/social-linked", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn(), c = await load(sb, u, req.params.id);
+      const p = getSocialProvider({ env, fetch: deps.fetch, log });
+      const prof = p ? await sb.from("studio_social_profiles").select("profile_key").eq("user_id", u).maybeSingle() : null;
+      let linked: string[] = [];
+      if (p && prof?.data?.profile_key) {
+        const accounts = await p.accounts(prof.data.profile_key);
+        await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
+        linked = accounts.map((a) => a.platform);
+      }
+      const card = [...c.messages].reverse().find((m) => m.publish?.status === "open")?.publish;
+      const fresh = card ? linked.filter((x) => !(card.linked_seen ?? []).includes(x)) : [];
+      if (card && fresh.length) {
+        card.linked_seen = linked;
+        const n = card.items.length > 1 ? "these" : "it";
+        say(c, `${listNames(fresh)} ${fresh.length === 1 ? "is" : "are"} linked. Want me to post ${n} now or schedule ${n}? I can write the caption from the video, or use yours.`);
+        await save(sb, u, c);
+      }
+      await respond(sb, u, c, res);
+    } catch (e) { fail(res, e); }
+  });
+
   // Choice cards: the person presses Show options (a character job for four portraits, credits reserved like any job),
   // then picks one; the pick is recorded on the card and the interface sends the picked image as the next message.
   app.post("/api/studio/assistant/conversations/:id/choices/:choiceId/generate", async (req, res) => {

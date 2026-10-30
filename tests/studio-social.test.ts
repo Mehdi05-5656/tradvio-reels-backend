@@ -307,3 +307,36 @@ test("tick: reads back sends and overdue schedules the webhook did not settle", 
   assert.equal(tables.studio_social_posts[1].status, "scheduled", "a future schedule is not touched");
   assert.equal(ayr.calls.length, 1);
 });
+
+test("captions: frames and speech go to Claude with a JSON schema (no forced tool), hashtags cleaned, YouTube title only when asked", async () => {
+  const { draftCaption, allowCaption } = await import("../src/studio-captions.js");
+  const tables: Record<string, any[]> = { studio_jobs: [doneJob()] };
+  const sb = fakeSb(tables);
+  const asked: any[] = [];
+  const fetchFn: any = async (url: string, init: any) => {
+    if (url.startsWith("https://signed/")) return new Response(new Uint8Array([1, 2, 3]));
+    if (url === "https://api.anthropic.com/v1/messages") { asked.push({ headers: init.headers, body: JSON.parse(init.body) }); return new Response(JSON.stringify({ stop_reason: "end_turn", content: [{ type: "text", text: JSON.stringify({ caption: "POV: the cat runs the podcast now", hashtags: ["catsoftiktok", "#podcast", "two words"], youtube_title: "The cat took over the podcast" }) }] })); }
+    throw new Error(`unexpected ${url}`);
+  };
+  const d = await draftCaption(sb, ANN, { job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4`, platforms: ["tiktok", "youtube"], note: "funny" }, { env: { ANTHROPIC_API_KEY: "sk" }, fetch: fetchFn, frames: async () => ["AAA", "BBB"], speech: async () => "welcome back to the show" });
+  assert.equal(d.caption, "POV: the cat runs the podcast now");
+  assert.deepEqual(d.hashtags, ["#catsoftiktok", "#podcast", "#twowords"]);
+  assert.equal(d.youtube_title, "The cat took over the podcast");
+  assert.equal(d.heard_speech, true);
+  const b = asked[0].body;
+  assert.equal(b.model, "claude-opus-5-5");
+  assert.equal(b.tool_choice, undefined); assert.equal(b.tools, undefined);
+  assert.equal(b.output_config.format.type, "json_schema");
+  assert.equal(b.fallbacks, "default"); assert.equal(asked[0].headers["anthropic-beta"], "server-side-fallback-2026-07-01");
+  const content = b.messages[0].content;
+  assert.deepEqual(content.slice(0, 2).map((c: any) => c.source.media_type), ["image/jpeg", "image/jpeg"]);
+  assert.match(content.at(-1).text, /welcome back to the show/); assert.match(content.at(-1).text, /funny/);
+  const noYt = await draftCaption(sb, ANN, { job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4`, platforms: ["tiktok"] }, { env: { ANTHROPIC_API_KEY: "sk" }, fetch: fetchFn, frames: async () => ["AAA"], speech: async () => null });
+  assert.equal(noYt.youtube_title, null);
+  await assert.rejects(draftCaption(sb, BOB, { job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4`, platforms: [] }, { env: { ANTHROPIC_API_KEY: "sk" }, fetch: fetchFn, frames: async () => ["A"], speech: async () => null }), (e: any) => e.code === "video_not_found", "someone else's video");
+  await assert.rejects(draftCaption(sb, ANN, { job_id: JOB, output_key: "x", platforms: [] }, { env: {}, fetch: fetchFn }), (e: any) => e.code === "captions_off");
+  const t0 = 1_000_000;
+  for (let i = 0; i < 30; i++) assert.equal(allowCaption("rate-user", t0 + i), true);
+  assert.equal(allowCaption("rate-user", t0 + 31), false);
+  assert.equal(allowCaption("rate-user", t0 + 3600_001 + 31), true, "the hour rolls over");
+});

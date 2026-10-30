@@ -6,6 +6,7 @@
 // it; a loop reads back any post the webhook left behind, so a missed delivery never strands a row.
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { draftCaption, type CaptionDraft } from "./studio-captions.js";
 import { getSocialProvider, isSocialPlatform, SocialError, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult } from "./social-provider.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -16,7 +17,7 @@ const MIN_LEAD_MS = 5 * 60_000;
 const MAX_ITEMS = 25;
 
 export type SocialPostRow = {
-  id: string; user_id: string; provider: string; provider_post_id: string | null; job_id: string | null; output_key: string;
+  id: string; user_id: string; provider: string; provider_post_id: string | null; job_id: string | null; output_key: string | null; asset_id?: string | null; conversation_id?: string | null;
   caption: string; platforms: string[]; options: Record<string, any>; schedule_at: string | null; status: string;
   results: SocialResult[]; error: string | null; created_at: string; updated_at: string;
 };
@@ -39,7 +40,7 @@ export function cleanOptions(platforms: string[], raw: any, caption: string): Re
   return out;
 }
 
-export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: SocialDeps & { provider?: SocialProvider | null } = {}): void {
+export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: SocialDeps & { provider?: SocialProvider | null; caption?: (sb: SupabaseClient, u: string, req: any, d: any) => Promise<CaptionDraft> } = {}): void {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
   const provider = () => (deps.provider !== undefined ? deps.provider : getSocialProvider({ ...deps, env }));
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
@@ -146,78 +147,31 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const sb = sbFn();
       const r = await sb.from("studio_social_posts").select("*").eq("user_id", u).order("created_at", { ascending: false }).limit(200);
       if (r.error) throw r.error;
-      const rows = (r.data ?? []) as SocialPostRow[];
-      const posters = rows.map((x) => x.output_key.replace(/\.mp4$/i, ".jpg"));
-      const signed = posters.length ? await sb.storage.from("studio-outputs").createSignedUrls([...new Set(posters)], 900) : { data: [] as any[] };
-      const urls = new Map(((signed.data ?? []) as any[]).filter((x) => !x.error).map((x) => [x.path, x.signedUrl]));
-      res.json({ posts: rows.map((x) => publicPost(x, urls.get(x.output_key.replace(/\.mp4$/i, ".jpg")) ?? null)) });
+      res.json({ posts: await withPostPosters(sb, u, (r.data ?? []) as SocialPostRow[]) });
     } catch (e) { fail(res, e); }
   });
 
-  // Post or schedule one or more outputs. Several videos can be spread out: the first at `schedule_at` (or now),
-  // each next one `spacing_minutes` later.
+  // Post or schedule one or more videos (Studio outputs or uploads). Several can be spread out: the first at
+  // `schedule_at` (or now), each next one `spacing_minutes` later.
   app.post("/api/studio/social/posts", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const p = need(), sb = sbFn();
+      const posts = await createPosts(sbFn(), need(), u, req.body ?? {}, { log });
+      res.status(201).json({ posts });
+    } catch (e) { fail(res, e); }
+  });
+
+  // "Write it for me": a caption drafted from the video's frames and speech. Needs a plan, not linked networks.
+  app.post("/api/studio/social/caption", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn();
       await requirePlan(sb, u);
-      const prof = await profileOf(sb, u);
-      if (!prof) throw new SocialError("not_connected", "Connect your socials first", 409);
       const b = req.body ?? {};
-      const items: Array<{ job_id: string; output_key: string }> = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
-      if (!items.length) throw new SocialError("no_videos", "Pick at least one video");
-      if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} videos at a time`);
-      const offered = new Set(p.offered());
-      const platforms = [...new Set((Array.isArray(b.platforms) ? b.platforms : []).map(String))].filter((x) => isSocialPlatform(x) && offered.has(x)) as any[];
-      if (!platforms.length) throw new SocialError("no_platforms", "Pick at least one network");
-      const linked = new Set((prof.accounts ?? []).map((a) => a.platform));
-      const missing = platforms.filter((x) => !linked.has(x));
-      if (missing.length) throw new SocialError("platform_not_linked", `Link ${missing.join(", ")} first`, 409);
-      const caption = String(b.caption ?? "").slice(0, 5000);
-      const options = cleanOptions(platforms, b.options, caption);
-      const spacing = Math.min(Math.max(Number(b.spacing_minutes ?? 0) || 0, 0), 7 * 24 * 60);
-      const first = b.schedule_at ? new Date(String(b.schedule_at)) : null;
-      if (first && Number.isNaN(first.getTime())) throw new SocialError("bad_schedule", "That date is not readable");
-
-      // The outputs must be the person's own, finished, and still kept on the scheduled day.
-      const jobIds = [...new Set(items.map((i) => String(i.job_id)).filter((x) => UUID_RE.test(x)))];
-      const jr = jobIds.length ? await sb.from("studio_jobs").select("id,status,outputs,finished_at").eq("user_id", u).in("id", jobIds) : { data: [], error: null };
-      if (jr.error) throw jr.error;
-      const jobs = new Map(((jr.data ?? []) as any[]).map((j) => [j.id, j]));
-      const now = Date.now();
-      const plan = items.map((it, i) => {
-        const j = jobs.get(String(it.job_id));
-        const out = j?.status === "done" ? (j.outputs ?? []).find((o: any) => o.key === it.output_key) : null;
-        if (!out) throw new SocialError("video_not_found", "One of those videos is gone");
-        if (out.kind && out.kind !== "video") throw new SocialError("not_a_video", "Only videos can be posted for now");
-        const at = first ? new Date(first.getTime() + i * spacing * 60_000) : spacing ? new Date(now + MIN_LEAD_MS + i * spacing * 60_000) : null;
-        const keptUntil = Date.parse(j.finished_at ?? new Date().toISOString()) + (OUTPUT_DAYS - 1) * 86400_000;
-        if (at && at.getTime() > keptUntil) throw new SocialError("too_late", "A video is kept 30 days; schedule it before then");
-        return { job: j, out, at: at && at.getTime() - now < MIN_LEAD_MS ? null : at };
-      });
-
-      const made: any[] = [];
-      for (const x of plan) {
-        const ins = await sb.from("studio_social_posts").insert({ user_id: u, provider: p.name, job_id: x.job.id, output_key: x.out.key, caption, platforms, options, schedule_at: x.at?.toISOString() ?? null, status: "sending" }).select("*").single();
-        if (ins.error) throw ins.error;
-        const row = ins.data as SocialPostRow;
-        try {
-          // The provider fetches the file when it posts, so the link has to outlive the scheduled time.
-          // The provider checks the link with a HEAD request and fetches it at publish time; it asks for 7 days at least.
-          const ttl = Math.ceil(Math.max(7 * 86400_000, (x.at ? x.at.getTime() - now : 0) + 2 * 86400_000) / 1000);
-          const s = await sb.storage.from("studio-outputs").createSignedUrl(x.out.key, ttl);
-          if (s.error || !s.data?.signedUrl) throw new SocialError("video_unavailable", "That video could not be read", 502);
-          const r = await p.publish(prof.profile_key, { text: caption, platforms, mediaUrl: s.data.signedUrl, scheduleAt: x.at, options, idempotencyKey: row.id });
-          const upd = await sb.from("studio_social_posts").update({ provider_post_id: r.providerPostId, status: r.status, results: r.results, error: r.error, updated_at: new Date().toISOString() }).eq("id", row.id).select("*").single();
-          made.push(publicPost((upd.data ?? row) as SocialPostRow, null));
-        } catch (e: any) {
-          const msg = e instanceof SocialError ? e.message : String(e?.message ?? e).slice(0, 300);
-          await sb.from("studio_social_posts").update({ status: "failed", error: msg, updated_at: new Date().toISOString() }).eq("id", row.id);
-          made.push(publicPost({ ...row, status: "failed", error: msg }, null));
-        }
-      }
-      log(`[social] ${u} sent ${made.length} post(s) to ${platforms.join(",")}: ${made.map((m) => m.status).join(",")}`);
-      res.status(201).json({ posts: made });
+      const item = await resolveItem(sb, u, b);
+      const platforms = (Array.isArray(b.platforms) ? b.platforms : []).map(String).filter(isSocialPlatform);
+      const draft = await (deps.caption ?? draftCaption)(sb, u, { ...item, platforms, note: b.note ? String(b.note) : null }, { env, fetch: deps.fetch, log });
+      res.json({ draft });
     } catch (e) { fail(res, e); }
   });
 
@@ -266,6 +220,123 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
   });
 }
 
+/** A video to post: a Studio output, or one of the person's uploads (it is posted from its stored file). */
+export type PostItem = { job_id: string; output_key: string } | { asset_id: string };
+type Resolved = { job_id: string | null; output_key: string | null; asset_id: string | null; bucket: "studio-outputs" | "studio-uploads"; key: string; keptUntil: number };
+
+/** The person's own video, finished and still kept, with where its file is. For a caption, an output reference only. */
+export async function resolveItem(sb: SupabaseClient, u: string, it: any): Promise<{ job_id: string; output_key: string }> {
+  const job = String(it?.job_id ?? ""), key = String(it?.output_key ?? "");
+  if (!UUID_RE.test(job) || !key) throw new SocialError("video_not_found", "That video is gone", 404);
+  return { job_id: job, output_key: key };
+}
+
+async function resolveItems(sb: SupabaseClient, u: string, items: any[]): Promise<Resolved[]> {
+  const jobIds = [...new Set(items.map((i) => String(i?.job_id ?? "")).filter((x) => UUID_RE.test(x)))];
+  const assetIds = [...new Set(items.map((i) => String(i?.asset_id ?? "")).filter((x) => UUID_RE.test(x)))];
+  const [jr, ar] = await Promise.all([
+    jobIds.length ? sb.from("studio_jobs").select("id,status,outputs,finished_at").eq("user_id", u).in("id", jobIds) : Promise.resolve({ data: [], error: null } as any),
+    assetIds.length ? sb.from("studio_assets").select("id,kind,status,object_key").eq("user_id", u).in("id", assetIds) : Promise.resolve({ data: [], error: null } as any),
+  ]);
+  if (jr.error) throw jr.error;
+  if (ar.error) throw ar.error;
+  const jobs = new Map(((jr.data ?? []) as any[]).map((j) => [j.id, j]));
+  const assets = new Map(((ar.data ?? []) as any[]).map((a) => [a.id, a]));
+  return items.map((it) => {
+    if (it?.asset_id) {
+      const a = assets.get(String(it.asset_id));
+      if (!a || a.status !== "ready") throw new SocialError("video_not_found", "One of those videos is gone");
+      if (a.kind !== "video") throw new SocialError("not_a_video", "Only videos can be posted for now");
+      return { job_id: null, output_key: null, asset_id: a.id, bucket: "studio-uploads" as const, key: a.object_key, keptUntil: Number.POSITIVE_INFINITY };
+    }
+    const j = jobs.get(String(it?.job_id ?? ""));
+    const out = j?.status === "done" ? (j.outputs ?? []).find((o: any) => o.key === it.output_key) : null;
+    if (!out) throw new SocialError("video_not_found", "One of those videos is gone");
+    if (out.kind && out.kind !== "video") throw new SocialError("not_a_video", "Only videos can be posted for now");
+    return { job_id: j.id, output_key: out.key, asset_id: null, bucket: "studio-outputs" as const, key: out.key, keptUntil: Date.parse(j.finished_at ?? new Date().toISOString()) + (OUTPUT_DAYS - 1) * 86400_000 };
+  });
+}
+
+/** Post or schedule videos for a person; every path that posts (the Publish page, the chat's card) comes through here. */
+export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: string, b: any, opts: { conversationId?: string | null; log?: (s: string) => void } = {}) {
+  const log = opts.log ?? ((s: string) => console.log(s));
+  const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
+  if (c.error) throw c.error;
+  if (!c.data || !["active", "trialing"].includes(c.data.status)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
+  const pr = await sb.from("studio_social_profiles").select("profile_key,accounts").eq("user_id", u).maybeSingle();
+  if (pr.error) throw pr.error;
+  const prof = pr.data as { profile_key: string; accounts: SocialAccount[] } | null;
+  if (!prof) throw new SocialError("not_connected", "Connect your socials first", 409);
+  const items: any[] = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
+  if (!items.length) throw new SocialError("no_videos", "Pick at least one video");
+  if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} videos at a time`);
+  const offered = new Set(p.offered());
+  const platforms = [...new Set((Array.isArray(b.platforms) ? b.platforms : []).map(String))].filter((x) => isSocialPlatform(x) && offered.has(x)) as any[];
+  if (!platforms.length) throw new SocialError("no_platforms", "Pick at least one network");
+  const linked = new Set((prof.accounts ?? []).map((a) => a.platform));
+  const missing = platforms.filter((x: string) => !linked.has(x));
+  if (missing.length) throw new SocialError("platform_not_linked", `Link ${missing.join(", ")} first`, 409);
+  const caption = String(b.caption ?? "").slice(0, 5000);
+  const options = cleanOptions(platforms, b.options, caption);
+  const spacing = Math.min(Math.max(Number(b.spacing_minutes ?? 0) || 0, 0), 7 * 24 * 60);
+  const first = b.schedule_at ? new Date(String(b.schedule_at)) : null;
+  if (first && Number.isNaN(first.getTime())) throw new SocialError("bad_schedule", "That date is not readable");
+  const resolved = await resolveItems(sb, u, items);
+  const now = Date.now();
+  const plan = resolved.map((x, i) => {
+    const at = first ? new Date(first.getTime() + i * spacing * 60_000) : spacing ? new Date(now + MIN_LEAD_MS + i * spacing * 60_000) : null;
+    if (at && at.getTime() > x.keptUntil) throw new SocialError("too_late", "A video is kept 30 days; schedule it before then");
+    return { x, at: at && at.getTime() - now < MIN_LEAD_MS ? null : at };
+  });
+  const made: SocialPostRow[] = [];
+  for (const { x, at } of plan) {
+    const ins = await sb.from("studio_social_posts").insert({ user_id: u, provider: p.name, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id, conversation_id: opts.conversationId ?? null, caption, platforms, options, schedule_at: at?.toISOString() ?? null, status: "sending" }).select("*").single();
+    if (ins.error) throw ins.error;
+    const row = ins.data as SocialPostRow;
+    try {
+      // The provider checks the link with a HEAD request and fetches it at publish time; it asks for 7 days at least.
+      const ttl = Math.ceil(Math.max(7 * 86400_000, (at ? at.getTime() - now : 0) + 2 * 86400_000) / 1000);
+      const s = await sb.storage.from(x.bucket).createSignedUrl(x.key, ttl);
+      if (s.error || !s.data?.signedUrl) throw new SocialError("video_unavailable", "That video could not be read", 502);
+      const r = await p.publish(prof.profile_key, { text: caption, platforms, mediaUrl: s.data.signedUrl, scheduleAt: at, options, idempotencyKey: row.id });
+      const upd = await sb.from("studio_social_posts").update({ provider_post_id: r.providerPostId, status: r.status, results: r.results, error: r.error, updated_at: new Date().toISOString() }).eq("id", row.id).select("*").single();
+      made.push((upd.data ?? { ...row, ...r }) as SocialPostRow);
+    } catch (e: any) {
+      const msg = e instanceof SocialError ? e.message : String(e?.message ?? e).slice(0, 300);
+      await sb.from("studio_social_posts").update({ status: "failed", error: msg, updated_at: new Date().toISOString() }).eq("id", row.id);
+      made.push({ ...row, status: "failed", error: msg });
+    }
+  }
+  log(`[social] ${u} sent ${made.length} post(s) to ${platforms.join(",")}: ${made.map((m) => m.status).join(",")}`);
+  return withPostPosters(sb, u, made);
+}
+
+/** Post rows for the page, each with its video's poster (output posters sit next to the file; uploads keep theirs). */
+export async function withPostPosters(sb: SupabaseClient, u: string, rows: SocialPostRow[]) {
+  const assetIds = [...new Set(rows.map((x) => x.asset_id).filter(Boolean))] as string[];
+  const ar = assetIds.length ? await sb.from("studio_assets").select("id,probe").eq("user_id", u).in("id", assetIds) : { data: [] as any[] };
+  const assetPoster = new Map(((ar.data ?? []) as any[]).map((a) => [a.id, a.probe?.poster_key ?? null]));
+  const posterOf = (x: SocialPostRow) => (x.output_key ? x.output_key.replace(/\.mp4$/i, ".jpg") : x.asset_id ? assetPoster.get(x.asset_id) ?? null : null);
+  const keys = [...new Set(rows.map(posterOf).filter(Boolean))] as string[];
+  const signed = keys.length ? await sb.storage.from("studio-outputs").createSignedUrls(keys, 900) : { data: [] as any[] };
+  const urls = new Map(((signed.data ?? []) as any[]).filter((x) => !x.error).map((x) => [x.path, x.signedUrl]));
+  return rows.map((x) => publicPost(x, posterOf(x) ? urls.get(posterOf(x)!) ?? null : null));
+}
+
+/** What the chat and the pages need to know about a person's posting: on or off, and what is linked. */
+export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<string, string | undefined>): Promise<{ enabled: boolean; linked: string[]; quiet: boolean }> {
+  if (!getSocialProvider({ env })) return { enabled: false, linked: [], quiet: false };
+  const [pr, pf] = await Promise.all([
+    sb.from("studio_social_profiles").select("accounts").eq("user_id", u).maybeSingle(),
+    sb.from("studio_social_prefs").select("connect_dismissed_at,connect_dismissals").eq("user_id", u).maybeSingle(),
+  ]);
+  const linked = ((pr.data?.accounts ?? []) as SocialAccount[]).map((a) => a.platform);
+  // "Not now" to linking quiets the unasked offer for two weeks; three of them, for good (asking still works).
+  const d = pf.data as { connect_dismissed_at: string | null; connect_dismissals: number } | null;
+  const quiet = !linked.length && !!d && (d.connect_dismissals >= 3 || (!!d.connect_dismissed_at && Date.now() - Date.parse(d.connect_dismissed_at) < 14 * 86400_000));
+  return { enabled: true, linked, quiet };
+}
+
 /** Apply one status change to the matching post row; returns how many rows moved. Canceled rows stay canceled. */
 export async function applyEvent(sb: SupabaseClient, ev: SocialEvent): Promise<number> {
   const r = await sb.from("studio_social_posts").update({ status: ev.status, results: ev.results, error: ev.error, updated_at: new Date().toISOString() })
@@ -275,7 +346,7 @@ export async function applyEvent(sb: SupabaseClient, ev: SocialEvent): Promise<n
 }
 
 export function publicPost(x: SocialPostRow, posterUrl: string | null) {
-  return { id: x.id, job_id: x.job_id, output_key: x.output_key, caption: x.caption, platforms: x.platforms, options: x.options, schedule_at: x.schedule_at, status: x.status, results: x.results ?? [], error: x.error, created_at: x.created_at, updated_at: x.updated_at, poster_url: posterUrl };
+  return { id: x.id, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id ?? null, conversation_id: x.conversation_id ?? null, caption: x.caption, platforms: x.platforms, options: x.options, schedule_at: x.schedule_at, status: x.status, results: x.results ?? [], error: x.error, created_at: x.created_at, updated_at: x.updated_at, poster_url: posterUrl };
 }
 
 /** Reads back posts the webhook has not settled: scheduled ones past their time, sends that never got an answer. */

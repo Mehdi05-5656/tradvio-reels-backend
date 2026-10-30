@@ -25,8 +25,12 @@ CREATE TABLE IF NOT EXISTS public.studio_social_posts (
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   provider text NOT NULL DEFAULT 'ayrshare',
   provider_post_id text,
+  -- the video: a Studio output (job + key in studio-outputs) or one of the person's uploads (asset)
   job_id uuid REFERENCES public.studio_jobs(id) ON DELETE SET NULL,
-  output_key text NOT NULL,
+  output_key text,
+  asset_id uuid REFERENCES public.studio_assets(id) ON DELETE SET NULL,
+  -- the chat that offered it, when it came from a publish card
+  conversation_id uuid REFERENCES public.studio_conversations(id) ON DELETE SET NULL,
   caption text NOT NULL DEFAULT '' CHECK (length(caption) <= 5000),
   platforms text[] NOT NULL CHECK (cardinality(platforms) BETWEEN 1 AND 10),
   options jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -36,11 +40,21 @@ CREATE TABLE IF NOT EXISTS public.studio_social_posts (
   results jsonb NOT NULL DEFAULT '[]'::jsonb,
   error text,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (output_key IS NOT NULL OR asset_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS studio_social_posts_user ON public.studio_social_posts(user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS studio_social_posts_provider_id ON public.studio_social_posts(provider, provider_post_id) WHERE provider_post_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS studio_social_posts_open ON public.studio_social_posts(schedule_at) WHERE status IN ('sending', 'scheduled');
 ALTER TABLE public.studio_social_posts ENABLE ROW LEVEL SECURITY;
+
+-- What the person told the assistant about posting: "not now" to linking, so the offer does not come back every run.
+CREATE TABLE IF NOT EXISTS public.studio_social_prefs (
+  user_id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  connect_dismissed_at timestamptz,
+  connect_dismissals integer NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.studio_social_prefs ENABLE ROW LEVEL SECURITY;
 
 COMMIT;
