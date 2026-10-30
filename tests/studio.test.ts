@@ -81,7 +81,8 @@ test("quotes: blueprint by copies, recast by seconds, with validation", () => {
   const r = quote("recast", { character: "noah" }, video);
   assert.deepEqual([r.credits, r.options.seconds, r.options.model], [24 * COSTS.recast_second, 24, "full"], "a 23.4 s file bills 24 s at Higgsfield (container rounding)");
   assert.deepEqual([billableSeconds(4, 30), billableSeconds(3.7, 30), billableSeconds(15.27, 15), billableSeconds(30, 30), billableSeconds(0, 30)], [5, 4, 15, 30, 1]);
-  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 40 } }).credits, 15 * COSTS.recast_light_second, "light caps at 15 s");
+  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 40 } }).credits, 41 * COSTS.recast_light_second, "light takes the whole clip up to 2 minutes (40.0 s bills 41 at the platform's rounding)");
+  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 150 } }).credits, 120 * COSTS.recast_light_second, "light caps at 2 minutes");
   assert.throws(() => quote("recast", {}, video), { code: "character_required" });
   assert.throws(() => quote("recast", { character: "noah" }, { kind: "video" }), { code: "asset_not_inspected" });
   assert.throws(() => quote("poster", {}, video), { code: "unknown_tool" });
@@ -298,7 +299,8 @@ test("the operator overview: customers with plan and balance, run-rate, tools, f
 test("quotes for the Genjutsu suite: swap and trend price like recast, restyle like the full model, a character is one unit", () => {
   const video = { kind: "video", probe: { duration: 23.4 } };
   const swap = quote("swap", { model: "light", character: "noah", prompt: "  make it a tabby cat  " }, video);
-  assert.deepEqual([swap.credits, swap.options.seconds, swap.options.model, swap.options.prompt], [15 * COSTS.recast_light_second, 15, "light", "make it a tabby cat"]);
+  const lightSeconds = billableSeconds(Number(video.probe!.duration), 120);
+  assert.deepEqual([swap.credits, swap.options.seconds, swap.options.model, swap.options.prompt], [lightSeconds * COSTS.recast_light_second, lightSeconds, "light", "make it a tabby cat"]);
   assert.equal(quote("swap", { model: "full", character_asset_id: ASSET }, video).credits, 24 * COSTS.recast_second);
   assert.throws(() => quote("swap", { model: "full" }, video), (e: any) => e.code === "character_required");
   const style = "11111111-1111-4111-8111-111111111111";
@@ -359,11 +361,11 @@ test("max_seconds narrows the window: billed and cut to the opening the person a
   const { quote, windowSeconds } = await import("../src/studio.js");
   const costs = { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 72, recast_light_second: 22, character_image: 10 } as any;
   const clip = { kind: "video", probe: { duration: 43.5 } } as any;
-  assert.equal(windowSeconds({ max_seconds: 6 }, 15), 6); assert.equal(windowSeconds({ max_seconds: 40 }, 15), 15); assert.equal(windowSeconds({ max_seconds: 2 }, 15), 15, "under four seconds is ignored"); assert.equal(windowSeconds({}, 30), 30);
+  assert.equal(windowSeconds({ max_seconds: 6 }, 120), 6); assert.equal(windowSeconds({ max_seconds: 400 }, 120), 120); assert.equal(windowSeconds({ max_seconds: 2 }, 15), 15, "under four seconds is ignored"); assert.equal(windowSeconds({}, 30), 30);
   const q = quote("swap", { model: "light", character: "noah", max_seconds: 6 }, clip, costs);
   assert.equal(q.options.seconds, 6); assert.equal(q.options.max_seconds, 6); assert.equal(q.credits, 6 * 22);
   const full = quote("swap", { model: "light", character: "noah" }, clip, costs);
-  assert.equal(full.options.seconds, 15); assert.equal("max_seconds" in full.options, false, "no window asked: nothing extra in the options");
+  assert.equal(full.options.seconds, 44, "light takes the whole 43.5 s clip"); assert.equal("max_seconds" in full.options, false, "no window asked: nothing extra in the options");
   const r = quote("recast", { model: "full", character: "noah", max_seconds: 10 }, clip, costs);
   assert.equal(r.options.seconds, 10); assert.equal(r.credits, 720);
 });
