@@ -28,8 +28,13 @@ export class AssistantError extends Error { constructor(public code: string, mes
 
 export type Attachment = { asset_id: string; name: string; kind: string; seconds: number | null };
 /** A choice card: faces the assistant offers to generate so the person can pick one (or upload their own instead). */
-export type Choice = { id: string; kind: "characters"; prompt: string; mode: "human" | "animal"; count: number; credits: number; status: "offered" | "generating" | "ready" | "picked" | "failed"; job_id?: string | null; options?: Array<{ asset_id: string; name: string; poster_key?: string | null; url?: string | null }>; picked?: string | null; error_code?: string | null };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null };
+export type ChoiceOption = { asset_id: string; name: string; poster_key?: string | null; url?: string | null };
+export type Choice = { id: string; kind: "characters"; prompt: string; mode: "human" | "animal"; count: number; credits: number; auto_credits: number; status: "offered" | "generating" | "ready" | "picked" | "failed"; auto?: boolean; job_id?: string | null; options?: ChoiceOption[]; existing?: ChoiceOption[]; picked?: string | null; error_code?: string | null };
+/** A request card: the assistant needs a video (or picture) and asks for it with a drop zone, a link field and the library. */
+export type RequestCard = { id: string; kind: "video" | "image"; reason: string; status: "open" | "done" };
+/** A people card: the faces found in a clip, for the person to say who gets swapped (all that apply). */
+export type PeopleCard = { id: string; asset_id: string; asset_name: string; reason: string; people: Array<{ index: number; label: string; url?: string | null; key?: string | null }>; status: "open" | "done" };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null };
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: "video" | "image"; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
 export type RunStep = { index: number; job_id: string | null; asset_id: string | null; status: "waiting" | "queued" | "running" | "done" | "failed" | "canceled" | "skipped"; error_code?: string | null };
@@ -82,6 +87,16 @@ export const TOOLS = [
     name: "fetch_link",
     description: "Fetch a TikTok or Instagram video link into the person's library so it can be used as a source. Returns the new asset (id, name, seconds). YouTube is not supported; ask for the file instead.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
+  },
+  {
+    name: "request_video",
+    description: "Ask for the video (or picture) the person means, with a card that takes a dropped file, a pasted TikTok or Instagram link, or a pick from their library. Use it whenever they refer to a video they have not attached (\"this\", \"it\", \"my video\") and you cannot be sure which file they mean. Never guess a library file for them.",
+    input_schema: { type: "object", additionalProperties: false, properties: { kind: { type: "string", enum: ["video", "image"] }, reason: { type: "string", description: "One short line: what it is for" } }, required: ["kind", "reason"] },
+  },
+  {
+    name: "choose_people",
+    description: "When a swap or recast is wanted on a clip with more than one person, show the faces found in it so the person can tick who changes (all that apply, or everyone). Use the asset id of that clip. Wait for their answer; it arrives as a message naming the chosen people, which you then pass as options.targets (the labels) in propose_plan.",
+    input_schema: { type: "object", additionalProperties: false, properties: { asset_id: { type: "string" }, reason: { type: "string", description: "One short line" } }, required: ["asset_id", "reason"] },
   },
   {
     name: "preview_characters",
@@ -139,7 +154,7 @@ export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onTe
 }
 
 /** One Claude request. With onText the reply streams and each text delta is handed out; the result has the same shape either way. */
-async function claude(deps: AssistantDeps, body: Record<string, any>, onText?: (text: string) => void): Promise<any> {
+export async function claude(deps: AssistantDeps, body: Record<string, any>, onText?: (text: string) => void): Promise<any> {
   const env = deps.env ?? process.env;
   const key = env.ANTHROPIC_API_KEY;
   if (!key) throw new AssistantError("assistant_unavailable", "The assistant is not configured", 503);
@@ -390,8 +405,9 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
     if (up.error) throw up.error;
     let posterKey: string | undefined;
     if (poster) { const jpg = await readFile(still).catch(() => null); if (jpg) { const p = await sb.storage.from("studio-outputs").upload(`${u}/assets/${id}.jpg`, jpg, { contentType: "image/jpeg", upsert: true }); if (!p.error) posterKey = `${u}/assets/${id}.jpg`; } }
-    const title = String(body?.title ?? body?.desc ?? body?.caption?.text ?? body?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
-    const name = `${title || (platform === "tiktok" ? "TikTok video" : "Instagram video")}.mp4`;
+    const title = String(body?.title ?? body?.desc ?? body?.aweme_detail?.desc ?? body?.caption?.text ?? body?.data?.caption?.text ?? body?.text ?? "").replace(/#\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+    const handle = url.match(/\/@([A-Za-z0-9_.]+)/)?.[1] ?? (platform === "instagram" ? url.match(/instagram\.com\/([A-Za-z0-9_.]+)\/(?:reel|p)\//)?.[1] : null);
+    const name = `${title || `${platform === "tiktok" ? "TikTok" : "Instagram"}${handle ? ` @${handle}` : " video"}`}.mp4`;
     const ins = await sb.from("studio_assets").insert({ id, user_id: u, kind: "video", name, object_key: objectKey, bytes: bytes.length, status: "ready", probe: { duration: seconds || undefined, poster_key: posterKey, source_url: url, source: platform } });
     if (ins.error) throw ins.error;
     return { asset_id: id, name, kind: "video", seconds: seconds || null };
@@ -429,7 +445,17 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
   const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
-  let plan: Plan | null = null, choice: Choice | null = null, saved: { id: string; name: string } | null = null;
+  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, saved: { id: string; name: string } | null = null;
+  // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes
+  const peopleNotes: string[] = [];
+  for (const a of input.attachments.filter((x) => x.kind === "video").slice(0, 2)) {
+    try {
+      const { detectPeople } = await import("./studio-people.js");
+      const found = await Promise.race([detectPeople(sb, deps, convo.user_id, a.asset_id), new Promise<null>((r) => setTimeout(() => r(null), 25_000))]);
+      if (found) peopleNotes.push(`[People seen in "${a.name}" (asset ${a.asset_id}): ${found.length ? found.map((p) => `${p.index}: ${p.label}${p.speaking ? ", speaking" : ""}`).join("; ") : "nobody with a visible face"}]`);
+    } catch (e: any) { log(`[assistant] people ${a.asset_id} ${String(e?.message ?? e).slice(0, 120)}`); }
+  }
+  if (peopleNotes.length) user.text = `${user.text}\n${peopleNotes.join("\n")}`.slice(0, 4400);
   let text = "", streamed = "", interrupted = false;
   const costs = costsFor(env);
   try {
@@ -449,12 +475,25 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         else if (use.name === "fetch_link") events?.({ type: "status", text: "Fetching the link" });
         else if (use.name === "remember") events?.({ type: "status", text: "Saving a note" });
         else if (use.name === "preview_characters") events?.({ type: "status", text: "Preparing options" });
+        else if (use.name === "choose_people") events?.({ type: "status", text: "Finding the faces" });
         else if (use.name === "save_automation") events?.({ type: "status", text: "Saving the automation" });
-        if (use.name === "preview_characters") {
+        if (use.name === "choose_people") {
+          const aid = String(use.input?.asset_id ?? "").toLowerCase();
+          const asset = ctx.assets.get(aid);
+          if (!asset || asset.kind !== "video") throw new AssistantError("plan_invalid", "choose_people needs a video asset id from the library");
+          const { detectPeople } = await import("./studio-people.js");
+          const found = await detectPeople(sb, deps, convo.user_id, asset.id);
+          people = { id: randomUUID(), asset_id: asset.id, asset_name: asset.name, reason: String(use.input?.reason ?? "").slice(0, 160), people: found.map((p) => ({ index: p.index, label: p.label, key: p.key ?? null })), status: "open" };
+          result = { ok: true, people: found.map((p) => ({ index: p.index, label: p.label })), note: found.length > 1 ? "The card is shown; wait for their choice, then put the chosen labels in options.targets." : found.length === 1 ? "Only one face: no need to ask, go ahead with that person." : "No face was found; ask them which person in words or go ahead with the whole clip." };
+        } else if (use.name === "request_video") {
+          request = { id: randomUUID(), kind: use.input?.kind === "image" ? "image" : "video", reason: String(use.input?.reason ?? "").slice(0, 160), status: "open" };
+          result = { ok: true, note: "The card is shown. Say in one line what you will do once it arrives; do not propose a plan yet." };
+        } else if (use.name === "preview_characters") {
           if (!tools.character) throw new AssistantError("plan_invalid", "Characters are not taking jobs right now");
           const q = quote("character", { mode: use.input?.mode, prompt: use.input?.prompt, count: 4 }, null, costs);
-          choice = { id: randomUUID(), kind: "characters", prompt: q.options.prompt, mode: q.options.mode, count: 4, credits: q.credits, status: "offered" };
-          result = { ok: true, offered: { options: 4, credits: q.credits, note: "The card is shown; nothing runs until the person presses Show options. They may upload a photo instead. Wait for their pick." } };
+          const existing: ChoiceOption[] = [...ctx.assets.values()].filter((a) => a.kind === "image" && a.probe?.character && (a.probe?.mode ?? "human") === q.options.mode).slice(0, 4).map((a) => ({ asset_id: a.id, name: a.name, poster_key: a.probe?.poster_key ?? null }));
+          choice = { id: randomUUID(), kind: "characters", prompt: q.options.prompt, mode: q.options.mode, count: 4, credits: q.credits, auto_credits: costs.character_image, status: "offered", existing };
+          result = { ok: true, offered: { options: 4, credits: q.credits, existing: existing.map((e) => e.name), note: "The card is shown: existing characters to pick for free, Show options for four new ones, Let Clone8 decide, or a photo upload. Nothing runs until they press a button. Wait for their pick." } };
         } else if (use.name === "save_automation") {
           if (!convo.plan || convo.plan.status !== "confirmed") result = { ok: false, error: "no_confirmed_plan", detail: "Only a plan that was confirmed in this chat can be saved" };
           else {
@@ -496,9 +535,14 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     log(`[assistant] turn ${convo.id} stopped by the person`);
   }
   if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
-  if (!text && choice) text = "Here are four takes on that. Pick the one you like, or upload a photo instead.";
+  if (!text && choice) text = "Pick a face below, or upload a photo instead.";
+  if (!text && request) text = request.kind === "image" ? "Drop the picture below, or pick it from your library." : "Drop the video below, paste a TikTok or Instagram link, or pick one from your library.";
+  if (!text && people) text = "Tick who gets swapped, or choose everyone.";
   if (!text && saved) text = `Saved as "${saved.name}". Find it under Automations and drop a new video to run it again.`;
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}) };
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}) };
+  if (/^(swap|change) (only|these|everyone)/i.test(input.text)) for (const m of convo.messages) if (m.people?.status === "open") m.people.status = "done";
+  // a new attachment or link answers any open request card
+  if (input.attachments.length || input.links.length) for (const m of convo.messages) if (m.request?.status === "open") m.request.status = "done";
   convo.messages = [...convo.messages, assistant];
   if (plan) { if (convo.plan && convo.plan.status === "proposed") convo.plan.status = "superseded"; convo.plan = plan; convo.title = plan.title; }
   convo.updated_at = now();
@@ -517,6 +561,20 @@ export function needsCompaction(convo: Pick<Conversation, "messages" | "summary_
   const raw = convo.messages.slice(convo.summary_through ?? 0);
   return raw.length >= COMPACT_AFTER || raw.reduce((n, m) => n + m.text.length, 0) >= COMPACT_CHARS;
 }
+/** A short name for a chat that still carries its first message as a title, like any chat app; false when nothing changed. */
+export async function titleIfNeeded(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation): Promise<boolean> {
+  const first = convo.messages.find((m) => m.role === "user")?.text?.trim() ?? "";
+  const raw = convo.title === "New chat" || (first && convo.title === first.replace(/\s+/g, " ").slice(0, 60));
+  if (!raw || convo.messages.length < 2 || !first) return false;
+  const reply = await claude({ ...deps, signal: undefined }, { system: "Name this chat in three to six words, plain, no quotes, no period, no emoji. It is a chat between a creator and a video assistant; name it by what the person wants.", max_tokens: 24, messages: [{ role: "user", content: convo.messages.slice(0, 4).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text.slice(0, 300)}`).join("\n") }] });
+  const text = (Array.isArray(reply?.content) ? reply.content : []).filter((b: any) => b.type === "text").map((b: any) => String(b.text)).join(" ").replace(/["\n]+/g, " ").replace(/[.\s]+$/, "").trim().slice(0, 60);
+  if (!text) return false;
+  convo.title = text;
+  const w = await sb.from("studio_conversations").update({ title: text }).eq("id", convo.id).eq("user_id", convo.user_id);
+  if (w.error) throw w.error;
+  return true;
+}
+
 /** Folds the older messages into the summary when the chat has grown; false when nothing was done. */
 export async function compactIfNeeded(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation): Promise<boolean> {
   if (!needsCompaction(convo)) return false;
@@ -719,11 +777,14 @@ export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversat
     }
   }
   if (changed) { const w = await sb.from("studio_conversations").update({ messages: c.messages }).eq("id", c.id).eq("user_id", u); if (w.error) throw w.error; }
-  const keys = c.messages.flatMap((m) => (m.choice?.options ?? []).map((o) => o.poster_key).filter(Boolean) as string[]);
+  const keys = c.messages.flatMap((m) => [...[...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])].map((o) => o.poster_key), ...(m.people?.people ?? []).map((p) => p.key)].filter(Boolean) as string[]);
   if (keys.length) {
-    const signed = await sb.storage.from("studio-outputs").createSignedUrls(keys, 900);
+    const signed = await sb.storage.from("studio-outputs").createSignedUrls([...new Set(keys)], 900);
     const urls = new Map(((signed.data ?? []) as any[]).map((x) => [x.path, x.signedUrl]));
-    for (const m of c.messages) for (const o of m.choice?.options ?? []) o.url = o.poster_key ? urls.get(o.poster_key) ?? null : null;
+    for (const m of c.messages) {
+      for (const o of [...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])]) o.url = o.poster_key ? urls.get(o.poster_key) ?? null : null;
+      for (const p of m.people?.people ?? []) p.url = p.key ? urls.get(p.key) ?? null : null;
+    }
   }
   return c;
 }
@@ -759,13 +820,15 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       const c = await load(sb, u, req.params.id);
       const m = c.messages.find((x) => x.choice?.id === req.params.choiceId);
       if (!m?.choice) throw new AssistantError("choice_not_found", "No such card", 404);
-      if (m.choice.status !== "offered" && m.choice.status !== "failed") throw new AssistantError("choice_done", "Those options were already made", 409);
+      if (m.choice.status !== "offered" && m.choice.status !== "failed" && !(m.choice.status === "ready" && req.body?.again)) throw new AssistantError("choice_done", "Those options were already made", 409);
       const limit = await checkJobRate(sb, u);
       if (limit) throw new AssistantError(limit.code, limit.message, limit.status);
-      const q = quote("character", { mode: m.choice.mode, prompt: m.choice.prompt, count: 4 }, null, costsFor(env));
+      // "Let Clone8 decide" draws one portrait and picks it for them; otherwise four to choose from
+      const auto = req.body?.mode === "auto";
+      const q = quote("character", { mode: m.choice.mode, prompt: m.choice.prompt, count: auto ? 1 : 4 }, null, costsFor(env));
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: "character", p_asset: null, p_options: q.options, p_credits: q.credits });
       if (r.error) { const msg = String(r.error.message ?? r.error); if (/insufficient_credits/.test(msg)) throw new AssistantError("insufficient_credits", "Not enough credits for the options", 402); if (/too_many_jobs/.test(msg)) throw new AssistantError("too_many_jobs", "Your jobs are all busy; try again in a moment", 429); throw r.error; }
-      m.choice.status = "generating"; m.choice.job_id = r.data.id; m.choice.credits = q.credits; m.choice.error_code = null;
+      m.choice.status = "generating"; m.choice.job_id = r.data.id; m.choice.credits = q.credits; m.choice.error_code = null; m.choice.auto = auto; m.choice.count = auto ? 1 : 4;
       const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
       if (w.error) throw w.error;
       log(`[assistant] choice ${m.choice.id} job ${r.data.id}`);
@@ -781,7 +844,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       const m = c.messages.find((x) => x.choice?.id === req.params.choiceId);
       if (!m?.choice) throw new AssistantError("choice_not_found", "No such card", 404);
       const id = String(req.body?.asset_id ?? "");
-      if (!(m.choice.options ?? []).some((o) => o.asset_id === id)) throw new AssistantError("choice_invalid", "Pick one of the options");
+      if (![...(m.choice.options ?? []), ...(m.choice.existing ?? [])].some((o) => o.asset_id === id)) throw new AssistantError("choice_invalid", "Pick one of the options");
       m.choice.status = "picked"; m.choice.picked = id;
       const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
       if (w.error) throw w.error;
@@ -885,7 +948,10 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       const stream = req.query.stream === "1" || String(req.headers.accept ?? "").includes("text/event-stream");
       const ctl = new AbortController();
       const turnDeps = { ...deps, env, log, signal: ctl.signal };
-      const afterwards = (out: Conversation) => compactIfNeeded(sb, { ...deps, env, log }, out).catch((e) => log(`[assistant] compact ${out.id} ${String(e?.message ?? e).slice(0, 200)}`));
+      const afterwards = async (out: Conversation) => {
+        await titleIfNeeded(sb, { ...deps, env, log }, out).catch((e) => log(`[assistant] title ${out.id} ${String(e?.message ?? e).slice(0, 200)}`));
+        await compactIfNeeded(sb, { ...deps, env, log }, out).catch((e) => log(`[assistant] compact ${out.id} ${String(e?.message ?? e).slice(0, 200)}`));
+      };
       if (!stream) {
         const out = await runTurn(sb, turnDeps, c, { text, attachments, links });
         await respond(sb, u, out, res);

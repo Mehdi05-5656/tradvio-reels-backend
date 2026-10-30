@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
+import { targetsPrompt } from "./studio-people.js";
 import { PLANS, billableSeconds } from "./studio.js";
 import { RECAST_RESOLUTION, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
@@ -206,8 +207,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         await renew(sb, job, { note: "Sending your video to the renderer", input_key: inputKey });
       } else await renew(sb, job, { note: "Sending the clip to the renderer" });
       const images = await characterUrls(sb, deps, job, tool === "restyle");
-      const prompt = tool === "swap" ? (String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT) : tool === "restyle" ? String(job.options?.prompt ?? "").trim() || undefined : undefined;
-      const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.id, resolution: RECAST_RESOLUTION });
+      const prompt = tool === "swap" ? targetsPrompt(String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null) : tool === "restyle" ? String(job.options?.prompt ?? "").trim() || undefined : undefined;
+      const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.attempts ? `${job.id}:${job.attempts}` : job.id, resolution: RECAST_RESOLUTION });
       requestId = sub.request_id;
       await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
       log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, request: requestId })}`);
@@ -224,7 +225,10 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       if (st.status === "completed") { result = st; break; }
       if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
         log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
-        throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
+        const code = st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled";
+        // "Generation failed" with no reason is often transient on the renderer's side: one fresh submission before giving up
+        if (code === "recast_failed" && job.attempts < 1) { await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer gave up once; trying again" }); throw new RecastError(code, "generation failed once, retrying", true); }
+        throw new RecastError(code);
       }
       await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In Higgsfield's queue" });
       await sleep(POLL_MS);

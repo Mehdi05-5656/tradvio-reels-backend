@@ -116,8 +116,10 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const seconds = billableSeconds(duration, model === "light" ? 15 : 30);
     const who = characterChoice(o);
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
+    // which people change when the clip has several: plain labels, carried into the renderer's prompt
+    const targets = Array.isArray(o.targets) ? o.targets.map((t: unknown) => String(t).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 6) : [];
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    return { tool, credits: seconds * per, options: { model, seconds, ...who, prompt }, summary: `${seconds} s × ${per}` };
+    return { tool, credits: seconds * per, options: { model, seconds, ...who, prompt, ...(targets.length ? { targets } : {}) }, summary: `${seconds} s × ${per}` };
   }
   if (tool === "restyle") {
     // Restyle: every frame redrawn in a Higgsfield style; motion, camera and audio stay. Full model only, up to 30 s.

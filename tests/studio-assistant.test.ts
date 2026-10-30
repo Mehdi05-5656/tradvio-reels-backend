@@ -5,14 +5,14 @@ import { writeFile } from "node:fs/promises";
 import { accountAccess } from "../src/account-access.js";
 import { COSTS, PLANS } from "../src/studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS } from "../src/studio-knowledge.js";
-import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
+import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, titleIfNeeded, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
 import { templateFromPlan, instantiate, createAutomation, runAutomation, registerAutomations } from "../src/studio-automations.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CAT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CONVO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ENV: Record<string, string | undefined> = { HIGGSFIELD_API_KEY: "id:secret", STUDIO_INSTRUMENTS_ENABLED: "true", STUDIO_BLUEPRINT_ENABLED: "true", STUDIO_RECAST_FULL_ENABLED: "true", ANTHROPIC_API_KEY: "sk-test", SCRAPECREATORS_API_KEY: "sc-test" };
 const STYLES = [{ id: "11111111-1111-4111-8111-111111111111", name: "Anime", preview_url: null }, { id: "22222222-2222-4222-8222-222222222222", name: "Clay", preview_url: null }];
 const video = { id: VID, user_id: ANN, kind: "video", name: "podcast.mp4", object_key: `${ANN}/${VID}.mp4`, bytes: 1000, status: "ready", probe: { duration: 12.2 } };
-const cat = { id: CAT, user_id: ANN, kind: "image", name: "Orange cat.jpg", object_key: `${ANN}/${CAT}.jpg`, bytes: 100, status: "ready", probe: { character: true, prompt: "an orange cat" } };
+const cat = { id: CAT, user_id: ANN, kind: "image", name: "Orange cat.jpg", object_key: `${ANN}/${CAT}.jpg`, bytes: 100, status: "ready", probe: { character: true, mode: "animal", prompt: "an orange cat" } };
 
 // A small in-memory Supabase stand-in with storage: filters by eq/in/neq/gte, records writes and rpc calls.
 function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) => { data: any; error: any } = () => ({ data: null, error: null })) {
@@ -106,7 +106,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,preview_characters,save_automation,remember");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,preview_characters,save_automation,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {
@@ -230,9 +230,11 @@ test("links: TikTok and Instagram are fetched into the library as ready video as
   const { fetchFn } = fakeClaude([], () => ({ title: "my cat driving", download_url: "https://cdn.example/dl.mp4" }));
   const a = await importLink(sb, deps(fetchFn), ANN, "https://www.tiktok.com/@cat/video/7301");
   assert.equal(a.kind, "video"); assert.equal(a.name, "my cat driving.mp4"); assert.equal(a.seconds, 7.5);
+  const bare = await importLink(sb, deps(fakeClaude([], () => ({ download_url: "https://cdn.example/dl.mp4" })).fetchFn), ANN, "https://www.tiktok.com/@osamas0ns/video/7692");
+  assert.equal(bare.name, "TikTok @osamas0ns.mp4", "no caption: the account handle names the clip");
   const row = tables.studio_assets.find((r) => r.id === a.asset_id);
   assert.ok(row); assert.equal(row.status, "ready"); assert.equal(row.probe.source, "tiktok"); assert.equal(row.probe.duration, 7.5); assert.equal(row.probe.poster_key, `${ANN}/assets/${a.asset_id}.jpg`);
-  assert.deepEqual(sb.uploads.map((u: any) => u.bucket), ["studio-uploads", "studio-outputs"]);
+  assert.deepEqual(sb.uploads.slice(0, 2).map((u: any) => u.bucket), ["studio-uploads", "studio-outputs"]);
   await assert.rejects(importLink(sb, deps(fetchFn), ANN, "https://youtu.be/dQw4w9WgXcQ"), (e: any) => e.code === "unsupported_link");
   await assert.rejects(importLink(sb, deps(fetchFn), ANN, "https://example.com/v.mp4"), (e: any) => e.code === "unsupported_link");
   const { fetchFn: empty } = fakeClaude([], () => ({ title: "nothing" }));
@@ -547,7 +549,8 @@ test("choice cards: the model offers four faces, the person generates them (a ch
     assert.equal(msg.status, 200, JSON.stringify(msg.body));
     const card = msg.body.conversation.messages[1].choice;
     assert.ok(card, "the assistant message carries a card");
-    assert.equal(card.status, "offered"); assert.equal(card.count, 4); assert.equal(card.credits, 4 * COSTS.character_image); assert.equal(card.mode, "human");
+    assert.equal(card.status, "offered"); assert.equal(card.count, 4); assert.equal(card.credits, 4 * COSTS.character_image); assert.equal(card.mode, "human"); assert.equal(card.auto_credits, COSTS.character_image);
+    assert.deepEqual(card.existing, [], "the cat is an animal, not offered for a human");
     assert.equal(msg.body.conversation.plan, null, "no plan before the pick");
     // generate: one character job for four portraits
     const gen = await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/generate`);
@@ -642,4 +645,53 @@ test("automation routes: save from a chat (and from the save_automation tool), l
     assert.equal((await s.call("DELETE", `/api/studio/automations/${aid}`)).body.deleted, aid);
     assert.equal((await s.call("GET", `/api/studio/automations/${aid}`)).status, 404);
   } finally { await s.close(); }
+});
+
+
+test("a request card asks for the video instead of guessing, the next attachment closes it, and the animal card offers the library cat for free", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn, asked } = fakeClaude([
+    toolReply("request_video", { kind: "video", reason: "The clip to turn into a cat video" }),
+    textReply("Drop it below and I will take it from there."),
+    textReply("Cat video from a clip"), // the background naming call after the first reply
+    toolReply("preview_characters", { prompt: "a tabby cat", mode: "animal" }),
+    textReply("Your cat from the library is there for free, or new takes."),
+  ]);
+  const s = await serve(sb, fetchFn);
+  try {
+    const made = await s.call("POST", "/api/studio/assistant/conversations"); const id = made.body.conversation.id;
+    const m1 = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "turn this into a cat video" });
+    const req = m1.body.conversation.messages[1].request;
+    assert.ok(req); assert.equal(req.kind, "video"); assert.equal(req.status, "open"); assert.match(req.reason, /cat video/);
+    assert.match(asked[0].system, /never pick a library file for them/);
+    await new Promise((r) => setTimeout(r, 30)); // the naming call runs after the reply
+    const m2 = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "Here is the video.", attachments: [VID] });
+    assert.equal(m2.body.conversation.messages[1].request.status, "done", "the attachment answered the card");
+    assert.equal(m2.body.conversation.title, "Cat video from a clip", "named by the model, not the raw message");
+    const card = m2.body.conversation.messages[3].choice;
+    assert.ok(card); assert.equal(card.mode, "animal");
+    assert.deepEqual(card.existing.map((e: any) => e.name), ["Orange cat.jpg"], "the made cat is a free pick");
+    // Let Clone8 decide: one portrait, one unit of credits, picked for them
+    const auto = await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/generate`, { mode: "auto" });
+    assert.equal(auto.status, 200, JSON.stringify(auto.body));
+    const ch = auto.body.conversation.messages[3].choice;
+    assert.equal(ch.auto, true); assert.equal(ch.count, 1); assert.equal(ch.credits, COSTS.character_image);
+    assert.equal(sb.calls.filter((x: any) => x.name === "studio_create_job").at(-1).args.p_options.count, 1);
+    // an existing character can be picked straight away
+    const pickExisting = await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/pick`, { asset_id: CAT });
+    assert.equal(pickExisting.status, 200, JSON.stringify(pickExisting.body)); assert.equal(pickExisting.body.conversation.messages[3].choice.picked, CAT);
+  } finally { await s.close(); }
+});
+
+test("a chat still titled with its first message gets a short name from the model", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const c = convo({ title: "turn this into a cat video then make 3 copies of it", messages: [{ id: "u", role: "user", text: "turn this into a cat video then make 3 copies of it", at: "2026-10-29T00:00:00Z" }, { id: "a", role: "assistant", text: "Which video?", at: "2026-10-29T00:00:00Z" }] });
+  tables.studio_conversations.push(c);
+  const { fetchFn, asked } = fakeClaude([textReply('"Cat video with three copies."')]);
+  assert.equal(await titleIfNeeded(sb, deps(fetchFn), c), true);
+  assert.equal(c.title, "Cat video with three copies"); assert.equal(tables.studio_conversations[0].title, "Cat video with three copies");
+  assert.ok(asked[0].max_tokens <= 32);
+  // a plan-named chat is left alone
+  const named = convo({ title: "Five originals", messages: c.messages });
+  assert.equal(await titleIfNeeded(sb, deps(fakeClaude([]).fetchFn), named), false);
 });
