@@ -28,13 +28,13 @@ export class AssistantError extends Error { constructor(public code: string, mes
 
 export type Attachment = { asset_id: string; name: string; kind: string; seconds: number | null };
 /** A choice card: faces the assistant offers to generate so the person can pick one (or upload their own instead). */
-export type ChoiceOption = { asset_id: string; name: string; poster_key?: string | null; url?: string | null };
+export type ChoiceOption = { asset_id: string; name: string; poster_key?: string | null; object_key?: string | null; url?: string | null };
 export type Choice = { id: string; kind: "characters"; prompt: string; mode: "human" | "animal"; count: number; credits: number; auto_credits: number; status: "offered" | "generating" | "ready" | "picked" | "failed"; auto?: boolean; job_id?: string | null; options?: ChoiceOption[]; existing?: ChoiceOption[]; picked?: string | null; error_code?: string | null };
 /** A request card: the assistant needs a video (or picture) and asks for it with a drop zone, a link field and the library. */
 export type RequestCard = { id: string; kind: "video" | "image"; reason: string; status: "open" | "done" };
 /** A people card: the faces found in a clip, for the person to say who gets swapped (all that apply). */
 export type PeopleCard = { id: string; asset_id: string; asset_name: string; reason: string; people: Array<{ index: number; label: string; url?: string | null; key?: string | null }>; status: "open" | "done" };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; context?: string | null };
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: "video" | "image"; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
 export type RunStep = { index: number; job_id: string | null; asset_id: string | null; status: "waiting" | "queued" | "running" | "done" | "failed" | "canceled" | "skipped"; error_code?: string | null };
@@ -424,6 +424,7 @@ function modelMessages(msgs: Message[], from = 0): any[] {
       const parts = [m.text.trim()];
       for (const a of m.attachments ?? []) parts.push(`[Attached: "${a.name}" (${a.kind}${a.seconds ? `, ${Math.round(a.seconds)} s` : ""}) id ${a.asset_id}]`);
       for (const l of m.links ?? []) parts.push(`[Link: ${l}]`);
+      if (m.context) parts.push(m.context);
       out.push({ role: "user", content: parts.filter(Boolean).join("\n") || "(no text)" });
     } else out.push({ role: "assistant", content: m.text || "(plan proposed)" });
   }
@@ -455,7 +456,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
       if (found) peopleNotes.push(`[People seen in "${a.name}" (asset ${a.asset_id}): ${found.length ? found.map((p) => `${p.index}: ${p.label}${p.speaking ? ", speaking" : ""}`).join("; ") : "nobody with a visible face"}]`);
     } catch (e: any) { log(`[assistant] people ${a.asset_id} ${String(e?.message ?? e).slice(0, 120)}`); }
   }
-  if (peopleNotes.length) user.text = `${user.text}\n${peopleNotes.join("\n")}`.slice(0, 4400);
+  if (peopleNotes.length) user.context = peopleNotes.join("\n").slice(0, 1200);
   let text = "", streamed = "", interrupted = false;
   const costs = costsFor(env);
   try {
@@ -491,7 +492,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         } else if (use.name === "preview_characters") {
           if (!tools.character) throw new AssistantError("plan_invalid", "Characters are not taking jobs right now");
           const q = quote("character", { mode: use.input?.mode, prompt: use.input?.prompt, count: 4 }, null, costs);
-          const existing: ChoiceOption[] = [...ctx.assets.values()].filter((a) => a.kind === "image" && a.probe?.character && (a.probe?.mode ?? "human") === q.options.mode).slice(0, 4).map((a) => ({ asset_id: a.id, name: a.name, poster_key: a.probe?.poster_key ?? null }));
+          const existing: ChoiceOption[] = [...ctx.assets.values()].filter((a) => a.kind === "image" && a.probe?.character && (a.probe?.mode ?? "human") === q.options.mode).slice(0, 4).map((a) => ({ asset_id: a.id, name: a.name, poster_key: a.probe?.poster_key ?? null, object_key: a.object_key ?? null }));
           choice = { id: randomUUID(), kind: "characters", prompt: q.options.prompt, mode: q.options.mode, count: 4, credits: q.credits, auto_credits: costs.character_image, status: "offered", existing };
           result = { ok: true, offered: { options: 4, credits: q.credits, existing: existing.map((e) => e.name), note: "The card is shown: existing characters to pick for free, Show options for four new ones, Let Clone8 decide, or a photo upload. Nothing runs until they press a button. Wait for their pick." } };
         } else if (use.name === "save_automation") {
@@ -566,7 +567,7 @@ export async function titleIfNeeded(sb: SupabaseClient, deps: AssistantDeps, con
   const first = convo.messages.find((m) => m.role === "user")?.text?.trim() ?? "";
   const raw = convo.title === "New chat" || (first && convo.title === first.replace(/\s+/g, " ").slice(0, 60));
   if (!raw || convo.messages.length < 2 || !first) return false;
-  const reply = await claude({ ...deps, signal: undefined }, { system: "Name this chat in three to six words, plain, no quotes, no period, no emoji. It is a chat between a creator and a video assistant; name it by what the person wants.", max_tokens: 24, messages: [{ role: "user", content: convo.messages.slice(0, 4).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text.slice(0, 300)}`).join("\n") }] });
+  const reply = await claude({ ...deps, signal: undefined }, { system: "Name this chat in three to six words, sentence case (capital only on the first word and names), plain, no quotes, no period, no emoji. It is a chat between a creator and a video assistant; name it by what the person wants.", max_tokens: 24, messages: [{ role: "user", content: convo.messages.slice(0, 4).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text.slice(0, 300)}`).join("\n") }] });
   const text = (Array.isArray(reply?.content) ? reply.content : []).filter((b: any) => b.type === "text").map((b: any) => String(b.text)).join(" ").replace(/["\n]+/g, " ").replace(/[.\s]+$/, "").trim().slice(0, 60);
   if (!text) return false;
   convo.title = text;
@@ -785,6 +786,13 @@ export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversat
       for (const o of [...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])]) o.url = o.poster_key ? urls.get(o.poster_key) ?? null : null;
       for (const p of m.people?.people ?? []) p.url = p.key ? urls.get(p.key) ?? null : null;
     }
+  }
+  // a made character without a poster file shows its own picture from the uploads bucket
+  const own = c.messages.flatMap((m) => (m.choice?.existing ?? []).filter((o) => !o.url && o.object_key).map((o) => o.object_key!));
+  if (own.length) {
+    const signed = await sb.storage.from("studio-uploads").createSignedUrls([...new Set(own)], 900);
+    const urls = new Map(((signed.data ?? []) as any[]).map((x) => [x.path, x.signedUrl]));
+    for (const m of c.messages) for (const o of m.choice?.existing ?? []) if (!o.url && o.object_key) o.url = urls.get(o.object_key) ?? null;
   }
   return c;
 }

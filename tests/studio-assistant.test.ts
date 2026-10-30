@@ -671,6 +671,8 @@ test("a request card asks for the video instead of guessing, the next attachment
     const card = m2.body.conversation.messages[3].choice;
     assert.ok(card); assert.equal(card.mode, "animal");
     assert.deepEqual(card.existing.map((e: any) => e.name), ["Orange cat.jpg"], "the made cat is a free pick");
+    assert.match(card.existing[0].url, /^https:\/\/signed\/.*dddddddd.*\.jpg$/, "shown from its own picture when it has no poster");
+    assert.ok(!m2.body.conversation.messages[2].text.includes("[People seen"), "the people note stays out of the bubble");
     // Let Clone8 decide: one portrait, one unit of credits, picked for them
     const auto = await s.call("POST", `/api/studio/assistant/conversations/${id}/choices/${card.id}/generate`, { mode: "auto" });
     assert.equal(auto.status, 200, JSON.stringify(auto.body));
