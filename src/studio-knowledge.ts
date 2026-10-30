@@ -21,6 +21,10 @@ export type KnowledgeUser = {
 export type KnowledgeInput = {
   tools: Record<string, boolean>; costs: StudioCosts; plans: PlanLike[]; env: Record<string, string | undefined>;
   styles: Array<{ id: string; name: string }>; user: KnowledgeUser; today?: string;
+  /** Durable notes kept across chats (the person can read and delete them). */
+  memory?: string[];
+  /** The older part of this chat, summarized; the raw messages after it follow in the turn. */
+  summary?: string | null;
 };
 
 /** The kinds of instrument, in creator words, with what each needs. */
@@ -79,12 +83,16 @@ export function buildSystemPrompt(k: KnowledgeInput): string {
   lines.push("- Prices: quote the credits the plan tool returns, never a guess. If the balance is short, say so and point to Plans.");
   lines.push("- When you have what you need (which file or link, which tool, which character or style, how many copies), call propose_plan once with every step in order. A later step can use an earlier step's output by writing \"$1\", \"$2\" as its source. After the tool answers, tell the person in two or three sentences what will happen and what it costs, and that they can confirm it in the card. Do not call propose_plan for questions, for chit-chat, or when a required input is missing.");
   lines.push("- Instruments: call them by their name (the second column below). The id in the first column is only for propose_plan; never say an id, a vendor or a provider to the person. Everything here is a Clone8 tool.");
+  lines.push("- Memory: the remember tool keeps one short sentence that will matter in later chats: a standing preference (\"always Light model\", \"my brand voice is dry\"), a fact about their accounts or audience, a character they reuse. Never what they asked for once, never a file id, never anything sensitive. Call it only when the person states such a thing, then acknowledge in two words. They can see and delete every note.");
+  lines.push("- A long chat arrives as a summary of its earlier part plus the recent messages. Treat the summary as what was said; do not ask again for what it already answers.");
   lines.push("- Keep replies under 120 words unless the person asks for detail.");
   lines.push("");
   lines.push("THIS PERSON");
   lines.push(`Plan: ${u.plan ?? "none"} (${u.status ?? "no subscription"}). Balance: ${u.balance} credits. Jobs at once: ${u.parallel_jobs}.`);
   lines.push(u.assets.length ? `Library (newest first): ${u.assets.slice(0, 40).map((a) => `${a.kind} "${a.name}" id ${a.id}${a.seconds ? ` ${Math.round(a.seconds)} s` : ""}${a.character ? ` (made character: ${a.prompt ?? ""})` : ""}`).join("; ")}.` : "Library: empty.");
   if (u.recent_jobs.length) lines.push(`Recent jobs: ${u.recent_jobs.slice(0, 8).map((j) => `${j.label} (${j.status})`).join("; ")}.`);
+  if (k.memory?.length) { lines.push(""); lines.push("WHAT YOU REMEMBER ABOUT THIS PERSON (from earlier chats)"); for (const m of k.memory.slice(0, 30)) lines.push(`- ${m}`); }
+  if (k.summary) { lines.push(""); lines.push("EARLIER IN THIS CHAT (summarized; the recent messages follow)"); lines.push(k.summary); }
   lines.push("");
   lines.push("INSTRUMENT KINDS");
   for (const [kind, help] of Object.entries(KIND_HELP)) lines.push(`- ${kind}: ${help}`);

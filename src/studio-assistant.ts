@@ -27,15 +27,20 @@ const MAX_TOOL_ROUNDS = 5, MAX_MESSAGES = 60, LINK_LIMIT = 536_870_912;
 export class AssistantError extends Error { constructor(public code: string, message = code, public status = 400) { super(message); } }
 
 export type Attachment = { asset_id: string; name: string; kind: string; seconds: number | null };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean };
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: "video" | "image"; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
 export type RunStep = { index: number; job_id: string | null; asset_id: string | null; status: "waiting" | "queued" | "running" | "done" | "failed" | "canceled" | "skipped"; error_code?: string | null };
 export type Run = { plan_id: string; status: "running" | "done" | "failed" | "canceled"; steps: RunStep[]; started_at: string; finished_at?: string | null; note?: string | null };
-export type Conversation = { id: string; user_id: string; title: string; status: string; messages: Message[]; plan: Plan | null; run: Run | null; created_at: string; updated_at: string };
+export type Conversation = { id: string; user_id: string; title: string; status: string; messages: Message[]; plan: Plan | null; run: Run | null; summary?: string | null; summary_through?: number; created_at: string; updated_at: string };
+/** What a streaming turn reports while it works: a new round of model text, a text delta, or a status line for a tool. */
+export type TurnEvent = { type: "round" } | { type: "delta"; text: string } | { type: "status"; text: string };
+export type MemoryNote = { id: string; note: string; created_at: string };
 
 export type AssistantDeps = {
   fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; now?: () => number;
+  /** Aborted when the person stops a reply or leaves; the model request is cut and the partial text is kept. */
+  signal?: AbortSignal;
   styles?: (env: Record<string, string | undefined>) => Promise<StudioStyle[]>;
   probeSeconds?: (path: string) => Promise<number>; poster?: (video: string, target: string) => Promise<void>;
 };
@@ -76,40 +81,96 @@ export const TOOLS = [
     description: "Fetch a TikTok or Instagram video link into the person's library so it can be used as a source. Returns the new asset (id, name, seconds). YouTube is not supported; ask for the file instead.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
   },
+  {
+    name: "remember",
+    description: "Keep one short, durable note about this person for later chats: a standing preference, a fact about their brand, accounts or audience, a character they reuse. Only when they state it. Never a one-off request, a file id or anything sensitive. They can read and delete every note.",
+    input_schema: { type: "object", additionalProperties: false, properties: { note: { type: "string", description: "One plain sentence, under 240 characters" } }, required: ["note"] },
+  },
 ];
+export const MEMORY_LIMIT = 30;
 
-async function claude(deps: AssistantDeps, body: Record<string, any>): Promise<any> {
+/** Reads Anthropic's server-sent event stream into the same shape as a plain reply, handing text deltas out as they come. */
+export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onText: (text: string) => void, signal?: AbortSignal): Promise<{ content: any[]; stop_reason: string | null }> {
+  const reader = body.getReader(), dec = new TextDecoder();
+  const blocks: any[] = [], partial: Record<number, string> = {};
+  let buf = "", stop: string | null = null;
+  const handle = (evt: string, data: any) => {
+    if (evt === "content_block_start") {
+      const b = data.content_block ?? {};
+      blocks[data.index] = b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: {} } : { type: "text", text: String(b.text ?? "") };
+      if (b.type === "tool_use") partial[data.index] = "";
+    } else if (evt === "content_block_delta") {
+      const b = blocks[data.index]; if (!b) return;
+      if (data.delta?.type === "text_delta") { b.text += data.delta.text; if (data.delta.text) onText(data.delta.text); }
+      else if (data.delta?.type === "input_json_delta") partial[data.index] = (partial[data.index] ?? "") + String(data.delta.partial_json ?? "");
+    } else if (evt === "content_block_stop") {
+      const b = blocks[data.index];
+      if (b?.type === "tool_use") { try { b.input = partial[data.index] ? JSON.parse(partial[data.index]) : {}; } catch { b.input = {}; } }
+    } else if (evt === "message_delta") stop = data.delta?.stop_reason ?? stop;
+    else if (evt === "error") throw new AssistantError("assistant_unavailable", `Claude stream: ${data.error?.message ?? "error"}`, 503);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i: number;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      let evt = "", data = "";
+      for (const line of chunk.split("\n")) { if (line.startsWith("event:")) evt = line.slice(6).trim(); else if (line.startsWith("data:")) data += line.slice(5).trim(); }
+      if (data) handle(evt, JSON.parse(data));
+      if (signal?.aborted) { await reader.cancel().catch(() => undefined); throw new AssistantError("aborted", "Stopped", 499); }
+    }
+  }
+  return { content: blocks.filter(Boolean), stop_reason: stop };
+}
+
+/** One Claude request. With onText the reply streams and each text delta is handed out; the result has the same shape either way. */
+async function claude(deps: AssistantDeps, body: Record<string, any>, onText?: (text: string) => void): Promise<any> {
   const env = deps.env ?? process.env;
   const key = env.ANTHROPIC_API_KEY;
   if (!key) throw new AssistantError("assistant_unavailable", "The assistant is not configured", 503);
-  const r = await (deps.fetch ?? fetch)("https://api.anthropic.com/v1/messages", {
-    method: "POST", redirect: "error", signal: AbortSignal.timeout(90_000),
-    headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-    // no temperature: the current models reject the parameter ("deprecated for this model", seen live Oct 29 2026)
-    body: JSON.stringify({ model: env.STUDIO_ASSISTANT_MODEL || DEFAULT_MODEL, max_tokens: 1400, ...body }),
-  }).catch(() => { throw new AssistantError("assistant_unavailable", "The assistant did not answer", 503); });
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    throw new AssistantError("assistant_unavailable", `Claude ${r.status}: ${text.slice(0, 200)}`, r.status === 429 || r.status >= 500 ? 503 : 502);
-  }
-  return r.json();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 120_000);
+  const stop = () => ctl.abort();
+  if (deps.signal?.aborted) throw new AssistantError("aborted", "Stopped", 499);
+  deps.signal?.addEventListener("abort", stop, { once: true });
+  const aborted = () => new AssistantError("aborted", "Stopped", 499);
+  try {
+    const r = await (deps.fetch ?? fetch)("https://api.anthropic.com/v1/messages", {
+      method: "POST", redirect: "error", signal: ctl.signal,
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      // no temperature: the current models reject the parameter ("deprecated for this model", seen live Oct 29 2026)
+      body: JSON.stringify({ model: env.STUDIO_ASSISTANT_MODEL || DEFAULT_MODEL, max_tokens: 1400, stream: !!onText, ...body }),
+    }).catch(() => { throw deps.signal?.aborted ? aborted() : new AssistantError("assistant_unavailable", "The assistant did not answer", 503); });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      throw new AssistantError("assistant_unavailable", `Claude ${r.status}: ${text.slice(0, 200)}`, r.status === 429 || r.status >= 500 ? 503 : 502);
+    }
+    if (!onText) return r.json();
+    if (!r.body) throw new AssistantError("assistant_unavailable", "Claude sent no stream", 503);
+    return await readAnthropicStream(r.body, onText, ctl.signal).catch((e) => { if (deps.signal?.aborted) throw aborted(); throw e instanceof AssistantError ? e : new AssistantError("assistant_unavailable", "The reply broke off", 503); });
+  } finally { clearTimeout(timer); deps.signal?.removeEventListener("abort", stop); }
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Knowledge for this person
 // ---------------------------------------------------------------------------------------------------
-async function userContext(sb: SupabaseClient, u: string): Promise<{ user: KnowledgeUser; assets: any[] }> {
-  const [assets, cust, bal, jobs] = await Promise.all([
+async function userContext(sb: SupabaseClient, u: string): Promise<{ user: KnowledgeUser; assets: any[]; memory: MemoryNote[] }> {
+  const [assets, cust, bal, jobs, mem] = await Promise.all([
     sb.from("studio_assets").select("id,kind,name,probe,status,bytes").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(60),
     sb.from("studio_customers").select("plan_id,status,parallel_jobs").eq("user_id", u).maybeSingle(),
     sb.rpc("studio_balance", { p_user: u }),
     sb.from("studio_jobs").select("id,tool,status,options,asset_id,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(8),
+    sb.from("studio_assistant_memory").select("id,note,created_at").eq("user_id", u).order("created_at", { ascending: true }).limit(MEMORY_LIMIT),
   ]);
   for (const r of [assets, cust, jobs]) if (r.error) throw r.error;
+  // memory is optional: before its migration the table is missing and the assistant simply has no notes
+  const memory = (mem.error ? [] : (mem.data ?? [])) as MemoryNote[];
   const list = (assets.data ?? []) as any[];
   const named = await withAssetNames(sb, u, (jobs.data ?? []) as any[]);
   return {
-    assets: list,
+    assets: list, memory,
     user: {
       plan: cust.data?.plan_id ?? null, status: cust.data?.status ?? null, balance: Number(bal.data ?? 0), parallel_jobs: Number(cust.data?.parallel_jobs ?? 1),
       assets: list.map((a) => ({ id: a.id, kind: a.kind, name: a.name, seconds: Number(a.probe?.duration) > 0 ? Number(a.probe.duration) : null, character: !!a.probe?.character, prompt: a.probe?.prompt ?? null })),
@@ -317,9 +378,9 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
 // ---------------------------------------------------------------------------------------------------
 // A turn: the person's message in, the assistant's reply (and maybe a priced plan) out.
 // ---------------------------------------------------------------------------------------------------
-function modelMessages(msgs: Message[]): any[] {
+function modelMessages(msgs: Message[], from = 0): any[] {
   const out: any[] = [];
-  for (const m of msgs.slice(-MAX_MESSAGES)) {
+  for (const m of msgs.slice(Math.max(from, msgs.length - MAX_MESSAGES))) {
     if (m.role === "user") {
       const parts = [m.text.trim()];
       for (const a of m.attachments ?? []) parts.push(`[Attached: "${a.name}" (${a.kind}${a.seconds ? `, ${Math.round(a.seconds)} s` : ""}) id ${a.asset_id}]`);
@@ -334,21 +395,23 @@ function modelMessages(msgs: Message[]): any[] {
   return merged;
 }
 
-export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation, input: { text: string; attachments: Attachment[]; links: string[] }): Promise<Conversation> {
+export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation, input: { text: string; attachments: Attachment[]; links: string[] }, events?: (e: TurnEvent) => void): Promise<Conversation> {
   const env = deps.env ?? process.env, log = deps.log ?? (() => undefined);
   const now = () => new Date(deps.now?.() ?? Date.now()).toISOString();
   const user: Message = { id: randomUUID(), role: "user", text: input.text.slice(0, 4000), attachments: input.attachments, links: input.links, at: now() };
   convo.messages = [...convo.messages, user];
   if (convo.title === "New chat" && input.text.trim()) convo.title = input.text.trim().replace(/\s+/g, " ").slice(0, 60);
-  const [{ user: ku, assets }, styles] = await Promise.all([userContext(sb, convo.user_id), (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[])]);
+  const [{ user: ku, assets, memory }, styles] = await Promise.all([userContext(sb, convo.user_id), (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[])]);
   const tools = toolsEnabled(env);
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
-  const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku });
-  const messages = modelMessages(convo.messages);
+  const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null });
+  const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
   let plan: Plan | null = null;
-  let text = "";
+  let text = "", streamed = "", interrupted = false;
+  try {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const reply = await claude(deps, { system, tools: TOOLS, messages });
+    events?.({ type: "round" }); streamed = "";
+    const reply = await claude(deps, { system, tools: TOOLS, messages }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
     const blocks: any[] = Array.isArray(reply?.content) ? reply.content : [];
     text = blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n").trim() || text;
     const uses = blocks.filter((b) => b.type === "tool_use");
@@ -358,7 +421,20 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     for (const use of uses) {
       let result: any;
       try {
-        if (use.name === "propose_plan") { plan = await pricePlan(ctx, use.input); result = { ok: true, plan: { title: plan.title, total_credits: plan.total_credits, estimate: plan.estimate, balance: ku.balance, warnings: plan.warnings, steps: plan.steps.map((s) => ({ index: s.index, tool: s.tool, label: s.label, credits: s.credits, estimate: s.estimate, summary: s.summary })) } }; }
+        if (use.name === "propose_plan") events?.({ type: "status", text: "Pricing the plan" });
+        else if (use.name === "fetch_link") events?.({ type: "status", text: "Fetching the link" });
+        else if (use.name === "remember") events?.({ type: "status", text: "Saving a note" });
+        if (use.name === "remember") {
+          const note = String(use.input?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+          if (note.length < 3) result = { ok: false, error: "note_empty" };
+          else if (memory.length >= MEMORY_LIMIT) result = { ok: false, error: "memory_full", detail: `${MEMORY_LIMIT} notes already; the person can clear some under Memory` };
+          else {
+            const ins = await sb.from("studio_assistant_memory").insert({ user_id: convo.user_id, note, conversation_id: convo.id }).select("id,note,created_at").single();
+            if (ins.error && /duplicate|unique/i.test(String(ins.error.message))) result = { ok: true, already: true };
+            else if (ins.error) throw ins.error;
+            else { memory.push(ins.data as MemoryNote); result = { ok: true }; }
+          }
+        } else if (use.name === "propose_plan") { plan = await pricePlan(ctx, use.input); result = { ok: true, plan: { title: plan.title, total_credits: plan.total_credits, estimate: plan.estimate, balance: ku.balance, warnings: plan.warnings, steps: plan.steps.map((s) => ({ index: s.index, tool: s.tool, label: s.label, credits: s.credits, estimate: s.estimate, summary: s.summary })) } }; }
         else if (use.name === "fetch_link") {
           const a = await importLink(sb, deps, convo.user_id, String(use.input?.url ?? ""));
           ctx.assets.set(a.asset_id, { id: a.asset_id, kind: "video", name: a.name, probe: { duration: a.seconds }, object_key: `${convo.user_id}/${a.asset_id}.mp4` });
@@ -374,14 +450,46 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     }
     messages.push({ role: "user", content: results });
   }
-  if (!text) text = plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now() };
+  } catch (e: any) {
+    // The person stopped the reply (or left): keep what was said so far, marked, and let the chat go on from there.
+    if (!(e instanceof AssistantError && e.code === "aborted")) throw e;
+    interrupted = true; text = streamed.trim() || text;
+    log(`[assistant] turn ${convo.id} stopped by the person`);
+  }
+  if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}) };
   convo.messages = [...convo.messages, assistant];
   if (plan) { if (convo.plan && convo.plan.status === "proposed") convo.plan.status = "superseded"; convo.plan = plan; convo.title = plan.title; }
   convo.updated_at = now();
   const w = await sb.from("studio_conversations").update({ title: convo.title, messages: convo.messages, plan: convo.plan, updated_at: convo.updated_at }).eq("id", convo.id).eq("user_id", convo.user_id);
   if (w.error) throw w.error;
   return convo;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Long chats: once enough has been said, the older part is folded into a running summary the model reads in its
+// system prompt, and only the recent messages travel raw. The person sees where the fold happened and can read it.
+// ---------------------------------------------------------------------------------------------------
+export const COMPACT_AFTER = 24, KEEP_RAW = 12, COMPACT_CHARS = 24_000;
+const SUMMARY_PROMPT = "You write the Clone8 Studio assistant's own notes on a chat with one creator, so the assistant can keep the thread without the earlier messages. Keep what the person wants, decisions made, files and characters named (with any ids), plans proposed and what happened to them (steps, credits, outcomes, failures), preferences stated, and open questions. Plain text, under 250 words, no headers, no advice, nothing that was not said. If a summary so far is given, merge it with the new part into one summary.";
+export function needsCompaction(convo: Pick<Conversation, "messages" | "summary_through">): boolean {
+  const raw = convo.messages.slice(convo.summary_through ?? 0);
+  return raw.length >= COMPACT_AFTER || raw.reduce((n, m) => n + m.text.length, 0) >= COMPACT_CHARS;
+}
+/** Folds the older messages into the summary when the chat has grown; false when nothing was done. */
+export async function compactIfNeeded(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation): Promise<boolean> {
+  if (!needsCompaction(convo)) return false;
+  const from = convo.summary_through ?? 0, to = convo.messages.length - KEEP_RAW;
+  if (to <= from) return false;
+  const part = convo.messages.slice(from, to).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text}${m.attachments?.length ? ` [attached: ${m.attachments.map((a) => `${a.name} id ${a.asset_id}`).join(", ")}]` : ""}${m.links?.length ? ` [links: ${m.links.join(", ")}]` : ""}`).join("\n");
+  const reply = await claude({ ...deps, signal: undefined }, { system: SUMMARY_PROMPT, max_tokens: 700, messages: [{ role: "user", content: `${convo.summary ? `Summary so far:\n${convo.summary}\n\n` : ""}New part of the chat:\n${part}` }] });
+  const text = (Array.isArray(reply?.content) ? reply.content : []).filter((b: any) => b.type === "text").map((b: any) => String(b.text)).join("\n").trim();
+  if (!text) return false;
+  convo.summary = text.slice(0, 6000); convo.summary_through = to;
+  const w = await sb.from("studio_conversations").update({ summary: convo.summary, summary_through: to }).eq("id", convo.id).eq("user_id", convo.user_id);
+  if (w.error) throw w.error;
+  (deps.log ?? (() => undefined))(`[assistant] compacted ${convo.id} through ${to} (${convo.summary.length} chars)`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -552,7 +660,8 @@ async function hydrateJobs(sb: SupabaseClient, u: string, ids: string[]) {
   }
   return jobs;
 }
-const publicConversation = (c: any, jobs: any[] = []) => ({ id: c.id, title: c.title, status: c.status, messages: c.messages ?? [], plan: c.plan ?? null, run: c.run ?? null, jobs, created_at: c.created_at, updated_at: c.updated_at });
+const publicConversation = (c: any, jobs: any[] = []) => ({ id: c.id, title: c.title, status: c.status, messages: c.messages ?? [], plan: c.plan ?? null, run: c.run ?? null, jobs, summary: c.summary ?? null, summary_through: c.summary_through ?? 0, created_at: c.created_at, updated_at: c.updated_at });
+const escapeLike = (q: string) => q.replace(/[\\%_]/g, (m) => `\\${m}`);
 
 export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps: AssistantDeps = {}): void {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
@@ -580,9 +689,64 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     res.setHeader("Cache-Control", "private, no-store");
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const r = await sbFn().from("studio_conversations").select("id,title,status,created_at,updated_at").eq("user_id", u).order("updated_at", { ascending: false }).limit(30);
+      const q = String(req.query.q ?? "").trim().slice(0, 80);
+      let query = sbFn().from("studio_conversations").select("id,title,status,created_at,updated_at").eq("user_id", u).order("updated_at", { ascending: false }).limit(100);
+      if (q) query = query.ilike("title", `%${escapeLike(q)}%`);
+      const r = await query;
       if (r.error) throw r.error;
       res.json({ conversations: r.data ?? [], assistant: toolsEnabled(env).assistant });
+    } catch (e) { fail(res, e); }
+  });
+  app.patch("/api/studio/assistant/conversations/:id", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn();
+      const c = await load(sb, u, req.params.id);
+      const title = String(req.body?.title ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+      if (!title) throw new AssistantError("title_empty", "Give the chat a name");
+      c.title = title; c.updated_at = new Date().toISOString();
+      const w = await sb.from("studio_conversations").update({ title, updated_at: c.updated_at }).eq("id", c.id).eq("user_id", u);
+      if (w.error) throw w.error;
+      await respond(sb, u, c, res);
+    } catch (e) { fail(res, e); }
+  });
+  app.delete("/api/studio/assistant/conversations/:id", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn();
+      const c = await load(sb, u, req.params.id);
+      // queued steps of a live run are canceled (and refunded) first; a rendering job finishes on its own and stays in the library
+      if (c.run?.status === "running") for (const s of c.run.steps) if (s.status === "queued" && s.job_id) { const r = await sb.rpc("studio_cancel", { p_user: u, p_job: s.job_id }); if (r.error) log(`[assistant] cancel ${s.job_id} ${r.error.message}`); }
+      const d = await sb.from("studio_conversations").delete().eq("id", c.id).eq("user_id", u);
+      if (d.error) throw d.error;
+      res.json({ deleted: c.id });
+    } catch (e) { fail(res, e); }
+  });
+  // Memory: the notes the assistant keeps across chats, in the open. Read them, drop one, or drop them all.
+  app.get("/api/studio/assistant/memory", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const r = await sbFn().from("studio_assistant_memory").select("id,note,created_at").eq("user_id", u).order("created_at", { ascending: true }).limit(MEMORY_LIMIT);
+      if (r.error) { if (/relation .* does not exist/i.test(String(r.error.message))) return res.json({ notes: [], limit: MEMORY_LIMIT }); throw r.error; }
+      res.json({ notes: r.data ?? [], limit: MEMORY_LIMIT });
+    } catch (e) { fail(res, e); }
+  });
+  app.delete("/api/studio/assistant/memory/:id", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      if (!UUID_RE.test(req.params.id)) throw new AssistantError("note_not_found", "No such note", 404);
+      const d = await sbFn().from("studio_assistant_memory").delete().eq("id", req.params.id).eq("user_id", u);
+      if (d.error) throw d.error;
+      res.json({ deleted: req.params.id });
+    } catch (e) { fail(res, e); }
+  });
+  app.delete("/api/studio/assistant/memory", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const d = await sbFn().from("studio_assistant_memory").delete().eq("user_id", u);
+      if (d.error) throw d.error;
+      res.json({ deleted: "all" });
     } catch (e) { fail(res, e); }
   });
   app.post("/api/studio/assistant/conversations", async (req, res) => {
@@ -614,8 +778,36 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
         if (a.error) throw a.error;
         attachments = ((a.data ?? []) as any[]).filter((x) => x.status === "ready").map((x) => ({ asset_id: x.id, name: x.name, kind: x.kind, seconds: Number(x.probe?.duration) > 0 ? Number(x.probe.duration) : null }));
       }
-      const out = await runTurn(sb, { ...deps, env, log }, c, { text, attachments, links });
-      await respond(sb, u, out, res);
+      const stream = req.query.stream === "1" || String(req.headers.accept ?? "").includes("text/event-stream");
+      const ctl = new AbortController();
+      const turnDeps = { ...deps, env, log, signal: ctl.signal };
+      const afterwards = (out: Conversation) => compactIfNeeded(sb, { ...deps, env, log }, out).catch((e) => log(`[assistant] compact ${out.id} ${String(e?.message ?? e).slice(0, 200)}`));
+      if (!stream) {
+        const out = await runTurn(sb, turnDeps, c, { text, attachments, links });
+        await respond(sb, u, out, res);
+        void afterwards(out);
+        return;
+      }
+      // Server-sent events: text as it is written, a status line per tool, then the whole conversation. If the
+      // person leaves or presses Stop, the model request is cut and the partial reply is kept.
+      res.status(200).set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+      res.flushHeaders();
+      let finished = false;
+      const send = (event: string, data: unknown) => { if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
+      req.on("close", () => { if (!finished) ctl.abort(); });
+      const keepAlive = setInterval(() => { if (!res.writableEnded) res.write(": ping\n\n"); }, 15_000);
+      try {
+        const out = await runTurn(sb, turnDeps, c, { text, attachments, links }, (e) => send(e.type, e));
+        finished = true;
+        const ids2 = (out.run?.steps ?? []).map((s) => s.job_id).filter(Boolean) as string[];
+        send("done", { conversation: publicConversation(out, await hydrateJobs(sb, u, ids2)), assistant: toolsEnabled(env).assistant });
+        void afterwards(out);
+      } catch (e: any) {
+        finished = true;
+        const code = e instanceof AssistantError || e instanceof StudioError || e instanceof InstrumentError ? e.code : "assistant_failed";
+        if (code !== "aborted") log(`[assistant] stream ${code}: ${String(e?.message ?? e).slice(0, 200)}`);
+        send("error", { error: code, detail: String(e?.message ?? e).slice(0, 200) });
+      } finally { clearInterval(keepAlive); res.end(); }
     } catch (e) { fail(res, e); }
   });
   app.post("/api/studio/assistant/conversations/:id/confirm", async (req, res) => {

@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { accountAccess } from "../src/account-access.js";
 import { COSTS, PLANS } from "../src/studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS } from "../src/studio-knowledge.js";
-import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, type Conversation } from "../src/studio-assistant.js";
+import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CAT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CONVO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ENV: Record<string, string | undefined> = { HIGGSFIELD_API_KEY: "id:secret", STUDIO_INSTRUMENTS_ENABLED: "true", STUDIO_BLUEPRINT_ENABLED: "true", STUDIO_RECAST_FULL_ENABLED: "true", ANTHROPIC_API_KEY: "sk-test", SCRAPECREATORS_API_KEY: "sc-test" };
@@ -35,13 +35,17 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
         neq(k: string, v: any) { filters.push((r) => r[k] !== v); return q; },
         gte(k: string, v: any) { filters.push((r) => r[k] >= v); return q; },
         in(k: string, v: any[]) { filters.push((r) => v.includes(r[k])); return q; },
+        ilike(k: string, pat: string) { const re = new RegExp(`^${pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".")}$`, "i"); filters.push((r) => re.test(String(r[k] ?? ""))); return q; },
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },
         insert(v: any) { pending = { table, op: "insert", v }; rows = () => (Array.isArray(v) ? v : [v]); return q; },
         update(v: any) { pending = { table, op: "update", v }; return q; },
+        delete() { pending = { table, op: "delete" }; return q; },
         then(resolve: any, reject: any) {
           if (pending) {
             writes.push({ ...pending, filters: filters.length });
-            if (pending.op === "insert") { const v = { id: CONVO, title: "New chat", status: "open", messages: [], plan: null, run: null, created_at: "2026-10-29T00:00:00Z", updated_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
+            if (pending.op === "delete") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); tables[table] = (tables[table] ?? []).filter((r) => !hit.includes(r)); rows = () => []; filters.length = 0; }
+            if (pending.op === "insert" && table === "studio_assistant_memory") { if ((tables[table] ?? []).some((r) => r.note.toLowerCase() === pending.v.note.toLowerCase())) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } }).then(resolve, reject); const v = { id: `note-${(tables[table] ?? []).length + 1}`, created_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
+            else if (pending.op === "insert") { const v = { id: CONVO, title: "New chat", status: "open", messages: [], plan: null, run: null, summary: null, summary_through: 0, created_at: "2026-10-29T00:00:00Z", updated_at: "2026-10-29T00:00:00Z", ...pending.v }; (tables[table] ??= []).push(v); rows = () => [v]; }
             if (pending.op === "update") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); for (const r of hit) Object.assign(r, pending.v); rows = () => hit; filters.length = 0; }
           }
           const out = rows().filter((r) => filters.every((f) => f(r)));
@@ -54,7 +58,7 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
   };
   return sb;
 }
-const baseTables = () => ({ studio_assets: [video, cat], studio_customers: [{ user_id: ANN, plan_id: "creator", status: "active", parallel_jobs: 2 }], studio_jobs: [] as any[], studio_conversations: [] as any[] });
+const baseTables = () => ({ studio_assets: [video, cat], studio_customers: [{ user_id: ANN, plan_id: "creator", status: "active", parallel_jobs: 2 }], studio_jobs: [] as any[], studio_conversations: [] as any[], studio_assistant_memory: [] as any[] });
 const rpcs = (tables: Record<string, any[]>) => (name: string, args: any) => {
   if (name === "studio_balance") return { data: 5000, error: null };
   if (name === "studio_create_job") { const j = { id: `job-${tables.studio_jobs.length + 1}`, user_id: ANN, tool: args.p_tool, status: "queued", asset_id: args.p_asset, options: args.p_options, credits_reserved: args.p_credits, outputs: [], progress: {}, created_at: "2026-10-29T00:00:00Z" }; tables.studio_jobs.push(j); return { data: j, error: null }; }
@@ -66,13 +70,25 @@ const convo = (over: Partial<Conversation> = {}): Conversation => ({ id: CONVO, 
 function fakeClaude(replies: any[], scrape?: (url: string) => any) {
   const asked: any[] = [];
   const fetchFn: any = async (url: string, init: any) => {
-    if (url.startsWith("https://api.anthropic.com")) { asked.push(JSON.parse(init.body)); const r = replies.shift(); if (!r) return new Response(JSON.stringify({ error: "script ran out" }), { status: 500 }); return new Response(JSON.stringify(r), { status: 200 }); }
+    if (url.startsWith("https://api.anthropic.com")) { const body = JSON.parse(init.body); asked.push(body); const r = replies.shift(); if (!r) return new Response(JSON.stringify({ error: "script ran out" }), { status: 500 }); if (body.stream) return new Response(sse(r), { status: 200, headers: { "content-type": "text/event-stream" } }); return new Response(JSON.stringify(r), { status: 200 }); }
     if (url.startsWith("https://api.scrapecreators.com")) return new Response(JSON.stringify(scrape ? scrape(url) : {}), { status: 200 });
     if (url.startsWith("https://cdn.example/")) return new Response(new Uint8Array(2048), { status: 200 });
     if (url.startsWith("https://api.higgsfield.ai/estimate/")) return new Response(JSON.stringify({ usd: 0.4 }), { status: 200 });
     throw new Error(`unexpected fetch ${url}`);
   };
   return { fetchFn, asked };
+}
+/** A scripted reply as Anthropic's event stream: text in two deltas, tool input as partial JSON. */
+function sse(reply: any): string {
+  const ev = (event: string, data: any) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  let out = ev("message_start", { message: { id: "msg_1", role: "assistant" } });
+  (reply.content ?? []).forEach((b: any, i: number) => {
+    if (b.type === "text") { out += ev("content_block_start", { index: i, content_block: { type: "text", text: "" } }); const half = Math.ceil(b.text.length / 2); out += ev("content_block_delta", { index: i, delta: { type: "text_delta", text: b.text.slice(0, half) } }); out += ev("content_block_delta", { index: i, delta: { type: "text_delta", text: b.text.slice(half) } }); }
+    else { out += ev("content_block_start", { index: i, content_block: { type: "tool_use", id: b.id, name: b.name, input: {} } }); const j = JSON.stringify(b.input); out += ev("content_block_delta", { index: i, delta: { type: "input_json_delta", partial_json: j.slice(0, 7) } }); out += ev("content_block_delta", { index: i, delta: { type: "input_json_delta", partial_json: j.slice(7) } }); }
+    out += ev("content_block_stop", { index: i });
+  });
+  out += ev("message_delta", { delta: { stop_reason: reply.stop_reason }, usage: { output_tokens: 10 } }) + ev("message_stop", {});
+  return out;
 }
 const textReply = (text: string) => ({ stop_reason: "end_turn", content: [{ type: "text", text }] });
 const toolReply = (name: string, input: any, text?: string) => ({ stop_reason: "tool_use", content: [...(text ? [{ type: "text", text }] : []), { type: "tool_use", id: "tu_1", name, input }] });
@@ -88,7 +104,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {
@@ -316,12 +332,12 @@ async function serve(sb: any, fetchFn: any) {
   app.use(accountAccess(() => sb));
   registerAssistant(app, () => sb, deps(fetchFn));
   const server = app.listen(0); await new Promise((r) => server.once("listening", r));
-  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const port = (server.address() as any).port, base = `http://127.0.0.1:${port}`;
   const call = async (method: string, path: string, body?: any, headers: Record<string, string> = { "x-test-user": ANN }) => {
     const res = await fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: res.status, body: await res.json().catch(() => null) };
   };
-  return { call, close: () => new Promise((r) => server.close(r)) };
+  return { call, port, close: () => new Promise((r) => server.close(r)) };
 }
 
 test("routes: create, message, confirm, read with hydrated jobs, cancel; strangers get 401 and empty messages 400", async () => {
@@ -367,4 +383,144 @@ test("routes: without the migration the reply is a 503 that names it, not a stac
   const sb: any = { from: () => ({ select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: null, error: { message: 'relation "public.studio_conversations" does not exist' } }) }) }) }) }) };
   const s = await serve(sb, fakeClaude([]).fetchFn);
   try { const r = await s.call("GET", "/api/studio/assistant/conversations"); assert.equal(r.status, 503); assert.equal(r.body.error, "assistant_unavailable"); assert.match(r.body.detail, /migration/); } finally { await s.close(); }
+});
+
+
+test("Anthropic's event stream is read back into blocks: text deltas handed out, tool input assembled from partial JSON", async () => {
+  const reply = toolReply("propose_plan", { title: "T", steps: [{ tool: "blueprint", label: "x", source: VID, options: { copies: 2 } }] }, "Let me price that.");
+  const deltas: string[] = [];
+  const got = await readAnthropicStream(new Response(sse(reply)).body!, (t) => deltas.push(t));
+  assert.equal(got.stop_reason, "tool_use");
+  assert.equal(deltas.join(""), "Let me price that.");
+  assert.equal(deltas.length, 2);
+  assert.deepEqual(got.content[0], { type: "text", text: "Let me price that." });
+  assert.equal(got.content[1].type, "tool_use"); assert.equal(got.content[1].name, "propose_plan"); assert.deepEqual(got.content[1].input.steps[0].options, { copies: 2 });
+  // a mid-stream error from the API is surfaced, not swallowed
+  await assert.rejects(readAnthropicStream(new Response('event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n').body!, () => undefined), (e: any) => e.code === "assistant_unavailable" && /Overloaded/.test(e.message));
+});
+
+test("a streaming turn reports rounds, text deltas and tool status in order, and the saved text is the last round's", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn, asked } = fakeClaude([
+    toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }, "Pricing it now."),
+    textReply("Five originals for 20 credits. Confirm in the card."),
+  ]);
+  const c = convo(); tables.studio_conversations.push(c);
+  const events: TurnEvent[] = [];
+  const out = await runTurn(sb, deps(fetchFn), c, { text: "five originals", attachments: [], links: [] }, (e) => events.push(e));
+  assert.ok(asked.every((a) => a.stream === true), "the model is asked to stream");
+  const kinds = events.map((e) => e.type);
+  assert.deepEqual(kinds, ["round", "delta", "delta", "status", "round", "delta", "delta"]);
+  assert.equal((events[3] as any).text, "Pricing the plan");
+  assert.equal(events.filter((e) => e.type === "delta").map((e: any) => e.text).join(""), "Pricing it now.Five originals for 20 credits. Confirm in the card.");
+  assert.equal(out.messages[1].text, "Five originals for 20 credits. Confirm in the card.");
+  assert.equal(out.plan!.total_credits, 5 * COSTS.blueprint_copy);
+});
+
+test("Stop mid-reply keeps the words so far as an interrupted message and the chat stays usable", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const ctl = new AbortController();
+  // the fake aborts itself after the first delta reaches the turn
+  const { fetchFn } = fakeClaude([textReply("First half of a long answer, second half never arrives.")]);
+  const c = convo(); tables.studio_conversations.push(c);
+  let deltas = 0;
+  const out = await runTurn(sb, deps(fetchFn, { signal: ctl.signal }), c, { text: "tell me everything", attachments: [], links: [] }, (e) => { if (e.type === "delta" && ++deltas === 1) ctl.abort(); });
+  const last = out.messages[1];
+  assert.equal(last.role, "assistant"); assert.equal(last.interrupted, true);
+  assert.ok(last.text.length > 0 && last.text.length < "First half of a long answer, second half never arrives.".length, `partial text kept: ${JSON.stringify(last.text)}`);
+  assert.equal(tables.studio_conversations[0].messages.length, 2, "the user message and the partial reply are saved");
+});
+
+test("remember: the model files a durable note, duplicates are fine, the limit is honest, and the next turn reads the notes", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn, asked } = fakeClaude([
+    toolReply("remember", { note: "Always use the Light model; they post the same clip on six accounts." }),
+    textReply("Noted."),
+    toolReply("remember", { note: "always use the light model; they post the same clip on six accounts." }),
+    textReply("Already noted."),
+    textReply("Sure."),
+  ]);
+  const c = convo(); tables.studio_conversations.push(c);
+  await runTurn(sb, deps(fetchFn), c, { text: "always use light, I post on six accounts", attachments: [], links: [] });
+  assert.equal(tables.studio_assistant_memory.length, 1);
+  assert.equal(tables.studio_assistant_memory[0].conversation_id, CONVO);
+  const lastResult = (a: any) => JSON.parse(a.messages[a.messages.length - 1].content[0].content);
+  assert.equal(lastResult(asked[1]).ok, true);
+  await runTurn(sb, deps(fetchFn), c, { text: "again: light model", attachments: [], links: [] });
+  assert.equal(tables.studio_assistant_memory.length, 1, "the same note is not kept twice");
+  assert.deepEqual(lastResult(asked[3]), { ok: true, already: true });
+  await runTurn(sb, deps(fetchFn), c, { text: "hi", attachments: [], links: [] });
+  assert.match(asked[4].system, /WHAT YOU REMEMBER ABOUT THIS PERSON[\s\S]*Always use the Light model/);
+  // full memory refuses with a reason
+  for (let i = 0; i < MEMORY_LIMIT; i++) tables.studio_assistant_memory.push({ id: `n${i}`, user_id: ANN, note: `note ${i}`, created_at: "2026-10-29T00:00:00Z" });
+  const more = fakeClaude([toolReply("remember", { note: "one more thing" }), textReply("ok")]);
+  await runTurn(sb, deps(more.fetchFn), c, { text: "remember this", attachments: [], links: [] });
+  assert.equal(lastResult(more.asked[1]).error, "memory_full");
+});
+
+test("long chats fold: the older part becomes a summary the model reads, the recent messages travel raw, and the fold point is kept", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const c = convo(); tables.studio_conversations.push(c);
+  for (let i = 0; i < COMPACT_AFTER; i++) c.messages.push({ id: `m${i}`, role: i % 2 ? "assistant" : "user", text: `message ${i}`, at: "2026-10-29T00:00:00Z" });
+  assert.equal(needsCompaction(c), true);
+  const { fetchFn, asked } = fakeClaude([textReply("The person wants ten originals of podcast.mp4; a 5-copy plan was proposed and confirmed; they prefer Light.")]);
+  assert.equal(await compactIfNeeded(sb, deps(fetchFn), c), true);
+  assert.equal(asked.length, 1); assert.ok(!("tools" in asked[0]), "summarizing uses no tools"); assert.equal(asked[0].stream, false);
+  assert.match(asked[0].messages[0].content, /message 0[\s\S]*message 11/); assert.ok(!asked[0].messages[0].content.includes(`message ${COMPACT_AFTER - 1}`), "the recent messages are not summarized");
+  assert.equal(c.summary_through, COMPACT_AFTER - KEEP_RAW); assert.match(c.summary!, /ten originals/);
+  assert.equal(tables.studio_conversations[0].summary_through, COMPACT_AFTER - KEEP_RAW);
+  assert.equal(needsCompaction(c), false);
+  // the next turn: the summary is in the system prompt and only the raw tail goes as messages
+  const next = fakeClaude([textReply("Right, ten originals.")]);
+  await runTurn(sb, deps(next.fetchFn), c, { text: "where were we?", attachments: [], links: [] });
+  assert.match(next.asked[0].system, /EARLIER IN THIS CHAT[\s\S]*ten originals/);
+  assert.equal(next.asked[0].messages.length, KEEP_RAW + 1);
+  assert.ok(!JSON.stringify(next.asked[0].messages).includes("message 3"), "summarized messages are not resent");
+  // the second fold merges the earlier summary
+  for (let i = 0; i < COMPACT_AFTER; i++) c.messages.push({ id: `x${i}`, role: i % 2 ? "assistant" : "user", text: `later ${i}`, at: "2026-10-29T00:00:00Z" });
+  const again = fakeClaude([textReply("merged summary")]);
+  assert.equal(await compactIfNeeded(sb, deps(again.fetchFn), c), true);
+  assert.match(again.asked[0].messages[0].content, /Summary so far:\nThe person wants ten originals/);
+});
+
+test("routes: rename, delete (canceling queued steps), search, memory list and delete, and a streamed message", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn } = fakeClaude([
+    toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }, "Pricing."),
+    textReply("Five originals for 20 credits. Confirm in the card."),
+  ]);
+  tables.studio_assistant_memory.push({ id: "aaaaaaaa-0000-4000-8000-000000000001", user_id: ANN, note: "Prefers Light", created_at: "2026-10-29T00:00:00Z" });
+  const s = await serve(sb, fetchFn);
+  try {
+    const made = await s.call("POST", "/api/studio/assistant/conversations");
+    const id = made.body.conversation.id;
+    // streamed message: events in order, then the whole conversation
+    const res = await fetch(`http://127.0.0.1:${(s as any).port}/api/studio/assistant/conversations/${id}/messages`, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream", "x-test-user": ANN }, body: JSON.stringify({ text: "five originals of my podcast", attachments: [VID] }) });
+    assert.equal(res.status, 200); assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+    const raw = await res.text();
+    const events = raw.split("\n\n").filter((x) => x.startsWith("event:")).map((x) => ({ event: x.match(/^event: (\S+)/)![1], data: JSON.parse(x.slice(x.indexOf("data: ") + 6)) }));
+    assert.deepEqual(events.map((e) => e.event), ["round", "delta", "delta", "status", "round", "delta", "delta", "done"]);
+    const done = events[events.length - 1].data;
+    assert.equal(done.conversation.plan.total_credits, 5 * COSTS.blueprint_copy); assert.equal(done.conversation.messages.length, 2); assert.equal(done.conversation.summary_through, 0);
+    // rename
+    const renamed = await s.call("PATCH", `/api/studio/assistant/conversations/${id}`, { title: "  Podcast  originals " });
+    assert.equal(renamed.status, 200); assert.equal(renamed.body.conversation.title, "Podcast originals");
+    assert.equal((await s.call("PATCH", `/api/studio/assistant/conversations/${id}`, { title: " " })).body.error, "title_empty");
+    // search
+    assert.equal((await s.call("GET", "/api/studio/assistant/conversations?q=podcast")).body.conversations.length, 1);
+    assert.equal((await s.call("GET", "/api/studio/assistant/conversations?q=nothing%25here")).body.conversations.length, 0);
+    // memory
+    const mem = await s.call("GET", "/api/studio/assistant/memory");
+    assert.equal(mem.status, 200); assert.equal(mem.body.notes.length, 1); assert.equal(mem.body.limit, MEMORY_LIMIT);
+    assert.equal((await s.call("DELETE", "/api/studio/assistant/memory/aaaaaaaa-0000-4000-8000-000000000001")).status, 200);
+    assert.equal((await s.call("GET", "/api/studio/assistant/memory")).body.notes.length, 0);
+    assert.equal((await s.call("DELETE", "/api/studio/assistant/memory")).body.deleted, "all");
+    // delete a running conversation: its queued step is canceled first
+    await s.call("POST", `/api/studio/assistant/conversations/${id}/confirm`, { plan_id: done.conversation.plan.id });
+    const del = await s.call("DELETE", `/api/studio/assistant/conversations/${id}`);
+    assert.equal(del.status, 200); assert.equal(del.body.deleted, id);
+    assert.ok(sb.calls.some((x: any) => x.name === "studio_cancel"), "the queued job was canceled");
+    assert.equal(tables.studio_conversations.length, 0);
+    assert.equal((await s.call("GET", `/api/studio/assistant/conversations/${id}`)).status, 404);
+  } finally { await s.close(); }
 });
