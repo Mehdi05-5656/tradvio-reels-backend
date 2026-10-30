@@ -750,3 +750,19 @@ test("the face card offers the made characters that match the ask, not every ani
   assert.deepEqual(matchingCharacters(lib as any, "two tigers", "animal").map((a) => a.id), ["t"], "plural and singular meet");
   assert.deepEqual(matchingCharacters(lib as any, "a rugged action hero", "human").map((a) => a.id), ["h"]);
 });
+
+
+test("plans: a cast is resolved member by member (presets, made characters, \"$N\"), and a trend can take a fetched clip as its source", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const ctx = ctxFor(sb) as any;
+  const plan = await pricePlan(ctx, { title: "Trio", steps: [
+    { tool: "character", label: "A fox", source: null, options: { mode: "animal", prompt: "a red fox" } },
+    { tool: "trend", label: "Car 24 with the three", source: VID, options: { model: "light", trend_name: "Car 24", cast: [{ character: "Noah", label: "left" }, { character_asset_id: CAT, label: "middle" }, { character_asset_id: "$1", label: "right" }] } },
+  ] });
+  const st = plan.steps[1];
+  assert.equal(st.tool, "trend"); assert.equal(st.source, VID); assert.equal(st.options.trend_id, null); assert.equal(st.options.trend_name, "Car 24");
+  assert.deepEqual(st.options.cast.map((m: any) => [m.character, m.character_asset_id, m.label]), [["noah", null, "left"], [null, CAT, "middle"], [null, "$1", "right"]]);
+  assert.equal(st.estimate, true, "a member made by an earlier step settles when it starts");
+  assert.ok(st.credits > 0);
+  await assert.rejects(pricePlan(ctx, { title: "x", steps: [{ tool: "recast", label: "x", source: VID, options: { model: "light", cast: [{ character: "Noah" }, { character: "nobody-here" }] } }] }), (e: any) => e.code === "plan_invalid");
+});

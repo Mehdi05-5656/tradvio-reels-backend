@@ -97,6 +97,10 @@ export function failureCode(raw: any): "recast_failed" | "recast_balance" | "rec
   return "recast_failed";
 }
 
+/** Asks the renderer to stop a request (used when a sibling piece failed and the job is lost anyway). */
+export async function cancelRecast(deps: RecastDeps, requestId: string): Promise<void> {
+  await hf(deps, `/requests/${encodeURIComponent(requestId)}/cancel`, { method: "POST" });
+}
 export async function pollRecast(deps: RecastDeps, requestId: string): Promise<{ status: string; videoUrl: string | null; raw: any }> {
   const r = await hf(deps, `/requests/${encodeURIComponent(requestId)}/status`, { method: "GET" });
   const status = String(r?.status ?? "unknown").toLowerCase();
@@ -171,9 +175,16 @@ export function planPieces(window: number, cuts: number[], pieceMax = PIECE_SECO
   if (out.length > 1 && out[out.length - 1].end - out[out.length - 1].start < min) { const tail = out.pop()!; out[out.length - 1].end = tail.end; }
   return out;
 }
-/** Which renderer a Light swap or recast goes to: Genjutsu for one short continuous shot, the long path otherwise. */
+/** The words that tell the renderer who plays whom: reference image N goes to the Nth person from the left. */
+export function castPrompt(cast: Array<{ label?: string | null }> | null | undefined): string {
+  if (!Array.isArray(cast) || cast.length < 2) return "";
+  const lines = cast.map((m, i) => `reference image ${i + 1} is the ${ordinal(i + 1)} person from the left${m?.label ? ` (${m.label})` : ""}`);
+  return `There are ${cast.length} people to recast, each with their own character: ${lines.join("; ")}. Keep each person's own motion and position; do not mix the characters up.`;
+}
+const ordinal = (n: number) => ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"][n - 1] ?? `${n}th`;
+/** Which renderer a Light swap, recast or brought trend goes to: Genjutsu for one short continuous shot, the long path otherwise. */
 export function chooseEngine(tool: SuiteTool, model: "full" | "light", window: number, cuts: number[]): "genjutsu" | "seedance" {
-  if (model !== "light" || (tool !== "swap" && tool !== "recast")) return "genjutsu";
+  if (model !== "light" || (tool !== "swap" && tool !== "recast" && tool !== "trend")) return "genjutsu";
   if (window > MAX_SECONDS.light + 0.05) return "seedance";
   return cuts.some((c) => c >= 0.5 && c < window - 0.5) ? "seedance" : "genjutsu";
 }
@@ -218,6 +229,11 @@ async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>
 /** Where the character comes from: the person's own photo (signed) or a preset served by the dashboard. */
 async function characterUrls(sb: SupabaseClient, deps: RecastDeps, job: Job, optional = false): Promise<string[]> {
   const o = job.options ?? {};
+  if (Array.isArray(o.cast) && o.cast.length > 1) {
+    const urls: string[] = [];
+    for (const m of o.cast.slice(0, 8)) urls.push(...(await characterUrls(sb, deps, { ...job, options: { character: m?.character ?? null, character_asset_id: m?.character_asset_id ?? null } }, false)));
+    return urls;
+  }
   if (optional && !o.character_asset_id && !o.character) return [];
   if (o.character_asset_id) {
     if (!UUID_RE.test(String(o.character_asset_id))) throw new RecastError("character_invalid");
@@ -250,8 +266,9 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const tool: SuiteTool = (SUITE_TOOLS as string[]).includes(String(job.tool)) ? (job.tool as SuiteTool) : "recast";
     const model: "full" | "light" = tool !== "restyle" && job.options?.model === "light" ? "light" : "full";
     // The source: the person's own video, or for a Trend one of our driving clips served by the dashboard host.
-    const trend = tool === "trend" ? trendById(job.options?.trend_id) : null;
-    if (tool === "trend" && !trend) throw new RecastError("trend_unavailable");
+    // a trend the person brought (a link or an upload) is a video asset like a recast source; a catalog trend is hosted
+    const trend = tool === "trend" && !job.asset_id ? trendById(job.options?.trend_id) : null;
+    if (tool === "trend" && !job.asset_id && !trend) throw new RecastError("trend_unavailable");
     let sourceKey: string | null = null, sourceSeconds = 0, drivingUrl: string | null = null;
     if (trend) {
       const base = (deps.env?.STUDIO_PRESET_BASE ?? deps.env?.DASHBOARD_URL ?? process.env.STUDIO_PRESET_BASE ?? process.env.DASHBOARD_URL ?? "https://app.clone8.io");
@@ -280,7 +297,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       const src = await sb.storage.from("studio-uploads").download(sourceKey!);
       if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
       await writeFile(original, Buffer.from(await src.data.arrayBuffer()));
-      if (engine === "genjutsu" && model === "light" && (tool === "swap" || tool === "recast")) {
+      if (engine === "genjutsu" && model === "light" && (tool === "swap" || tool === "recast" || tool === "trend")) {
         const cuts = lightWindow > MAX_SECONDS.light ? [] : await (deps.sceneCuts ?? sceneCuts)(original, lightWindow).catch(() => [] as number[]);
         engine = chooseEngine(tool, model, lightWindow, cuts);
         if (engine === "seedance") { await renew(sb, job, { engine: "seedance" }); log(`[recast] long path ${JSON.stringify({ job: job.id, window: lightWindow, cuts: cuts.length })}`); }
@@ -298,7 +315,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         const plan = planPieces(lightWindow, cuts);
         await renew(sb, job, { done: 0, total: plan.length, note: plan.length > 1 ? `Preparing ${plan.length} pieces` : "Preparing your video" });
         const images = await characterUrls(sb, deps, job, false);
-        const prompt = targetsPrompt(String(job.options?.prompt ?? "").trim() || LONG_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null);
+        const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
+        const prompt = cast ? `${String(job.options?.prompt ?? "").trim() || LONG_PROMPT.replace("the person in the video with the character from the reference image", "the people in the video with the characters from the reference images")} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || LONG_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null);
         for (const [i, p] of plan.entries()) {
           const file = join(dir, `piece-${i + 1}.mp4`);
           await (deps.prescale ?? prescaleSource)(original, file, Math.round((p.end - p.start) * 100) / 100, p.start);
@@ -329,6 +347,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); urls[i] = st.videoUrl; continue; }
           if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
             log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: i + 1, request: p.request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
+            // the job is lost: stop paying for the pieces still rendering
+            for (const [k, other] of pieces.entries()) if (k !== i && !urls[k] && other.request_id) await cancelRecast(deps, other.request_id).catch(() => undefined);
             throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
           }
           pending++;
@@ -373,7 +393,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           await renew(sb, job, { note: "Sending your video to the renderer", input_key: inputKey });
         } else await renew(sb, job, { done: 0, total: 1, note: "Sending the clip to the renderer" });
         const images = await characterUrls(sb, deps, job, tool === "restyle");
-        const prompt = tool === "swap" ? targetsPrompt(String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null) : tool === "restyle" ? String(job.options?.prompt ?? "").trim() || undefined : undefined;
+        const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
+        const prompt = tool === "swap" ? (cast ? `${String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null)) : tool === "restyle" ? String(job.options?.prompt ?? "").trim() || undefined : cast ? castPrompt(cast) : undefined;
         const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.attempts ? `${job.id}:${job.attempts}` : job.id, resolution: RECAST_RESOLUTION });
         requestId = sub.request_id;
         await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
@@ -396,7 +417,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           // swap or recast is retried on the long path, which takes cuts; a Full one is retried on the opening shot only, up
           // to the first cut. Attempts count claims, this one included, so 1 is the first run and 2 the retry.
           if (code === "recast_failed" && job.attempts < 2) {
-            if (model === "light" && (tool === "swap" || tool === "recast") && !drivingUrl) {
+            if (model === "light" && (tool === "swap" || tool === "recast" || tool === "trend") && !drivingUrl) {
               await renew(sb, job, { request_id: null, submitted_at: null, engine: "seedance", note: "The renderer gave up once; trying again on the long path" });
               throw new RecastError(code, "generation failed once, retrying on the long path", true);
             }
@@ -460,7 +481,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, window));
     const charged = Math.min(job.credits_reserved, billed * per);
     const pieceCount = Array.isArray(job.progress?.pieces) ? job.progress.pieces.length : 1;
-    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, engine, request_id: requestId, audio: model === "full" || engine === "seedance" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null, ...(engine === "seedance" && pieceCount > 1 ? { pieces: pieceCount, note: `Rendered in ${pieceCount} pieces at the camera changes and joined` } : {}), ...(cutAt ? { cut_at: cutAt, note: `Cut at the first shot change (${cutAt} s): the renderer takes one continuous shot` } : {}) }];
+    const castCount = Array.isArray(job.options?.cast) ? job.options.cast.length : 1;
+    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, engine, request_id: requestId, audio: model === "full" || engine === "seedance" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null, ...(castCount > 1 ? { cast: castCount } : {}), ...(engine === "seedance" && pieceCount > 1 ? { pieces: pieceCount, note: `Rendered in ${pieceCount} pieces at the camera changes and joined` } : {}), ...(cutAt ? { cut_at: cutAt, note: `Cut at the first shot change (${cutAt} s): the renderer takes one continuous shot` } : {}) }];
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;

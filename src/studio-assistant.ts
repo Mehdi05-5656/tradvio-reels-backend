@@ -87,10 +87,10 @@ export const TOOLS = [
             properties: {
               tool: { type: "string", enum: ["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument"] },
               label: { type: "string", description: "What this step does, in the person's words" },
-              source: { type: ["string", "null"], description: "Video (or picture) asset id, or \"$N\". Null for trend, character and text-only instruments." },
+              source: { type: ["string", "null"], description: "Video (or picture) asset id, or \"$N\". For a trend: null for a catalog trend (trend_id), or the video asset of a trend the person brought (a fetched link or an upload). Null for character and text-only instruments." },
               options: {
                 type: "object", additionalProperties: true,
-                description: "blueprint: {copies}. recast/swap: {model: light|full, character: preset id, or character_asset_id: library image id or \"$N\" of a character step; swap also takes prompt}. restyle: {style_name or style_id, prompt?}. trend: {trend_id, model, character or character_asset_id}. character: {mode: human|animal, prompt}. instrument: {endpoint, params: {...}, inputs: {media_field: asset id or [ids] or \"$N\"}}.",
+                description: "blueprint: {copies}. recast/swap: {model: light|full, character: preset id, or character_asset_id: library image id or \"$N\" of a character step; swap also takes prompt}. For several people, each with their own character, give cast instead: [{character or character_asset_id, label}] in left-to-right order, labels from choose_people. restyle: {style_name or style_id, prompt?}. trend: {trend_id (catalog) or a video source, trend_name?, model, character or character_asset_id, or cast as above}. character: {mode: human|animal, prompt}. instrument: {endpoint, params: {...}, inputs: {media_field: asset id or [ids] or \"$N\"}}.",
               },
             },
             required: ["tool", "label", "options"],
@@ -325,17 +325,26 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
       }
       output = inst.output;
     } else if (tool === "trend") {
-      const who = resolveCharacter(ctx, o, i, resolveRef);
-      const q = quote("trend", { trend_id: o.trend_id, model: o.model ?? "light", ...who.opt }, null, costs);
-      credits = q.credits; summary = q.summary; Object.assign(o, q.options, who.ref ? { character_asset_id: `$${who.ref}` } : {});
-      estimate = !!who.ref;
+      const cast = resolveCast(ctx, o, i, resolveRef);
+      const who = cast ? { opt: { cast: cast.members }, ref: cast.refs[0] ?? null } : resolveCharacter(ctx, o, i, resolveRef);
+      let asset: any = null;
+      if (st.source != null && st.source !== "") { const src = resolveRef(st.source, i, "video"); sourceStr = src.id ?? `$${src.ref}`; asset = src.id ? ctx.assets.get(src.id.toLowerCase()) : src.pseudo; if (src.ref) estimate = true; }
+      const q = quote("trend", { trend_id: o.trend_id, trend_name: o.trend_name, model: o.model ?? "light", max_seconds: o.max_seconds, ...who.opt }, asset, costs);
+      credits = q.credits; summary = q.summary; Object.assign(o, q.options, !cast && who.ref ? { character_asset_id: `$${who.ref}` } : {});
+      if (cast) o.cast = cast.restore(o.cast);
+      if (who.ref) estimate = true;
     } else {
       // blueprint, recast, swap, restyle: a video source, concrete or "$N"
       const src = resolveRef(st.source, i, "video");
       sourceStr = src.id ?? `$${src.ref}`;
       const asset = src.id ? ctx.assets.get(src.id.toLowerCase()) : src.pseudo;
       let extra: Record<string, any> = {}, whoRef: number | null = null;
-      if (tool === "recast" || tool === "swap") { const who = resolveCharacter(ctx, o, i, resolveRef); extra = { ...who.opt, model: o.model ?? "light", prompt: o.prompt }; whoRef = who.ref; if (who.ref) estimate = true; }
+      let cast: ReturnType<typeof resolveCast> = null;
+      if (tool === "recast" || tool === "swap") {
+        cast = resolveCast(ctx, o, i, resolveRef);
+        const who = cast ? { opt: { cast: cast.members }, ref: cast.refs[0] ?? null } : resolveCharacter(ctx, o, i, resolveRef);
+        extra = { ...who.opt, model: o.model ?? "light", prompt: o.prompt, max_seconds: o.max_seconds, targets: o.targets }; whoRef = cast ? null : who.ref; if (who.ref) estimate = true;
+      }
       if (tool === "restyle") {
         let styleId = UUID_RE.test(String(o.style_id ?? "")) ? String(o.style_id) : null;
         if (!styleId && o.style_name) { const n = String(o.style_name).toLowerCase(); styleId = ctx.styles.find((s) => s.name.toLowerCase() === n)?.id ?? ctx.styles.find((s) => s.name.toLowerCase().includes(n))?.id ?? null; }
@@ -347,6 +356,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
       credits = q.credits; summary = q.summary; Object.assign(o, q.options);
       if (src.ref) estimate = true;
       if (whoRef) o.character_asset_id = `$${whoRef}`; // the placeholder passed the quote; the run fills in the made character
+      if (cast) o.cast = cast.restore(o.cast);
     }
     const ex = expectedOutput(tool, o, sourceStr && !sourceStr.startsWith("$") ? Number(ctx.assets.get(sourceStr.toLowerCase())?.probe?.duration) || null : produced[Number(sourceStr?.slice(1) ?? 0) - 1]?.seconds ?? null, output);
     seconds = ex.seconds; output = ex.output;
@@ -358,6 +368,19 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
 }
 
 /** Who appears: a preset id, a library image id, a "$N" of a character step, or a name the model used for either. */
+/** A character per person (2 to 8, left to right): each member resolved like a single character; "$N" members are
+ *  quoted with a placeholder and put back after, so the run fills in the made character. */
+function resolveCast(ctx: Ctx, o: any, i: number, resolveRef: (v: unknown, i: number, want: "video" | "image") => { id: string | null; ref: number | null }) {
+  if (!Array.isArray(o.cast) || o.cast.length < 2) return null;
+  if (o.cast.length > 8) throw new AssistantError("plan_invalid", `Step ${i}: up to 8 people can be cast`);
+  const refs: number[] = [], refAt = new Map<number, number>();
+  const members = o.cast.map((m: any, k: number) => {
+    const r = resolveCharacter(ctx, m ?? {}, i, resolveRef);
+    if (r.ref) { refs.push(r.ref); refAt.set(k, r.ref); }
+    return { ...r.opt, label: typeof m?.label === "string" ? m.label : null };
+  });
+  return { members, refs, restore: (quoted: any[]) => (Array.isArray(quoted) ? quoted.map((m, k) => (refAt.has(k) ? { ...m, character: null, character_asset_id: `$${refAt.get(k)}` } : m)) : quoted) };
+}
 function resolveCharacter(ctx: Ctx, o: any, i: number, resolveRef: (v: unknown, i: number, want: "video" | "image") => { id: string | null; ref: number | null }): { opt: Record<string, any>; ref: number | null } {
   const preset = PRESET_CHARACTERS.find((p) => p.id === String(o.character ?? "").toLowerCase() || p.name.toLowerCase() === String(o.character ?? o.character_name ?? "").toLowerCase());
   if (preset) return { opt: { character: preset.id, character_asset_id: null }, ref: null };
@@ -662,6 +685,7 @@ const refsOf = (s: PlanStep): number[] => {
   const out: number[] = [];
   const add = (v: unknown) => { const m = String(v ?? "").match(REF_RE); if (m) out.push(Number(m[1])); };
   add(s.source); add(s.options?.character_asset_id);
+  if (Array.isArray(s.options?.cast)) for (const m of s.options.cast) add(m?.character_asset_id);
   if (s.tool === "instrument") for (const v of Object.values(s.options?.inputs ?? {})) ([] as any[]).concat(v).forEach(add);
   return [...new Set(out)];
 };
@@ -734,6 +758,7 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
         const o = { ...ps.options };
         let assetId: string | null = ps.source ? resolve(ps.source) : null;
         if (o.character_asset_id && REF_RE.test(String(o.character_asset_id))) o.character_asset_id = resolve(o.character_asset_id);
+        if (Array.isArray(o.cast)) o.cast = o.cast.map((m: any) => (m?.character_asset_id && REF_RE.test(String(m.character_asset_id)) ? { ...m, character_asset_id: resolve(m.character_asset_id) } : m));
         if (ps.tool === "instrument" && o.inputs) o.inputs = Object.fromEntries(Object.entries(o.inputs).map(([k, v]) => [k, Array.isArray(v) ? v.map(resolve) : resolve(v)]));
         let credits = ps.credits, options: Record<string, any> = o;
         if (ps.tool === "instrument") {

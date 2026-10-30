@@ -81,9 +81,26 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
 export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument"; credits: number; options: Record<string, any>; summary: string };
 const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const characterChoice = (o: any) => {
+  const cast = castChoice(o);
+  if (cast) return cast;
   if (!UUID_OPT(o.character_asset_id) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
   return { character: o.character ?? null, character_asset_id: o.character_asset_id ?? null };
 };
+export type CastMember = { character: string | null; character_asset_id: string | null; label: string | null };
+/** A character per person, left to right (2 to 8). One member collapses to the plain single choice; none means no cast. */
+export function castChoice(o: any): { character: string | null; character_asset_id: string | null; cast?: CastMember[] } | null {
+  if (!Array.isArray(o?.cast) || !o.cast.length) return null;
+  if (o.cast.length > 8) throw new StudioError("cast_too_large", "Up to 8 people can be cast");
+  const cast: CastMember[] = o.cast.map((m: any, i: number) => {
+    const asset = UUID_OPT(m?.character_asset_id) ? String(m.character_asset_id) : null;
+    const preset = !asset && /^[a-z0-9_-]{2,40}$/.test(String(m?.character ?? "")) ? String(m.character) : null;
+    if (!asset && !preset) throw new StudioError("character_required", `Pick who plays person ${i + 1}`);
+    const label = typeof m?.label === "string" ? m.label.replace(/\s+/g, " ").trim().slice(0, 60) || null : null;
+    return { character: preset, character_asset_id: asset, label };
+  });
+  if (cast.length === 1) return { character: cast[0].character, character_asset_id: cast[0].character_asset_id };
+  return { character: cast[0].character, character_asset_id: cast[0].character_asset_id, cast };
+}
 
 export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};
@@ -103,9 +120,9 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     // duration rounded up, and a re-encoded 4.00 s file reads a hair over 4, so a tenth of a second is added before rounding.
     const cap = windowSeconds(o, WINDOW[model]);
     const seconds = billableSeconds(duration, cap);
-    if (!UUID_RE.test(String(o.character_asset_id ?? "")) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
+    const who = characterChoice(o);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    return { tool, credits: seconds * per, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };
+    return { tool, credits: seconds * per, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who }, summary: `${seconds} s × ${per}` };
   }
   if (tool === "swap") {
     // Object swap: the person or thing in the video replaced by the reference image, scene and motion kept. Same rates as
@@ -136,13 +153,23 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     return { tool, credits: seconds * costs.recast_second, options: { model: "full", seconds, ...(cap < 30 ? { max_seconds: cap } : {}), style_id: o.style_id, style_name, prompt, character_asset_id: UUID_OPT(o.character_asset_id) ? o.character_asset_id : null }, summary: `${seconds} s × ${costs.recast_second}` };
   }
   if (tool === "trend") {
-    // Trend: one of our driving clips performed by the person's character. The clip's length sets the price.
+    // Trend: a driving clip performed by the person's character(s): one of our catalog clips, or any trend they bring as
+    // a video (a TikTok or Instagram link fetched into the library, or an upload). The clip's length sets the price.
+    const model = o.model === "light" ? "light" : "full";
+    const per = model === "light" ? costs.recast_light_second : costs.recast_second;
+    if (asset && asset.kind === "video") {
+      const duration = Number(asset.probe?.duration);
+      if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
+      const cap = windowSeconds(o, WINDOW[model]);
+      const seconds = billableSeconds(duration, cap);
+      const who = characterChoice(o);
+      const trend_name = typeof o.trend_name === "string" && o.trend_name.trim() ? o.trend_name.trim().slice(0, 80) : "Your trend";
+      return { tool, credits: seconds * per, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), trend_id: null, trend_name, ...who }, summary: `${seconds} s × ${per}` };
+    }
     const trend = trendById(o.trend_id);
     if (!trend) throw new StudioError("trend_required", "Pick a trend");
-    const model = o.model === "light" ? "light" : "full";
     const seconds = billableSeconds(trend.seconds, model === "light" ? 15 : 30);
     const who = characterChoice(o);
-    const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     return { tool, credits: seconds * per, options: { model, seconds, trend_id: trend.id, trend_name: trend.name, ...who }, summary: `${seconds} s × ${per}` };
   }
   if (tool === "character") {

@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, LONG_ENDPOINT, concatVideos, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -338,4 +338,49 @@ test("real ffmpeg: a piece is cut from the middle of a clip, and two rendered pi
     const total = await probeSeconds(out); assert.ok(Math.abs(total - 5) < 0.2, `2 s + 3 s joins to ${total}`);
     const st = await probeStream(out); assert.deepEqual([st.width, st.height, st.hasAudio], [720, 1280, false], "one picture track, 720 wide, sound added later");
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+
+test("cast: each person's character goes to the renderer in left-to-right order with words saying who plays whom", async () => {
+  const PHOTO2 = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const h = fakeHiggsfield([{ status: "completed", video: { url: "https://cdn.example/out.mp4" } }]);
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 8 }, name: "trio.mp4" }, { id: PHOTO, user_id: ANN, kind: "image", status: "ready", object_key: `${ANN}/${PHOTO}.jpg` }, { id: PHOTO2, user_id: ANN, kind: "image", status: "ready", object_key: `${ANN}/${PHOTO2}.jpg` }] });
+  const cast = [{ character: null, character_asset_id: PHOTO2, label: "left, blue top" }, { character: "noah", character_asset_id: null, label: "middle" }, { character: null, character_asset_id: PHOTO, label: "right, cap" }];
+  const out = await runRecastJob(sb, deps(h.fetchFn, { sceneCuts: async () => [] }), job({ tool: "recast", options: { model: "light", seconds: 8, character: null, character_asset_id: PHOTO2, cast }, credits_reserved: 8 * 22 }));
+  assert.equal(out, "done");
+  const submit = h.calls.find((c) => c.method === "POST");
+  assert.deepEqual(submit.body.image_urls, [`https://signed/studio-uploads/${ANN}/${PHOTO2}.jpg`, "https://app.clone8.io/presets/noah.jpg", `https://signed/studio-uploads/${ANN}/${PHOTO}.jpg`], "one reference per person, in order");
+  assert.match(submit.body.prompt, /reference image 1 is the first person from the left \(left, blue top\); reference image 2 is the second person from the left \(middle\); reference image 3 is the third person from the left \(right, cap\)/);
+  assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_outputs[0].cast, 3);
+  assert.equal(castPrompt([{ label: "x" }]), "", "one person needs no words");
+});
+
+test("a trend the person brought is rendered from their clip, not the catalog, and long ones take the long path", async () => {
+  const h = fakeHiggsfield([{ status: "completed", video: { url: "https://cdn.example/out.mp4" } }]);
+  const sb = fakeSb(job());
+  const out = await runRecastJob(sb, deps(h.fetchFn, { sceneCuts: async () => [] }), job({ tool: "trend", options: { model: "light", seconds: 15, max_seconds: 15, trend_id: null, trend_name: "Car 24", character: "noah", character_asset_id: null } }));
+  assert.equal(out, "done");
+  assert.ok(!h.calls.some((c) => c.method === "HEAD" && /\/trends\//.test(c.url)), "no catalog clip is looked up");
+  assert.equal(h.calls.find((c) => c.method === "POST").url, `${HF_BASE}/${MODELS.light}`, "a short single-shot brought trend stays on Genjutsu");
+  assert.equal(chooseEngine("trend", "light", 40, []), "seedance");
+});
+
+test("the long path stops paying for the other pieces when one is refused", async () => {
+  const calls: any[] = [];
+  const fetchFn: any = async (url: string, init: any = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    const res = (status: number, body: any) => ({ ok: status < 300, status, text: async () => JSON.stringify(body), arrayBuffer: async () => body });
+    if (init.method === "HEAD") return { ok: true, status: 200 };
+    if (url === `${HF_BASE}/${LONG_ENDPOINT}`) { const n = calls.filter((c) => c.url === url).length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+    if (url.endsWith("/requests/piece_1/status")) return res(200, { status: "in_progress" });
+    if (url.endsWith("/requests/piece_2/status")) return res(200, { status: "failed", error: "Generation failed" });
+    if (url.endsWith("/requests/piece_1/cancel")) return res(200, { status: "cancelled" });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const { writeFile: wf } = await import("node:fs/promises");
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 50 }, name: "long.mp4" }] });
+  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 2, options: { model: "light", seconds: 50, character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
+  assert.equal(out, "failed");
+  assert.ok(calls.some((c) => c.method === "POST" && c.url.endsWith("/requests/piece_1/cancel")), "the piece still rendering is cancelled");
+  assert.equal(sb.calls.at(-1).args.p_reason, "recast_failed");
 });

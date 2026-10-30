@@ -369,3 +369,23 @@ test("max_seconds narrows the window: billed and cut to the opening the person a
   const r = quote("recast", { model: "full", character: "noah", max_seconds: 10 }, clip, costs);
   assert.equal(r.options.seconds, 10); assert.equal(r.credits, 720);
 });
+
+
+test("cast: a character per person, left to right, priced like one; trends take any clip the person brought", async () => {
+  const { castChoice } = await import("../src/studio.js");
+  const clip = { kind: "video", probe: { duration: 12 } } as any;
+  const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
+  const q = quote("recast", { model: "light", cast: [{ character_asset_id: A, label: "left, red shirt" }, { character: "noah" }, { character_asset_id: B, label: "right" }] }, clip);
+  assert.equal(q.credits, 13 * COSTS.recast_light_second, "the cast does not change the price");
+  assert.deepEqual(q.options.cast.map((m: any) => [m.character, m.character_asset_id, m.label]), [[null, A, "left, red shirt"], ["noah", null, null], [null, B, "right"]]);
+  assert.equal(q.options.character_asset_id, A, "the first member also fills the single fields for older readers");
+  const one = castChoice({ cast: [{ character: "maya" }] });
+  assert.deepEqual(one, { character: "maya", character_asset_id: null }, "a cast of one is the plain choice");
+  assert.throws(() => quote("recast", { model: "light", cast: [{ character: "noah" }, {}] }, clip), (e: any) => e.code === "character_required" && /person 2/.test(e.message));
+  assert.throws(() => quote("swap", { model: "light", cast: Array.from({ length: 9 }, () => ({ character: "noah" })) }, clip), (e: any) => e.code === "cast_too_large");
+  // a trend from a fetched link: the clip's own length, the Light window, a name
+  const t = quote("trend", { model: "light", trend_name: "Car 24", cast: [{ character: "noah" }, { character: "maya" }] }, { kind: "video", probe: { duration: 9.4 } } as any);
+  assert.deepEqual([t.credits, t.options.seconds, t.options.trend_id, t.options.trend_name, t.options.cast.length], [10 * COSTS.recast_light_second, 10, null, "Car 24", 2]);
+  assert.equal(quote("trend", { model: "light", character: "noah" }, { kind: "video", probe: { duration: 70 } } as any).options.seconds, 71, "a brought trend takes the whole clip on Light (70.0 s bills 71 at the platform rounding)");
+  assert.equal(quote("trend", { model: "light", character: "noah", trend_id: "desk-talk" }, null).options.trend_id, "desk-talk", "catalog trends unchanged");
+});

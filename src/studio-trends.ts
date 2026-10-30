@@ -2,7 +2,7 @@
 // /trends/<id>.jpg, like the preset portraits); the person adds a character and Genjutsu motion transfer performs the
 // clip as them. The clips are ours or licensed, never another platform's community uploads. Seconds are the clip's
 // length after our 720p encode and decide the price (seconds × the Recast rate of the chosen model).
-export type StudioTrend = { id: string; name: string; lede: string; seconds: number; tags: string[] };
+export type StudioTrend = { id: string; name: string; lede: string; seconds: number; tags: string[]; /** people performing, left to right (1 when absent) */ people?: number };
 
 // Clips: desk-talk and pitch-15 are a client's (used with permission); thumbs-up and dance-headphones are Pexels stock
 // (Tima Miroshnichenko 4994156, Polina Tankilevitch 6868300), free for commercial use and modification, no attribution required.
