@@ -235,7 +235,19 @@ test("links: TikTok and Instagram are fetched into the library as ready video as
   const row = tables.studio_assets.find((r) => r.id === a.asset_id);
   assert.ok(row); assert.equal(row.status, "ready"); assert.equal(row.probe.source, "tiktok"); assert.equal(row.probe.duration, 7.5); assert.equal(row.probe.poster_key, `${ANN}/assets/${a.asset_id}.jpg`);
   assert.deepEqual(sb.uploads.slice(0, 2).map((u: any) => u.bucket), ["studio-uploads", "studio-outputs"]);
-  await assert.rejects(importLink(sb, deps(fetchFn), ANN, "https://youtu.be/dQw4w9WgXcQ"), (e: any) => e.code === "unsupported_link");
+  // YouTube: metadata from the service (title, length), the file from the injected downloader; too long is refused before any download
+  let downloaded: string[] = [];
+  const yt = fakeClaude([], () => ({ title: "How I edit #shorts", durationMs: 42_000 })).fetchFn;
+  const dl = async (url: string, target: string, o: any) => { downloaded.push(url); assert.equal(o.maxSeconds, 600); await writeFile(target, Buffer.from("mp4")); return { title: "How I edit" }; };
+  const y = await importLink(sb, deps(yt, { download: dl }), ANN, "https://youtube.com/shorts/dQw4w9WgXcQ");
+  assert.equal(y.name, "How I edit.mp4"); assert.deepEqual(downloaded, ["https://youtube.com/shorts/dQw4w9WgXcQ"]);
+  assert.equal(tables.studio_assets.find((r) => r.id === y.asset_id).probe.source, "youtube");
+  const noTitle = await importLink(sb, deps(fakeClaude([], () => ({})).fetchFn, { download: async (_u: string, target: string) => { await writeFile(target, Buffer.from("mp4")); return { title: null }; } }), ANN, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(noTitle.name, "YouTube dQw4w9WgXcQ.mp4");
+  downloaded = [];
+  await assert.rejects(importLink(sb, deps(fakeClaude([], () => ({ title: "Long", durationMs: 45 * 60_000 })).fetchFn, { download: dl }), ANN, "https://youtu.be/dQw4w9WgXcQ"), (e: any) => e.code === "link_too_long");
+  assert.deepEqual(downloaded, [], "nothing is downloaded for an over-long video");
+  await assert.rejects(importLink(sb, deps(yt, { download: async () => { const { LinkError } = await import("../src/studio-youtube.js"); throw new LinkError("link_blocked", "bot check"); } }), ANN, "https://youtu.be/dQw4w9WgXcQ"), (e: any) => e.code === "link_blocked" && e.status === 400);
   await assert.rejects(importLink(sb, deps(fetchFn), ANN, "https://example.com/v.mp4"), (e: any) => e.code === "unsupported_link");
   const { fetchFn: empty } = fakeClaude([], () => ({ title: "nothing" }));
   await assert.rejects(importLink(sb, deps(empty), ANN, "https://www.instagram.com/reel/C1x/"), (e: any) => e.code === "link_no_media");
@@ -350,12 +362,18 @@ test("routes: create, message, confirm, read with hydrated jobs, cancel; strange
   const { fetchFn } = fakeClaude([
     toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }),
     textReply("Five originals for 25 credits. Confirm in the card."),
-  ]);
+  ], () => ({ title: "linked clip", download_url: "https://cdn.example/dl.mp4" }));
   const s = await serve(sb, fetchFn);
   try {
     assert.equal((await s.call("GET", "/api/studio/assistant/conversations", undefined, {})).status, 401);
     const list0 = await s.call("GET", "/api/studio/assistant/conversations");
     assert.equal(list0.status, 200); assert.deepEqual(list0.body.conversations, []); assert.equal(list0.body.assistant, true);
+    // a link brought into the library outside a chat, for the Automations page and the tool pages
+    const linked = await s.call("POST", "/api/studio/links", { url: "https://www.tiktok.com/@cat/video/7301" });
+    assert.equal(linked.status, 201, JSON.stringify(linked.body)); assert.equal(linked.body.asset.kind, "video"); assert.equal(linked.body.asset.status, "ready"); assert.ok(linked.body.asset.name.endsWith(".mp4"));
+    const badLink = await s.call("POST", "/api/studio/links", { url: "https://example.com/v.mp4" });
+    assert.equal(badLink.status, 400); assert.equal(badLink.body.error, "unsupported_link");
+    assert.equal((await s.call("POST", "/api/studio/links", { url: "https://youtu.be/dQw4w9WgXcQ" }, {})).status, 401);
     const made = await s.call("POST", "/api/studio/assistant/conversations");
     assert.equal(made.status, 201); assert.equal(made.body.conversation.title, "New chat");
     const id = made.body.conversation.id;
@@ -703,4 +721,18 @@ test("a chat still titled with its first message gets a short name from the mode
   // a plan-named chat is left alone
   const named = convo({ title: "Five originals", messages: c.messages });
   assert.equal(await titleIfNeeded(sb, deps(fakeClaude([]).fetchFn), named), false);
+});
+
+
+test("YouTube helpers: the binary for this machine, the id in every link shape, yt-dlp's complaints in plain words, and the arguments", async () => {
+  const { ytDlpAsset, youtubeId, classifyYtDlpError, ytDlpArgs } = await import("../src/studio-youtube.js");
+  assert.equal(ytDlpAsset("linux", "x64"), "yt-dlp_linux"); assert.equal(ytDlpAsset("linux", "arm64"), "yt-dlp_linux_aarch64"); assert.equal(ytDlpAsset("darwin", "arm64"), "yt-dlp_macos");
+  for (const u of ["https://youtu.be/dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s", "https://youtube.com/shorts/dQw4w9WgXcQ", "https://m.youtube.com/watch?v=dQw4w9WgXcQ"]) assert.equal(youtubeId(u), "dQw4w9WgXcQ", u);
+  assert.equal(youtubeId("https://www.youtube.com/@channel"), null);
+  assert.equal(classifyYtDlpError("ERROR: [youtube] abc: Sign in to confirm you're not a bot").code, "link_blocked");
+  assert.equal(classifyYtDlpError("ERROR: File is larger than max-filesize").code, "link_too_large");
+  assert.equal(classifyYtDlpError("abc: Private video. Sign in if you've been granted access").code, "link_no_media");
+  assert.equal(classifyYtDlpError("something odd").code, "link_fetch_failed");
+  const args = ytDlpArgs("https://youtu.be/x", "/tmp/v.mp4", { maxBytes: 10, maxSeconds: 600 });
+  assert.ok(args.includes("--no-playlist")); assert.equal(args[args.indexOf("--max-filesize") + 1], "10"); assert.equal(args[args.indexOf("--match-filter") + 1], "duration <= 600"); assert.equal(args[args.length - 1], "https://youtu.be/x");
 });

@@ -12,12 +12,13 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PLANS, quote, StudioError, fetchStyles, toolsEnabled, costsFor, publicJob, withAssetNames, downloadBase, type StudioStyle } from "./studio.js";
+import { PLANS, quote, StudioError, fetchStyles, toolsEnabled, costsFor, publicJob, withAssetNames, withPosterUrls, downloadBase, type StudioStyle } from "./studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS, type KnowledgeUser } from "./studio-knowledge.js";
 import { quoteInstrument, instrumentById, tableUsd, instrumentCredits, InstrumentError, inputAssetIds } from "./studio-instruments.js";
 import { trendById } from "./studio-trends.js";
 import { probeSeconds, makePoster } from "./studio-recast.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
+import { youtubeId } from "./studio-youtube.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REF_RE = /^\$(\d{1,2})$/;
@@ -49,6 +50,8 @@ export type MemoryNote = { id: string; note: string; created_at: string };
 
 export type AssistantDeps = {
   fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; now?: () => number;
+  /** Fetches a YouTube video to a file (yt-dlp in production; tests inject one). */
+  download?: (url: string, target: string, o: { maxBytes: number; maxSeconds: number }) => Promise<{ title: string | null }>;
   /** Aborted when the person stops a reply or leaves; the model request is cut and the partial text is kept. */
   signal?: AbortSignal;
   styles?: (env: Record<string, string | undefined>) => Promise<StudioStyle[]>;
@@ -88,12 +91,12 @@ export const TOOLS = [
   },
   {
     name: "fetch_link",
-    description: "Fetch a TikTok or Instagram video link into the person's library so it can be used as a source. Returns the new asset (id, name, seconds). YouTube is not supported; ask for the file instead.",
+    description: "Fetch a TikTok, Instagram or YouTube (video or Short) link into the person's library so it can be used as a source. Returns the new asset (id, name, seconds). If it fails with link_blocked, YouTube refused our servers: ask for the file.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
   },
   {
     name: "request_video",
-    description: "Ask for the video (or picture) the person means, with a card that takes a dropped file, a pasted TikTok or Instagram link, or a pick from their library. Use it whenever they refer to a video they have not attached (\"this\", \"it\", \"my video\") and you cannot be sure which file they mean. Never guess a library file for them.",
+    description: "Ask for the video (or picture) the person means, with a card that takes a dropped file, a pasted TikTok, Instagram or YouTube link, or a pick from their library. Use it whenever they refer to a video they have not attached (\"this\", \"it\", \"my video\") and you cannot be sure which file they mean. Never guess a library file for them.",
     input_schema: { type: "object", additionalProperties: false, properties: { kind: { type: "string", enum: ["video", "image"] }, reason: { type: "string", description: "One short line: what it is for" } }, required: ["kind", "reason"] },
   },
   {
@@ -359,7 +362,7 @@ function resolveCharacter(ctx: Ctx, o: any, i: number, resolveRef: (v: unknown, 
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Links: TikTok and Instagram through ScrapeCreators (download_media), stored as a library asset.
+// Links: TikTok and Instagram through ScrapeCreators (download_media); YouTube through yt-dlp. Stored as a library asset.
 // ---------------------------------------------------------------------------------------------------
 export function linkPlatform(url: string): "tiktok" | "instagram" | "youtube" | null {
   let h = ""; try { h = new URL(url).hostname.toLowerCase(); } catch { return null; }
@@ -382,43 +385,65 @@ export function findMediaUrl(body: any): string | null {
   hits.sort((a, b) => score(b) - score(a));
   return hits[0]?.url ?? null;
 }
+/** The longest video a link may bring in, in seconds (uploads say 10 minutes; STUDIO_LINK_MAX_SECONDS raises it). */
+export const linkMaxSeconds = (env: Record<string, string | undefined>) => Math.max(60, Number(env.STUDIO_LINK_MAX_SECONDS) || 600);
 export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: string, url: string): Promise<Attachment> {
   const env = deps.env ?? process.env, fetchFn = deps.fetch ?? fetch;
   const platform = linkPlatform(url);
-  if (!platform) throw new AssistantError("unsupported_link", "Only TikTok and Instagram links can be fetched");
-  if (platform === "youtube") throw new AssistantError("unsupported_link", "YouTube links cannot be fetched yet; upload the file instead");
+  if (!platform) throw new AssistantError("unsupported_link", "Only TikTok, Instagram and YouTube links can be fetched");
   const key = env.SCRAPECREATORS_API_KEY;
   if (!key) throw new AssistantError("link_fetch_failed", "Link fetching is not configured", 503);
-  const path = platform === "tiktok" ? `/v2/tiktok/video?url=${encodeURIComponent(url)}&download_media=true&trim=true` : `/v1/instagram/post?url=${encodeURIComponent(url)}&download_media=true&trim=true`;
-  const r = await fetchFn(`https://api.scrapecreators.com${path}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
-  if (!r.ok) throw new AssistantError("link_fetch_failed", `The link could not be read (${r.status})`, 502);
-  const body: any = await r.json().catch(() => null);
-  const media = findMediaUrl(body);
-  if (!media) throw new AssistantError("link_no_media", "No video was found at that link");
-  const dl = await fetchFn(media, { signal: AbortSignal.timeout(300_000) });
-  if (!dl.ok) throw new AssistantError("link_fetch_failed", `The video could not be downloaded (${dl.status})`, 502);
-  const bytes = Buffer.from(await dl.arrayBuffer());
+  const dir = await mkdtemp(join(tmpdir(), "studio-link-"));
+  try {
+  let bytes: Buffer, body: any = null, ytTitle: string | null = null;
+  const file = join(dir, "v.mp4"), still = join(dir, "v.jpg");
+  if (platform === "youtube") {
+    // metadata first (title, length) so an over-long video is refused before anything is downloaded
+    const meta = await fetchFn(`https://api.scrapecreators.com/v1/youtube/video?url=${encodeURIComponent(url)}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(60_000) }).catch(() => null);
+    body = meta && meta.ok ? await meta.json().catch(() => null) : null;
+    const ms = Number(body?.durationMs ?? body?.lengthSeconds * 1000);
+    const maxSeconds = linkMaxSeconds(env);
+    if (ms > 0 && ms / 1000 > maxSeconds) throw new AssistantError("link_too_long", `That video is ${Math.round(ms / 60000)} minutes; links can be up to ${Math.round(maxSeconds / 60)} minutes`);
+    try {
+      const got = await (deps.download ?? ((a, b, o) => import("./studio-youtube.js").then((m) => m.downloadYouTube(a, b, { ...o, fetch: fetchFn, env }))))(url, file, { maxBytes: LINK_LIMIT, maxSeconds });
+      ytTitle = got.title;
+    } catch (e: any) {
+      if (e && typeof e.code === "string" && /^link_/.test(e.code)) throw new AssistantError(e.code, e.message, e.code === "link_fetch_failed" ? 502 : 400);
+      throw new AssistantError("link_fetch_failed", `The video could not be downloaded: ${String(e?.message ?? e).slice(0, 160)}`, 502);
+    }
+    bytes = await readFile(file);
+  } else {
+    const path = platform === "tiktok" ? `/v2/tiktok/video?url=${encodeURIComponent(url)}&download_media=true&trim=true` : `/v1/instagram/post?url=${encodeURIComponent(url)}&download_media=true&trim=true`;
+    const r = await fetchFn(`https://api.scrapecreators.com${path}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
+    if (!r.ok) throw new AssistantError("link_fetch_failed", `The link could not be read (${r.status})`, 502);
+    body = await r.json().catch(() => null);
+    const media = findMediaUrl(body);
+    if (!media) throw new AssistantError("link_no_media", "No video was found at that link");
+    const dl = await fetchFn(media, { signal: AbortSignal.timeout(300_000) });
+    if (!dl.ok) throw new AssistantError("link_fetch_failed", `The video could not be downloaded (${dl.status})`, 502);
+    bytes = Buffer.from(await dl.arrayBuffer());
+    await writeFile(file, bytes);
+  }
   if (!bytes.length) throw new AssistantError("link_no_media", "The video was empty");
   if (bytes.length > LINK_LIMIT) throw new AssistantError("link_too_large", "That video is over 512 MB");
   const limit = await checkUpload(sb, u, bytes.length);
   if (limit) throw new AssistantError(limit.code, limit.message, limit.status);
   const id = randomUUID(), objectKey = `${u}/${id}.mp4`;
-  const dir = await mkdtemp(join(tmpdir(), "studio-link-"));
-  try {
-    const file = join(dir, "v.mp4"), still = join(dir, "v.jpg");
-    await writeFile(file, bytes);
+  {
     const seconds = await (deps.probeSeconds ?? probeSeconds)(file).catch(() => 0);
     let poster = false; try { await (deps.poster ?? makePoster)(file, still); poster = true; } catch { poster = false; }
     const up = await sb.storage.from("studio-uploads").upload(objectKey, bytes, { contentType: "video/mp4", upsert: false });
     if (up.error) throw up.error;
     let posterKey: string | undefined;
     if (poster) { const jpg = await readFile(still).catch(() => null); if (jpg) { const p = await sb.storage.from("studio-outputs").upload(`${u}/assets/${id}.jpg`, jpg, { contentType: "image/jpeg", upsert: true }); if (!p.error) posterKey = `${u}/assets/${id}.jpg`; } }
-    const title = String(body?.title ?? body?.desc ?? body?.aweme_detail?.desc ?? body?.caption?.text ?? body?.data?.caption?.text ?? body?.text ?? "").replace(/#\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+    const title = String(ytTitle ?? body?.title ?? body?.desc ?? body?.aweme_detail?.desc ?? body?.caption?.text ?? body?.data?.caption?.text ?? body?.text ?? "").replace(/#\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
     const handle = url.match(/\/@([A-Za-z0-9_.]+)/)?.[1] ?? (platform === "instagram" ? url.match(/instagram\.com\/([A-Za-z0-9_.]+)\/(?:reel|p)\//)?.[1] : null);
-    const name = `${title || `${platform === "tiktok" ? "TikTok" : "Instagram"}${handle ? ` @${handle}` : " video"}`}.mp4`;
+    const label = platform === "tiktok" ? "TikTok" : platform === "instagram" ? "Instagram" : /\/shorts\//.test(url) ? "YouTube Short" : "YouTube";
+    const name = `${title || `${label}${handle ? ` @${handle}` : platform === "youtube" ? ` ${youtubeId(url) ?? "video"}` : " video"}`}.mp4`;
     const ins = await sb.from("studio_assets").insert({ id, user_id: u, kind: "video", name, object_key: objectKey, bytes: bytes.length, status: "ready", probe: { duration: seconds || undefined, poster_key: posterKey, source_url: url, source: platform } });
     if (ins.error) throw ins.error;
     return { asset_id: id, name, kind: "video", seconds: seconds || null };
+  }
   } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 
@@ -940,6 +965,19 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       const d = await sbFn().from("studio_assistant_memory").delete().eq("user_id", u);
       if (d.error) throw d.error;
       res.json({ deleted: "all" });
+    } catch (e) { fail(res, e); }
+  });
+  /** A TikTok, Instagram or YouTube link brought into the library outside a chat (the Automations page, the tool pages). */
+  app.post("/api/studio/links", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const url = String(req.body?.url ?? "").trim().slice(0, 2000);
+      if (!url) throw new AssistantError("message_empty", "Paste a link");
+      const a = await importLink(sbFn(), deps, u, url);
+      const row = await sbFn().from("studio_assets").select("id,kind,name,bytes,status,probe,created_at").eq("id", a.asset_id).eq("user_id", u).maybeSingle();
+      if (row.error) throw row.error;
+      const assets = await withPosterUrls(sbFn(), [row.data]);
+      res.status(201).json({ asset: assets[0] ?? row.data });
     } catch (e) { fail(res, e); }
   });
   app.post("/api/studio/assistant/conversations", async (req, res) => {

@@ -862,7 +862,7 @@ export function downloadBase(assetName: string | null | undefined, tool: string)
   return `${stem || "clone8"}-${word}`;
 }
 
-async function withPosterUrls(sb: SupabaseClient, assets: any[]) {
+export async function withPosterUrls(sb: SupabaseClient, assets: any[]) {
   const keys = assets.map((a) => a.probe?.poster_key).filter(Boolean);
   if (!keys.length) return assets.map((a) => ({ ...a, poster_url: null }));
   const signed = await sb.storage.from("studio-outputs").createSignedUrls(keys, 900);
