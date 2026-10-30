@@ -99,10 +99,37 @@ export async function pollRecast(deps: RecastDeps, requestId: string): Promise<{
 /** Higgsfield bills by the input's resolution (a 1080×1920 source bills at the 1080p rate whatever output we ask for),
  *  and the output comes back at 720p anyway. So the source is scaled to fit 720×1280 before it leaves, sound untouched. */
 export const INPUT_MAX_SHORT = 720, INPUT_MAX_LONG = 1280;
+/** The renderer wants at least this many pixels a frame (its documented floor); smaller sources are scaled up to it. */
+export const INPUT_MIN_PIXELS = 409_600;
+/** The source's video stream as the renderer will see it: size, frame rate, whether the rate is variable. */
+export async function probeStream(path: string): Promise<{ width: number; height: number; fps: number | null; vfr: boolean; hasAudio: boolean }> {
+  const raw = await command("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate,r_frame_rate", "-of", "json", path], undefined, 30_000);
+  const p = JSON.parse(raw.toString());
+  const v = (p.streams ?? []).find((x: any) => x.codec_type === "video") ?? {};
+  const rate = (f: string | undefined) => { const [n, d] = String(f ?? "0/1").split("/").map(Number); return d ? n / d : 0; };
+  const avg = rate(v.avg_frame_rate), r = rate(v.r_frame_rate);
+  return { width: Number(v.width) || 0, height: Number(v.height) || 0, fps: avg > 0 ? Math.round(avg * 100) / 100 : null, vfr: avg > 0 && r > 0 && Math.abs(avg - r) > 0.5, hasAudio: (p.streams ?? []).some((x: any) => x.codec_type === "audio") };
+}
+/** The ffmpeg video filter for a source of this size: down to 720x1280 when larger, up to the renderer's pixel floor
+ *  when smaller (a 480x852 phone rendition is 409k pixels, right at the line), even sides always. */
+export function inputScaleFilter(width: number, height: number): string {
+  if (width > 0 && height > 0 && width * height < INPUT_MIN_PIXELS) {
+    const portrait = height >= width;
+    const short = Math.ceil(Math.sqrt(INPUT_MIN_PIXELS * (portrait ? width / height : height / width)) / 2) * 2;
+    const target = Math.min(INPUT_MAX_SHORT, Math.max(short, 640));
+    return portrait ? `scale=${target}:-2` : `scale=-2:${target}`;
+  }
+  return `scale='if(gt(iw,ih),min(${INPUT_MAX_LONG},iw),min(${INPUT_MAX_SHORT},iw))':'if(gt(iw,ih),min(${INPUT_MAX_SHORT},ih),min(${INPUT_MAX_LONG},ih))':force_original_aspect_ratio=decrease:force_divisible_by=2`;
+}
+/** The copy that leaves for the renderer: sized as above, a constant frame rate of at most 30, standard H.264 and AAC,
+ *  cut to the model's window. Phone and TikTok downloads often carry variable frame rates or odd rates; the renderer
+ *  is told nothing about them, so the copy is made plain here. */
 export async function prescaleSource(source: string, target: string, maxSeconds?: number) {
-  const vf = `scale='if(gt(iw,ih),min(${INPUT_MAX_LONG},iw),min(${INPUT_MAX_SHORT},iw))':'if(gt(iw,ih),min(${INPUT_MAX_SHORT},ih),min(${INPUT_MAX_LONG},ih))':force_original_aspect_ratio=decrease:force_divisible_by=2`;
+  const st = await probeStream(source).catch(() => ({ width: 0, height: 0, fps: null as number | null, vfr: false, hasAudio: true }));
+  const vf = inputScaleFilter(st.width, st.height) + (st.fps && st.fps > 30.5 ? ",fps=30" : st.vfr ? `,fps=${Math.min(30, Math.max(24, Math.round(st.fps ?? 30)))}` : "");
   const cut = maxSeconds ? ["-t", String(maxSeconds)] : [];
-  await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, ...cut, "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", target], undefined, 240_000);
+  const audio = st.hasAudio ? ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"] : ["-an"];
+  await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, ...cut, "-vf", vf, "-fps_mode", "cfr", "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-g", "60", ...audio, "-movflags", "+faststart", target], undefined, 240_000);
 }
 export async function probeDimensions(path: string): Promise<{ width: number; height: number }> {
   const raw = await command("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", path], undefined, 30_000);

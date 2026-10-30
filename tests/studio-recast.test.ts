@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -167,7 +167,7 @@ test("an uncertain completion is reported, never turned into a refund", async ()
 test("real ffmpeg: a 1080×1920 source is scaled to 720×1280 and a landscape one to 1280×720, sound kept", { skip: !hasFfmpeg() }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "recast-scale-"));
   try {
-    for (const [size, want] of [["1080x1920", [720, 1280]], ["1920x1080", [1280, 720]], ["540x960", [540, 960]]] as const) {
+    for (const [size, want] of [["1080x1920", [720, 1280]], ["1920x1080", [1280, 720]], ["540x960", [540, 960]], ["360x640", [640, 1138]]] as const) {
       const src = join(dir, `src-${size}.mp4`), out = join(dir, `out-${size}.mp4`);
       execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", `testsrc=size=${size}:rate=30`, "-f", "lavfi", "-i", "sine=frequency=440", "-t", "1", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-shortest", src]);
       await prescaleSource(src, out, size === "540x960" ? 0.5 : undefined);
@@ -176,6 +176,7 @@ test("real ffmpeg: a 1080×1920 source is scaled to 720×1280 and a landscape on
       assert.deepEqual([d.width, d.height], want, size);
       const streams = execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", out]).toString().trim().split("\n").sort();
       assert.deepEqual(streams, ["audio", "video"]);
+      const st = await probeStream(out); assert.ok(st.width * st.height >= INPUT_MIN_PIXELS, `${size}: ${st.width}x${st.height} meets the renderer floor`); assert.ok(st.fps && st.fps <= 30.01 && !st.vfr, `${size}: constant rate ${st.fps}`);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -209,4 +210,15 @@ test("the suite picks the right Genjutsu endpoint and body per tool", async () =
   await submitRecast({ fetch: fetchFn, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "restyle", model: "full", videoUrl: "https://v/1.mp4", imageUrls: [], presetId: "11111111-1111-4111-8111-111111111111", idempotencyKey: "job-2", resolution: "720p" });
   assert.match(calls[0].url, /object-swap\/v1\.0$/); assert.deepEqual(Object.keys(calls[0].body).sort(), ["image_urls", "prompt", "resolution", "video_url"]);
   assert.match(calls[1].url, /restyle\/v1\.0$/); assert.deepEqual(calls[1].body, { video_url: "https://v/1.mp4", preset_id: "11111111-1111-4111-8111-111111111111", resolution: "720p" }, "restyle sends the style id and no empty image list");
+});
+
+
+test("the input scale filter: down to 720p, up to the renderer pixel floor, never past 720 on the short side", () => {
+  assert.match(inputScaleFilter(1080, 1920), /min\(1280,iw\)/);
+  assert.match(inputScaleFilter(540, 960), /min\(1280,iw\)/, "540x960 is 518k pixels, above the floor: left alone");
+  assert.equal(inputScaleFilter(360, 640), "scale=640:-2");
+  assert.equal(inputScaleFilter(640, 360), "scale=-2:640");
+  assert.equal(inputScaleFilter(480, 852), "scale=640:-2", "a 480p phone rendition is scaled up");
+  assert.match(inputScaleFilter(720, 1280), /min\(1280,iw\)/, "720p stays as it is");
+  assert.match(inputScaleFilter(0, 0), /min\(1280,iw\)/, "unknown size: the plain downscale");
 });
