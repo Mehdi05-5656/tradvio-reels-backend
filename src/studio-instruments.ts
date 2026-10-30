@@ -16,18 +16,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import catalogJson from "./data/higgsfield-catalog.json";
+import elevenJson from "./data/eleven-catalog.json";
+import { elevenEnabled, runElevenJob } from "./studio-eleven.js";
 import { HF_BASE, higgsfieldAuth, RecastError, makePoster, probeSeconds } from "./studio-recast.js";
 import { toJpeg } from "./studio-characters.js";
 import { creditValueFloor, creditsForCost, higgsfieldDiscount, type PlanLike } from "./studio-pricing.js";
 
-export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit";
+export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
+/** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
+export type Pricing = { per: "kchars" | "minute" | "generation" | "hour"; usd: number };
 export type MediaKind = "image" | "video" | "audio";
 export type Instrument = {
-  id: string; title: string; family: string; provider: string; kind: InstrumentKind; output: "video" | "image";
+  id: string; title: string; family: string; provider: string; kind: InstrumentKind; output: "video" | "image" | "audio" | "text";
   summary: string; notes: string[]; media_fields: Record<string, MediaKind>; required: string[]; schema: any; docs: string;
+  /** audio instruments: the list price and what it is measured in; `minutes_from` says where the minutes come from */
+  pricing?: Pricing; minutes_from?: "source" | "length";
 };
 type Catalog = { generated_at: string; source: string; models: Instrument[] };
 const CATALOG = catalogJson as unknown as Catalog;
+const ELEVEN = elevenJson as unknown as Catalog;
 
 /** Endpoints our first-class tools already own; they are not offered twice. */
 export const FIRST_CLASS = new Set(["higgsfield/genjutsu/motion-transfer/v1.0", "higgsfield/genjutsu/object-swap/v1.0", "higgsfield/genjutsu/restyle/v1.0"]);
@@ -37,16 +44,19 @@ const UNSUPPORTED_MEDIA: MediaKind[] = ["audio"];
 export const KIND_LABEL: Record<InstrumentKind, string> = {
   text_to_video: "Video from words", image_to_video: "Video from a picture", reference_to_video: "Video from references", video_edit: "Edit a video",
   video_extend: "Extend a video", motion_control: "Motion onto a picture", text_to_image: "Picture from words", image_edit: "Edit a picture",
+  text_to_audio: "Sound from words", audio_edit: "Change the sound of a clip", transcribe: "Words from a clip",
 };
 
+/** Every instrument we know, whatever the keys: the video models and the audio ones. */
 export function allInstruments(): Instrument[] {
-  return CATALOG.models.filter((m) => !FIRST_CLASS.has(m.id));
+  return [...CATALOG.models.filter((m) => !FIRST_CLASS.has(m.id)), ...ELEVEN.models];
 }
-/** The instruments on offer: all of them when STUDIO_INSTRUMENTS_ENABLED=true, narrowed by an allow list or a hidden list. */
+/** The instruments on offer: the video models need HIGGSFIELD_API_KEY, the audio ones ELEVENLABS_API_KEY, all behind
+ *  STUDIO_INSTRUMENTS_ENABLED=true, narrowed by an allow list or a hidden list. */
 export function instrumentsEnabled(env: Record<string, string | undefined> = process.env): Instrument[] {
-  if (!env.HIGGSFIELD_API_KEY || env.STUDIO_INSTRUMENTS_ENABLED !== "true") return [];
+  if (env.STUDIO_INSTRUMENTS_ENABLED !== "true") return [];
   const allow = split(env.STUDIO_INSTRUMENTS_ALLOW), hide = new Set(split(env.STUDIO_INSTRUMENTS_HIDDEN));
-  return allInstruments().filter((m) => (!allow.length || allow.includes(m.id)) && !hide.has(m.id));
+  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!allow.length || allow.includes(m.id)) && !hide.has(m.id));
 }
 const split = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 export const instrumentById = (id: unknown, env?: Record<string, string | undefined>): Instrument | null => instrumentsEnabled(env).find((m) => m.id === id) ?? null;
@@ -152,6 +162,14 @@ export function listPrice(id: string): UnitPrice | null {
 }
 /** Units a request will be billed for by the table: seconds asked for (or the source's), or images. */
 export function tableUnits(inst: Instrument, params: Record<string, any>, sourceSeconds: number | null): number {
+  if (inst.pricing) {
+    const p = inst.pricing;
+    if (p.per === "kchars") return Math.max(0.1, Math.round((String(params.text ?? params.prompt ?? "").length / 1000) * 100) / 100);
+    if (p.per === "generation") return 1;
+    const seconds = inst.minutes_from === "length" ? Number(params.length_seconds ?? 30) : Number(sourceSeconds ?? 0);
+    if (p.per === "hour") return Math.max(1 / 60, Math.round((seconds / 3600) * 1000) / 1000);
+    return Math.max(0.1, Math.round((seconds / 60) * 100) / 100);
+  }
   if (inst.output === "image") return Math.max(1, Math.floor(Number(params.batch_size ?? 1)) || 1);
   const asked = Number(params.duration);
   if (Number.isFinite(asked) && asked > 0) return Math.ceil(asked);
@@ -160,8 +178,14 @@ export function tableUnits(inst: Instrument, params: Record<string, any>, source
   return Number.isFinite(Number(d)) && Number(d) > 0 ? Math.ceil(Number(d)) : 5;
 }
 export function tableUsd(inst: Instrument, params: Record<string, any>, sourceSeconds: number | null): number | null {
+  if (inst.pricing) return inst.pricing.usd * tableUnits(inst, params, sourceSeconds);
   const p = listPrice(inst.id);
   return p ? p.usd * tableUnits(inst, params, sourceSeconds) : null;
+}
+/** What a unit is called on a card: "a second", "an image", "a minute", "1,000 characters", "a sound", "an hour". */
+export function unitLabel(inst: Instrument): string {
+  if (inst.pricing) return ({ kchars: "1,000 characters", minute: "a minute", generation: "a sound", hour: "an hour" } as Record<string, string>)[inst.pricing.per];
+  return inst.output === "image" ? "an image" : "a second";
 }
 
 export type InstrumentDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; now?: () => number;
@@ -197,7 +221,7 @@ export function instrumentCredits(usd: number, plans: PlanLike[], env: Record<st
   return Math.max(1, creditsForCost(usd * (1 - higgsfieldDiscount(env)), floor));
 }
 
-export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; priced_by: "estimate" | "table"; units: number; output: "video" | "image" }; summary: string };
+export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; priced_by: "estimate" | "table"; units: number; output: "video" | "image" | "audio" | "text" }; summary: string };
 
 /** Validate, price and describe one instrument request. `signInputs` turns the person's assets into URLs for the estimate. */
 export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], raw: any, resolveAssets: (ids: string[]) => Promise<Map<string, { url: string; kind: string; seconds: number | null }>>): Promise<InstrumentQuote> {
@@ -218,11 +242,12 @@ export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], r
   const body = buildBody(params, inputs, (id) => assets.get(id)?.url ?? "");
   const sourceSeconds = Math.max(0, ...ids.map((id) => assets.get(id)?.seconds ?? 0)) || null;
   const units = tableUnits(inst, params, sourceSeconds);
-  let usd = await estimateUsd(deps, inst.id, body), priced_by: "estimate" | "table" = "estimate";
+  // audio instruments price from their own table; the video models ask the platform's estimate first
+  let usd = inst.provider === "elevenlabs" ? null : await estimateUsd(deps, inst.id, body), priced_by: "estimate" | "table" = "estimate";
   if (usd == null) { usd = tableUsd(inst, params, sourceSeconds); priced_by = "table"; }
   if (usd == null) throw new InstrumentError("price_unavailable", "This model cannot be priced right now; try again in a moment", 503);
   const credits = instrumentCredits(usd, plans, env);
-  const summary = inst.output === "image" ? `${units} ${units === 1 ? "image" : "images"} · ${credits}` : `${units} s · ${credits}`;
+  const summary = inst.pricing ? `${inst.pricing.per === "kchars" ? `${Math.round(units * 1000)} characters` : inst.pricing.per === "minute" ? `${units} min` : inst.pricing.per === "hour" ? `${Math.round(units * 60)} min` : "1 sound"} · ${credits}` : inst.output === "image" ? `${units} ${units === 1 ? "image" : "images"} · ${credits}` : `${units} s · ${credits}`;
   return { tool: "instrument", credits, options: { endpoint: inst.id, params, inputs, usd: Math.round(usd * 1000) / 1000, priced_by, units, output: inst.output }, summary };
 }
 
@@ -267,6 +292,7 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
     const o = job.options ?? {};
     const inst = allInstruments().find((m) => m.id === o.endpoint) ?? null;
     if (!inst) throw new RecastError("instrument_unknown");
+    if (inst.provider === "elevenlabs") return await runElevenJob(sb, deps, job, inst);
     let requestId: string | null = job.progress?.request_id ?? null;
     if (!requestId) {
       await renew(sb, job, { done: 0, total: 1, note: "Preparing your files" });
@@ -388,12 +414,14 @@ export function publicInstrument(inst: Instrument, env: Record<string, string | 
   const fields = Object.entries(props).filter(([n]) => !inst.media_fields[n]).map(([name, d]) => ({
     name, type: Array.isArray(d.type) ? d.type[0] : d.type ?? (d.enum ? typeof d.enum[0] : "string"), description: String(d.description ?? "").slice(0, 300), default: d.default ?? null,
     enum: d.enum ?? null, minimum: d.minimum ?? null, maximum: d.maximum ?? null, minItems: d.minItems ?? null, maxItems: d.maxItems ?? null, required: inst.required.includes(name),
+    format: d.format ?? null, maxLength: d.maxLength ?? null,
   }));
   const media = Object.entries(inst.media_fields).filter(([, k]) => !UNSUPPORTED_MEDIA.includes(k)).map(([name, kind]) => {
     const d = props[name] ?? {};
     return { name, kind, multiple: d.type === "array", maxItems: d.maxItems ?? null, description: String(d.description ?? "").slice(0, 300), required: inst.required.includes(name) };
   });
-  const price = listPrice(inst.id);
-  const hint = price && plans.length ? { per: price.per, credits: instrumentCredits(price.usd, plans, env) } : null;
-  return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: inst.docs, price_hint: hint };
+  const price = inst.pricing ?? listPrice(inst.id);
+  const hint = price && plans.length ? { per: price.per, credits: instrumentCredits(price.usd, plans, env), unit: unitLabel(inst) } : null;
+  // the provider is ours to know; the person sees a Clone8 family
+  return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider === "elevenlabs" ? "Clone8" : inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: inst.docs, price_hint: hint };
 }

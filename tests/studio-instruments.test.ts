@@ -14,7 +14,7 @@ test("the catalog is loaded, the first-class Genjutsu endpoints are not offered 
   for (const m of all) {
     assert.ok(KIND_LABEL[m.kind], `${m.id} has an unknown kind ${m.kind}`);
     assert.ok(m.schema?.properties, `${m.id} has no schema`);
-    assert.ok(m.output === "video" || m.output === "image");
+    assert.ok(["video", "image", "audio", "text"].includes(m.output));
   }
   assert.ok(all.some((m) => m.id === "bytedance/seedance-2.5/text-to-video"));
   assert.ok(all.some((m) => m.id === "higgsfield-ai/soul/v2/standard"));

@@ -32,10 +32,13 @@ export type ChoiceOption = { asset_id: string; name: string; poster_key?: string
 export type Choice = { id: string; kind: "characters"; prompt: string; mode: "human" | "animal"; count: number; credits: number; auto_credits: number; status: "offered" | "generating" | "ready" | "picked" | "failed"; auto?: boolean; job_id?: string | null; options?: ChoiceOption[]; existing?: ChoiceOption[]; picked?: string | null; error_code?: string | null };
 /** A request card: the assistant needs a video (or picture) and asks for it with a drop zone, a link field and the library. */
 export type RequestCard = { id: string; kind: "video" | "image"; reason: string; status: "open" | "done" };
+/** A voice card: a few voices that fit a description, each with a sample to play; the pick names the voice. */
+export type VoiceCard = { id: string; description: string; voices: Array<{ id: string; name: string; labels: Record<string, string>; preview_url: string | null }>; picked?: string | null; status: "open" | "done" };
 /** A people card: the faces found in a clip, for the person to say who gets swapped (all that apply). */
 export type PeopleCard = { id: string; asset_id: string; asset_name: string; reason: string; people: Array<{ index: number; label: string; url?: string | null; key?: string | null }>; status: "open" | "done" };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; context?: string | null };
-export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: "video" | "image"; seconds: number | null; summary: string };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; context?: string | null };
+export type OutputKind = "video" | "image" | "audio" | "text";
+export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: OutputKind; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
 export type RunStep = { index: number; job_id: string | null; asset_id: string | null; status: "waiting" | "queued" | "running" | "done" | "failed" | "canceled" | "skipped"; error_code?: string | null };
 export type Run = { plan_id: string; status: "running" | "done" | "failed" | "canceled"; steps: RunStep[]; started_at: string; finished_at?: string | null; note?: string | null };
@@ -97,6 +100,11 @@ export const TOOLS = [
     name: "choose_people",
     description: "When a swap or recast is wanted on a clip with more than one person, show the faces found in it so the person can tick who changes (all that apply, or everyone). Use the asset id of that clip. Wait for their answer; it arrives as a message naming the chosen people, which you then pass as options.targets (the labels) in propose_plan.",
     input_schema: { type: "object", additionalProperties: false, properties: { asset_id: { type: "string" }, reason: { type: "string", description: "One short line" } }, required: ["asset_id", "reason"] },
+  },
+  {
+    name: "preview_voices",
+    description: "Show four voices that fit a description (age, gender, accent, mood), each with a sample the person can play. Their pick arrives as a message naming the voice and its id; use that id as voice_id in a voice over, voice change or dubbing instrument step. Only when the person asked for a voice.",
+    input_schema: { type: "object", additionalProperties: false, properties: { description: { type: "string", description: "The voice in plain words" } }, required: ["description"] },
   },
   {
     name: "preview_characters",
@@ -229,9 +237,9 @@ export async function buildCtx(sb: SupabaseClient, deps: AssistantDeps, u: strin
   return { sb, u, env, assets: new Map(((assets.data ?? []) as any[]).map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools: toolsEnabled(env) };
 }
 
-export function expectedOutput(tool: string, options: any, sourceSeconds: number | null, instOutput?: "video" | "image"): { output: "video" | "image"; seconds: number | null } {
+export function expectedOutput(tool: string, options: any, sourceSeconds: number | null, instOutput?: OutputKind): { output: OutputKind; seconds: number | null } {
   if (tool === "character") return { output: "image", seconds: null };
-  if (tool === "instrument") return { output: instOutput ?? "video", seconds: instOutput === "image" ? null : Number(options?.units ?? options?.params?.duration ?? sourceSeconds ?? 5) };
+  if (tool === "instrument") return { output: instOutput ?? "video", seconds: instOutput === "video" ? Number(options?.units ?? options?.params?.duration ?? sourceSeconds ?? 5) : null };
   if (tool === "trend") return { output: "video", seconds: trendById(options?.trend_id)?.seconds ?? null };
   return { output: "video", seconds: options?.seconds ?? sourceSeconds };
 }
@@ -243,7 +251,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
   const steps: PlanStep[] = [];
   const warnings: string[] = [];
   // the asset a "$N" would be once promoted: its kind and (for video) its seconds
-  const produced: Array<{ output: "video" | "image"; seconds: number | null }> = [];
+  const produced: Array<{ output: OutputKind; seconds: number | null }> = [];
   const resolveRef = (v: unknown, i: number, want: "video" | "image"): { id: string | null; ref: number | null; pseudo: { kind: string; probe: any } | null } => {
     const s = String(v ?? "");
     const m = s.match(REF_RE);
@@ -269,7 +277,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
     if (!ctx.tools[tool]) throw new AssistantError("plan_invalid", `Step ${i}: ${tool} is not taking jobs right now`);
     const o = st.options && typeof st.options === "object" ? { ...st.options } : {};
     const label = String(st.label ?? tool).slice(0, 120);
-    let credits = 0, estimate = false, summary = "", sourceStr: string | null = null, seconds: number | null = null, output: "video" | "image" = "video";
+    let credits = 0, estimate = false, summary = "", sourceStr: string | null = null, seconds: number | null = null, output: OutputKind = "video";
 
     if (tool === "character") {
       const q = quote("character", { mode: o.mode, prompt: o.prompt }, null, costs);
@@ -446,7 +454,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
   const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
-  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, saved: { id: string; name: string } | null = null;
+  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, saved: { id: string; name: string } | null = null;
   // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes
   const peopleNotes: string[] = [];
   for (const a of input.attachments.filter((x) => x.kind === "video").slice(0, 2)) {
@@ -477,8 +485,15 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         else if (use.name === "remember") events?.({ type: "status", text: "Saving a note" });
         else if (use.name === "preview_characters") events?.({ type: "status", text: "Preparing options" });
         else if (use.name === "choose_people") events?.({ type: "status", text: "Finding the faces" });
+        else if (use.name === "preview_voices") events?.({ type: "status", text: "Picking voices" });
         else if (use.name === "save_automation") events?.({ type: "status", text: "Saving the automation" });
-        if (use.name === "choose_people") {
+        if (use.name === "preview_voices") {
+          const { listVoices, matchVoices, elevenEnabled } = await import("./studio-eleven.js");
+          if (!elevenEnabled(env)) throw new AssistantError("plan_invalid", "Voices are not switched on");
+          const found = matchVoices(await listVoices({ env, fetch: deps.fetch }), String(use.input?.description ?? ""), 4);
+          voices = { id: randomUUID(), description: String(use.input?.description ?? "").slice(0, 160), voices: found.map((v) => ({ id: v.id, name: v.name, labels: v.labels, preview_url: v.preview_url })), status: "open" };
+          result = { ok: true, voices: found.map((v) => ({ id: v.id, name: v.name, labels: v.labels })), note: "The card is shown with samples; wait for their pick, then use the voice id." };
+        } else if (use.name === "choose_people") {
           const aid = String(use.input?.asset_id ?? "").toLowerCase();
           const asset = ctx.assets.get(aid);
           if (!asset || asset.kind !== "video") throw new AssistantError("plan_invalid", "choose_people needs a video asset id from the library");
@@ -539,8 +554,11 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   if (!text && choice) text = "Pick a face below, or upload a photo instead.";
   if (!text && request) text = request.kind === "image" ? "Drop the picture below, or pick it from your library." : "Drop the video below, paste a TikTok or Instagram link, or pick one from your library.";
   if (!text && people) text = "Tick who gets swapped, or choose everyone.";
+  if (!text && voices) text = "Play the samples and pick a voice.";
   if (!text && saved) text = `Saved as "${saved.name}". Find it under Automations and drop a new video to run it again.`;
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}) };
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}) };
+  const voicePick = input.text.match(/^Use the voice .* \(voice ([A-Za-z0-9]+)\)/);
+  if (voicePick) for (const m of convo.messages) if (m.voices?.status === "open") { m.voices.status = "done"; m.voices.picked = voicePick[1]; }
   if (/^(swap|change) (only|these|everyone)/i.test(input.text)) for (const m of convo.messages) if (m.people?.status === "open") m.people.status = "done";
   // a new attachment or link answers any open request card
   if (input.attachments.length || input.links.length) for (const m of convo.messages) if (m.request?.status === "open") m.request.status = "done";

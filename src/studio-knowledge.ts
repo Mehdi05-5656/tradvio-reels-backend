@@ -4,7 +4,7 @@
 // else's data; it never contains keys. Everything here is plain text for the model.
 import type { StudioCosts } from "./studio-pricing.js";
 import { STUDIO_TRENDS } from "./studio-trends.js";
-import { instrumentsEnabled, listPrice, instrumentCredits, type Instrument } from "./studio-instruments.js";
+import { instrumentsEnabled, listPrice, instrumentCredits, unitLabel, type Instrument } from "./studio-instruments.js";
 import type { PlanLike } from "./studio-pricing.js";
 
 export const PRESET_CHARACTERS = [
@@ -37,11 +37,14 @@ const KIND_HELP: Record<string, string> = {
   motion_control: "a picture performs the motion of a video (needs one picture and one video)",
   text_to_image: "a picture from a description (no file needed)",
   image_edit: "edit a picture with words (needs one or more pictures)",
+  text_to_audio: "sound from words: a voice over in a chosen voice (text-to-speech), a sound effect, or a music track; the result is a sound file",
+  audio_edit: "change the sound of a clip while the picture stays: another voice saying the same words (voice change), another language (dubbing), or a cleaned voice track (voice isolator); needs a video",
+  transcribe: "the words said in a clip, as text and subtitles (needs a video)",
 };
 
 function instrumentLine(m: Instrument, plans: PlanLike[], env: Record<string, string | undefined>): string {
-  const p = listPrice(m.id);
-  const price = p ? `about ${instrumentCredits(p.usd, plans, env)} credits ${p.per === "second" ? "a second" : "an image"}` : "priced on request";
+  const p = m.pricing ?? listPrice(m.id);
+  const price = p ? `about ${instrumentCredits(p.usd, plans, env)} credits per ${unitLabel(m)}` : "priced on request";
   const props: Record<string, any> = m.schema?.properties ?? {};
   const bits: string[] = [];
   if (props.duration) bits.push(`duration ${props.duration.minimum ?? "?"}-${props.duration.maximum ?? "?"} s${props.duration.default != null ? ` (default ${props.duration.default})` : ""}`);
@@ -85,6 +88,8 @@ export function buildSystemPrompt(k: KnowledgeInput): string {
   lines.push("- Instruments: call them by their name (the second column below). The id in the first column is only for propose_plan; never say an id, a vendor or a provider to the person. Everything here is a Clone8 tool.");
   lines.push("- Memory: the remember tool keeps one short sentence that will matter in later chats: a standing preference (\"always Light model\", \"my brand voice is dry\"), a fact about their accounts or audience, a character they reuse. Never what they asked for once, never a file id, never anything sensitive. Call it only when the person states such a thing, then acknowledge in two words. They can see and delete every note.");
   lines.push("- A long chat arrives as a summary of its earlier part plus the recent messages. Treat the summary as what was said; do not ask again for what it already answers.");
+  if (k.env.STUDIO_VOICE_RECOMMEND !== "true") lines.push("- Voices are new and still being tested: never bring up voice change, dubbing, a new voice or a voice over yourself. Only when the person asks for one of those explicitly, do it, and say once that it is new and results can vary. To pick a voice, call preview_voices with their description; the card plays samples and their pick arrives as a message naming the voice and its id, which goes into the instrument's voice_id.");
+  else lines.push("- Voices: when a swap or recast puts someone else on screen and the clip has speech, offer once to change the voice too (audio/voice-change). To pick a voice, call preview_voices with a description; the card plays samples and their pick arrives as a message naming the voice and its id, which goes into voice_id.");
   lines.push("- Which video: if they refer to a video they have not attached in this message (\"this\", \"it\", \"my clip\") call request_video; never pick a library file for them. Only when they name a file, attach it, or say \"my latest video\" with exactly one video in the library may you use it, and say which.");
   lines.push("- A reply with a card is short: one or two lines on what happens next. Never list library file names as a question.");
   lines.push("- Who changes: an attached clip arrives with a note of the people seen in it. If a swap or recast is wanted and more than one person is listed, call choose_people on that clip before proposing; their answer names the chosen people, which you pass as options.targets (the exact labels) in the swap step. One person listed: just go ahead. Nobody listed: go ahead with the whole clip and say so.");

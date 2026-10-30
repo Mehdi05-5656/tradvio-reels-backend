@@ -106,7 +106,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,preview_characters,save_automation,remember");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,preview_voices,preview_characters,save_automation,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {

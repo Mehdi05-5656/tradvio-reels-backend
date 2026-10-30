@@ -1,0 +1,334 @@
+{
+ "generated_at": "2026-10-29",
+ "source": "elevenlabs.io/pricing/api and the ElevenLabs API reference, Oct 29 2026",
+ "models": [
+  {
+   "id": "audio/text-to-speech",
+   "title": "Voice over \u2014 Text to speech",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "text_to_audio",
+   "output": "audio",
+   "summary": "Any text spoken in a voice you pick: a voice over, a line for a clip, a narration. Up to 5,000 characters a request.",
+   "notes": [
+    "Audio tags like [whispers] or [laughs] work with the Expressive model.",
+    "Sound files come back as MP3."
+   ],
+   "media_fields": {},
+   "required": [
+    "text",
+    "voice_id"
+   ],
+   "schema": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string",
+      "description": "What to say",
+      "maxLength": 5000
+     },
+     "voice_id": {
+      "type": "string",
+      "format": "voice",
+      "description": "The voice to use; pick one from the voice list"
+     },
+     "model": {
+      "type": "string",
+      "enum": [
+       "natural",
+       "expressive",
+       "fast"
+      ],
+      "default": "natural",
+      "description": "natural = steady and clear; expressive = acting with tags; fast = quickest"
+     }
+    },
+    "required": [
+     "text",
+     "voice_id"
+    ]
+   },
+   "docs": "",
+   "pricing": {
+    "per": "kchars",
+    "usd": 0.08
+   }
+  },
+  {
+   "id": "audio/voice-change",
+   "title": "Voice change \u2014 Same words, another voice",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "audio_edit",
+   "output": "video",
+   "summary": "The speech in your clip is kept word for word and timing for timing, but spoken in another voice. The picture is untouched.",
+   "notes": [
+    "Best on a clip with one clear speaker and little music.",
+    "New: still being tested; results vary with noisy audio."
+   ],
+   "media_fields": {
+    "video_url": "video"
+   },
+   "required": [
+    "voice_id"
+   ],
+   "schema": {
+    "type": "object",
+    "properties": {
+     "voice_id": {
+      "type": "string",
+      "format": "voice",
+      "description": "The voice to use; pick one from the voice list"
+     },
+     "remove_background_noise": {
+      "type": "boolean",
+      "default": false,
+      "description": "Clean the audio before changing the voice"
+     }
+    },
+    "required": [
+     "voice_id"
+    ]
+   },
+   "docs": "",
+   "pricing": {
+    "per": "minute",
+    "usd": 0.12
+   },
+   "minutes_from": "source"
+  },
+  {
+   "id": "audio/dubbing",
+   "title": "Dubbing \u2014 Translate the speech",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "audio_edit",
+   "output": "video",
+   "summary": "Your clip speaks another language in a matching voice; the picture stays. Up to 30 languages.",
+   "notes": [
+    "Takes a few minutes per minute of video.",
+    "Lip movement is not changed."
+   ],
+   "media_fields": {
+    "video_url": "video"
+   },
+   "required": [
+    "target_language"
+   ],
+   "schema": {
+    "type": "object",
+    "properties": {
+     "target_language": {
+      "type": "string",
+      "format": "language",
+      "description": "Target language",
+      "enum": [
+       "en",
+       "es",
+       "fr",
+       "de",
+       "it",
+       "pt",
+       "pl",
+       "nl",
+       "sv",
+       "da",
+       "fi",
+       "nb",
+       "tr",
+       "ru",
+       "uk",
+       "cs",
+       "el",
+       "hu",
+       "ro",
+       "bg",
+       "hr",
+       "sk",
+       "ar",
+       "hi",
+       "ja",
+       "ko",
+       "zh",
+       "id",
+       "ms",
+       "vi",
+       "th",
+       "ta",
+       "fil",
+       "tl"
+      ]
+     },
+     "num_speakers": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 0,
+      "description": "How many people speak (0 = detect)"
+     }
+    },
+    "required": [
+     "target_language"
+    ]
+   },
+   "docs": "",
+   "pricing": {
+    "per": "minute",
+    "usd": 0.5
+   },
+   "minutes_from": "source"
+  },
+  {
+   "id": "audio/voice-isolator",
+   "title": "Voice isolator \u2014 Clean the voice track",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "audio_edit",
+   "output": "video",
+   "summary": "Music, wind and room noise are stripped out and only the voice stays, on the same picture.",
+   "notes": [
+    "Works best when the voice is louder than the background."
+   ],
+   "media_fields": {
+    "video_url": "video"
+   },
+   "required": [],
+   "schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   },
+   "docs": "",
+   "pricing": {
+    "per": "minute",
+    "usd": 0.12
+   },
+   "minutes_from": "source"
+  },
+  {
+   "id": "audio/sound-effects",
+   "title": "Sound effects \u2014 From words",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "text_to_audio",
+   "output": "audio",
+   "summary": "A sound from a description: a whoosh, a crowd, rain on a tent, a cinematic hit. Half a second to thirty seconds.",
+   "notes": [
+    "Sound files come back as MP3."
+   ],
+   "media_fields": {},
+   "required": [
+    "text"
+   ],
+   "schema": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string",
+      "description": "The sound, in words",
+      "maxLength": 450
+     },
+     "duration_seconds": {
+      "type": "number",
+      "minimum": 0.5,
+      "maximum": 30,
+      "description": "Length in seconds (blank = the model decides)"
+     },
+     "loop": {
+      "type": "boolean",
+      "default": false,
+      "description": "Make it loop seamlessly"
+     }
+    },
+    "required": [
+     "text"
+    ]
+   },
+   "docs": "",
+   "pricing": {
+    "per": "generation",
+    "usd": 0.1
+   }
+  },
+  {
+   "id": "audio/music",
+   "title": "Music \u2014 A track from words",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "text_to_audio",
+   "output": "audio",
+   "summary": "A full music track from a description: genre, mood, instruments, tempo. Ten seconds to five minutes.",
+   "notes": [
+    "Copyrighted artists, songs or lyrics are refused by the model; describe the style instead."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "description": "The track, in words",
+      "maxLength": 2000
+     },
+     "length_seconds": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 300,
+      "default": 30,
+      "description": "Length in seconds"
+     }
+    },
+    "required": [
+     "prompt"
+    ]
+   },
+   "docs": "",
+   "pricing": {
+    "per": "minute",
+    "usd": 0.15
+   },
+   "minutes_from": "length"
+  },
+  {
+   "id": "audio/transcribe",
+   "title": "Transcript \u2014 Words and timings",
+   "family": "Clone8 Audio",
+   "provider": "elevenlabs",
+   "kind": "transcribe",
+   "output": "text",
+   "summary": "Everything said in the clip, as text and as subtitles (SRT), with speakers told apart.",
+   "notes": [
+    "Returns a .txt and a .srt file."
+   ],
+   "media_fields": {
+    "video_url": "video"
+   },
+   "required": [],
+   "schema": {
+    "type": "object",
+    "properties": {
+     "language": {
+      "type": "string",
+      "description": "Language code if known (blank = detect)",
+      "maxLength": 8
+     },
+     "diarize": {
+      "type": "boolean",
+      "default": true,
+      "description": "Tell speakers apart"
+     }
+    },
+    "required": []
+   },
+   "docs": "",
+   "pricing": {
+    "per": "hour",
+    "usd": 0.22
+   },
+   "minutes_from": "source"
+  }
+ ]
+}
