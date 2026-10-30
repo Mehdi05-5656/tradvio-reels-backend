@@ -122,7 +122,8 @@ export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onTe
       if (signal?.aborted) { await reader.cancel().catch(() => undefined); throw new AssistantError("aborted", "Stopped", 499); }
     }
   }
-  return { content: blocks.filter(Boolean), stop_reason: stop };
+  // a streamed round that is only tool calls still opens an empty text block; the API refuses it back, so it is dropped
+  return { content: blocks.filter((b) => b && !(b.type === "text" && !String(b.text).trim())), stop_reason: stop };
 }
 
 /** One Claude request. With onText the reply streams and each text delta is handed out; the result has the same shape either way. */
@@ -416,7 +417,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     text = blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n").trim() || text;
     const uses = blocks.filter((b) => b.type === "tool_use");
     if (!uses.length || reply.stop_reason !== "tool_use") break;
-    messages.push({ role: "assistant", content: blocks });
+    messages.push({ role: "assistant", content: blocks.filter((b) => !(b.type === "text" && !String(b.text ?? "").trim())) });
     const results: any[] = [];
     for (const use of uses) {
       let result: any;

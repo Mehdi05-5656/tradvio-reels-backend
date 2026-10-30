@@ -395,6 +395,10 @@ test("Anthropic's event stream is read back into blocks: text deltas handed out,
   assert.equal(deltas.length, 2);
   assert.deepEqual(got.content[0], { type: "text", text: "Let me price that." });
   assert.equal(got.content[1].type, "tool_use"); assert.equal(got.content[1].name, "propose_plan"); assert.deepEqual(got.content[1].input.steps[0].options, { copies: 2 });
+  // a round that is only tool calls opens an empty text block; it must not travel back to the API
+  const bare = { stop_reason: "tool_use", content: [{ type: "text", text: "" }, { type: "tool_use", id: "tu_9", name: "remember", input: { note: "Prefers Light" } }] };
+  const got2 = await readAnthropicStream(new Response(sse(bare)).body!, () => undefined);
+  assert.deepEqual(got2.content.map((b: any) => b.type), ["tool_use"]);
   // a mid-stream error from the API is surfaced, not swallowed
   await assert.rejects(readAnthropicStream(new Response('event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n').body!, () => undefined), (e: any) => e.code === "assistant_unavailable" && /Overloaded/.test(e.message));
 });
@@ -411,6 +415,7 @@ test("a streaming turn reports rounds, text deltas and tool status in order, and
   assert.ok(asked.every((a) => a.stream === true), "the model is asked to stream");
   const kinds = events.map((e) => e.type);
   assert.deepEqual(kinds, ["round", "delta", "delta", "status", "round", "delta", "delta"]);
+  assert.ok(!asked[1].messages[1].content.some((b: any) => b.type === "text" && !b.text), "no empty text block is sent back");
   assert.equal((events[3] as any).text, "Pricing the plan");
   assert.equal(events.filter((e) => e.type === "delta").map((e: any) => e.text).join(""), "Pricing it now.Five originals for 20 credits. Confirm in the card.");
   assert.equal(out.messages[1].text, "Five originals for 20 credits. Confirm in the card.");
