@@ -33,6 +33,17 @@ export type ChoiceOption = { asset_id: string; name: string; poster_key?: string
 export type Choice = { id: string; kind: "characters"; prompt: string; mode: "human" | "animal"; count: number; credits: number; auto_credits: number; status: "offered" | "generating" | "ready" | "picked" | "failed"; auto?: boolean; job_id?: string | null; options?: ChoiceOption[]; existing?: ChoiceOption[]; picked?: string | null; error_code?: string | null };
 /** A request card: the assistant needs a video (or picture) and asks for it with a drop zone, a link field and the library. */
 export type RequestCard = { id: string; kind: "video" | "image"; reason: string; status: "open" | "done" };
+/** Made characters worth offering for a described one: those sharing a word with the ask ("cat" for "a friendly tabby
+ *  cat") come alone when any match; otherwise every character of that kind (human or animal), newest first, up to four. */
+const CHARACTER_STOPWORDS = new Set(["the", "and", "with", "for", "from", "into", "that", "this", "his", "her", "its", "their", "who", "like", "look", "looking", "facing", "camera", "friendly", "natural", "realistic", "photo", "portrait", "character", "person", "wearing", "style", "front", "shot", "head", "face", "cute", "nice", "cool", "young", "old", "big", "small", "little", "made", "same", "one"]);
+export function matchingCharacters<T extends { kind: string; name?: string; probe?: any }>(assets: T[], prompt: string, mode: "human" | "animal"): T[] {
+  const pool = assets.filter((a) => a.kind === "image" && a.probe?.character && (a.probe?.mode ?? "human") === mode);
+  const words = String(prompt ?? "").toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 2 && !CHARACTER_STOPWORDS.has(w));
+  const score = (a: T) => { const hay = new Set(`${a.name ?? ""} ${a.probe?.prompt ?? ""}`.toLowerCase().split(/[^a-z]+/)); return words.reduce((n, w) => n + (hay.has(w) || hay.has(w + "s") || (w.endsWith("s") && hay.has(w.slice(0, -1))) ? 1 : 0), 0); };
+  const scored = pool.map((a) => ({ a, s: score(a) }));
+  const hits = scored.filter((x) => x.s > 0).sort((x, y) => y.s - x.s).map((x) => x.a);
+  return (hits.length ? hits : pool).slice(0, 4);
+}
 /** A voice card: a few voices that fit a description, each with a sample to play; the pick names the voice. */
 export type VoiceCard = { id: string; description: string; voices: Array<{ id: string; name: string; labels: Record<string, string>; preview_url: string | null }>; picked?: string | null; status: "open" | "done" };
 /** A people card: the faces found in a clip, for the person to say who gets swapped (all that apply). */
@@ -532,7 +543,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         } else if (use.name === "preview_characters") {
           if (!tools.character) throw new AssistantError("plan_invalid", "Characters are not taking jobs right now");
           const q = quote("character", { mode: use.input?.mode, prompt: use.input?.prompt, count: 4 }, null, costs);
-          const existing: ChoiceOption[] = [...ctx.assets.values()].filter((a) => a.kind === "image" && a.probe?.character && (a.probe?.mode ?? "human") === q.options.mode).slice(0, 4).map((a) => ({ asset_id: a.id, name: a.name, poster_key: a.probe?.poster_key ?? null, object_key: a.object_key ?? null }));
+          const existing: ChoiceOption[] = matchingCharacters([...ctx.assets.values()], q.options.prompt, q.options.mode).map((a) => ({ asset_id: a.id, name: a.name, poster_key: a.probe?.poster_key ?? null, object_key: a.object_key ?? null }));
           choice = { id: randomUUID(), kind: "characters", prompt: q.options.prompt, mode: q.options.mode, count: 4, credits: q.credits, auto_credits: costs.character_image, status: "offered", existing };
           result = { ok: true, offered: { options: 4, credits: q.credits, existing: existing.map((e) => e.name), note: "The card is shown: existing characters to pick for free, Show options for four new ones, Let Clone8 decide, or a photo upload. Nothing runs until they press a button. Wait for their pick." } };
         } else if (use.name === "save_automation") {

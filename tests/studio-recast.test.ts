@@ -113,10 +113,16 @@ test("a restart resumes polling instead of submitting again", async () => {
 });
 
 test("failures: Higgsfield failed/nsfw refund for good, a 429 while polling is retried, a bad key is not", async () => {
+  // a bare "failed" on the first claim (attempts 1) is tried once more; on the second claim (attempts 2) it fails for good
+  const first = fakeHiggsfield([{ status: "failed" }]);
+  const sbFirst = fakeSb(job());
+  assert.equal(await runRecastJob(sbFirst, deps(first.fetchFn), job()), "requeued");
+  assert.deepEqual([sbFirst.calls.at(-1).args.p_reason, sbFirst.calls.at(-1).args.p_retry], ["recast_failed", true]);
+  assert.equal(sbFirst.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress.request_id, null, "the next claim submits afresh");
   for (const [status, code] of [["failed", "recast_failed"], ["nsfw", "recast_nsfw"]] as const) {
     const h = fakeHiggsfield([{ status }]);
-    const sb = fakeSb(job());
-    assert.equal(await runRecastJob(sb, deps(h.fetchFn), job()), "failed");
+    const sb = fakeSb(job({ attempts: 2 }));
+    assert.equal(await runRecastJob(sb, deps(h.fetchFn), job({ attempts: 2 })), "failed");
     assert.deepEqual([sb.calls.at(-1).args.p_reason, sb.calls.at(-1).args.p_retry], [code, false]);
   }
   const broke = fakeHiggsfield([{ status: "failed", error: "Your credit balance is too low to complete this request. Please top up your balance and try again." }]);

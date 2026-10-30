@@ -740,3 +740,13 @@ test("YouTube helpers: the binary for this machine, the id in every link shape, 
   const viaProxy = ytDlpArgs("https://youtu.be/x", "/tmp/v.mp4", { maxBytes: 10, maxSeconds: 600, proxy: "socks5://u:p@proxy.example:1080", cookies: "/tmp/c.txt" });
   assert.equal(viaProxy[viaProxy.indexOf("--proxy") + 1], "socks5://u:p@proxy.example:1080"); assert.equal(viaProxy[viaProxy.indexOf("--cookies") + 1], "/tmp/c.txt");
 });
+
+test("the face card offers the made characters that match the ask, not every animal in the library", async () => {
+  const { matchingCharacters } = await import("../src/studio-assistant.js");
+  const mk = (id: string, name: string, mode: string, prompt?: string) => ({ id, kind: "image", name, probe: { character: true, mode, prompt } });
+  const lib = [mk("c", "Character: a tabby cat wearing a hollowed watermelon rind as a helmet", "animal"), mk("t", "Character: a tiger mascot with orange fur in a yellow football kit", "animal"), mk("d", "Character: a golden retriever wearing a black gaming headset", "animal"), mk("h", "Character: a rugged 1980s action-movie hero", "human", "a rugged hero"), { id: "v", kind: "video", name: "clip.mp4", probe: {} }];
+  assert.deepEqual(matchingCharacters(lib as any, "A friendly tabby cat, natural look, facing the camera", "animal").map((a) => a.id), ["c"]);
+  assert.deepEqual(matchingCharacters(lib as any, "a fox in a scarf", "animal").map((a) => a.id), ["c", "t", "d"], "no word in common: every animal is offered rather than a wrong guess");
+  assert.deepEqual(matchingCharacters(lib as any, "two tigers", "animal").map((a) => a.id), ["t"], "plural and singular meet");
+  assert.deepEqual(matchingCharacters(lib as any, "a rugged action hero", "human").map((a) => a.id), ["h"]);
+});

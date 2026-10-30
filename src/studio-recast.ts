@@ -227,7 +227,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
         const code = st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled";
         // "Generation failed" with no reason is often transient on the renderer's side: one fresh submission before giving up
-        if (code === "recast_failed" && job.attempts < 1) { await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer gave up once; trying again" }); throw new RecastError(code, "generation failed once, retrying", true); }
+        // attempts counts claims, this one included, so 1 is the first run and 2 the retry
+        if (code === "recast_failed" && job.attempts < 2) { await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer gave up once; trying again" }); throw new RecastError(code, "generation failed once, retrying", true); }
         throw new RecastError(code);
       }
       await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In Higgsfield's queue" });
