@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { allInstruments, instrumentsEnabled, instrumentById, validateParams, validateInputs, buildBody, tableUnits, tableUsd, listPrice, instrumentCredits, quoteInstrument, outputUrls, publicInstrument, runInstrumentJob, KIND_LABEL, FIRST_CLASS, InstrumentError } from "../src/studio-instruments.js";
+import { allInstruments, apiPath, instrumentsEnabled, instrumentById, validateParams, validateInputs, buildBody, tableUnits, tableUsd, listPrice, instrumentCredits, quoteInstrument, outputUrls, publicInstrument, runInstrumentJob, KIND_LABEL, FIRST_CLASS, InstrumentError } from "../src/studio-instruments.js";
 import { PLANS } from "../src/studio.js";
 import { HF_BASE } from "../src/studio-recast.js";
 
@@ -10,14 +10,23 @@ const ENV = { HIGGSFIELD_API_KEY: "id:secret", STUDIO_INSTRUMENTS_ENABLED: "true
 test("the catalog is loaded, the first-class Genjutsu endpoints are not offered twice, and every entry has a kind and a schema", () => {
   const all = allInstruments();
   assert.ok(all.length >= 75, `expected the platform catalog, got ${all.length}`);
-  for (const id of FIRST_CLASS) assert.ok(!all.some((m) => m.id === id), `${id} should stay a first-class tool`);
+  for (const id of FIRST_CLASS) assert.ok(!all.some((m) => m.id === id || apiPath(m) === id), `${id} should stay a first-class tool`);
   for (const m of all) {
     assert.ok(KIND_LABEL[m.kind], `${m.id} has an unknown kind ${m.kind}`);
     assert.ok(m.schema?.properties, `${m.id} has no schema`);
     assert.ok(["video", "image", "audio", "text"].includes(m.output));
   }
   assert.ok(all.some((m) => m.id === "bytedance/seedance-2.5/text-to-video"));
-  assert.ok(all.some((m) => m.id === "higgsfield-ai/soul/v2/standard"));
+  const soul = all.find((m) => m.id === "clone8/soul/v2/standard");
+  assert.ok(soul, "vendor-named ids carry a clone8/ alias");
+  assert.equal(apiPath(soul!), "higgsfield-ai/soul/v2/standard", "calls still go to the vendor's path");
+});
+
+test("nothing that names the vendor reaches a person or the assistant: ids, makers, summaries, notes, doc links", () => {
+  for (const m of allInstruments()) {
+    const shown = JSON.stringify({ id: m.id, title: m.title, family: m.family, provider: m.provider, summary: m.summary, notes: m.notes, docs: m.docs });
+    assert.ok(!/higgsfiel|llms\.txt|documentation index|https?:\/\//i.test(shown), `${m.id} leaks: ${shown.slice(0, 200)}`);
+  }
 });
 
 test("instruments are closed without the flag, open with it, and narrowed by allow and hidden lists", () => {

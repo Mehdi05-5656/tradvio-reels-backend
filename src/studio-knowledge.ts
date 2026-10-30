@@ -4,7 +4,7 @@
 // else's data; it never contains keys. Everything here is plain text for the model.
 import type { StudioCosts } from "./studio-pricing.js";
 import { STUDIO_TRENDS } from "./studio-trends.js";
-import { instrumentsEnabled, listPrice, instrumentCredits, unitLabel, type Instrument } from "./studio-instruments.js";
+import { apiPath, instrumentsEnabled, listPrice, instrumentCredits, unitLabel, type Instrument } from "./studio-instruments.js";
 import type { PlanLike } from "./studio-pricing.js";
 
 export const PRESET_CHARACTERS = [
@@ -43,7 +43,7 @@ const KIND_HELP: Record<string, string> = {
 };
 
 function instrumentLine(m: Instrument, plans: PlanLike[], env: Record<string, string | undefined>): string {
-  const p = m.pricing ?? listPrice(m.id);
+  const p = m.pricing ?? listPrice(apiPath(m));
   const price = p ? `about ${instrumentCredits(p.usd, plans, env)} credits per ${unitLabel(m)}` : "priced on request";
   const props: Record<string, any> = m.schema?.properties ?? {};
   const bits: string[] = [];

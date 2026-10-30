@@ -31,9 +31,35 @@ export type Instrument = {
   summary: string; notes: string[]; media_fields: Record<string, MediaKind>; required: string[]; schema: any; docs: string;
   /** audio instruments: the list price and what it is measured in; `minutes_from` says where the minutes come from */
   pricing?: Pricing; minutes_from?: "source" | "length";
+  /** the vendor's path for this model when our public id differs (vendor-named ids get a clone8/ alias) */
+  api_path?: string;
 };
 type Catalog = { generated_at: string; source: string; models: Instrument[] };
-const CATALOG = catalogJson as unknown as Catalog;
+/** What each kind does, for models whose scraped summary is unusable. */
+const KIND_SUMMARY: Record<InstrumentKind, string> = {
+  text_to_video: "Footage from a description alone.", image_to_video: "A picture starts moving; a last frame can end it where you want.",
+  reference_to_video: "New footage built from pictures, clips and words together.", video_edit: "Change what is in a clip you already have, with words and reference pictures.",
+  video_extend: "Make a clip run longer; the model continues the motion.", motion_control: "A picture performs the motion of a video.",
+  text_to_image: "A picture from a description.", image_edit: "Edit a picture with words.", text_to_audio: "Sound from words: a voice over, an effect or music.",
+  audio_edit: "The sound of a clip changes while the picture stays.", transcribe: "What is said in a clip, written down with timings.",
+};
+// The catalog was scraped from the vendor's docs. Nothing that names the vendor reaches a person or the assistant:
+// vendor-named ids get a clone8/ alias (calls still go to the real path), scraped boilerplate summaries are replaced,
+// developer notes and doc links are dropped, and a vendor maker reads as Clone8.
+const VENDOR_PATH = /^higgsfield(?:-ai)?\//;
+const VENDOR_TEXT = /higgsfiel|documentation index|llms\.txt|https?:\/\//i;
+const DEV_NOTE = /higgsfiel|https?:\/\/|\b(GET|POST) \/|endpoint|integration|preset\\?_id|UUID/i;
+export function cleanInstrument(m: Instrument): Instrument {
+  return {
+    ...m, id: VENDOR_PATH.test(m.id) ? m.id.replace(VENDOR_PATH, "clone8/") : m.id, api_path: m.api_path ?? m.id,
+    provider: /higgsfield/i.test(m.provider) ? "Clone8" : m.provider, summary: !m.summary || VENDOR_TEXT.test(m.summary) ? KIND_SUMMARY[m.kind] : m.summary,
+    notes: m.notes.filter((n) => !DEV_NOTE.test(n)), docs: "",
+  };
+}
+/** The vendor's path for a model: what the HTTP calls and the list prices use. */
+export const apiPath = (m: Instrument) => m.api_path ?? m.id;
+const RAW_CATALOG = catalogJson as unknown as Catalog;
+const CATALOG: Catalog = { ...RAW_CATALOG, models: RAW_CATALOG.models.map(cleanInstrument) };
 const ELEVEN = elevenJson as unknown as Catalog;
 
 /** Endpoints our first-class tools already own; they are not offered twice. */
@@ -49,17 +75,17 @@ export const KIND_LABEL: Record<InstrumentKind, string> = {
 
 /** Every instrument we know, whatever the keys: the video models and the audio ones. */
 export function allInstruments(): Instrument[] {
-  return [...CATALOG.models.filter((m) => !FIRST_CLASS.has(m.id)), ...ELEVEN.models];
+  return [...CATALOG.models.filter((m) => !FIRST_CLASS.has(apiPath(m))), ...ELEVEN.models];
 }
 /** The instruments on offer: the video models need HIGGSFIELD_API_KEY, the audio ones ELEVENLABS_API_KEY, all behind
  *  STUDIO_INSTRUMENTS_ENABLED=true, narrowed by an allow list or a hidden list. */
 export function instrumentsEnabled(env: Record<string, string | undefined> = process.env): Instrument[] {
   if (env.STUDIO_INSTRUMENTS_ENABLED !== "true") return [];
   const allow = split(env.STUDIO_INSTRUMENTS_ALLOW), hide = new Set(split(env.STUDIO_INSTRUMENTS_HIDDEN));
-  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!allow.length || allow.includes(m.id)) && !hide.has(m.id));
+  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!allow.length || allow.includes(m.id) || allow.includes(apiPath(m))) && !hide.has(m.id) && !hide.has(apiPath(m)));
 }
 const split = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-export const instrumentById = (id: unknown, env?: Record<string, string | undefined>): Instrument | null => instrumentsEnabled(env).find((m) => m.id === id) ?? null;
+export const instrumentById = (id: unknown, env?: Record<string, string | undefined>): Instrument | null => instrumentsEnabled(env).find((m) => m.id === id || apiPath(m) === id) ?? null;
 
 // ---------------------------------------------------------------------------------------------------
 // Parameters: a small JSON-schema check, enough for what the catalog uses (types, enums, ranges, arrays).
@@ -179,7 +205,7 @@ export function tableUnits(inst: Instrument, params: Record<string, any>, source
 }
 export function tableUsd(inst: Instrument, params: Record<string, any>, sourceSeconds: number | null): number | null {
   if (inst.pricing) return inst.pricing.usd * tableUnits(inst, params, sourceSeconds);
-  const p = listPrice(inst.id);
+  const p = listPrice(apiPath(inst));
   return p ? p.usd * tableUnits(inst, params, sourceSeconds) : null;
 }
 /** What a unit is called on a card: "a second", "an image", "a minute", "1,000 characters", "a sound", "an hour". */
@@ -243,7 +269,7 @@ export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], r
   const sourceSeconds = Math.max(0, ...ids.map((id) => assets.get(id)?.seconds ?? 0)) || null;
   const units = tableUnits(inst, params, sourceSeconds);
   // audio instruments price from their own table; the video models ask the platform's estimate first
-  let usd = inst.provider === "elevenlabs" ? null : await estimateUsd(deps, inst.id, body), priced_by: "estimate" | "table" = "estimate";
+  let usd = inst.provider === "elevenlabs" ? null : await estimateUsd(deps, apiPath(inst), body), priced_by: "estimate" | "table" = "estimate";
   if (usd == null) { usd = tableUsd(inst, params, sourceSeconds); priced_by = "table"; }
   if (usd == null) throw new InstrumentError("price_unavailable", "This model cannot be priced right now; try again in a moment", 503);
   const credits = instrumentCredits(usd, plans, env);
@@ -290,7 +316,7 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
   let dir: string | null = null;
   try {
     const o = job.options ?? {};
-    const inst = allInstruments().find((m) => m.id === o.endpoint) ?? null;
+    const inst = allInstruments().find((m) => m.id === o.endpoint || apiPath(m) === o.endpoint) ?? null;
     if (!inst) throw new RecastError("instrument_unknown");
     if (inst.provider === "elevenlabs") return await runElevenJob(sb, deps, job, inst);
     let requestId: string | null = job.progress?.request_id ?? null;
@@ -311,7 +337,7 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
       }
       const body = buildBody(o.params ?? {}, o.inputs ?? {}, (id) => urls.get(id) ?? "");
       await renew(sb, job, { note: "Sending the request to the renderer" });
-      const r = await hf(deps, `/${inst.id}`, { method: "POST", body: JSON.stringify(body), idempotency: job.id });
+      const r = await hf(deps, `/${apiPath(inst)}`, { method: "POST", body: JSON.stringify(body), idempotency: job.id });
       if (r.status !== 200 && r.status !== 201 && r.status !== 202) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
       if (!r.body?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
       requestId = String(r.body.request_id);
@@ -420,8 +446,8 @@ export function publicInstrument(inst: Instrument, env: Record<string, string | 
     const d = props[name] ?? {};
     return { name, kind, multiple: d.type === "array", maxItems: d.maxItems ?? null, description: String(d.description ?? "").slice(0, 300), required: inst.required.includes(name) };
   });
-  const price = inst.pricing ?? listPrice(inst.id);
+  const price = inst.pricing ?? listPrice(apiPath(inst));
   const hint = price && plans.length ? { per: price.per, credits: instrumentCredits(price.usd, plans, env), unit: unitLabel(inst) } : null;
   // the provider is ours to know; the person sees a Clone8 family
-  return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider === "elevenlabs" ? "Clone8" : inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: inst.docs, price_hint: hint };
+  return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider === "elevenlabs" ? "Clone8" : inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: null, price_hint: hint };
 }
