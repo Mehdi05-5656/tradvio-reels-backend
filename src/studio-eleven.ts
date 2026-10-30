@@ -50,12 +50,21 @@ export const resetVoiceCache = () => { voiceCache = null; };
 const SYNONYMS: Record<string, string[]> = { man: ["male"], men: ["male"], guy: ["male"], masculine: ["male"], woman: ["female"], women: ["female"], lady: ["female"], girl: ["female", "young"], feminine: ["female"], boy: ["male", "young"], older: ["old", "middle_aged"], elderly: ["old"], mature: ["middle_aged", "old"], senior: ["old"], youthful: ["young"], teen: ["young"], english: ["british"], uk: ["british"], us: ["american"], usa: ["american"], aussie: ["australian"], calm: ["soothing", "relaxed"], soft: ["gentle", "soothing"], upbeat: ["energetic", "cheerful"], lively: ["energetic"], serious: ["authoritative", "confident"], deep: ["deep", "resonant"] };
 export function matchVoices(voices: Voice[], description: string, count = 4): Voice[] {
   const words = new Set(description.toLowerCase().split(/[^a-z_]+/).filter((w) => w.length > 1).flatMap((w) => [w, ...(SYNONYMS[w] ?? [])]));
+  // a named gender or accent is a filter first and a score second: nobody asks for "a British man" and wants a woman
+  const wanted = (xs: string[]) => xs.filter((x) => words.has(x));
+  const genders = wanted(["male", "female"]), accents = wanted(["british", "american", "australian", "irish", "indian", "african", "canadian", "scottish", "swedish", "italian", "spanish", "french", "german"]);
+  const has = (v: Voice, k: string, x: string) => String(v.labels[k] ?? "").toLowerCase().replace(/[^a-z]/g, "") === x;
   const score = (v: Voice) => {
     const hay = new Set(`${v.name} ${Object.values(v.labels).join(" ")} ${v.description ?? ""}`.toLowerCase().split(/[^a-z_]+/));
     let n = 0; for (const w of words) if (hay.has(w)) n++;
+    if (genders.length && genders.some((g) => has(v, "gender", g))) n += 3;
+    if (accents.length && accents.some((a) => has(v, "accent", a))) n += 2;
     return n + (v.preview_url ? 0.5 : 0);
   };
-  return [...voices].sort((a, b) => score(b) - score(a)).slice(0, count);
+  let pool = voices;
+  if (genders.length) { const same = pool.filter((v) => genders.some((g) => has(v, "gender", g))); if (same.length >= count) pool = same; }
+  if (accents.length) { const same = pool.filter((v) => accents.some((a) => has(v, "accent", a))); if (same.length >= count) pool = same; }
+  return [...pool].sort((a, b) => score(b) - score(a)).slice(0, count);
 }
 
 // ---------------------------------------------------------------------------------------------------

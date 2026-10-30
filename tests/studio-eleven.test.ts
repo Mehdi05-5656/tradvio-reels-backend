@@ -148,8 +148,10 @@ test("voices: the library is fetched once, matched by words in the description, 
   const deps = { fetch: fetchFn, env: ENV, now: () => t };
   const all = await listVoices(deps); await listVoices(deps);
   assert.equal(fetched, 1, "cached"); assert.equal(all.length, 3);
-  assert.deepEqual(matchVoices(all, "a warm British man", 2).map((v) => v.name), ["George", "Brian"]);
+  assert.deepEqual(matchVoices(all, "a warm British man", 2).map((v) => v.name), ["George", "Brian"], "men first, the British one on top");
   assert.equal(matchVoices(all, "young energetic woman", 1)[0].name, "Sarah");
+  assert.deepEqual(matchVoices(all, "deep American man", 2).map((v) => v.name), ["Brian", "George"], "accent and gender outrank a sample");
+  assert.ok(!matchVoices(all, "a British man", 2).some((v) => v.name === "Sarah"), "no woman for a man when two men exist");
   t += 11 * 60_000; await listVoices(deps); assert.equal(fetched, 2, "refreshed after ten minutes");
 
   const app = express();
