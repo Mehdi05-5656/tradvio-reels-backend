@@ -40,6 +40,8 @@ const POLL_MS = 10_000, MAX_WAIT_MS = 40 * 60_000, OUTPUT_LIMIT = 268_435_456;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type RecastDeps = {
+  /** Shot changes inside the first seconds of a file (ffmpeg in production; tests inject one). */
+  sceneCuts?: (path: string, within: number) => Promise<number[]>;
   fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>;
   now?: () => number; mux?: (output: string, source: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number>; poster?: (video: string, target: string) => Promise<void>;
   prescale?: (source: string, target: string, maxSeconds?: number) => Promise<void>;
@@ -110,6 +112,17 @@ export async function probeStream(path: string): Promise<{ width: number; height
   const avg = rate(v.avg_frame_rate), r = rate(v.r_frame_rate);
   return { width: Number(v.width) || 0, height: Number(v.height) || 0, fps: avg > 0 ? Math.round(avg * 100) / 100 : null, vfr: avg > 0 && r > 0 && Math.abs(avg - r) > 0.5, hasAudio: (p.streams ?? []).some((x: any) => x.codec_type === "audio") };
 }
+/** Where the picture hard-cuts to another shot inside the first `within` seconds, in order; a cut is a frame that differs
+ *  from the one before it by more than `threshold` (ffmpeg's scene score, 0.3 catches camera switches, not head turns). */
+export async function sceneCuts(path: string, within: number, threshold = 0.3): Promise<number[]> {
+  const raw = await command("ffmpeg", ["-v", "info", "-nostdin", "-i", path, "-t", String(within), "-vf", `select='gt(scene,${threshold})',showinfo`, "-f", "null", "-"], undefined, 120_000).catch((e) => { throw e; });
+  const text = raw.toString();
+  const out: number[] = [];
+  for (const m of text.matchAll(/pts_time:([0-9.]+)/g)) { const t = Number(m[1]); if (Number.isFinite(t) && t > 0 && t < within) out.push(Math.round(t * 100) / 100); }
+  return out;
+}
+/** The opening shot: the stretch before the first cut, when that is long enough to render (4 s); else null. */
+export const openingShot = (cuts: number[], minSeconds = MIN_SECONDS) => { const first = cuts.find((t) => t >= minSeconds); return first == null ? null : Math.floor(first * 10) / 10; };
 /** The ffmpeg video filter for a source of this size: down to 720x1280 when larger, up to the renderer's pixel floor
  *  when smaller (a 480x852 phone rendition is 409k pixels, right at the line), even sides always. */
 export function inputScaleFilter(width: number, height: number): string {
@@ -224,7 +237,9 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         const src = await sb.storage.from("studio-uploads").download(sourceKey!);
         if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
         await writeFile(original, Buffer.from(await src.data.arrayBuffer()));
-        await (deps.prescale ?? prescaleSource)(original, scaled, windowSeconds(job.options, MAX_SECONDS[model]));
+        const cutAt = Number(job.progress?.cut_at) || null;
+        const window = cutAt ? Math.min(cutAt, windowSeconds(job.options, MAX_SECONDS[model])) : windowSeconds(job.options, MAX_SECONDS[model]);
+        await (deps.prescale ?? prescaleSource)(original, scaled, window);
         const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-720p.mp4`;
         const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(scaled), { contentType: "video/mp4", upsert: true });
         if (put.error) throw put.error;
@@ -253,9 +268,20 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
         log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
         const code = st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled";
-        // "Generation failed" with no reason is often transient on the renderer's side: one fresh submission before giving up
-        // attempts counts claims, this one included, so 1 is the first run and 2 the retry
-        if (code === "recast_failed" && job.attempts < 2) { await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer gave up once; trying again" }); throw new RecastError(code, "generation failed once, retrying", true); }
+        // "Generation failed" with no reason: the renderer refuses clips whose shot changes inside the window it uses (a
+        // podcast cutting between cameras), so the retry sends the opening shot only, up to the first cut. Attempts count
+        // claims, this one included, so 1 is the first run and 2 the retry.
+        if (code === "recast_failed" && job.attempts < 2) {
+          let cutAt: number | null = null;
+          if (!drivingUrl && dir) {
+            const window = windowSeconds(job.options, MAX_SECONDS[model]);
+            const cuts = await (deps.sceneCuts ?? sceneCuts)(join(dir, "original.mp4"), window).catch(() => [] as number[]);
+            cutAt = openingShot(cuts);
+            if (cutAt != null && cutAt >= window) cutAt = null;
+          }
+          await renew(sb, job, { request_id: null, submitted_at: null, cut_at: cutAt, note: cutAt ? `The renderer gave up once; trying again with the opening shot only (${cutAt} s)` : "The renderer gave up once; trying again" });
+          throw new RecastError(code, cutAt ? `generation failed once, retrying on the first ${cutAt} s` : "generation failed once, retrying", true);
+        }
         throw new RecastError(code);
       }
       await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In Higgsfield's queue" });
@@ -298,9 +324,11 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const costs = studioCosts(deps.env ?? process.env, PLANS);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     // Higgsfield bills the input's seconds (rounded up), and the output can come back a little shorter: charge the larger.
-    const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, windowSeconds(job.options, MAX_SECONDS[model])));
+    const cutAt = Number(job.progress?.cut_at) || null;
+    const window = cutAt ? Math.min(cutAt, windowSeconds(job.options, MAX_SECONDS[model])) : windowSeconds(job.options, MAX_SECONDS[model]);
+    const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, window));
     const charged = Math.min(job.credits_reserved, billed * per);
-    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null }];
+    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null, ...(cutAt ? { cut_at: cutAt, note: `Cut at the first shot change (${cutAt} s): the renderer takes one continuous shot` } : {}) }];
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;

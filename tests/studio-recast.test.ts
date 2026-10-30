@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -221,4 +221,44 @@ test("the input scale filter: down to 720p, up to the renderer pixel floor, neve
   assert.equal(inputScaleFilter(480, 852), "scale=640:-2", "a 480p phone rendition is scaled up");
   assert.match(inputScaleFilter(720, 1280), /min\(1280,iw\)/, "720p stays as it is");
   assert.match(inputScaleFilter(0, 0), /min\(1280,iw\)/, "unknown size: the plain downscale");
+});
+
+
+test("a refused clip with a shot change is retried on its opening shot only: the cut is found, kept on the job, used for the cut and the bill", async () => {
+  // first claim: refused; the shot changes at 6.9, 7.37 and 9.7 s inside the 15 s window, so the retry is set up on the first 6.9 s
+  const first = fakeHiggsfield([{ status: "failed" }]);
+  const sbFirst = fakeSb(job());
+  const seen: any[] = [];
+  const out1 = await runRecastJob(sbFirst, deps(first.fetchFn, { sceneCuts: async (_p: string, within: number) => { seen.push(within); return [6.9, 7.37, 9.7]; } }), job({ options: { model: "light", seconds: 15, character: "noah", character_asset_id: null }, credits_reserved: 330 }));
+  assert.equal(out1, "requeued"); assert.deepEqual(seen, [15]);
+  const renewed = sbFirst.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
+  assert.equal(renewed.cut_at, 6.9); assert.match(renewed.note, /opening shot only \(6\.9 s\)/); assert.equal(renewed.request_id, null);
+  // second claim: the cut travels in progress, the copy is cut there, and the charge follows the cut, not the 15 s window
+  const second = fakeHiggsfield([{ status: "completed", video: { url: "https://cdn.example/out.mp4" } }]);
+  const sbSecond = fakeSb(job());
+  const out2 = await runRecastJob(sbSecond, deps(second.fetchFn, { probeSeconds: async () => 6.9 }), job({ attempts: 2, progress: { cut_at: 6.9 }, options: { model: "light", seconds: 15, character: "noah", character_asset_id: null }, credits_reserved: 330 }));
+  assert.equal(out2, "done");
+  assert.equal((globalThis as any).__lastPrescaleMax, 6.9, "the copy sent is cut at the shot change");
+  const done = sbSecond.calls.find((c: any) => c.name === "studio_complete").args;
+  assert.ok(done.p_credits_charged % 7 === 0 && done.p_credits_charged < 330, `7 billed seconds at the Light rate, under the 15 s reservation: ${done.p_credits_charged}`);
+  assert.equal(done.p_outputs[0].cut_at, 6.9); assert.match(done.p_outputs[0].note, /first shot change \(6\.9 s\)/);
+  // no cut inside the window, or a cut too early to leave 4 s: the plain retry
+  const h3 = fakeHiggsfield([{ status: "failed" }]); const sb3 = fakeSb(job());
+  assert.equal(await runRecastJob(sb3, deps(h3.fetchFn, { sceneCuts: async () => [2.1] }), job()), "requeued");
+  const r3 = sb3.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress; assert.equal(r3.cut_at, null); assert.equal(r3.note, "The renderer gave up once; trying again");
+  assert.equal(openingShot([2.1, 6.9]), 6.9); assert.equal(openingShot([]), null); assert.equal(openingShot([3.9]), null); assert.equal(openingShot([12.26]), 12.2);
+});
+
+test("real ffmpeg: a hard cut between two different pictures is found, a steady picture reports none", { skip: !hasFfmpeg() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "recast-cuts-"));
+  try {
+    const a = join(dir, "a.mp4"), b = join(dir, "b.mp4"), both = join(dir, "both.mp4"), list = join(dir, "list.txt");
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-t", "3", "-pix_fmt", "yuv420p", "-c:v", "libx264", a]);
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "smptebars=size=320x240:rate=25", "-t", "3", "-pix_fmt", "yuv420p", "-c:v", "libx264", b]);
+    await writeFile(list, `file '${a}'\nfile '${b}'\n`);
+    execFileSync("ffmpeg", ["-v", "error", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", both]);
+    const cuts = await sceneCuts(both, 6);
+    assert.equal(cuts.length, 1); assert.ok(Math.abs(cuts[0] - 3) < 0.1, `cut near 3 s, got ${cuts[0]}`);
+    assert.deepEqual(await sceneCuts(a, 3), []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
