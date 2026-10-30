@@ -353,3 +353,17 @@ test("invoice.paid that arrives before the customer link still grants, by the su
   await assert.rejects(() => applyStripeEvent(sb, stripe2, { id: "evt_x", type: "invoice.paid", data: { object: { id: "in_x", customer: "cus_x", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_x" } } } } }), /unknown customer/, "no user anywhere: throw so Stripe retries");
   delete process.env.STRIPE_PRICE_CREATOR_YEAR;
 });
+
+
+test("max_seconds narrows the window: billed and cut to the opening the person asked for, never past the model's cap", async () => {
+  const { quote, windowSeconds } = await import("../src/studio.js");
+  const costs = { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 72, recast_light_second: 22, character_image: 10 } as any;
+  const clip = { kind: "video", probe: { duration: 43.5 } } as any;
+  assert.equal(windowSeconds({ max_seconds: 6 }, 15), 6); assert.equal(windowSeconds({ max_seconds: 40 }, 15), 15); assert.equal(windowSeconds({ max_seconds: 2 }, 15), 15, "under four seconds is ignored"); assert.equal(windowSeconds({}, 30), 30);
+  const q = quote("swap", { model: "light", character: "noah", max_seconds: 6 }, clip, costs);
+  assert.equal(q.options.seconds, 6); assert.equal(q.options.max_seconds, 6); assert.equal(q.credits, 6 * 22);
+  const full = quote("swap", { model: "light", character: "noah" }, clip, costs);
+  assert.equal(full.options.seconds, 15); assert.equal("max_seconds" in full.options, false, "no window asked: nothing extra in the options");
+  const r = quote("recast", { model: "full", character: "noah", max_seconds: 10 }, clip, costs);
+  assert.equal(r.options.seconds, 10); assert.equal(r.credits, 720);
+});

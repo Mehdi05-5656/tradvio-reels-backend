@@ -101,10 +101,11 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const model = o.model === "light" ? "light" : "full";
     // Higgsfield's limits: the full model trims a source to 30 s, Light uses the first 15 s. They bill the input's container
     // duration rounded up, and a re-encoded 4.00 s file reads a hair over 4, so a tenth of a second is added before rounding.
-    const seconds = billableSeconds(duration, model === "light" ? 15 : 30);
+    const cap = windowSeconds(o, model === "light" ? 15 : 30);
+    const seconds = billableSeconds(duration, cap);
     if (!UUID_RE.test(String(o.character_asset_id ?? "")) && !/^[a-z0-9_-]{2,40}$/.test(String(o.character ?? ""))) throw new StudioError("character_required", "Pick a character or upload a photo");
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    return { tool, credits: seconds * per, options: { model, seconds, character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };
+    return { tool, credits: seconds * per, options: { model, seconds, ...(cap < (model === "light" ? 15 : 30) ? { max_seconds: cap } : {}), character: o.character ?? null, character_asset_id: o.character_asset_id ?? null }, summary: `${seconds} s × ${per}` };
   }
   if (tool === "swap") {
     // Object swap: the person or thing in the video replaced by the reference image, scene and motion kept. Same Genjutsu
@@ -113,13 +114,14 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const duration = Number(asset.probe?.duration);
     if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
     const model = o.model === "light" ? "light" : "full";
-    const seconds = billableSeconds(duration, model === "light" ? 15 : 30);
+    const cap = windowSeconds(o, model === "light" ? 15 : 30);
+    const seconds = billableSeconds(duration, cap);
     const who = characterChoice(o);
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
     // which people change when the clip has several: plain labels, carried into the renderer's prompt
     const targets = Array.isArray(o.targets) ? o.targets.map((t: unknown) => String(t).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 6) : [];
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    return { tool, credits: seconds * per, options: { model, seconds, ...who, prompt, ...(targets.length ? { targets } : {}) }, summary: `${seconds} s × ${per}` };
+    return { tool, credits: seconds * per, options: { model, seconds, ...(cap < (model === "light" ? 15 : 30) ? { max_seconds: cap } : {}), ...who, prompt, ...(targets.length ? { targets } : {}) }, summary: `${seconds} s × ${per}` };
   }
   if (tool === "restyle") {
     // Restyle: every frame redrawn in a Higgsfield style; motion, camera and audio stay. Full model only, up to 30 s.
@@ -127,10 +129,11 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const duration = Number(asset.probe?.duration);
     if (!(duration > 0)) throw new StudioError("asset_not_inspected", "The video is still being checked");
     if (!UUID_OPT(o.style_id)) throw new StudioError("style_required", "Pick a style");
-    const seconds = billableSeconds(duration, 30);
+    const cap = windowSeconds(o, 30);
+    const seconds = billableSeconds(duration, cap);
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
     const style_name = typeof o.style_name === "string" ? o.style_name.slice(0, 80) : null;
-    return { tool, credits: seconds * costs.recast_second, options: { model: "full", seconds, style_id: o.style_id, style_name, prompt, character_asset_id: UUID_OPT(o.character_asset_id) ? o.character_asset_id : null }, summary: `${seconds} s × ${costs.recast_second}` };
+    return { tool, credits: seconds * costs.recast_second, options: { model: "full", seconds, ...(cap < 30 ? { max_seconds: cap } : {}), style_id: o.style_id, style_name, prompt, character_asset_id: UUID_OPT(o.character_asset_id) ? o.character_asset_id : null }, summary: `${seconds} s × ${costs.recast_second}` };
   }
   if (tool === "trend") {
     // Trend: one of our driving clips performed by the person's character. The clip's length sets the price.
@@ -157,6 +160,11 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
 /** Seconds Higgsfield will bill for an input of `duration`. Longer sources are trimmed to the model's cap and billed exactly
  *  that (15.27 s Light runs billed 15); shorter ones bill the container duration rounded up, and a re-encoded 4.00 s file reads
  *  a hair over 4 (a 4.0 s Full run billed 5), so a tenth of a second is added before rounding. */
+/** The stretch of the clip to use: the model's cap, or a shorter opening the person asked for (max_seconds, at least 4). */
+export function windowSeconds(o: any, cap: number): number {
+  const asked = Number(o?.max_seconds);
+  return Number.isFinite(asked) && asked >= 4 ? Math.min(cap, Math.floor(asked)) : cap;
+}
 export function billableSeconds(duration: number, cap: number): number {
   if (!(duration > 0)) return 1;
   return duration >= cap ? cap : Math.max(1, Math.ceil(duration + 0.1));

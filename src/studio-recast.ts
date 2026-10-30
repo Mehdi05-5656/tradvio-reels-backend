@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { targetsPrompt } from "./studio-people.js";
-import { PLANS, billableSeconds } from "./studio.js";
+import { PLANS, billableSeconds, windowSeconds } from "./studio.js";
 import { RECAST_RESOLUTION, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
 
@@ -224,7 +224,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         const src = await sb.storage.from("studio-uploads").download(sourceKey!);
         if (src.error || !src.data) throw src.error ?? new RecastError("source_missing");
         await writeFile(original, Buffer.from(await src.data.arrayBuffer()));
-        await (deps.prescale ?? prescaleSource)(original, scaled, MAX_SECONDS[model]);
+        await (deps.prescale ?? prescaleSource)(original, scaled, windowSeconds(job.options, MAX_SECONDS[model]));
         const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-720p.mp4`;
         const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(scaled), { contentType: "video/mp4", upsert: true });
         if (put.error) throw put.error;
@@ -298,7 +298,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const costs = studioCosts(deps.env ?? process.env, PLANS);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     // Higgsfield bills the input's seconds (rounded up), and the output can come back a little shorter: charge the larger.
-    const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, MAX_SECONDS[model]));
+    const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, windowSeconds(job.options, MAX_SECONDS[model])));
     const charged = Math.min(job.credits_reserved, billed * per);
     const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, request_id: requestId, audio: model === "full" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null }];
     try {
