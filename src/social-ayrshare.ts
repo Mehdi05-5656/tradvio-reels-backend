@@ -8,7 +8,7 @@
 // Env: AYRSHARE_API_KEY (required), AYRSHARE_DOMAIN (optional), STUDIO_SOCIAL_WEBHOOK_SECRET (signing secret),
 // AYRSHARE_X_API_KEY / AYRSHARE_X_API_SECRET (optional, to offer X).
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { SocialError, type PublishRequest, type PublishResult, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type SocialWebhook } from "./social-provider.js";
+import { SocialError, type ProviderAccountStats, type ProviderPost, type PublishRequest, type PublishResult, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type SocialWebhook } from "./social-provider.js";
 
 const BASE = "https://api.ayrshare.com/api";
 
@@ -62,6 +62,51 @@ export function verifySignature(rawBody: string, headers: Record<string, string 
   const candidates = [h("X-Authorization-Content-SHA256"), ...String(h("X-Authorization-Content-SHA256-V2") ?? "").split(",").map((x) => x.trim().replace(/^v1=/, ""))].filter(Boolean) as string[];
   const a = Buffer.from(want, "hex");
   return candidates.some((c) => { const b = Buffer.from(c, "hex"); return b.length === a.length && timingSafeEqual(a, b); });
+}
+
+
+// ---------------------------------------------------------------------------------------------------
+// Analytics (docs Oct 30, 2026): GET /history/:platform lists every post on the account, also those published natively;
+// TikTok items carry their analytics, others are read with POST /analytics/post {postIds, platforms:[one],
+// searchPlatformId:true}; POST /analytics/social gives followers. Metrics settle 24-48 h after posting.
+// ---------------------------------------------------------------------------------------------------
+const nn = (v: any) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+const isoOf = (v: any) => { if (!v) return null; const t = typeof v === "number" ? (v > 1e12 ? v : v * 1000) : Date.parse(String(v)); return Number.isFinite(t) ? new Date(t).toISOString() : null; };
+/** The retention curve kept small: the share still watching at a few seconds that matter, and the share at 3 s. */
+export function retentionOf(curve: any): { retention: Array<[number, number]>; hold_3s: number | null } {
+  const pts = (Array.isArray(curve) ? curve : []).map((p: any) => [nn(p?.second), nn(p?.percentage)] as [number | null, number | null]).filter((p): p is [number, number] => p[0] != null && p[1] != null).sort((a, b) => a[0] - b[0]);
+  if (!pts.length) return { retention: [], hold_3s: null };
+  const scale = pts.some((p) => p[1] > 1.5) ? 1 / 100 : 1;
+  const at = (s: number) => { const p = pts.filter((x) => x[0] <= s).at(-1); return p ? p[1] * scale : null; };
+  const keep = [1, 2, 3, 5, 10, 15, 30, 60].filter((s) => s <= pts.at(-1)![0]).map((s) => [s, Math.round((at(s) ?? 0) * 1000) / 1000] as [number, number]);
+  const h = at(3);
+  return { retention: keep, hold_3s: h == null ? null : Math.round(h * 1000) / 1000 };
+}
+/** Every object in a response that carries an `analytics` block, with its id. */
+function analyticsEntries(body: any): Array<{ id: string | null; postUrl: string | null; a: any }> {
+  const out: Array<{ id: string | null; postUrl: string | null; a: any }> = [];
+  const walk = (x: any) => { if (!x || typeof x !== "object") return; if (Array.isArray(x)) { x.forEach(walk); return; } if (x.analytics && typeof x.analytics === "object") out.push({ id: x.id ? String(x.id) : null, postUrl: x.postUrl ?? null, a: x.analytics }); else for (const v of Object.values(x)) walk(v); };
+  walk(body);
+  return out;
+}
+/** Network analytics mapped onto one shape. */
+export function metricsOf(platform: string, a: any): Omit<ProviderPost, "platform" | "id" | "url" | "caption" | "published_at" | "thumb_url"> {
+  if (platform === "tiktok") {
+    const r = retentionOf(a.videoViewRetention);
+    const fyp = (Array.isArray(a.impressionSources) ? a.impressionSources : []).find((s: any) => /for_you|fyp|for you/i.test(String(s?.impression_source ?? "")));
+    return { duration_s: nn(a.videoDuration), views: nn(a.videoViews), likes: nn(a.likeCount), comments: nn(a.commentsCount), shares: nn(a.shareCount), saves: null,
+      extra: { reach: nn(a.reach), avg_watch_s: nn(a.averageTimeWatched), full_watch_rate: nn(a.fullVideoWatchedRate), ...r, fyp_share: fyp ? nn(fyp.percentage) : null } };
+  }
+  if (platform === "instagram") {
+    const avg = nn(a.igReelsAvgWatchTimeCount);
+    return { duration_s: null, views: nn(a.viewsCount ?? a.playsCount ?? a.igReelsAggregatedAllPlaysCount), likes: nn(a.likeCount), comments: nn(a.commentsCount), shares: nn(a.sharesCount), saves: nn(a.savedCount),
+      extra: { reach: nn(a.reachCount), avg_watch_s: avg == null ? null : avg > 600 ? avg / 1000 : avg, replays: nn(a.clipsReplaysCount), follows: nn(a.followsCount) } };
+  }
+  if (platform === "youtube") {
+    return { duration_s: null, views: nn(a.views), likes: nn(a.likes), comments: nn(a.comments), shares: nn(a.shares), saves: null,
+      extra: { engaged_views: nn(a.engagedViews), avg_watch_s: nn(a.averageViewDuration), avg_view_pct: nn(a.averageViewPercentage), subscribers_gained: nn(a.subscribersGained) } };
+  }
+  return { duration_s: null, views: nn(a.views ?? a.videoViews ?? a.impressionCount), likes: nn(a.likeCount ?? a.likes), comments: nn(a.commentsCount ?? a.commentCount ?? a.replies), shares: nn(a.sharesCount ?? a.shareCount ?? a.reposts), saves: null, extra: {} };
 }
 
 export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
@@ -176,6 +221,38 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
         const r = await call("POST", "/hook/webhook", { profileKey, body: { action, url, ...(secret ? { secret } : {}) } });
         if (r.status === 400) throw new SocialError("webhook_failed", String(r.body?.message ?? "Could not register the webhook").slice(0, 200), 502);
       }
+    },
+
+    async recentPosts(profileKey, platform, limit): Promise<ProviderPost[]> {
+      const r = await call("GET", `/history/${encodeURIComponent(platform)}?limit=${Math.min(Math.max(limit, 1), 100)}`, { profileKey });
+      if (r.status === 400) throw new SocialError("history_failed", String(r.body?.message ?? "Could not read the posts").slice(0, 200), 502);
+      const items: any[] = Array.isArray(r.body?.posts) ? r.body.posts : [];
+      const posts: ProviderPost[] = items.filter((x) => x?.id).map((x) => ({
+        platform, id: String(x.id), url: x.postUrl ?? x.permalink ?? x.url ?? null, caption: x.post ?? x.caption ?? x.title ?? null,
+        published_at: isoOf(x.created ?? x.published ?? x.publishedAt), thumb_url: x.thumbnailUrl ?? x.mediaUrl ?? (Array.isArray(x.mediaUrls) ? x.mediaUrls[0] : null) ?? null,
+        ...metricsOf(platform, x),
+      }));
+      // only TikTok's list carries its analytics; the rest are read in one batch by their network ids
+      if (platform !== "tiktok" && posts.length) {
+        const a = await call("POST", "/analytics/post", { profileKey, body: { postIds: posts.map((p) => p.id), platforms: [platform], searchPlatformId: true } }).catch(() => null);
+        const byId = new Map(analyticsEntries(a?.body).map((e) => [e.id, e]));
+        for (const p of posts) {
+          const e = byId.get(p.id); if (!e) continue;
+          const m = metricsOf(platform, e.a);
+          Object.assign(p, { views: m.views ?? p.views, likes: m.likes ?? p.likes, comments: m.comments ?? p.comments, shares: m.shares ?? p.shares, saves: m.saves ?? p.saves, duration_s: m.duration_s ?? p.duration_s, extra: { ...p.extra, ...Object.fromEntries(Object.entries(m.extra).filter(([, v]) => v != null)) }, url: p.url ?? e.postUrl });
+          if (platform === "youtube" && e.a?.thumbnailUrl && !p.thumb_url) p.thumb_url = e.a.thumbnailUrl;
+        }
+      }
+      return posts.filter((p) => p.url);
+    },
+
+    async accountStats(profileKey, platforms): Promise<ProviderAccountStats[]> {
+      const r = await call("POST", "/analytics/social", { profileKey, body: { platforms } });
+      return platforms.map((platform) => {
+        const blk = r.body?.[platform]; const a = blk?.analytics ?? blk ?? {};
+        const followers = nn(a.followerCount ?? a.followersCount ?? a.subscriberCount ?? a.followers?.totalFollowerCount);
+        return { platform, followers, extra: { profile_views: nn(a.profileViews), views_total: nn(a.viewCountTotal ?? a.viewCount ?? a.viewsCount), reach: nn(a.reachCount) } };
+      });
     },
 
     parseWebhook(headers, rawBody): SocialWebhook | null {

@@ -27,6 +27,16 @@ export type SocialEvent = { providerPostId: string; status: SocialPostStatus; re
 /** A webhook delivery we act on: a post settled, or a network was linked, unlinked or needs relinking. */
 export type SocialWebhook = { kind: "post"; event: SocialEvent } | { kind: "account"; refId: string; platform: string; change: "link" | "unlink" | "refresh"; bySystem: boolean };
 
+/** A post on a linked account, with what the provider reports about it (private analytics where the network shares them). */
+export type ProviderPost = {
+  platform: string; id: string; url: string | null; caption: string | null; published_at: string | null; thumb_url: string | null; duration_s: number | null;
+  views: number | null; likes: number | null; comments: number | null; shares: number | null; saves: number | null;
+  /** reach, avg_watch_s, full_watch_rate, hold_3s (share of viewers still watching at 3 s), retention [[second, %]], fyp_share,
+   *  engaged_views, avg_view_pct, subscribers_gained, follows */
+  extra: Record<string, any>;
+};
+export type ProviderAccountStats = { platform: string; followers: number | null; extra: Record<string, any> };
+
 export class SocialError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }
 
 export interface SocialProvider {
@@ -47,6 +57,10 @@ export interface SocialProvider {
   registerWebhook(profileKey: string, url: string): Promise<void>;
   /** Read a webhook delivery; null when it is not one we act on. Throws SocialError("webhook_unverified") when it fails verification. */
   parseWebhook(headers: Record<string, string | undefined>, rawBody: string): SocialWebhook | null;
+  /** Recent posts on a linked network, including ones published outside Clone8, with their analytics. */
+  recentPosts?(profileKey: string, platform: string, limit: number): Promise<ProviderPost[]>;
+  /** Followers and account totals per network. */
+  accountStats?(profileKey: string, platforms: string[]): Promise<ProviderAccountStats[]>;
 }
 
 export type SocialDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (s: string) => void };

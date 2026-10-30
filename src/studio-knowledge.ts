@@ -27,6 +27,8 @@ export type KnowledgeInput = {
   summary?: string | null;
   /** Self-serve posting: on or off, the networks this person linked, and whether they said "not now" to linking. */
   social?: { enabled: boolean; linked: string[]; quiet: boolean };
+  /** How this person's own posts perform (from the Performance dashboard), newest analysis first. */
+  performance?: string[];
 };
 
 /** The kinds of instrument, in creator words, with what each needs. */
@@ -122,6 +124,11 @@ export function buildSystemPrompt(k: KnowledgeInput): string {
   lines.push(`Plan: ${u.plan ?? "none"} (${u.status ?? "no subscription"}). Balance: ${u.balance} credits. Jobs at once: ${u.parallel_jobs}.`);
   lines.push(u.assets.length ? `Library (newest first): ${u.assets.slice(0, 40).map((a) => `${a.kind} "${a.name}" id ${a.id}${a.seconds ? ` ${Math.round(a.seconds)} s` : ""}${a.character ? ` (made character: ${a.prompt ?? ""})` : ""}`).join("; ")}.` : "Library: empty.");
   if (u.recent_jobs.length) lines.push(`Recent jobs: ${u.recent_jobs.slice(0, 8).map((j) => `${j.label} (${j.status}, job ${j.id})`).join("; ")}.`);
+  if (k.performance?.length) {
+    lines.push(""); lines.push("HOW THEIR POSTS PERFORM (their linked accounts; Performance page)");
+    for (const l of k.performance.slice(0, 12)) lines.push(`- ${l}`);
+    lines.push("Use this: when they ask what to make or what to do next, start from what already works for them and say the number (\"your 15-30 s posts get 2.1× your usual views\"). Offer Blueprint originals of a breakout post, a swap or a style on their most shared one, and their best window when they schedule. To work on one of their posts, fetch_link its link first. Never invent a number that is not here.");
+  }
   if (k.memory?.length) { lines.push(""); lines.push("WHAT YOU REMEMBER ABOUT THIS PERSON (from earlier chats)"); for (const m of k.memory.slice(0, 30)) lines.push(`- ${m}`); }
   if (k.summary) { lines.push(""); lines.push("EARLIER IN THIS CHAT (summarized; the recent messages follow)"); lines.push(k.summary); }
   lines.push("");

@@ -11,6 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
 import { getSocialProvider } from "./social-provider.js";
 import { createPosts, socialSnapshot } from "./studio-social.js";
+import { performanceForChat } from "./studio-insights.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -534,10 +535,10 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const user: Message = { id: randomUUID(), role: "user", text: input.text.slice(0, 4000), attachments: input.attachments, links: input.links, at: now() };
   convo.messages = [...convo.messages, user];
   if (convo.title === "New chat" && input.text.trim()) convo.title = input.text.trim().replace(/\s+/g, " ").slice(0, 60);
-  const [{ user: ku, assets, memory }, styles, social] = await Promise.all([userContext(sb, convo.user_id), (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[]), socialSnapshot(sb, convo.user_id, env).catch(() => ({ enabled: false, linked: [] as string[], quiet: false }))]);
+  const [{ user: ku, assets, memory }, styles, social, perf] = await Promise.all([userContext(sb, convo.user_id), (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[]), socialSnapshot(sb, convo.user_id, env).catch(() => ({ enabled: false, linked: [] as string[], quiet: false })), performanceForChat(sb, convo.user_id).catch(() => ({ brief: [] as string[], suggestions: [] }))]);
   const tools = toolsEnabled(env);
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
-  const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null, social });
+  const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null, social, performance: perf.brief });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
   let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, saved: { id: string; name: string } | null = null, publish: PublishCard | null = null;
   // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes

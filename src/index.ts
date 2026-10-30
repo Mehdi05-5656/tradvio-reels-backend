@@ -33,6 +33,7 @@ import { startInstrumentLoop } from "./studio-instruments.js";
 import { registerAssistant, startAssistantLoop } from "./studio-assistant.js";
 import { registerAutomations } from "./studio-automations.js";
 import { registerSocial, startSocialLoop } from "./studio-social.js";
+import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerPeople } from "./studio-people.js";
 import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
@@ -92,6 +93,7 @@ async function main() {
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
   registerSocial(app, getSb); // Studio self-serve posting to the person's own socials; off until STUDIO_SOCIAL_ENABLED=true. Not Publer.
+  registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
   registerPeople(app, getSb); // who is in a clip: faces for the chat card and the Swap page
   registerVoices(app); // the voice library for the picker and the chat's voice card; empty without ELEVENLABS_API_KEY
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
@@ -99,6 +101,7 @@ async function main() {
   startInstrumentLoop(getSb); // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
+  startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week
   startNoticesLoop(getSb); // Clone8 Studio emails: only runs when RESEND_API_KEY is set
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
