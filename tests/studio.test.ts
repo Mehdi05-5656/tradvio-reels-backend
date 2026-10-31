@@ -403,3 +403,27 @@ test("cast: a character per person, left to right, priced like one; trends take 
   assert.equal(quote("trend", { model: "light", character: "noah" }, { kind: "video", probe: { duration: 70 } } as any).options.seconds, 71, "a brought trend takes the whole clip on Light (70.0 s bills 71 at the platform rounding)");
   assert.equal(quote("trend", { model: "light", character: "noah", trend_id: "desk-talk" }, null).options.trend_id, "desk-talk", "catalog trends unchanged");
 });
+
+
+test("the operator overview counts what failures and retries cost: refunded credits and the renderer spend on them", async () => {
+  const { studioOverview } = await import("../src/studio.js");
+  const jobs = [
+    { id: "a", user_id: ANN, tool: "swap", status: "failed", credits_reserved: 80, credits_charged: 0, error_code: "renderer_busy", progress: { spend_usd: 1.5, offer: { engine: "seedance", credits: 180 } }, attempts: 3, created_at: "2026-10-30T00:00:00Z" },
+    { id: "b", user_id: ANN, tool: "recast", status: "failed", credits_reserved: 112, credits_charged: 0, error_code: "light_refused", progress: { spend_usd: 0.7 }, attempts: 1, created_at: "2026-10-30T00:00:00Z" },
+    { id: "c", user_id: ANN, tool: "swap", status: "done", credits_reserved: 80, credits_charged: 80, error_code: null, progress: { spend_usd: 1.0 }, attempts: 2, created_at: "2026-10-30T00:00:00Z" },
+    { id: "d", user_id: ANN, tool: "blueprint", status: "done", credits_reserved: 20, credits_charged: 20, error_code: null, progress: {}, attempts: 1, created_at: "2026-10-30T00:00:00Z" },
+  ];
+  const sb = fakeSb({ studio_customers: [], studio_jobs: jobs, studio_credit_ledger: [] }, () => ({ data: 0, error: null }));
+  const o: any = await studioOverview(sb, {}, new Date("2026-10-31T00:00:00Z"));
+  assert.deepEqual([o.waste.refunded_jobs, o.waste.credits_refunded, o.waste.spend_on_refunded_usd], [2, 192, 2.2]);
+  assert.deepEqual([o.waste.retried_jobs, o.waste.spend_on_retried_usd, o.waste.high_capacity_offered], [1, 1, 1]);
+  assert.deepEqual(o.waste.by_code.map((w: any) => [w.code, w.jobs, w.spend_usd]), [["renderer_busy", 1, 1.5], ["light_refused", 1, 0.7]]);
+});
+
+
+test("a customer never sees what a job cost us", async () => {
+  const { publicJob } = await import("../src/studio.js");
+  const pj = publicJob({ id: "x", tool: "swap", status: "failed", options: {}, credits_reserved: 80, progress: { spend_usd: 1.5, offer: { engine: "seedance", credits: 180 }, note: "n" } });
+  assert.equal("spend_usd" in pj.progress, false);
+  assert.deepEqual(pj.progress.offer, { engine: "seedance", credits: 180 }, "the offer and its price are theirs to see");
+});

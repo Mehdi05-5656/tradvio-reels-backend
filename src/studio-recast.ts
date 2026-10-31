@@ -10,8 +10,8 @@ import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { targetsPrompt } from "./studio-people.js";
-import { PLANS, WINDOW, billableSeconds, windowSeconds } from "./studio.js";
-import { PREMIUM_MARGIN, RECAST_RESOLUTION, creditsForCost, higgsfieldListPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
+import { PLANS, WINDOW, billableSeconds, quote, windowSeconds } from "./studio.js";
+import { PREMIUM_MARGIN, RECAST_RESOLUTION, creditsForCost, higgsfieldCostPerSecond, higgsfieldListPerSecond, seedanceEditCostPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
 import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath } from "./studio-longpath.js";
 export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath };
@@ -339,6 +339,17 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const trend = tool === "trend" && !job.asset_id ? trendById(job.options?.trend_id) : null;
     if (tool === "trend" && !job.asset_id && !trend) throw new RecastError("trend_unavailable");
     let sourceKey: string | null = null, sourceSeconds = 0, drivingUrl: string | null = null;
+    let assetRow: { kind: string; probe?: any } | null = null;
+    // What we pay the renderer, estimated at our rates, summed over every request a job sends (retries included). It stays
+    // on the job, so the operator console can show what refunded jobs and retries cost us.
+    const addSpend = (usd: number) => ({ spend_usd: Math.round(((Number(job.progress?.spend_usd) || 0) + usd) * 1000) / 1000 });
+    // The high-capacity route, offered with its price when the standard renderer is busy or refuses the clip. Never taken
+    // without the person's yes: they start it from the failed job's card, as a new job priced on the button.
+    const offerHighCapacity = async (): Promise<{ engine: "seedance"; credits: number } | null> => {
+      if (model !== "light" || (tool !== "swap" && tool !== "recast") || !assetRow) return null;
+      try { const q = quote(tool, { ...(job.options ?? {}), engine: "seedance" }, assetRow, studioCosts(deps.env ?? process.env, PLANS)); return { engine: "seedance", credits: q.credits }; }
+      catch { return null; }
+    };
     if (trend) {
       const base = (deps.env?.STUDIO_PRESET_BASE ?? deps.env?.DASHBOARD_URL ?? process.env.STUDIO_PRESET_BASE ?? process.env.DASHBOARD_URL ?? "https://app.clone8.io");
       drivingUrl = trendClipUrl(base, trend.id); sourceSeconds = trend.seconds;
@@ -348,6 +359,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       if (!job.asset_id) throw new RecastError("source_missing");
       const asset = await sb.from("studio_assets").select("id,object_key,kind,status,probe,name").eq("id", job.asset_id).eq("user_id", job.user_id).maybeSingle();
       if (asset.error) throw asset.error;
+      assetRow = asset.data ?? null;
       if (!asset.data || asset.data.kind !== "video" || asset.data.status !== "ready") throw new RecastError("source_not_ready");
       sourceKey = asset.data.object_key; sourceSeconds = Number(asset.data.probe?.duration ?? 0);
       if (sourceSeconds && sourceSeconds < MIN_SECONDS) throw new RecastError("source_too_short_recast");
@@ -355,7 +367,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
 
     // 1. The source as a file, and the renderer for it. Trends drive from a published clip and always go to Genjutsu.
     let requestId: string | null = job.progress?.request_id ?? null;
-    let engine: "genjutsu" | "seedance" = job.progress?.engine === "seedance" ? "seedance" : "genjutsu";
+    let engine: "genjutsu" | "seedance" = job.progress?.engine === "seedance" || job.options?.engine === "seedance" ? "seedance" : "genjutsu";
     let original: string | null = null;
     // the stretch a Light job covers: the cap, the person's max_seconds, or the whole clip when it is shorter
     const lightWindow = Math.min(windowSeconds(job.options, WINDOW.light), sourceSeconds > 0 ? Math.round(sourceSeconds * 100) / 100 : Infinity);
@@ -374,6 +386,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     }
 
     let final: string;
+    const chosenRoute = job.options?.engine === "seedance";
     if (engine === "seedance") {
       // 2a. The long path: the clip in pieces of up to PIECE_SECONDS, cut at camera changes, rendered together.
       dir = dir ?? await mkdtemp(join(tmpdir(), "studio-recast-"));
@@ -386,10 +399,11 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         // remembered on the clip, so a run again is quoted from its real plan (best effort: never stops the render)
         if (job.asset_id) try { const ap = await sb.from("studio_assets").select("probe").eq("id", job.asset_id).eq("user_id", job.user_id).maybeSingle(); if (ap.data && !Array.isArray(ap.data.probe?.cuts)) await sb.from("studio_assets").update({ probe: { ...(ap.data.probe ?? {}), cuts, cuts_at: new Date().toISOString() } }).eq("id", job.asset_id).eq("user_id", job.user_id); } catch { /* the quote falls back to the per-second price */ }
         const motion = await (deps.motion ?? motionScores)(original, lightWindow).catch(() => [] as Array<[number, number]>);
-        let plan = planLongPath(lightWindow, cuts, deps.env, job.progress?.seedance_only === true, motion);
+        const chosen = job.options?.engine === "seedance"; // the person picked (and paid for) the high-capacity route
+        let plan = planLongPath(lightWindow, cuts, deps.env, chosen || job.progress?.seedance_only === true, motion);
         // A retry forced onto Seedance (after Light refused the clip) must still pay for itself: the job was priced for
         // Light. Over the ceiling, take the cheaper plan when it fits; when nothing fits, refund rather than lose money.
-        if (job.progress?.seedance_only === true) {
+        if (!chosen && job.progress?.seedance_only === true) {
           const ceiling = retryCeilingUsd(job.credits_reserved, studioCosts(deps.env ?? process.env, PLANS).credit_floor);
           if (plan.usd > ceiling) {
             const cheaper = planLongPath(lightWindow, cuts, deps.env, false, motion);
@@ -437,7 +451,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             requestId = String(r.request_id);
           }
           pieces[i] = { ...p, request_id: requestId, input_key: inputKey };
-          await renew(sb, job, { pieces, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString() });
+          const pieceUsd = p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, len) - 1e-6) * higgsfieldCostPerSecond("light", deps.env) : Math.ceil(len - 1e-6) * seedanceEditCostPerSecond(deps.env);
+          await renew(sb, job, { pieces, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString(), ...addSpend(pieceUsd) });
           log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, engine: p.engine ?? "seedance", piece: i + 1, of: pieces.length, request: requestId, anchored: extra.length > 0 })}`);
         };
         // One character for the whole video: the longest piece renders first, a still of the character from it goes to
@@ -497,6 +512,10 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(i);
             // the job is lost: stop paying for the pieces still rendering
             for (const [k, other] of pieces.entries()) if (k !== i && !urls[k] && other.request_id) await cancelRecast(deps, other.request_id).catch(() => undefined);
+            if (st.status === "failed" && p.engine === "light" && failureCode(st.raw) === "recast_failed" && !chosenRoute) {
+              await renew(sb, job, { offer: await offerHighCapacity() });
+              throw new RecastError(isTransientFailure(st.raw) ? "renderer_busy" : "light_refused");
+            }
             throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
           }
           pending++;
@@ -549,7 +568,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         const prompt = genjutsuPrompt(tool, job);
         const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.attempts ? `${job.id}:${job.attempts}` : job.id, resolution: RECAST_RESOLUTION });
         requestId = sub.request_id;
-        await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
+        const sentSeconds = Math.ceil(Math.min(drivingUrl ? sourceSeconds || 15 : windowSeconds(job.options, MAX_SECONDS[model]), sourceSeconds || Infinity) - 1e-6);
+        await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue", ...addSpend(sentSeconds * higgsfieldCostPerSecond(model, deps.env)) });
         log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, request: requestId })}`);
       }
 
@@ -573,8 +593,15 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer was busy; trying again" });
             throw new RecastError(code, "renderer busy or timed out, retrying on the same engine", true);
           }
+          // Still failing after the retries, or refused outright: a Light swap or recast is NOT moved to the dearer renderer
+          // on its own. It stops, every credit comes back, and the card offers to try again or to use the high-capacity
+          // renderer at its price (the person confirms that price).
+          if (code === "recast_failed" && model === "light" && (tool === "swap" || tool === "recast") && !drivingUrl) {
+            await renew(sb, job, { offer: await offerHighCapacity() });
+            throw new RecastError(isTransientFailure(st.raw) ? "renderer_busy" : "light_refused");
+          }
           if (code === "recast_failed" && job.attempts < 2) {
-            if (model === "light" && (tool === "swap" || tool === "recast" || tool === "trend") && !drivingUrl) {
+            if (model === "light" && tool === "trend" && !drivingUrl) {
               await renew(sb, job, { request_id: null, submitted_at: null, engine: "seedance", seedance_only: true, note: "The renderer gave up once; trying again on the long path" });
               throw new RecastError(code, "generation failed once, retrying on the long path", true);
             }

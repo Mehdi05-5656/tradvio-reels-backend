@@ -135,6 +135,14 @@ export function lightCredits(seconds: number, asset: { probe?: any } | null, cos
   const plan = planLongPath(seconds, cuts ?? [], env);
   return Math.max(base, creditsForCost(plan.list_usd, costs.credit_floor, costs.light_margin));
 }
+/** Credits for the high-capacity route (Seedance, rendered in pieces): what its plan costs at list, at the margin of the
+ *  expensive models, never under the Light per-second price. Offered with its price when Light is busy or refuses a clip. */
+export function highCapacityCredits(seconds: number, asset: { probe?: any } | null, costs: StudioCosts, env: Record<string, string | undefined> = process.env): number {
+  const cuts: number[] = Array.isArray(asset?.probe?.cuts) ? asset!.probe.cuts.filter((c: number) => c >= 0.5 && c < seconds - 0.5) : [];
+  const plan = planLongPath(seconds, cuts, env, true);
+  const margin = costs.light_margin ?? 0.2;
+  return Math.max(seconds * costs.recast_light_second, costs.credit_floor ? creditsForCost(plan.list_usd, costs.credit_floor, margin) : 0);
+}
 export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};
   if (tool === "blueprint" || tool === "blueprint_plus") {
@@ -155,8 +163,9 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const seconds = billableSeconds(duration, cap);
     const who = characterChoice(o);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    const credits = model === "light" ? lightCredits(seconds, asset, costs) : seconds * per;
-    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
+    const high = model === "light" && o.engine === "seedance";
+    const credits = model === "light" ? (high ? highCapacityCredits(seconds, asset, costs) : lightCredits(seconds, asset, costs)) : seconds * per;
+    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, ...(high ? { engine: "seedance" } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}${high ? " (high capacity)" : ""}` };
   }
   if (tool === "swap") {
     // Object swap: the person or thing in the video replaced by the reference image, scene and motion kept. Same rates as
@@ -172,8 +181,9 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     // which people change when the clip has several: plain labels, carried into the renderer's prompt
     const targets = Array.isArray(o.targets) ? o.targets.map((t: unknown) => String(t).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 6) : [];
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    const credits = model === "light" ? lightCredits(seconds, asset, costs) : seconds * per;
-    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, prompt, ...(targets.length ? { targets } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
+    const high = model === "light" && o.engine === "seedance";
+    const credits = model === "light" ? (high ? highCapacityCredits(seconds, asset, costs) : lightCredits(seconds, asset, costs)) : seconds * per;
+    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, prompt, ...(targets.length ? { targets } : {}), ...(high ? { engine: "seedance" } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}${high ? " (high capacity)" : ""}` };
   }
   if (tool === "restyle") {
     // Restyle: every frame redrawn in a Higgsfield style; motion, camera and audio stay. Full model only, up to 30 s.
@@ -1038,7 +1048,7 @@ export async function studioOverview(sb: SupabaseClient, env: Record<string, str
   const since = new Date(now.getTime() - 30 * 86400000).toISOString();
   const [customers, jobs, ledger] = await Promise.all([
     sb.from("studio_customers").select("user_id,plan_id,billing_interval,status,period_end,cancel_at_period_end,credits_per_period,onboarding,created_at,updated_at").order("created_at", { ascending: false }).limit(500),
-    sb.from("studio_jobs").select("id,user_id,tool,status,credits_reserved,credits_charged,error_code,options,created_at,started_at,finished_at").gte("created_at", since).order("created_at", { ascending: false }).limit(2000),
+    sb.from("studio_jobs").select("id,user_id,tool,status,credits_reserved,credits_charged,error_code,options,progress,attempts,created_at,started_at,finished_at").gte("created_at", since).order("created_at", { ascending: false }).limit(2000),
     sb.from("studio_credit_ledger").select("user_id,delta,reason,ref,note,created_at").gte("created_at", since).limit(5000),
   ]);
   for (const r of [customers, jobs, ledger]) if (r.error) throw r.error;
@@ -1067,8 +1077,25 @@ export async function studioOverview(sb: SupabaseClient, env: Record<string, str
     t.jobs++; if (j.status === "done") t.done++; if (j.status === "failed") t.failed++; t.credits += j.credits_charged ?? 0;
     if (j.started_at && j.finished_at) t.seconds += (Date.parse(j.finished_at) - Date.parse(j.started_at)) / 1000;
   }
+  // What failures and retries cost us: refunded credits, and the renderer spend (estimated at our rates when each request
+  // was sent) on jobs that were refunded or needed more than one attempt. Higgsfield may not bill every failed render, so
+  // the spend is an upper bound; the trend matters more than the cent.
+  const spendOf = (j: any) => Number(j.progress?.spend_usd) || 0;
+  const wasteBy: Record<string, { jobs: number; credits_refunded: number; spend_usd: number }> = {};
+  for (const f of failures) { const w = wasteBy[f.error_code ?? "unknown"] ?? (wasteBy[f.error_code ?? "unknown"] = { jobs: 0, credits_refunded: 0, spend_usd: 0 }); w.jobs++; w.credits_refunded += f.credits_reserved ?? 0; w.spend_usd += spendOf(f); }
+  const retried = jobList.filter((j) => j.status === "done" && (j.attempts ?? 1) > 1);
+  const offered = failures.filter((j) => j.progress?.offer);
+  const waste = {
+    refunded_jobs: failures.length,
+    credits_refunded: failures.reduce((n, j) => n + (j.credits_reserved ?? 0), 0),
+    spend_on_refunded_usd: Math.round(failures.reduce((n, j) => n + spendOf(j), 0) * 100) / 100,
+    retried_jobs: retried.length,
+    spend_on_retried_usd: Math.round(retried.reduce((n, j) => n + spendOf(j), 0) * 100) / 100,
+    high_capacity_offered: offered.length,
+    by_code: Object.entries(wasteBy).map(([code, w]) => ({ code, ...w, spend_usd: Math.round(w.spend_usd * 100) / 100 })).sort((a, b) => b.spend_usd - a.spend_usd || b.jobs - a.jobs),
+  };
   return {
-    generated_at: now.toISOString(), window_days: 30,
+    generated_at: now.toISOString(), window_days: 30, waste,
     totals: { customers: rows.length, active: active.length, mrr_usd: mrr, jobs_30d: jobList.length, failed_30d: failures.length, credits_charged_30d: jobList.reduce((n, j) => n + (j.credits_charged ?? 0), 0), refunded_30d: refunds.reduce((n, l) => n + l.delta, 0), pack_credits_30d: packs.reduce((n, l) => n + l.delta, 0), pack_sales_30d: packs.length },
     tools: Object.entries(byTool).map(([tool, t]) => ({ tool, ...t, avg_seconds: t.done ? Math.round(t.seconds / t.done) : null })),
     failures: Object.entries(byReason).map(([code, count]) => ({ code, count })).sort((a, b) => b.count - a.count),
@@ -1131,7 +1158,13 @@ export async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[])
   return jobs.map((j) => ({ ...j, asset_name: j.asset_id ? names.get(j.asset_id) ?? null : null }));
 }
 
+/** A job's progress as its owner sees it: what we pay the renderer (spend_usd) stays ours. */
+export function customerProgress(p: any): Record<string, any> {
+  if (!p || typeof p !== "object") return {};
+  const { spend_usd: _spend, ...rest } = p;
+  return rest;
+}
 export function publicJob(j: any) {
   return { id: j.id, tool: j.tool, status: j.status, asset_id: j.asset_id, options: j.options ?? {}, credits_reserved: j.credits_reserved, credits_charged: j.credits_charged,
-    progress: j.progress ?? {}, outputs: Array.isArray(j.outputs) ? j.outputs : [], error_code: j.error_code, created_at: j.created_at, started_at: j.started_at, finished_at: j.finished_at };
+    progress: customerProgress(j.progress), outputs: Array.isArray(j.outputs) ? j.outputs : [], error_code: j.error_code, created_at: j.created_at, started_at: j.started_at, finished_at: j.finished_at };
 }

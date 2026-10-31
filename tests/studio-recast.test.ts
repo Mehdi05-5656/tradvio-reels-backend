@@ -357,14 +357,15 @@ test("the long path: shots, costs and the Seedance-only retry", () => {
   assert.equal(cheapSeed.engine, "seedance", "the cheaper one wins when the discounts change");
 });
 
-test("a Light clip refused by Genjutsu is retried on the long path instead of being cut", async () => {
+test("a Light clip refused by Genjutsu is not moved to the dearer renderer on its own: refunded, with the high-capacity route offered at its price", async () => {
   const h = fakeHiggsfield([{ status: "failed" }]);
-  const sb = fakeSb(job());
-  const out = await runRecastJob(sb, deps(h.fetchFn, { sceneCuts: async () => [] }), job({ options: { model: "light", seconds: 15, max_seconds: 15, character: "noah", character_asset_id: null }, credits_reserved: 330 }));
-  assert.equal(out, "requeued");
-  const renewed = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
-  assert.equal(renewed.engine, "seedance"); assert.match(renewed.note, /long path/); assert.equal(renewed.request_id, null);
-  assert.equal(renewed.seedance_only, true, "the retry does not send the same clip to Light again");
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 15 }, name: "clip.mp4" }] });
+  const out = await runRecastJob(sb, deps(h.fetchFn, { sceneCuts: async () => [] }), job({ options: { model: "light", seconds: 15, max_seconds: 15, character: "noah", character_asset_id: null }, credits_reserved: 240 }));
+  assert.equal(out, "failed");
+  assert.equal(sb.calls.find((c: any) => c.name === "studio_fail").args.p_reason, "light_refused");
+  const offer = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress.offer;
+  assert.equal(offer.engine, "seedance"); assert.ok(offer.credits > 240, "the dearer route costs more, and says so");
+  assert.ok(!h.calls.some((c: any) => c.url.includes("seedance")), "nothing was sent to the dearer renderer");
 });
 
 
@@ -427,7 +428,7 @@ test("the long path stops paying for the other pieces when one is refused", asyn
   const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" }, sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 2, options: { model: "light", seconds: 50, character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
   assert.equal(out, "failed");
   assert.ok(calls.some((c) => c.method === "POST" && c.url.endsWith("/requests/piece_1/cancel")), "the piece still rendering is cancelled");
-  assert.equal(sb.calls.at(-1).args.p_reason, "recast_failed");
+  assert.equal(sb.calls.at(-1).args.p_reason, "light_refused", "a refused Light piece offers the high-capacity route");
 });
 
 test("a long-path job that stopped half way through sending sends only the pieces still missing", async () => {
@@ -558,4 +559,39 @@ test("the long path: a piece the renderer timed out on is sent again on its own;
   assert.equal(pieces[0].request_id, "piece_1", "the healthy piece keeps its request");
   assert.equal(pieces[1].request_id, null, "only the timed-out piece is sent again");
   assert.ok(!calls.some((c) => /\/cancel$/.test(c.url)), "nothing is cancelled");
+});
+
+
+test("busy after every retry: refunded as renderer_busy, with the high-capacity route offered", async () => {
+  const h = fakeHiggsfield([{ status: "failed", error: "Generation took too long to complete. Please try again later." }]);
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 4.4 }, name: "dance.mp4" }] });
+  const out = await runRecastJob(sb, deps(h.fetchFn, { sceneCuts: async () => [], probeSeconds: async () => 4.4 }), job({ tool: "swap", attempts: 3, options: { model: "light", seconds: 5, character: "noah", character_asset_id: null }, credits_reserved: 80 }));
+  assert.equal(out, "failed");
+  assert.equal(sb.calls.find((c: any) => c.name === "studio_fail").args.p_reason, "renderer_busy");
+  const p = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
+  assert.ok(p.offer.credits > 80); assert.ok(p.spend_usd > 0, "what the attempt cost us is on the job");
+});
+
+test("the high-capacity route, once the person picks it: priced on the quote, sent to Seedance from the start", async () => {
+  const video = { kind: "video", probe: { duration: 4.4 } };
+  const std = quote("swap", { model: "light", character: "noah" }, video), high = quote("swap", { model: "light", character: "noah", engine: "seedance" }, video);
+  assert.equal(high.options.engine, "seedance"); assert.equal(std.options.engine, undefined);
+  assert.ok(high.credits > std.credits * 1.8, `the dearer route is priced as such (${std.credits} vs ${high.credits})`);
+  assert.equal(quote("swap", { model: "full", character: "noah", engine: "seedance" }, video).options.engine, undefined, "only Light has the option");
+  const posts: string[] = [];
+  const fetchFn: any = async (url: string, init: any = {}) => {
+    if (init.method === "POST") posts.push(url);
+    const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
+    if (init.method === "HEAD") return { ok: true, status: 200 };
+    if (init.method === "POST") return res(200, { status: "queued", request_id: "piece_1" });
+    if (/piece_1\/status$/.test(url)) return res(200, { status: "completed", video: { url: "https://cdn.example/piece_1.mp4" } });
+    if (url === "https://cdn.example/piece_1.mp4") return res(200, Buffer.from("video"), true);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const { writeFile: wf } = await import("node:fs/promises");
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 4.4 }, name: "dance.mp4" }] });
+  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, concat: async (_f: string[], t: string) => { await wf(t, "j"); }, join: async (_f: string[], _b: number[], t: string) => { await wf(t, "j"); }, mux: async (_r: string, _s: string, t: string) => { await wf(t, "f"); }, probeSeconds: async () => 4.4 }), job({ tool: "swap", options: high.options, credits_reserved: high.credits }));
+  assert.equal(out, "done");
+  assert.ok(posts.length && posts.every((u) => u === `${HF_BASE}/${LONG_ENDPOINT}`), "straight to the high-capacity renderer, no Light attempt first");
+  assert.ok(sb.calls.find((c: any) => c.name === "studio_complete").args.p_credits_charged <= high.credits, "never more than the price on the button");
 });
