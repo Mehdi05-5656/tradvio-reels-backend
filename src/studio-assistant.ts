@@ -26,6 +26,7 @@ import { probeSeconds, makePoster } from "./studio-recast.js";
 import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { youtubeId } from "./studio-youtube.js";
 import { profileLines } from "./studio-onboarding.js";
+import type { SetupCard } from "./studio-automations.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REF_RE = /^\$(\d{1,2})$/;
@@ -64,7 +65,7 @@ export type PublishCard = {
   /** networks already acknowledged in this chat, so a new link is announced once */
   linked_seen?: string[]; post_ids?: string[]; outcome?: string | null;
 };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; publish?: PublishCard | null; context?: string | null };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; publish?: PublishCard | null; setup?: SetupCard | null; context?: string | null };
 export type OutputKind = "video" | "image" | "audio" | "text";
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: OutputKind; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
@@ -160,8 +161,8 @@ export const TOOLS = [
   },
   {
     name: "save_automation",
-    description: "Save this chat's confirmed plan as an automation: the same steps and settings with the source video as an open input, so the person can run it again from the Automations page by dropping a new file. Only after a plan was confirmed in this chat.",
-    input_schema: { type: "object", additionalProperties: false, properties: { name: { type: "string", description: "Three to six words" } }, required: ["name"] },
+    description: "Offer to keep this chat's confirmed plan as an automation. It shows a setup card: the person ticks what changes on every run (the video, who plays each person, the character, the style, the trend, the words, a picture) and what stays, names it and presses Save. Nothing is saved until they do. If they already told you what will change next time, pass it in changes so the card comes pre-ticked; if it is unclear, the card asks. Only after a plan was confirmed in this chat.",
+    input_schema: { type: "object", additionalProperties: false, properties: { name: { type: "string", description: "Three to six words" }, changes: { type: "array", items: { type: "string", enum: ["video", "characters", "style", "trend", "words", "pictures"] }, description: "Only what the person said changes next time" } }, required: ["name"] },
   },
   {
     name: "remember",
@@ -593,7 +594,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
   const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null, social, performance: perf.brief });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
-  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, saved: { id: string; name: string } | null = null, publish: PublishCard | null = null;
+  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, setup: SetupCard | null = null, publish: PublishCard | null = null;
   // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes
   const peopleNotes: string[] = [];
   for (const a of input.attachments.filter((x) => x.kind === "video").slice(0, 2)) {
@@ -665,10 +666,17 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         } else if (use.name === "save_automation") {
           if (!convo.plan || convo.plan.status !== "confirmed") result = { ok: false, error: "no_confirmed_plan", detail: "Only a plan that was confirmed in this chat can be saved" };
           else {
-            const { createAutomation } = await import("./studio-automations.js");
-            const a = await createAutomation(sb, convo.user_id, { name: String(use.input?.name ?? convo.title), plan: convo.plan, conversation_id: convo.id });
-            saved = { id: a.id, name: a.name };
-            result = { ok: true, automation: { id: a.id, name: a.name, inputs: a.inputs.map((i: any) => i.label) }, note: "Tell the person it is on the Automations page and what it takes as input." };
+            const { draftAutomation, questions } = await import("./studio-automations.js");
+            const d = await draftAutomation(sb, convo.user_id, convo.plan, env);
+            const asked = questions(d.inputs);
+            if (!asked.length) result = { ok: false, error: "automation_no_input", detail: "Nothing in this plan can change between runs" };
+            else {
+              // what they said changes, as the inputs it means; the card shows every input and they confirm it
+              const kinds: Record<string, string[]> = { video: ["video"], characters: ["character", "people"], style: ["style"], trend: ["trend"], words: ["text"], pictures: ["image"] };
+              const said = new Set((Array.isArray(use.input?.changes) ? use.input.changes : []).flatMap((c: string) => kinds[c] ?? []));
+              setup = { id: randomUUID(), name: String(use.input?.name ?? convo.title).replace(/\s+/g, " ").trim().slice(0, 80) || d.name, suggested: asked.filter((i) => said.has(i.kind)).map((i) => i.key), status: "open" };
+              result = { ok: true, shown: "setup card", parts: asked.map((i) => ({ part: i.label, this_time: i.from_name ?? null })), note: "The setup card is shown: they tick what changes on every run, name it and press Save. It is NOT saved yet; do not say it is. In one or two sentences, tell them to choose what changes each time on the card." };
+            }
           }
         } else if (use.name === "remember") {
           const note = String(use.input?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
@@ -702,14 +710,14 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     interrupted = true; keep(streamed);
     log(`[assistant] turn ${convo.id} stopped by the person`);
   }
-  if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
   if (!text && choice) text = "Pick a face below, or upload a photo instead.";
   if (!text && request) text = request.kind === "image" ? "Drop the picture below, or pick it from your library." : "Drop the video below, paste a TikTok or Instagram link, or pick one from your library.";
   if (!text && people) text = "Tick who gets swapped, or choose everyone.";
   if (!text && voices) text = "Play the samples and pick a voice.";
-  if (!text && saved) text = `Saved as "${saved.name}". Find it under Automations and drop a new video to run it again.`;
+  if (!text && setup) text = "Choose what changes each time you run it, then press Save.";
   if (!text && publish) text = social.linked.length ? "Pick where it goes, then post it now or schedule it." : "Connect your socials below and I will post it from here.";
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}), ...(publish ? { publish } : {}) };
+  if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}), ...(publish ? { publish } : {}), ...(setup ? { setup } : {}) };
   const voicePick = input.text.match(/^Use the voice .* \(voice ([A-Za-z0-9]+)\)/);
   if (voicePick) for (const m of convo.messages) if (m.voices?.status === "open") { m.voices.status = "done"; m.voices.picked = voicePick[1]; }
   if (/^(swap|change) (only|these|everyone)/i.test(input.text)) for (const m of convo.messages) if (m.people?.status === "open") m.people.status = "done";

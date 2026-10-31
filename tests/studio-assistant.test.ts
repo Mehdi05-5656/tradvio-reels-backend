@@ -6,7 +6,7 @@ import { accountAccess } from "../src/account-access.js";
 import { COSTS, PLANS } from "../src/studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS } from "../src/studio-knowledge.js";
 import { mergeMessages, pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, titleIfNeeded, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
-import { templateFromPlan, instantiate, createAutomation, runAutomation, registerAutomations } from "../src/studio-automations.js";
+import { templateFromPlan, instantiate, createAutomation, runAutomation, registerAutomations, applyAnswers, isEachRun, cleanGiven, settlePeople } from "../src/studio-automations.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CAT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CONVO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ENV: Record<string, string | undefined> = { HIGGSFIELD_API_KEY: "id:secret", STUDIO_INSTRUMENTS_ENABLED: "true", STUDIO_BLUEPRINT_ENABLED: "true", STUDIO_RECAST_FULL_ENABLED: "true", ANTHROPIC_API_KEY: "sk-test", SCRAPECREATORS_API_KEY: "sc-test" };
@@ -614,44 +614,121 @@ test("a failed options job marks the card failed and lets the person try again",
   assert.equal(c.messages[0].choice!.status, "failed"); assert.equal(c.messages[0].choice!.error_code, "recast_nsfw");
 });
 
-test("automations: a confirmed plan becomes a recipe with the video as an open input and the made character fixed; running it on a new file prices and starts a run", async () => {
-  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
-  const ctx = ctxFor(sb);
-  const plan = await pricePlan(ctx as any, { title: "Cat podcast, ten originals", steps: [
-    { tool: "swap", label: "Host becomes the cat", source: VID, options: { model: "light", character_asset_id: CAT, prompt: "keep the mic" } },
-    { tool: "blueprint", label: "Ten originals", source: "$1", options: { copies: 10 } },
-  ] });
-  const t = templateFromPlan(plan, new Map([[VID, "podcast.mp4"]]));
-  assert.deepEqual(t.inputs, [{ key: "video_1", kind: "video", label: "The video", from_name: "podcast.mp4" }]);
-  assert.equal(t.steps[0].source, "{video_1}"); assert.equal(t.steps[0].options.character_asset_id, CAT, "the cat stays"); assert.equal(t.steps[0].options.seconds, undefined, "seconds are recomputed per file");
-  assert.equal(t.steps[1].source, "$1"); assert.equal(t.steps[1].options.copies, 10);
-  assert.throws(() => instantiate(t.steps, t.inputs, {}), (e: any) => e.code === "input_missing" && /The video/.test(e.message));
-  assert.equal(instantiate(t.steps, t.inputs, { video_1: VID }).steps[0].source, VID);
-  // saving needs a confirmed plan with a video in it
-  await assert.rejects(createAutomation(sb, ANN, { name: "x", plan: await pricePlan(ctx as any, { title: "x", steps: [{ tool: "character", label: "fox", options: { mode: "animal", prompt: "a fox" } }] }) }), (e: any) => e.code === "automation_no_input");
-  plan.status = "confirmed";
-  const a = await createAutomation(sb, ANN, { name: "  Cat podcast  ", plan, conversation_id: CONVO });
-  assert.equal(a.name, "Cat podcast"); assert.equal(tables.studio_automations.length, 1);
-  // run on another video: a conversation is created with the plan confirmed and the first job started
-  const other = { ...video, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", name: "episode-2.mp4", object_key: `${ANN}/ffffffff-ffff-4fff-8fff-ffffffffffff.mp4`, probe: { duration: 8 } };
-  tables.studio_assets.push(other);
-  const out = await runAutomation(sb, deps(fakeClaude([]).fetchFn), a, { video_1: other.id });
-  assert.equal(out.automation_id, a.id); assert.equal(out.status, "running"); assert.equal(out.plan!.status, "confirmed");
-  assert.equal(out.title, "Cat podcast · episode-2");
-  assert.equal(out.plan!.steps[0].credits, 9 * COSTS.recast_light_second, "priced on the new file (8 s rounds to 9)");
-  assert.equal(out.run!.steps[0].status, "queued"); assert.equal(sb.calls.filter((x: any) => x.name === "studio_create_job")[0].args.p_asset, other.id);
-  assert.equal(tables.studio_automations[0].runs, 1);
-  await assert.rejects(runAutomation(sb, deps(fakeClaude([]).fetchFn), a, {}), (e: any) => e.code === "input_missing");
-  await assert.rejects(runAutomation(sb, deps(fakeClaude([]).fetchFn), a, { video_1: CAT }), (e: any) => e.code === "input_invalid");
+const PH1 = "11111111-aaaa-4aaa-8aaa-111111111111", PH2 = "22222222-aaaa-4aaa-8aaa-222222222222", PH3 = "33333333-aaaa-4aaa-8aaa-333333333333", PH4 = "44444444-aaaa-4aaa-8aaa-444444444444";
+const photo = (id: string, name: string) => ({ id, user_id: ANN, kind: "image", name, object_key: `${ANN}/${id}.jpg`, bytes: 100, status: "ready", probe: {} });
+const twoPeople = [{ index: 1, label: "Black cap, varsity jacket, left", box: { x: 0.1, y: 0.2, w: 0.2, h: 0.2 } }, { index: 2, label: "Short dark hair, right", box: { x: 0.6, y: 0.2, w: 0.2, h: 0.2 } }];
+const other = (id: string, name: string, people?: any[]) => ({ ...video, id, name, object_key: `${ANN}/${id}.mp4`, probe: { duration: 8, ...(people ? { people } : {}) } });
+
+test("automations: every changeable part is an input; the owner's case (same clip, new photos each run) keeps the clip and asks for the photos", async () => {
+  const tables = baseTables(); tables.studio_assets.push(photo(PH1, "images.jpg"), photo(PH2, "getty.jpg"), photo(PH3, "images-1.jpg"), photo(PH4, "images-2.jpg"));
+  const sb = fakeSb(tables, rpcs(tables));
+  const ctx = { ...ctxFor(sb), assets: new Map(tables.studio_assets.map((a: any) => [a.id, a])) };
+  const cast = [{ label: twoPeople[0].label, character_asset_id: PH1 }, { label: twoPeople[1].label, character_asset_id: PH2 }];
+  const plan = await pricePlan(ctx as any, { title: "Swap both people", steps: [{ tool: "swap", label: "Both people become the photos", source: VID, options: { model: "light", cast } }] });
+  const names = new Map([[VID, "snaptik.MP4"], [PH1, "images.jpg"], [PH2, "getty.jpg"]]);
+  const t = templateFromPlan(plan, names);
+  assert.deepEqual(t.inputs.map((i) => [i.key, i.kind, i.label, !!i.hidden]), [["video_1", "video", "The video", false], ["people_1", "people", "Who plays each person", false]]);
+  assert.equal(t.inputs[0].value, VID, "the clip is kept with its id, not only its name");
+  assert.equal(t.inputs[1].video_key, "video_1"); assert.equal(t.inputs[1].from_name, "images.jpg, getty.jpg");
+  assert.equal(t.steps[0].source, "{video_1}"); assert.equal(t.steps[0].options.who, "{people_1}"); assert.equal(t.steps[0].options.cast, undefined);
+  // the answer: the photos change, the clip stays
+  const inputs = applyAnswers(t.inputs, ["people_1"]);
+  assert.equal(isEachRun(inputs[0], inputs), false); assert.equal(isEachRun(inputs[1], inputs), true);
+  assert.throws(() => instantiate(t.steps, inputs, {}), (e: any) => e.code === "input_missing" && /Who plays each person/.test(e.message));
+  const next = instantiate(t.steps, inputs, { people_1: { cast: [{ label: cast[0].label, character: null, character_asset_id: PH3 }, { label: cast[1].label, character: null, character_asset_id: PH4 }] } });
+  assert.equal(next.steps[0].source, VID, "the same clip");
+  assert.deepEqual(next.steps[0].options.cast.map((m: any) => m.character_asset_id), [PH3, PH4]);
+  assert.equal((await pricePlan(ctx as any, { title: "x", steps: next.steps })).steps[0].options.cast.length, 2, "the filled recipe prices like a chat plan");
+  // saved before the setup question: the video changed every run, everything else stayed
+  assert.equal(isEachRun({ key: "video_1", kind: "video", label: "The video" }, []), true);
+  assert.equal(isEachRun({ key: "character_1", kind: "character", label: "The character" }, []), false);
 });
 
-test("automation routes: save from a chat (and from the save_automation tool), list, get with runs, rename and edit copies, quote, run, delete", async () => {
+test("automations: characters, notes, styles, trends, descriptions and pictures each become inputs; made characters ($N) stay part of the recipe", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const ctx = ctxFor(sb);
+  const plan = await pricePlan(ctx as any, { title: "Cat podcast", steps: [
+    { tool: "swap", label: "Host becomes the cat", source: VID, options: { model: "light", character_asset_id: CAT, prompt: "keep the mic", targets: ["Man on the left"] } },
+    { tool: "blueprint", label: "Ten originals", source: "$1", options: { copies: 10 } },
+    { tool: "restyle", label: "Clay look", source: "$1", options: { style_name: "Clay" } },
+    { tool: "character", label: "A fox", options: { mode: "animal", prompt: "a red fox in a hoodie" } },
+    { tool: "trend", label: "Fox dances", options: { trend_id: "dance-headphones", model: "light", character_asset_id: "$4" } },
+  ] });
+  const t = templateFromPlan(plan, new Map([[VID, "podcast.mp4"], [CAT, "Orange cat.jpg"]]));
+  assert.deepEqual(t.inputs.map((i) => i.key), ["video_1", "character_1", "people_1", "text_1", "style_1", "text_2", "trend_1"]);
+  const by = Object.fromEntries(t.inputs.map((i) => [i.key, i]));
+  assert.deepEqual(by.character_1.value, { character: null, character_asset_id: CAT }); assert.equal(by.character_1.from_name, "Orange cat.jpg"); assert.equal(by.character_1.label, "The character · step 1");
+  assert.deepEqual(by.people_1.value, { targets: ["Man on the left"] }); assert.equal(by.people_1.hidden, true, "who changes is not its own question");
+  assert.equal(by.text_1.value, "keep the mic"); assert.equal(by.text_2.label, "The description · step 4");
+  assert.deepEqual(by.style_1.value, { id: STYLES[1].id, name: "Clay" }); assert.equal(by.trend_1.value.id, "dance-headphones");
+  assert.equal(t.steps[4].options.character_asset_id, "$4", "the fox made in step 4 is not an input");
+  assert.equal(t.steps[1].source, "$1"); assert.equal(t.steps[1].options.copies, 10);
+  // the defaults rebuild the same plan
+  const inputs = applyAnswers(t.inputs, ["video_1"]);
+  assert.equal(by.people_1.video_key, "video_1"); assert.equal(isEachRun(inputs.find((i) => i.key === "people_1")!, inputs), true, "hidden people follow their video");
+  const other1 = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const raw = instantiate(t.steps, inputs, { video_1: other1, character_1: { character: "maya", character_asset_id: null }, text_2: "a grey wolf" });
+  assert.equal(raw.steps[0].source, other1); assert.equal(raw.steps[0].options.character, "maya"); assert.equal(raw.steps[0].options.character_asset_id, null);
+  assert.equal(raw.steps[0].options.prompt, "keep the mic"); assert.deepEqual(raw.steps[0].options.targets, ["Man on the left"], "instantiate keeps them; settlePeople decides");
+  assert.equal(raw.steps[2].options.style_id, STYLES[1].id); assert.equal(raw.steps[3].options.prompt, "a grey wolf"); assert.equal(raw.steps[4].options.trend_id, "dance-headphones");
+  // what a request may carry, per kind
+  assert.deepEqual(cleanGiven({ video_1: "nope", character_1: "theo", text_1: "  hold  the mug ", people_1: { targets: ["Woman, right"] }, junk: 1 }, inputs), { character_1: { character: "theo", character_asset_id: null }, text_1: "hold the mug", people_1: { targets: ["Woman, right"] } });
+});
+
+test("automation runs: a new video's people are found again; several people must be picked on the card, one person gets the first character; deleted photos are named", async () => {
+  const tables = baseTables();
+  const NEW2 = "abababab-abab-4bab-8bab-abababababab", NEW1 = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  tables.studio_assets.push(photo(PH1, "images.jpg"), photo(PH2, "getty.jpg"), other(NEW2, "duo.mp4", twoPeople), other(NEW1, "solo.mp4", [twoPeople[1]]));
+  (tables.studio_assets[0] as any).probe = { duration: 12.2, people: twoPeople };
+  const sb = fakeSb(tables, rpcs(tables));
+  const ctx = { ...ctxFor(sb), assets: new Map(tables.studio_assets.map((a: any) => [a.id, a])) };
+  const plan = await pricePlan(ctx as any, { title: "Swap both", steps: [{ tool: "swap", label: "Both", source: VID, options: { model: "light", cast: [{ label: twoPeople[0].label, character_asset_id: PH1 }, { label: twoPeople[1].label, character_asset_id: PH2 }] } }] });
+  plan.status = "confirmed";
+  // the clip changes, the photos stay
+  const a = await createAutomation(sb, ANN, { name: "Swap both", plan, conversation_id: CONVO, each_run: ["video_1"] });
+  assert.deepEqual(a.inputs.map((i) => [i.key, i.each_run]), [["video_1", true], ["people_1", false]]);
+  const d = deps(fakeClaude([]).fetchFn);
+  await assert.rejects(runAutomation(sb, d, a, { video_1: NEW2 }), (e: any) => e.code === "people_required" && /duo\.mp4 has 2 people/.test(e.message), "old labels never reach a new video");
+  const picked = await runAutomation(sb, d, a, { video_1: NEW2, people_1: { cast: [{ label: "Red hoodie, left", character: null, character_asset_id: PH2 }, { label: "Glasses, right", character: null, character_asset_id: PH1 }] } });
+  assert.deepEqual(picked.plan!.steps[0].options.cast.map((m: any) => [m.label, m.character_asset_id]), [["Red hoodie, left", PH2], ["Glasses, right", PH1]]);
+  assert.match(picked.messages[0].text, /with duo\.mp4/); assert.equal(picked.title, "Swap both · duo");
+  const solo = await runAutomation(sb, d, a, { video_1: NEW1 });
+  assert.equal(solo.plan!.steps[0].options.cast, undefined); assert.equal(solo.plan!.steps[0].options.character_asset_id, PH1, "one person: the first photo plays them");
+  // the same clip again: the saved people still describe it
+  const same = await runAutomation(sb, d, a, { video_1: VID });
+  assert.deepEqual(same.plan!.steps[0].options.cast.map((m: any) => m.label), [twoPeople[0].label, twoPeople[1].label]);
+  // a kept photo deleted from the library is named
+  tables.studio_assets = tables.studio_assets.filter((x: any) => x.id !== PH2);
+  await assert.rejects(runAutomation(sb, d, a, { video_1: VID }), (e: any) => e.code === "input_gone" && /person 2 \(getty\.jpg\)/.test(e.message));
+  assert.equal(tables.studio_automations[0].runs, 3);
+  await assert.rejects(runAutomation(sb, d, a, {}), (e: any) => e.code === "input_missing" && /The video/.test(e.message));
+  await assert.rejects(runAutomation(sb, d, a, { video_1: CAT }), (e: any) => e.code === "input_gone");
+});
+
+test("automation runs: one character with a picked person on a new two-person clip asks who changes; settlePeople leaves 'everyone' recipes alone", async () => {
+  const inputs = applyAnswers([
+    { key: "video_1", kind: "video", label: "The video", value: VID },
+    { key: "character_1", kind: "character", label: "The character", value: { character: "noah", character_asset_id: null } },
+    { key: "people_1", kind: "people", label: "Who changes", value: { targets: ["Man, left"] }, video_key: "video_1", hidden: true },
+    { key: "people_2", kind: "people", label: "Who changes", value: {}, video_key: "video_1", hidden: true },
+  ] as any, ["video_1"]);
+  const NEW2 = "abababab-abab-4bab-8bab-abababababab";
+  const ctx = { assets: new Map<string, any>([[NEW2, { id: NEW2, name: "duo.mp4", kind: "video" }]]) };
+  await assert.rejects(settlePeople(ctx, inputs, { video_1: NEW2 }, async () => twoPeople), (e: any) => e.code === "people_required" && /Pick who changes/.test(e.message));
+  const ok = await settlePeople(ctx, inputs, { video_1: NEW2, people_1: { targets: ["Short dark hair, right"] } }, async () => twoPeople);
+  assert.deepEqual(ok.people_1, { targets: ["Short dark hair, right"] }); assert.equal(ok.people_2, undefined, "everyone: nothing named, nothing to check");
+  const one = await settlePeople(ctx, inputs, { video_1: NEW2 }, async () => [twoPeople[0]]).catch((e) => e);
+  assert.deepEqual(one.people_1, {}, "a single person: the pick is dropped, they change");
+  await assert.rejects(settlePeople(ctx, inputs, { video_1: NEW2 }, async () => null), (e: any) => e.code === "people_required", "faces not found: ask rather than guess");
+});
+
+test("automation routes: setup questions from a chat, save with answers, the assistant's setup card, older automations upgraded, edit, quote, run, delete", async () => {
   const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
   const { fetchFn } = fakeClaude([
     toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }),
     textReply("Five originals for 20 credits. Confirm in the card."),
-    toolReply("save_automation", { name: "Five originals of anything" }),
-    textReply("Saved. Find it under Automations."),
+    toolReply("save_automation", { name: "Five originals of anything", changes: ["video"] }),
+    textReply("Choose what changes each time on the card, then press Save."),
   ]);
   const s = await serve(sb, fetchFn);
   try {
@@ -659,16 +736,37 @@ test("automation routes: save from a chat (and from the save_automation tool), l
     const msg = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "five originals of my podcast" });
     assert.equal((await s.call("POST", "/api/studio/automations", { conversation_id: id })).body.error, "no_confirmed_plan", "not before Confirm");
     await s.call("POST", `/api/studio/assistant/conversations/${id}/confirm`, { plan_id: msg.body.conversation.plan.id });
-    const saved = await s.call("POST", "/api/studio/automations", { conversation_id: id, name: "Podcast originals" });
-    assert.equal(saved.status, 201, JSON.stringify(saved.body)); assert.equal(saved.body.automation.name, "Podcast originals"); assert.equal(saved.body.automation.inputs[0].from_name, "podcast.mp4");
-    // the tool path
+    const draft = await s.call("GET", `/api/studio/automations/draft?conversation_id=${id}`);
+    assert.equal(draft.status, 200, JSON.stringify(draft.body)); assert.deepEqual(draft.body.draft.inputs.map((i: any) => [i.key, i.from_name, i.each_run]), [["video_1", "podcast.mp4", undefined]]);
+    const saved = await s.call("POST", "/api/studio/automations", { conversation_id: id, name: "Podcast originals", each_run: ["video_1"] });
+    assert.equal(saved.status, 201, JSON.stringify(saved.body)); assert.equal(saved.body.automation.name, "Podcast originals"); assert.equal(saved.body.automation.inputs[0].each_run, true); assert.equal(saved.body.automation.needs_setup, false);
+    // the tool path shows a card and saves nothing until Save is pressed on it
     const viaTool = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "make this an automation" });
-    assert.equal(viaTool.status, 200, JSON.stringify(viaTool.body)); assert.match(viaTool.body.conversation.messages.at(-1).text, /Saved/);
-    const list = await s.call("GET", "/api/studio/automations");
-    assert.equal(list.body.automations.length, 2); assert.equal(list.body.automations.some((a: any) => a.name === "Five originals of anything"), true);
+    assert.equal(viaTool.status, 200, JSON.stringify(viaTool.body));
+    const card = viaTool.body.conversation.messages.at(-1).setup;
+    assert.equal(card.status, "open"); assert.equal(card.name, "Five originals of anything"); assert.deepEqual(card.suggested, ["video_1"]);
+    assert.equal((await s.call("GET", "/api/studio/automations")).body.automations.length, 1, "not saved by the assistant");
+    assert.deepEqual((await s.call("GET", `/api/studio/automations/draft?conversation_id=${id}&setup_id=${card.id}`)).body.draft.suggested, ["video_1"]);
+    const fromCard = await s.call("POST", "/api/studio/automations", { conversation_id: id, name: card.name, each_run: [], setup_id: card.id });
+    assert.equal(fromCard.status, 201); assert.equal(fromCard.body.automation.inputs[0].each_run, false, "nothing changes: the same video every run");
+    assert.equal(tables.studio_conversations[0].messages.find((m: any) => m.setup)?.setup.status, "saved");
+    // an automation saved before inputs had kinds: rebuilt on read, video found by its name, the setup asked again
+    tables.studio_assets.push(photo(PH1, "images.jpg"), photo(PH2, "getty.jpg"));
+    tables.studio_automations.push({ id: "b1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", user_id: ANN, name: "Old swap", description: null, runs: 1, last_run_at: null, source_conversation: null, created_at: "2026-10-30T00:00:00Z", updated_at: "2026-10-30T00:00:00Z",
+      inputs: [{ key: "video_1", kind: "video", label: "The video", from_name: "podcast.mp4" }],
+      steps: [{ index: 1, tool: "swap", label: "Both", source: "{video_1}", options: { model: "light", prompt: "", character_asset_id: PH1, cast: [{ label: "Black cap, left", character_asset_id: PH1 }, { label: "Dark hair, right", character_asset_id: PH2 }] } }] });
+    const old = (await s.call("GET", "/api/studio/automations")).body.automations.find((x: any) => x.name === "Old swap");
+    assert.equal(old.needs_setup, true); assert.deepEqual(old.inputs.map((i: any) => [i.key, i.value ?? null]), [["video_1", VID], ["people_1", { cast: [{ label: "Black cap, left", character: null, character_asset_id: PH1, name: "images.jpg" }, { label: "Dark hair, right", character: null, character_asset_id: PH2, name: "getty.jpg" }] }]]);
+    const fixed = await s.call("PATCH", `/api/studio/automations/${old.id}`, { each_run: ["people_1"] });
+    assert.equal(fixed.status, 200, JSON.stringify(fixed.body)); assert.equal(fixed.body.automation.needs_setup, false);
+    assert.equal(tables.studio_automations.find((x: any) => x.id === old.id).steps[0].options.who, "{people_1}", "written in the new shape");
+    assert.equal((await s.call("POST", `/api/studio/automations/${old.id}/quote`, { inputs: {} })).body.error, "input_missing");
+    const q2 = await s.call("POST", `/api/studio/automations/${old.id}/quote`, { inputs: { people_1: { cast: [{ label: "Black cap, left", character_asset_id: PH2 }, { label: "Dark hair, right", character: "maya" }] } } });
+    assert.equal(q2.status, 200, JSON.stringify(q2.body));
+    // the usual edits, quote, run and delete
     const aid = saved.body.automation.id;
     const renamed = await s.call("PATCH", `/api/studio/automations/${aid}`, { name: "Podcast, 8 originals", steps: [{ index: 1, options: { copies: 8 } }] });
-    assert.equal(renamed.status, 200, JSON.stringify(renamed.body)); assert.equal(renamed.body.automation.steps[0].options.copies, 8);
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.body)); assert.equal(renamed.body.automation.steps[0].options.copies, 8); assert.equal(renamed.body.automation.inputs[0].each_run, true);
     const q = await s.call("POST", `/api/studio/automations/${aid}/quote`, { inputs: { video_1: VID } });
     assert.equal(q.status, 200, JSON.stringify(q.body)); assert.equal(q.body.credits, 8 * COSTS.blueprint_copy);
     assert.equal((await s.call("POST", `/api/studio/automations/${aid}/quote`, { inputs: {} })).body.error, "input_missing");
