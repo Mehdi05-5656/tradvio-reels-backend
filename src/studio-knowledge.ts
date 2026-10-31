@@ -17,6 +17,8 @@ export type KnowledgeUser = {
   plan: string | null; status: string | null; balance: number; parallel_jobs: number;
   assets: Array<{ id: string; kind: string; name: string; seconds: number | null; character?: boolean; prompt?: string | null }>;
   recent_jobs: Array<{ id: string; tool: string; status: string; label: string }>;
+  /** how they described themselves after sign-up (studio-onboarding.ts profileLines) */
+  profile?: string[];
 };
 export type KnowledgeInput = {
   tools: Record<string, boolean>; costs: StudioCosts; plans: PlanLike[]; env: Record<string, string | undefined>;
@@ -126,6 +128,10 @@ export function buildSystemPrompt(k: KnowledgeInput): string {
   lines.push("THIS PERSON");
   lines.push(`Plan: ${u.plan ?? "none"} (${u.status ?? "no subscription"}). Balance: ${u.balance} credits. Jobs at once: ${u.parallel_jobs}.`);
   lines.push(u.assets.length ? `Library (newest first): ${u.assets.slice(0, 40).map((a) => `${a.kind} "${a.name}" id ${a.id}${a.seconds ? ` ${Math.round(a.seconds)} s` : ""}${a.character ? ` (made character: ${a.prompt ?? ""})` : ""}`).join("; ")}.` : "Library: empty.");
+  if (u.profile?.length) {
+    lines.push("From the questions they answered at sign-up (use it to tailor ideas, examples and the tool you suggest; never read it back to them or ask these questions again):");
+    for (const l of u.profile.slice(0, 10)) lines.push(`- ${l}`);
+  }
   if (u.recent_jobs.length) lines.push(`Recent jobs: ${u.recent_jobs.slice(0, 8).map((j) => `${j.label} (${j.status}, job ${j.id})`).join("; ")}.`);
   if (k.performance?.length) {
     lines.push(""); lines.push("HOW THEIR POSTS PERFORM (their linked accounts; Performance page)");

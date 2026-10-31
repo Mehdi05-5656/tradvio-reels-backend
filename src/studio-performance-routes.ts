@@ -5,6 +5,7 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { refreshPerformance, REFRESH_EVERY_MS, type PerfDeps } from "./studio-performance.js";
+import { profileSuggestions } from "./studio-onboarding.js";
 import { insightHash, latestInsight, loadPerformance, performanceForChat, suggestionsFrom, writeInsight } from "./studio-insights.js";
 import { importLink, promoteOutput } from "./studio-assistant.js";
 import { withPosterUrls } from "./studio.js";
@@ -171,7 +172,14 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
   app.get("/api/studio/assistant/suggestions", async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
-    try { res.json({ suggestions: (await performanceForChat(sbFn(), u)).suggestions }); } catch (e) { fail(res, e); }
+    try {
+      // their own numbers first, then what they told us at sign-up (their first idea, then their goals)
+      const sb = sbFn();
+      const [perf, cust] = await Promise.all([performanceForChat(sb, u), sb.from("studio_customers").select("onboarding").eq("user_id", u).maybeSingle()]);
+      const seen = new Set<string>();
+      const suggestions = [...perf.suggestions, ...profileSuggestions(cust.data?.onboarding)].filter((s) => { const k = s.prompt.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 4);
+      res.json({ suggestions });
+    } catch (e) { fail(res, e); }
   });
 }
 

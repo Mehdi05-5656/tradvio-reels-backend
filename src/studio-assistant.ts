@@ -23,6 +23,7 @@ import { trendById } from "./studio-trends.js";
 import { probeSeconds, makePoster } from "./studio-recast.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
 import { youtubeId } from "./studio-youtube.js";
+import { profileLines } from "./studio-onboarding.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REF_RE = /^\$(\d{1,2})$/;
@@ -240,7 +241,7 @@ export async function claude(deps: AssistantDeps, body: Record<string, any>, onT
 async function userContext(sb: SupabaseClient, u: string): Promise<{ user: KnowledgeUser; assets: any[]; memory: MemoryNote[] }> {
   const [assets, cust, bal, jobs, mem] = await Promise.all([
     sb.from("studio_assets").select("id,kind,name,object_key,probe,status,bytes").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(60),
-    sb.from("studio_customers").select("plan_id,status,parallel_jobs").eq("user_id", u).maybeSingle(),
+    sb.from("studio_customers").select("plan_id,status,parallel_jobs,onboarding").eq("user_id", u).maybeSingle(),
     sb.rpc("studio_balance", { p_user: u }),
     sb.from("studio_jobs").select("id,tool,status,options,asset_id,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(8),
     sb.from("studio_assistant_memory").select("id,note,created_at").eq("user_id", u).order("created_at", { ascending: true }).limit(MEMORY_LIMIT),
@@ -256,6 +257,7 @@ async function userContext(sb: SupabaseClient, u: string): Promise<{ user: Knowl
       plan: cust.data?.plan_id ?? null, status: cust.data?.status ?? null, balance: Number(bal.data ?? 0), parallel_jobs: Number(cust.data?.parallel_jobs ?? 1),
       assets: list.map((a) => ({ id: a.id, kind: a.kind, name: a.name, seconds: Number(a.probe?.duration) > 0 ? Number(a.probe.duration) : null, character: !!a.probe?.character, prompt: a.probe?.prompt ?? null })),
       recent_jobs: named.map((j: any) => ({ id: j.id, tool: j.tool, status: j.status, label: jobLabel(j) })),
+      profile: profileLines(cust.data?.onboarding),
     },
   };
 }

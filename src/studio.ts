@@ -16,6 +16,7 @@ import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError,
 import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
 import { checkUnsubscribeToken } from "./studio-mail.js";
+import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
 import Stripe from "stripe";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -547,8 +548,10 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
 
   app.post("/api/studio/onboarding", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
-    const a = req.body?.answers;
-    if (!a || typeof a !== "object" || Array.isArray(a) || JSON.stringify(a).length > 4000) return res.status(400).json({ error: "invalid_answers" });
+    const raw = req.body?.answers;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || JSON.stringify(raw).length > 8000) return res.status(400).json({ error: "invalid_answers" });
+    // only known questions with known answers are kept (src/studio-onboarding.ts); anything else is dropped quietly
+    const a = sanitizeAnswers(raw);
     try {
       const sb = sbFn();
       const r = await sb.from("studio_customers").upsert({ user_id: u, onboarding: { ...a, completed_at: new Date().toISOString() }, updated_at: new Date().toISOString() }, { onConflict: "user_id" }).select("onboarding").single();
@@ -1096,10 +1099,12 @@ export async function studioOverview(sb: SupabaseClient, env: Record<string, str
   };
   return {
     generated_at: now.toISOString(), window_days: 30, waste,
+    // who is signing up: the answers to the questions after sign-up, counted (latest 500 customers)
+    signups: signupInsights(rows.map((c) => ({ onboarding: c.onboarding, status: c.status }))),
     totals: { customers: rows.length, active: active.length, mrr_usd: mrr, jobs_30d: jobList.length, failed_30d: failures.length, credits_charged_30d: jobList.reduce((n, j) => n + (j.credits_charged ?? 0), 0), refunded_30d: refunds.reduce((n, l) => n + l.delta, 0), pack_credits_30d: packs.reduce((n, l) => n + l.delta, 0), pack_sales_30d: packs.length },
     tools: Object.entries(byTool).map(([tool, t]) => ({ tool, ...t, avg_seconds: t.done ? Math.round(t.seconds / t.done) : null })),
     failures: Object.entries(byReason).map(([code, count]) => ({ code, count })).sort((a, b) => b.count - a.count),
-    customers: rows.map((c) => ({ user_id: c.user_id, email: emails.get(c.user_id) ?? null, plan: c.plan_id, interval: c.billing_interval, status: c.status, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, balance: balance.get(c.user_id) ?? 0, intent: c.onboarding?.intent ?? null, jobs_30d: byUser.get(c.user_id)?.jobs ?? 0, credits_30d: byUser.get(c.user_id)?.credits ?? 0, last_job_at: byUser.get(c.user_id)?.last ?? null, since: c.created_at })),
+    customers: rows.map((c) => ({ user_id: c.user_id, email: emails.get(c.user_id) ?? null, plan: c.plan_id, interval: c.billing_interval, status: c.status, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, balance: balance.get(c.user_id) ?? 0, intent: c.onboarding?.goal ?? c.onboarding?.intent ?? null, role: c.onboarding?.role ?? null, accounts: c.onboarding?.accounts ?? null, heard: c.onboarding?.heard ?? null, managed_fit: managedFit(c.onboarding), jobs_30d: byUser.get(c.user_id)?.jobs ?? 0, credits_30d: byUser.get(c.user_id)?.credits ?? 0, last_job_at: byUser.get(c.user_id)?.last ?? null, since: c.created_at })),
     recent_failures: failures.slice(0, 20).map((j) => ({ id: j.id, user_id: j.user_id, tool: j.tool, code: j.error_code, created_at: j.created_at })),
     tools_enabled: toolsEnabled(env),
   };
