@@ -395,9 +395,10 @@ test("cast: each person's character goes to the renderer in left-to-right order 
   assert.equal(out, "done");
   const submit = h.calls.find((c) => c.method === "POST");
   assert.deepEqual(submit.body.image_urls, [`https://signed/studio-uploads/${ANN}/${PHOTO2}.jpg`, "https://app.clone8.io/presets/noah.jpg", `https://signed/studio-uploads/${ANN}/${PHOTO}.jpg`], "one reference per person, in order");
-  assert.match(submit.body.prompt, /reference image 1 is the first person from the left \(left, blue top\); reference image 2 is the second person from the left \(middle\); reference image 3 is the third person from the left \(right, cap\)/);
+  assert.match(submit.body.prompt, /reference image 1 plays: left, blue top; reference image 2 plays: middle; reference image 3 plays: right, cap\. .*Anyone not listed stays exactly as filmed/);
   assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_outputs[0].cast, 3);
   assert.equal(castPrompt([{ label: "x" }]), "", "one person needs no words");
+  assert.match(castPrompt([{ label: null }, { label: null }]), /reference image 2 is the second person from the left/, "a catalog trend has no descriptions: by position");
 });
 
 test("a trend the person brought is rendered from their clip, not the catalog, and long ones take the long path", async () => {

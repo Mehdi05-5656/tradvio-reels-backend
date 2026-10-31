@@ -355,9 +355,9 @@ export async function runAutomation(sb: SupabaseClient, deps: AssistantDeps, a: 
   const ctx = await buildCtx(sb, deps, a.user_id);
   checkValues(ctx, a.inputs, given);
   const settled = await settlePeople(ctx, a.inputs, given, async (id) => {
-    const cached = ctx.assets.get(id.toLowerCase())?.probe?.people;
-    if (Array.isArray(cached)) return cached;
-    const { detectPeople } = await import("./studio-people.js");
+    const { detectPeople, cachedPeople } = await import("./studio-people.js");
+    const cached = cachedPeople(ctx.assets.get(id.toLowerCase())?.probe);
+    if (cached) return cached;
     return Promise.race([detectPeople(sb, deps, a.user_id, id), new Promise<null>((r) => setTimeout(() => r(null), 25_000))]);
   });
   const raw = instantiate(a.steps, a.inputs, settled);

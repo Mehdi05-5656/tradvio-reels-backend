@@ -230,9 +230,15 @@ export async function prescaleSource(source: string, target: string, maxSeconds?
   const audio = st.hasAudio ? ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"] : ["-an"];
   await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, ...cut, "-vf", vf, "-fps_mode", "cfr", "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-g", "60", ...audio, "-movflags", "+faststart", target], undefined, 240_000);
 }
-/** The words that tell the renderer who plays whom: reference image N goes to the Nth person from the left. */
+/** The words that tell the renderer who plays whom. With the people's descriptions (found in the clip), each reference
+ *  image is tied to a described person, and anyone not listed stays as filmed: someone can change two people of four.
+ *  Without descriptions (a catalog trend), reference image N is the Nth person from the left. */
 export function castPrompt(cast: Array<{ label?: string | null }> | null | undefined): string {
   if (!Array.isArray(cast) || cast.length < 2) return "";
+  if (cast.every((m) => m?.label)) {
+    const lines = cast.map((m, i) => `reference image ${i + 1} plays: ${m.label}`);
+    return `Change ${cast.length} people, each into their own character: ${lines.join("; ")}. Keep each person's own motion and position; do not mix the characters up. Anyone not listed stays exactly as filmed.`;
+  }
   const lines = cast.map((m, i) => `reference image ${i + 1} is the ${ordinal(i + 1)} person from the left${m?.label ? ` (${m.label})` : ""}`);
   return `There are ${cast.length} people to recast, each with their own character: ${lines.join("; ")}. Keep each person's own motion and position; do not mix the characters up.`;
 }

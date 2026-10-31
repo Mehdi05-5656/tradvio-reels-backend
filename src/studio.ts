@@ -878,6 +878,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         if (!c.data) throw new StudioError("collection_not_found", "No such collection", 404);
         collectionId = c.data.id;
       }
+      // The same file again (same name, size and kind, ready, not into a named collection): hand back the copy already
+      // kept. People drop the same photo into chat after chat; each copy used to become another "character".
+      if (!collectionId) {
+        const same = await sb.from("studio_assets").select("id,kind,name,bytes,status,probe,created_at,collection_id").eq("user_id", u).eq("kind", k.kind).eq("name", name).eq("bytes", size).eq("status", "ready").order("created_at", { ascending: false }).limit(1);
+        if (!same.error && same.data?.length) return res.json({ asset_id: same.data[0].id, existing: (await withPosterUrls(sb, same.data))[0] });
+      }
       // Per-plan library limits (studio-limits.ts): files kept and bytes stored. Credits do not bound uploads, these do.
       const limit = await checkUpload(sb, u, size);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);

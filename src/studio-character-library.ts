@@ -17,19 +17,37 @@ export function characterIdsOf(options: any): string[] {
   return [...ids];
 }
 
-/** Ranks pictures by use (most first, then most recent); made characters show even before their first use. */
-export function rankCharacters(images: Array<{ id: string; name: string; created_at: string; probe?: any }>, jobs: Array<{ options: any; created_at: string }>): Omit<LibraryCharacter, "url">[] {
+/** A picture's name as a person would say it: "Character: a tabby cat" becomes "a tabby cat"; a camera or download name
+ *  ("images-2.jpg", "IMG_0412.jpg", "gettyimages-22504...jpg") says nothing, so it becomes "Photo". */
+export function characterName(raw: string): string {
+  const stem = String(raw ?? "").replace(/^Character: /, "").replace(/\.(jpe?g|png|webp|heic)$/i, "").trim();
+  if (!stem || /^(images?|img|image|photo|pic|picture|download|unnamed|untitled|screenshot|screen shot|pxl|dsc|gettyimages|istock|shutterstock|whatsapp image)?[\s_-]*[\d\s_x.-]*(\(\d+\))?$/i.test(stem) || /^(gettyimages|istock|shutterstock|whatsapp image|screenshot|img|pxl|dsc)[\s_-]/i.test(stem)) return "Photo";
+  return stem.slice(0, 60);
+}
+/** Ranks pictures by use (most first, then most recent); made characters show even before their first use. The same
+ *  photo added several times (same size and type) shows once, with the uses of all its copies. */
+export function rankCharacters(images: Array<{ id: string; name: string; created_at: string; probe?: any; bytes?: number | null }>, jobs: Array<{ options: any; created_at: string }>): Omit<LibraryCharacter, "url">[] {
   const uses = new Map<string, { n: number; last: string }>();
   for (const j of jobs) for (const id of characterIdsOf(j.options)) { const u = uses.get(id); uses.set(id, { n: (u?.n ?? 0) + 1, last: !u || j.created_at > u.last ? j.created_at : u.last }); }
-  return images
-    .map((a) => { const u = uses.get(String(a.id).toLowerCase()); return { asset_id: a.id, name: String(a.name ?? "").replace(/^Character: /, ""), made: !!a.probe?.character, uses: u?.n ?? 0, last_used_at: u?.last ?? null, created_at: a.created_at }; })
+  const all = images.map((a) => { const u = uses.get(String(a.id).toLowerCase()); return { asset_id: a.id, name: characterName(a.name), made: !!a.probe?.character, uses: u?.n ?? 0, last_used_at: u?.last ?? null, created_at: a.created_at, same: a.bytes ? `${a.bytes}:${String(a.name ?? "").split(".").pop()?.toLowerCase()}` : a.id }; });
+  const byCopy = new Map<string, (typeof all)[number]>();
+  for (const c of all) {
+    const prev = byCopy.get(c.same);
+    if (!prev) { byCopy.set(c.same, { ...c }); continue; }
+    const keep = c.uses > prev.uses || (c.uses === prev.uses && String(c.last_used_at ?? c.created_at) > String(prev.last_used_at ?? prev.created_at)) ? { ...c } : prev;
+    keep.uses = prev.uses + c.uses; keep.made = prev.made || c.made;
+    keep.last_used_at = [prev.last_used_at, c.last_used_at].filter(Boolean).sort().pop() ?? null;
+    byCopy.set(c.same, keep);
+  }
+  return [...byCopy.values()]
+    .map(({ same: _s, ...c }) => c)
     .filter((c) => c.uses > 0 || c.made)
     .sort((x, y) => y.uses - x.uses || String(y.last_used_at ?? "").localeCompare(String(x.last_used_at ?? "")) || String(y.created_at).localeCompare(String(x.created_at)));
 }
 
 export async function characterLibrary(sb: SupabaseClient, u: string): Promise<LibraryCharacter[]> {
   const [imgs, jobs] = await Promise.all([
-    sb.from("studio_assets").select("id,name,object_key,probe,created_at").eq("user_id", u).eq("kind", "image").eq("status", "ready").order("created_at", { ascending: false }).limit(400),
+    sb.from("studio_assets").select("id,name,object_key,probe,created_at,bytes").eq("user_id", u).eq("kind", "image").eq("status", "ready").order("created_at", { ascending: false }).limit(400),
     sb.from("studio_jobs").select("options,created_at").eq("user_id", u).in("tool", ["recast", "swap", "trend", "restyle"]).order("created_at", { ascending: false }).limit(1000),
   ]);
   if (imgs.error) throw imgs.error;

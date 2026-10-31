@@ -527,7 +527,10 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
   const usd = clipsCostUsd({ seconds, platform, clips: max, clipSeconds: len.max, transcribe: platform === "upload" || !!env.ELEVENLABS_API_KEY, choose: true, env });
   const credits = clipsCredits(usd, plans);
   const minutes = Math.ceil(seconds / 60);
-  return { tool: "clips", credits, options: { platform, url, format, length, seconds: Math.round(seconds), minutes, max_clips: max, source }, summary: `${minutes} min · up to ${max} clips` };
+  // whether our servers can read YouTube's stream (a proxy or a signed-in cookie is set); without it the moments are still
+  // chosen, then the person uploads the file to have them cut. The page says so before they start.
+  const youtube_direct = platform !== "youtube" || !!env.STUDIO_YT_PROXY || !!env.STUDIO_YT_COOKIES;
+  return { tool: "clips", credits, options: { platform, url, format, length, seconds: Math.round(seconds), minutes, max_clips: max, source, youtube_direct }, summary: `${minutes} min · up to ${max} clips` };
 }
 /** The re-run that cuts moments already chosen, from an uploaded copy of the same video: rendering only. */
 export function quoteCut(plans: PlanLike[], clips: number, seconds: number): number {
