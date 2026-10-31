@@ -43,7 +43,7 @@ export const BLUEPRINT_COPY_COST_USD = 0.001, BLUEPRINT_PLUS_COPY_COST_USD = 0.0
  *  sheet ($0.05, human or animal mode) has no published request schema yet; Soul is the documented endpoint. */
 export const CHARACTER_IMAGE_COST_USD = 0.094;
 /** Product floors: never price below these even when the cost would allow it. */
-export const PRICE_FLOORS = { blueprint_copy: 4, blueprint_plus_copy: 12, recast_second: 1, recast_light_second: 1, character_image: 4 };
+export const PRICE_FLOORS = { blueprint_copy: 12, blueprint_plus_copy: 24, recast_second: 1, recast_light_second: 1, character_image: 4 };
 
 /** Net USD per credit for one charge: price less Stripe's cut, divided by the credits it buys. */
 export function netPerCredit(priceUsd: number, credits: number): number {
