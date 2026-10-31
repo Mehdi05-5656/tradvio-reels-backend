@@ -12,10 +12,13 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 export type Mail = { to: string; subject: string; text: string; html?: string; unsubscribeUrl?: string | null };
 export type MailDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void };
 
+/** The one address for Clone8 support: emails come from it, replies go to it, and the site and app show it. */
+export const SUPPORT_EMAIL = "support@clone8.io";
+
 export function mailConfigured(env: Record<string, string | undefined> = process.env): boolean {
   return !!env.RESEND_API_KEY;
 }
-export const mailFrom = (env: Record<string, string | undefined> = process.env) => env.STUDIO_MAIL_FROM || "Clone8 Studio <studio@clone8.io>";
+export const mailFrom = (env: Record<string, string | undefined> = process.env) => env.STUDIO_MAIL_FROM || "Clone8 <support@clone8.io>";
 
 /** Returns the provider's message id, or null when mail is off. Throws on a provider error so callers can retry later. */
 export async function sendMail(mail: Mail, deps: MailDeps = {}): Promise<string | null> {
@@ -27,7 +30,7 @@ export async function sendMail(mail: Mail, deps: MailDeps = {}): Promise<string 
   const r = await (deps.fetch ?? fetch)("https://api.resend.com/emails", {
     method: "POST", signal: AbortSignal.timeout(20_000),
     headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ from: mailFrom(env), to: [mail.to], subject: mail.subject, text: mail.text, html: mail.html ?? toHtml(mail.text), reply_to: env.STUDIO_MAIL_REPLY_TO || "support@tradvio.com", headers }),
+    body: JSON.stringify({ from: mailFrom(env), to: [mail.to], subject: mail.subject, text: mail.text, html: mail.html ?? toHtml(mail.text), reply_to: env.STUDIO_MAIL_REPLY_TO || SUPPORT_EMAIL, headers }),
   });
   const body: any = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`mail_failed_${r.status}:${String(body?.message ?? "").slice(0, 120)}`);

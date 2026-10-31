@@ -5,7 +5,7 @@ import { noticesTick, jobNotice, jobsNotice } from "../src/studio-notices.js";
 import { applyStripeEvent, REFERRAL_CREDITS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const ENV = { RESEND_API_KEY: "re_test", DASHBOARD_URL: "https://app.clone8.io", STUDIO_MAIL_FROM: "Clone8 Studio <studio@clone8.io>" };
+const ENV = { RESEND_API_KEY: "re_test", DASHBOARD_URL: "https://app.clone8.io" };
 
 function fakeResend(status = 200) {
   const sent: any[] = [];
@@ -21,7 +21,7 @@ test("mail is a no-op without a key, posts to Resend with one, and refuses a bad
   assert.equal(id, "msg_1");
   assert.equal(r.sent[0].url, "https://api.resend.com/emails");
   assert.equal(r.sent[0].headers.authorization, "Bearer re_test");
-  assert.deepEqual([r.sent[0].body.from, r.sent[0].body.to, r.sent[0].body.subject, r.sent[0].body.reply_to], ["Clone8 Studio <studio@clone8.io>", ["ann@synthetic.invalid"], "Hello", "support@tradvio.com"]);
+  assert.deepEqual([r.sent[0].body.from, r.sent[0].body.to, r.sent[0].body.subject, r.sent[0].body.reply_to], ["Clone8 <support@clone8.io>", ["ann@synthetic.invalid"], "Hello", "support@clone8.io"]);
   assert.match(r.sent[0].body.html, /<a href="https:\/\/app\.clone8\.io\/#studio"/);
   await assert.rejects(sendMail({ to: "not-an-email", subject: "s", text: "t" }, { env: ENV, fetch: r.fetchFn }), /mail_invalid_recipient/);
   await assert.rejects(sendMail({ to: "a@b.co", subject: "s", text: "t" }, { env: ENV, fetch: fakeResend(500).fetchFn }), /mail_failed_500/);
