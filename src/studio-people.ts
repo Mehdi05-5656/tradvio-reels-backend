@@ -24,7 +24,7 @@ export type PeopleDeps = AssistantDeps & {
 };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Bumped when the way people are found changes, so lists found the old way are found again on next use. */
-export const PEOPLE_VERSION = 3;
+export const PEOPLE_VERSION = 4;
 /** The people stored on an asset, if they were found the current way. */
 export const cachedPeople = (probe: any): Person[] | null => (Array.isArray(probe?.people) && Number(probe?.people_v) >= PEOPLE_VERSION ? probe.people : null);
 
@@ -34,7 +34,7 @@ Rules:
 - The same person seen in several stills is ONE entry. Match them by face, hair and clothing.
 - Leave out: extras and passers-by in the background, anyone out of focus or tiny in the frame, people seen only from behind or only as a shoulder or hand, faces on posters, screens or photos, and reflections.
 - For each person pick the still where their face is clearest: largest, sharpest, most toward the camera. Give the box of their head (top of the hair to the chin, ear to ear) in THAT still, as fractions of its width and height.
-- label: two to five words a stranger could use to tell them apart, from what they wear and how they look (e.g. "denim jacket, dark hair", "beige jacket, black hair", "red hoodie, glasses"). Never a name, never a guess at who they are, never a position word alone.
+- label: two to five words a stranger could use to tell them apart, from what they wear, their hair and accessories (e.g. "denim jacket, dark hair", "beige jacket, tie", "red hoodie, glasses"). Never a name, never a guess at who they are, never ethnicity, race, skin colour, age, body or attractiveness, never a position word alone.
 - speaking: true if they are the one talking in that still.
 - At most six people, the most important first. If nobody qualifies, an empty list.`;
 const SCHEMA = {
