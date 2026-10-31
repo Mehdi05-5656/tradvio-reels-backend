@@ -27,7 +27,7 @@ const SCHEMA = {
   properties: {
     caption: { type: "string", description: "The post text, without the hashtags" },
     hashtags: { type: "array", items: { type: "string" }, description: "3 to 6 hashtags, each starting with #" },
-    youtube_title: { type: ["string", "null"], description: "A YouTube title of at most 80 characters, or null when YouTube is not a target" },
+    youtube_title: { anyOf: [{ type: "string" }, { type: "null" }], description: "A YouTube title of at most 80 characters, or null when YouTube is not a target" },
   },
 };
 

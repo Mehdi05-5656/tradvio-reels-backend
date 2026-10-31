@@ -36,8 +36,8 @@ const SCHEMA = {
       title: { type: "string", description: "An instruction, at most eight words" },
       detail: { type: "string", description: "One or two sentences: what exactly, and the number it should move" },
       tool: { type: "string", enum: [...MOVE_TOOLS] },
-      post_id: { type: ["string", "null"], description: "The post it starts from, when it starts from one" },
-      prompt: { type: ["string", "null"], description: "For tool chat: what the person would ask the assistant, in their voice, under 120 characters" } } } },
+      post_id: { anyOf: [{ type: "string" }, { type: "null" }], description: "The post it starts from, when it starts from one" },
+      prompt: { anyOf: [{ type: "string" }, { type: "null" }], description: "For tool chat: what the person would ask the assistant, in their voice, under 120 characters" } } } },
     sources: { type: "array", items: { type: "object", additionalProperties: false, required: ["label", "url"], properties: { label: { type: "string" }, url: { type: "string" } } }, description: "Only playbook sources actually used" },
   },
 };
