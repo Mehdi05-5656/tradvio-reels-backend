@@ -2,6 +2,8 @@ import {uploadFromUrl,waitForJob,jobStatus} from "./publer.js";
 
 // One shared DB coordinator for all Node instances. Unknown writes are held;
 // known provider jobs can be reconciled read-only before the next upload.
+// A hold releases itself after 30 minutes (publer_upload_acquire): by then the
+// unknown upload has finished or failed in Publer. The upload itself is never resent.
 export async function coordinatedUpload(sb:any,workspace:string,url:string,name:string){
   async function rpc(fn:string,args:any){
     const r=await sb.rpc(fn,{p_workspace:workspace,...args});
