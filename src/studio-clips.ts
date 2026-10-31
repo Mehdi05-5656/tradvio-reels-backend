@@ -708,7 +708,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: credits });
       return "partial";
     }
-    await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_error: code, p_retry: retry });
+    const failed = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry });
+    if (failed.error) log(`[clips] could not record the failure of ${job.id}: ${failed.error.message}`);
     return code;
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);

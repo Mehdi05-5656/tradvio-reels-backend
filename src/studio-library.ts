@@ -507,7 +507,8 @@ export async function runImportJob(sb: SupabaseClient, deps: ImportDeps, job: Jo
     log(`[import] failed ${job.id}: ${String(e?.message ?? e).slice(0, 200)}`);
     const last = (job.attempts ?? 1) >= 3;
     if (last) await sb.from("studio_collections").update({ status: "failed", note: "The import could not be finished; the credits were refunded.", updated_at: new Date().toISOString() }).eq("id", collectionId).eq("user_id", u);
-    await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_error: "import_failed", p_retry: true });
+    const failed = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: "import_failed", p_retry: true });
+    if (failed.error) log(`[import] could not record the failure of ${job.id}: ${failed.error.message}`);
     return "failed";
   }
 }

@@ -258,7 +258,8 @@ test("nothing worth clipping, or no speech: the run fails and every credit is re
     transcript: async () => segs, choose: async () => [{ start_line: 1, end_line: 9, title: "meh", hook: "h", why: "w", score: 30, tags: [] }] };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://youtu.be/L_Guz73e6fw" }) as any), "clips_none_found");
   const fail = sb.calls.find((c: any) => c.fn === "studio_fail");
-  assert.deepEqual([fail.args.p_error, fail.args.p_retry], ["clips_none_found", false]);
+  assert.deepEqual(Object.keys(fail.args).sort(), ["p_job", "p_reason", "p_retry", "p_token"], "the database function's own parameter names (a wrong one fails silently and the job runs forever)");
+  assert.deepEqual([fail.args.p_reason, fail.args.p_retry], ["clips_none_found", false]);
   assert.equal(sb.t.studio_collections[0].status, "failed");
 });
 
