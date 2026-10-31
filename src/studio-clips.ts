@@ -46,7 +46,7 @@ export const CLIP_COST = {
   frame_usd_per_clip: 0.001,              // a small model looking at up to 8 stills
   render_usd_per_clip: 0.003,             // web-service CPU and the stored file
   lookup_usd: 2 * OVERHEAD.scrapecreators_usd_per_call,
-  clip_bytes_per_second: 420_000,         // a 1080p VP9 stretch with sound, ~3.4 Mb/s, read through the proxy
+  clip_bytes_per_second: 200_000,         // a 1080p stretch with sound read through the proxy: measured 133-166 kB/s on YouTube (Oct 31 2026), kept with margin
 };
 /** What the proxy charges per GB (0 without one: then YouTube refuses us and nothing is read through it). */
 export const proxyUsdPerGb = (env: Record<string, string | undefined>) => (env.STUDIO_YT_PROXY ? (Number(env.STUDIO_YT_PROXY_USD_PER_GB) > 0 ? Number(env.STUDIO_YT_PROXY_USD_PER_GB) : 3) : 0);

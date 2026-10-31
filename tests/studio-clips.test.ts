@@ -112,7 +112,7 @@ test("prices: by length and clips made; YouTube through a proxy pays for the byt
   assert.ok(up > 0.4 && up < 0.6, `an hour's upload with 30 clips costs about half a dollar (${up})`);
   const ytNoProxy = clipsCostUsd({ seconds: 3600, platform: "youtube", clips: 30, clipSeconds: 32, transcribe: false, choose: true, env: {} });
   const ytProxy = clipsCostUsd({ seconds: 3600, platform: "youtube", clips: 30, clipSeconds: 32, transcribe: false, choose: true, env: { STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "3" } });
-  assert.ok(ytProxy > ytNoProxy + 1, "the proxy's bytes are priced in");
+  assert.ok(ytProxy > ytNoProxy + 0.4, "the proxy's bytes are priced in");
   assert.ok(clipsCredits(up, PLANS) > clipsCredits(0.01, PLANS) && clipsCredits(0.0001, PLANS) === CLIP_LIMITS.min_credits);
   assert.ok(quoteCut(PLANS, 30, 3600) < clipsCredits(up, PLANS), "cutting moments already chosen costs less than a full run");
 
