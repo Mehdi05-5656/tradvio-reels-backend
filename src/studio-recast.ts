@@ -11,7 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { targetsPrompt } from "./studio-people.js";
 import { PLANS, WINDOW, billableSeconds, windowSeconds } from "./studio.js";
-import { RECAST_RESOLUTION, creditsForCost, higgsfieldListPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
+import { PREMIUM_MARGIN, RECAST_RESOLUTION, creditsForCost, higgsfieldListPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
 import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath } from "./studio-longpath.js";
 export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath };
@@ -103,6 +103,18 @@ export function failureCode(raw: any): "recast_failed" | "recast_balance" | "rec
   if (/credit balance|insufficient (credits|balance|funds)|top up/i.test(text)) return "recast_balance";
   if (/api key|unauthori[sz]ed|forbidden/i.test(text)) return "recast_auth";
   return "recast_failed";
+}
+
+/** A failure that says nothing about the clip (the renderer's queue timed out, it is busy or rate-limited): the same
+ *  request on the same engine is the right retry. Only a plain refusal is worth a different, dearer route. */
+export function isTransientFailure(raw: any): boolean {
+  const text = typeof raw?.error === "string" ? raw.error : typeof raw?.message === "string" ? raw.message : JSON.stringify(raw ?? "");
+  return /took too long|try again|timed? ?out|timeout|overload|busy|capacity|temporar|rate.?limit|too many requests|unavailable|\b50[234]\b/i.test(text);
+}
+/** The most a retry on another route may cost us: what the job's credits bring in at the lowest net price a credit sells
+ *  for, less our smallest margin (the 20% of the expensive models). Above it, the retry would lose money on the job. */
+export function retryCeilingUsd(creditsReserved: number, creditFloor: number | null | undefined): number {
+  return creditFloor ? creditsReserved * creditFloor * (1 - PREMIUM_MARGIN) : Infinity;
 }
 
 /** Asks the renderer to stop a request (used when a sibling piece failed and the job is lost anyway). */
@@ -374,11 +386,29 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         // remembered on the clip, so a run again is quoted from its real plan (best effort: never stops the render)
         if (job.asset_id) try { const ap = await sb.from("studio_assets").select("probe").eq("id", job.asset_id).eq("user_id", job.user_id).maybeSingle(); if (ap.data && !Array.isArray(ap.data.probe?.cuts)) await sb.from("studio_assets").update({ probe: { ...(ap.data.probe ?? {}), cuts, cuts_at: new Date().toISOString() } }).eq("id", job.asset_id).eq("user_id", job.user_id); } catch { /* the quote falls back to the per-second price */ }
         const motion = await (deps.motion ?? motionScores)(original, lightWindow).catch(() => [] as Array<[number, number]>);
-        const plan = planLongPath(lightWindow, cuts, deps.env, job.progress?.seedance_only === true, motion);
+        let plan = planLongPath(lightWindow, cuts, deps.env, job.progress?.seedance_only === true, motion);
+        // A retry forced onto Seedance (after Light refused the clip) must still pay for itself: the job was priced for
+        // Light. Over the ceiling, take the cheaper plan when it fits; when nothing fits, refund rather than lose money.
+        if (job.progress?.seedance_only === true) {
+          const ceiling = retryCeilingUsd(job.credits_reserved, studioCosts(deps.env ?? process.env, PLANS).credit_floor);
+          if (plan.usd > ceiling) {
+            const cheaper = planLongPath(lightWindow, cuts, deps.env, false, motion);
+            log(`[recast] retry over budget ${JSON.stringify({ job: job.id, seedance_usd: plan.usd, ceiling: Math.round(ceiling * 1000) / 1000, cheaper: cheaper.engine, cheaper_usd: cheaper.usd })}`);
+            if (cheaper.usd <= ceiling) plan = cheaper;
+            else throw new RecastError("recast_failed", "a retry on another renderer would cost more than the job pays; refunded");
+          }
+        }
         pieces = plan.pieces.map((p) => ({ start: p.start, end: p.end, blend: p.blend, request_id: null, input_key: null, engine: plan.engine }));
         await renew(sb, job, { pieces, piece_engine: plan.engine, done: 0, total: pieces.length, note: pieces.length > 1 ? `Preparing ${pieces.length} pieces` : "Preparing your video" });
         log(`[recast] long path plan ${JSON.stringify({ job: job.id, engine: plan.engine, pieces: pieces.length, usd: plan.usd, instead_of: plan.other_usd })}`);
       }
+      // A piece the renderer timed out on: forget its request and requeue the job. The next attempt sends only the pieces
+      // without a request (this one), on the same engine, and picks the others' results up where they are.
+      const resendPiece = async (i: number): Promise<never> => {
+        pieces[i] = { ...pieces[i], request_id: null };
+        await renew(sb, job, { pieces, note: pieces.length > 1 ? `The renderer was busy on piece ${i + 1}; sending it again` : "The renderer was busy; sending it again" });
+        throw new RecastError("recast_failed", `piece ${i + 1} timed out or the renderer was busy; sending it again`, true);
+      };
       if (pieces.some((p) => !p.request_id)) {
         const images = await characterUrls(sb, deps, job, false);
         const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
@@ -428,6 +458,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); videoUrl = st.videoUrl; break; }
             if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
               log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: ai + 1, request: pieces[ai].request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
+              if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(ai);
               throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
             }
             await renew(sb, job, { note: `Rendering piece ${ai + 1} of ${pieces.length} first, to keep the character the same in every piece` });
@@ -462,6 +493,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); urls[i] = st.videoUrl; continue; }
           if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
             log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: i + 1, request: p.request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
+            // the renderer timed out or was busy on this piece: send just this one again, keep the others rendering
+            if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(i);
             // the job is lost: stop paying for the pieces still rendering
             for (const [k, other] of pieces.entries()) if (k !== i && !urls[k] && other.request_id) await cancelRecast(deps, other.request_id).catch(() => undefined);
             throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
@@ -535,6 +568,11 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           // "Generation failed" with no reason: Genjutsu refuses clips whose shot changes inside the window it uses. A Light
           // swap or recast is retried on the long path, which takes cuts; a Full one is retried on the opening shot only, up
           // to the first cut. Attempts count claims, this one included, so 1 is the first run and 2 the retry.
+          // The renderer timed out or was busy: same engine, same price, again (the queue allows three attempts).
+          if (code === "recast_failed" && job.attempts < 3 && isTransientFailure(st.raw)) {
+            await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer was busy; trying again" });
+            throw new RecastError(code, "renderer busy or timed out, retrying on the same engine", true);
+          }
           if (code === "recast_failed" && job.attempts < 2) {
             if (model === "light" && (tool === "swap" || tool === "recast" || tool === "trend") && !drivingUrl) {
               await renew(sb, job, { request_id: null, submitted_at: null, engine: "seedance", seedance_only: true, note: "The renderer gave up once; trying again on the long path" });

@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT, isTransientFailure, retryCeilingUsd } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -485,4 +485,77 @@ test("the character reference: off by setting, and never with several people", a
   assert.deepEqual(await run({}, null), [1, 2], "on by default: the second piece gets the still");
   assert.deepEqual(await run({ STUDIO_RECAST_ANCHOR: "off" }, null), [1, 1]);
   assert.deepEqual(await run({}, [{ character: "noah", character_asset_id: null }, { character: null, character_asset_id: PHOTO }]), [2, 2], "two people: no extra still");
+});
+
+
+test("retries: a renderer that timed out or was busy goes again on the same engine; only a plain refusal moves route", async () => {
+  assert.equal(isTransientFailure({ status: "failed", error: "Generation took too long to complete. Please try again later." }), true);
+  assert.equal(isTransientFailure({ error: "Service temporarily unavailable" }), true);
+  assert.equal(isTransientFailure({ error: "Too many requests" }), true);
+  assert.equal(isTransientFailure({ status: "failed" }), false, "a bare failure is the clip being refused");
+  assert.equal(isTransientFailure({ error: "Generation failed" }), false);
+  // the kid's swap on Oct 30: Light timed out, and the old code moved it to Seedance at 2.7x the cost
+  const h = fakeHiggsfield([{ status: "failed", error: "Generation took too long to complete. Please try again later." }]);
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 4.4 }, name: "dance.mp4" }] });
+  const out = await runRecastJob(sb, deps(h.fetchFn, { sceneCuts: async () => [], probeSeconds: async () => 4.4 }), job({ tool: "swap", options: { model: "light", seconds: 5, character: "noah", character_asset_id: null }, credits_reserved: 80 }));
+  assert.equal(out, "requeued");
+  const renewed = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
+  assert.notEqual(renewed.engine, "seedance"); assert.equal(renewed.seedance_only, undefined, "same engine, same price"); assert.match(renewed.note, /busy/);
+  assert.equal(renewed.request_id, null, "a fresh request on the next attempt");
+});
+
+test("a retry forced onto Seedance must pay for itself: the cheaper plan when it fits, a refund when nothing does", async () => {
+  // 80 credits at the lowest net price a credit sells for, less the 20% minimum margin: about $1.03 to spend
+  const ceiling = retryCeilingUsd(80, 0.016089);
+  assert.ok(ceiling > 1 && ceiling < 1.05);
+  assert.equal(retryCeilingUsd(80, null), Infinity, "no price known: no cap");
+  const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`, LONG = `${HF_BASE}/${LONG_ENDPOINT}`;
+  const run = async (credits: number) => {
+    const calls: any[] = [];
+    const fetchFn: any = async (url: string, init: any = {}) => {
+      calls.push({ url, method: init.method ?? "GET" });
+      const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
+      if (init.method === "HEAD") return { ok: true, status: 200 };
+      if (url === LIGHT || url === LONG) return res(200, { status: "queued", request_id: "piece_1" });
+      if (/\/requests\/piece_1\/status$/.test(url)) return res(200, { status: "completed", video: { url: "https://cdn.example/piece_1.mp4" } });
+      if (url === "https://cdn.example/piece_1.mp4") return res(200, Buffer.from("video"), true);
+      throw new Error(`unexpected fetch ${url}`);
+    };
+    const { writeFile: wf } = await import("node:fs/promises");
+    const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 4.4 }, name: "dance.mp4" }] });
+    const d = deps(fetchFn, { sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, pad: async (_s: string, t: string) => { await wf(t, "p"); }, trim: async (_s: string, t: string) => { await wf(t, "t"); }, join: async (_f: string[], _b: number[], t: string) => { await wf(t, "j"); }, concat: async (_f: string[], t: string) => { await wf(t, "j"); }, mux: async (_r: string, _s: string, t: string) => { await wf(t, "f"); }, probeSeconds: async () => 4.4 });
+    const out = await runRecastJob(sb, d, job({ tool: "swap", options: { model: "light", seconds: 5, character: "noah", character_asset_id: null }, credits_reserved: credits, attempts: 2, progress: { engine: "seedance", seedance_only: true } }));
+    return { out, posts: calls.filter((c) => c.method === "POST").map((c) => c.url), sb };
+  };
+  const fits = await run(80);
+  assert.equal(fits.out, "done");
+  assert.ok(fits.posts.length > 0 && fits.posts.every((u) => u === LIGHT), "Seedance (about $2.30) is over budget, so the clip goes to Light (about $0.50)");
+  const none = await run(5);
+  assert.notEqual(none.out, "done");
+  assert.equal(none.posts.length, 0, "nothing is sent when even the cheaper plan would lose money");
+  assert.ok(none.sb.calls.some((c: any) => c.name === "studio_fail"), "the job fails and the reserved credits are refunded");
+});
+
+
+test("the long path: a piece the renderer timed out on is sent again on its own; the others keep rendering", async () => {
+  const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`;
+  const calls: any[] = [];
+  const fetchFn: any = async (url: string, init: any = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
+    if (init.method === "HEAD") return { ok: true, status: 200 };
+    if (url === LIGHT) { const n = calls.filter((c) => c.method === "POST").length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+    if (/piece_2\/status$/.test(url)) return res(200, { status: "failed", error: "Generation took too long to complete. Please try again later." });
+    if (/piece_\d+\/status$/.test(url)) return res(200, { status: "in_progress" });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const { writeFile: wf } = await import("node:fs/promises");
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 20 }, name: "long.mp4" }] });
+  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" } }), job({ tool: "swap", options: { model: "light", seconds: 20, character: "noah", character_asset_id: null }, credits_reserved: 20 * 22 }));
+  assert.equal(out, "requeued", "not failed: nothing is refunded and nothing already paid for is thrown away");
+  const pieces = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress.pieces;
+  assert.equal(pieces.length, 2);
+  assert.equal(pieces[0].request_id, "piece_1", "the healthy piece keeps its request");
+  assert.equal(pieces[1].request_id, null, "only the timed-out piece is sent again");
+  assert.ok(!calls.some((c) => /\/cancel$/.test(c.url)), "nothing is cancelled");
 });
