@@ -6,8 +6,9 @@
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
+import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
+import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
 import { isAdmin } from "./auth.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
@@ -26,11 +27,11 @@ export type Plan = { id: PlanId; name: string; tagline: string; monthly_usd: num
 
 export const PLANS: Plan[] = [
   { id: "starter", name: "Starter", tagline: "For one creator with a library to put to work", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000, parallel: 1,
-    features: ["1 job at a time", "Downloads in 1080×1920", "Post to 1 social account"] },
+    features: ["Every tool: Blueprint, Swap, Recast, Styles, Trends, Characters", "Every model in Instruments: video, pictures, voice and sound", "The assistant: say what you want, it plans and runs it", "Post and schedule to 1 social account", "Performance dashboard with an AI overview", "Downloads in 1080×1920, no watermark", "1 job at a time", "Top-ups at 4¢ a credit"] },
   { id: "creator", name: "Creator", tagline: "For creators and small teams posting daily", monthly_usd: 79, annual_usd_per_month: 66, credits: 3500, parallel: 2, popular: true,
-    features: ["2 jobs at a time", "Priority queue", "Post to 3 social accounts"] },
+    features: ["Everything in Starter", "Post and schedule to 3 social accounts", "2 jobs at a time, in the priority queue", "Top-ups at 3.5¢ a credit"] },
   { id: "studio", name: "Studio", tagline: "For brands and agencies running many accounts", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000, parallel: 4,
-    features: ["4 jobs at a time", "Priority queue", "Post to 10 social accounts", "A path to managed distribution"] },
+    features: ["Everything in Creator", "Post and schedule to 10 social accounts", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"] },
 ];
 
 // What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the
@@ -112,6 +113,16 @@ export function castChoice(o: any): { character: string | null; character_asset_
   return { character: cast[0].character, character_asset_id: cast[0].character_asset_id, cast };
 }
 
+/** A job named the way a person thinks of it: "Swap · 44 s", "Blueprint · 3 copies", "Seedance 2.5 · 31 s". */
+export function jobLabel(j: { tool: string; options?: any }): string {
+  const o = j.options ?? {};
+  const names: Record<string, string> = { blueprint: "Blueprint", blueprint_plus: "Blueprint+", recast: "Recast", swap: "Swap", restyle: "Style", trend: "Trend", character: "Character", instrument: "Instrument" };
+  if (j.tool === "blueprint" || j.tool === "blueprint_plus") return `${names[j.tool]} · ${o.copies ?? "?"} ${o.copies === 1 ? "copy" : "copies"}`;
+  if (j.tool === "instrument") { const ep = String(o.endpoint ?? ""); const fam = ep.startsWith("audio/") ? ep.slice(6).replace(/-/g, " ") : ep.split("/").slice(0, 2).pop()?.replace(/-/g, " ") ?? "model"; return `${fam.charAt(0).toUpperCase()}${fam.slice(1)}${o.units && o.output === "video" ? ` · ${Math.round(o.units)} s` : ""}`; }
+  if (j.tool === "character") return o.style_name ? `Character · ${o.style_name}` : "Character";
+  const secs = Number(o.seconds);
+  return `${names[j.tool] ?? j.tool}${o.style_name ? ` · ${o.style_name}` : o.trend_name ? ` · ${o.trend_name}` : ""}${secs > 0 ? ` · ${secs} s` : ""}`;
+}
 /** Credits for a Light swap, recast or brought trend: the per-second price, or (when the clip is longer than one Light
  *  request or has camera changes) what its long-path plan costs at the Light tools' margin, whichever is higher. The
  *  plan needs the clip's cuts (found in the background after an upload); without them the per-second price stands. */
@@ -270,6 +281,7 @@ type StripeLike = {
   checkout: { sessions: { create: (p: any) => Promise<{ url: string | null; id: string }> } };
   billingPortal: { sessions: { create: (p: any) => Promise<{ url: string }> } };
   subscriptions: { retrieve: (id: string) => Promise<any>; update?: (id: string, p: any) => Promise<any> };
+} & StripeTopUp & {
   webhooks: { constructEvent: (raw: string, sig: string, secret: string) => any };
 };
 
@@ -309,6 +321,16 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
       if (link.error) throw link.error;
     }
     // A credit pack: one payment, credits on top, never expired by the next renewal. The session id makes the grant unique.
+    if (obj.mode === "payment" && obj.metadata?.topup === "1") {
+      // a top-up: the credits were worked out by the server when the session was made; the amount paid must match
+      const credits = Math.floor(Number(obj.metadata?.credits)), usd = Number(obj.metadata?.usd);
+      if (!(credits > 0) || !(usd >= TOPUP_MIN_USD)) return "top-up without credits";
+      if (obj.payment_status && obj.payment_status !== "paid") return `top-up checkout ${obj.payment_status}`;
+      if (obj.amount_total != null && Number(obj.amount_total) + 1 < Math.round(usd * 100)) return `top-up paid ${obj.amount_total} for $${usd}: not granted`;
+      const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: false, p_note: `Top-up $${usd}` });
+      if (g.error) throw g.error;
+      return `top-up → ${g.data?.granted ? "granted" : "already granted"} ${credits}`;
+    }
     if (obj.mode === "payment") {
       const pack = packById(obj.metadata?.pack);
       if (!pack) return "payment checkout without a known pack";
@@ -413,6 +435,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     return stripeClient;
   };
   const dashboard = () => (env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "");
+  const stripeOrNull = (): StripeLike | null => { try { return stripe(); } catch { return null; } };
+  // auto top-up for chat runs and anything else that spends outside the job route (production only)
+  if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
     if (e instanceof StudioError || e instanceof InstrumentError) return res.status(e.status).json({ error: e.code, detail: e.message });
@@ -431,7 +456,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
 
   app.get("/api/studio/plans", (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
-    res.json({ plans: plansWithFeatures(costs), costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env), packs: PACKS.map((p) => ({ ...p, available: !!packPriceIdFor(p.id, env) })) });
+    // per plan, the numbers the comparison shows: social accounts, the top-up rate, what an extra account costs
+    const plans = plansWithFeatures(costs).map((p: any) => ({ ...p, social_accounts: SOCIAL_ACCOUNTS[p.id] ?? 1, topup_rate_usd: topupRate(p.id) }));
+    res.json({ plans, costs, billing_ready: stripeConfigured(env), tools: toolsEnabled(env), packs: PACKS.map((p) => ({ ...p, available: !!packPriceIdFor(p.id, env) })), extra_account_usd: SOCIAL_SEAT_USD, topup_min_usd: TOPUP_MIN_USD });
   });
 
   // The Trends catalog: our driving clips, served by the dashboard host next to the preset portraits.
@@ -475,25 +502,31 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id";
       const [cust0, bal, jobs, ledger] = await Promise.all([
-        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out`).eq("user_id", u).maybeSingle(),
+        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error`).eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
         sb.from("studio_jobs").select("id,tool,status,credits_reserved,credits_charged,created_at").eq("user_id", u).gte("created_at", since).order("created_at", { ascending: false }).limit(200),
         sb.from("studio_credit_ledger").select("delta,reason,job_id,ref,note,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(50),
       ]);
       // Before the referrals migration those three columns do not exist: read the row without them, referral stays empty.
-      const cust = cust0.error && /referral_code|referred_by|email_opt_out/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
+      const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
       for (const r of [cust, bal, jobs, ledger]) if (r.error) throw r.error;
       const c: any = cust.data ?? null;
       const plan = planById(c?.plan_id);
       const spent = ((jobs.data ?? []) as any[]).reduce((n, j) => n + (j.credits_charged ?? (j.status === "queued" || j.status === "running" ? j.credits_reserved : 0)), 0);
+      // name each credit movement by its job ("Swap · 44 s") instead of "Reserved for a job"
+      const jobIds = [...new Set(((ledger.data ?? []) as any[]).map((l) => l.job_id).filter(Boolean))] as string[];
+      const named = jobIds.length ? await sb.from("studio_jobs").select("id,tool,status,options,created_at").eq("user_id", u).in("id", jobIds) : { data: [] as any[] };
+      const labels = new Map(((named.data ?? []) as any[]).map((j) => [j.id, { label: jobLabel(j), status: j.status }]));
+      const ledgerOut = ((ledger.data ?? []) as any[]).map((l) => (l.job_id && labels.has(l.job_id) ? { ...l, job_label: labels.get(l.job_id)!.label, job_status: labels.get(l.job_id)!.status } : l));
       res.json({
         subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id } : null,
         active: !!c && (c.status === "active" || c.status === "trialing"),
         balance: Number(bal.data ?? 0),
         onboarding: c?.onboarding ?? {},
         usage_30d: { jobs: (jobs.data ?? []).length, credits: spent },
-        ledger: ledger.data ?? [],
+        ledger: ledgerOut,
         costs,
+        topup: c ? topupInfo(c, spent) : null,
         referral: await referralInfo(sb, u, c, ledger.data ?? []),
         email_opt_out: !!c?.email_opt_out,
       });
@@ -572,6 +605,57 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       if (e?.type === "StripeCardError" || e?.code === "card_declined" || /payment/i.test(String(e?.message ?? ""))) return res.status(402).json({ error: "payment_failed", detail: "The card on file was declined; update it in Billing and try again" });
       fail(res, e);
     }
+  });
+
+  // Top up any amount from $5: a one-off payment for credits on top of the plan. The card is saved (setup_future_usage)
+  // so auto top-up can charge it later. The webhook grants the credits worked out here, at the plan's top-up rate.
+  app.post("/api/studio/topup", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const usd = cleanUsd(req.body?.usd, TOPUP_MIN_USD, TOPUP_MAX_USD);
+    if (usd == null) return res.status(400).json({ error: "invalid_amount", detail: `A top-up is between $${TOPUP_MIN_USD} and $${TOPUP_MAX_USD}, in whole dollars` });
+    try {
+      const sb = sbFn();
+      const cust = await sb.from("studio_customers").select("stripe_customer_id,status,plan_id").eq("user_id", u).maybeSingle();
+      if (cust.error) throw cust.error;
+      if (!cust.data || !["active", "trialing"].includes(cust.data.status)) return res.status(409).json({ error: "subscription_required", detail: "Credits are spent with a plan; pick a plan first" });
+      const credits = topupCredits(usd, cust.data.plan_id);
+      const email = req.auth && "email" in req.auth ? (req.auth as any).email : undefined;
+      const back = typeof req.body?.return_hash === "string" && /^#studio\/[a-z-]+$/.test(req.body.return_hash) ? req.body.return_hash : "#studio/account";
+      const session = await stripe().checkout.sessions.create({
+        mode: "payment",
+        line_items: [{ quantity: 1, price_data: { currency: "usd", unit_amount: usd * 100, product_data: { name: `Clone8 credits: ${new Intl.NumberFormat("en-US").format(credits)}`, description: "Added on top of your plan; they carry over at renewal." } } }],
+        ...(cust.data.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email, customer_creation: "always" }),
+        payment_intent_data: { setup_future_usage: "off_session", metadata: { user_id: u, topup: "1" } },
+        client_reference_id: u,
+        metadata: { user_id: u, topup: "1", usd: String(usd), credits: String(credits) },
+        success_url: `${dashboard()}/${back}?topup=success`,
+        cancel_url: `${dashboard()}/${back}?topup=canceled`,
+      });
+      log(`[studio] top-up checkout ${JSON.stringify({ user: u, usd, credits, session: session.id })}`);
+      res.json({ url: session.url, credits });
+    } catch (e) { fail(res, e); }
+  });
+  // Auto top-up: on, the line (credits) and the amount. Turning it on needs a saved card (from a top-up or the plan).
+  app.post("/api/studio/topup/auto", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const enabled = req.body?.enabled === true;
+    const usd = cleanUsd(req.body?.usd, AUTO_MIN_USD, AUTO_MAX_USD), below = Math.floor(Number(req.body?.below));
+    if (enabled && (usd == null || !(below >= 0 && below <= 100_000))) return res.status(400).json({ error: "invalid_auto", detail: `Pick a line of 0 to 100,000 credits and an amount of $${AUTO_MIN_USD} to $${AUTO_MAX_USD}` });
+    try {
+      const sb = sbFn();
+      const cust = await sb.from("studio_customers").select("stripe_customer_id,status").eq("user_id", u).maybeSingle();
+      if (cust.error) throw cust.error;
+      if (enabled) {
+        if (!cust.data || !["active", "trialing"].includes(cust.data.status)) return res.status(409).json({ error: "subscription_required", detail: "Auto top-up needs a plan" });
+        const card = await savedCard(stripe(), cust.data.stripe_customer_id);
+        if (!card) return res.status(409).json({ error: "no_card", detail: "Top up once by hand to save your card, then turn this on" });
+      }
+      const w = await sb.from("studio_customers").update({ auto_topup_enabled: enabled, ...(enabled ? { auto_topup_below: below, auto_topup_usd: usd, auto_topup_error: null } : {}), updated_at: new Date().toISOString() }).eq("user_id", u);
+      if (w.error) throw w.error;
+      log(`[studio] auto top-up ${JSON.stringify({ user: u, enabled, below: enabled ? below : undefined, usd: enabled ? usd : undefined })}`);
+      res.json({ enabled, below, usd });
+      if (enabled) void maybeAutoTopUp(sb, stripeOrNull(), u, log, "turned on").catch(() => undefined);
+    } catch (e) { fail(res, e); }
   });
 
   // One-off credit pack: Stripe Checkout in payment mode; the webhook grants the credits when it is paid.
@@ -837,10 +921,22 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);
-      const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
+      const create = () => sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
+      let r = await create();
+      // short of credits with auto top-up on: top up, then start the job (once)
+      if (r.error && /insufficient_credits/.test(String(r.error.message ?? r.error))) {
+        const st = stripeOrNull();
+        const auto = st ? await chargeAutoTopUp(sb, st, u, log, `job ${q.tool} needs ${q.credits}`) : { ok: false };
+        if (auto.ok) r = await create();
+        if (r.error && /insufficient_credits/.test(String(r.error.message ?? r.error))) {
+          const bal = await sb.rpc("studio_balance", { p_user: u });
+          return res.status(402).json({ error: "insufficient_credits", detail: "Not enough credits for this", needed: q.credits, balance: Number(bal.data ?? 0) });
+        }
+      }
       if (r.error) throw r.error;
       log(`[studio] job ${JSON.stringify({ user: u, tool: q.tool, credits: q.credits, job: r.data?.id })}`);
       res.status(201).json({ job: r.data, quote: q });
+      void maybeAutoTopUp(sb, stripeOrNull(), u, log, "after a job").catch(() => undefined);
     } catch (e) { fail(res, e); }
   });
 
