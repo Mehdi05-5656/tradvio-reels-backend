@@ -225,9 +225,9 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   const up = await s.call("POST", "/api/studio/assets/upload-url", { name: "clip.mp4", size: 1234, type: "video/mp4" }, { "x-test-user": ANN });
   assert.equal(up.status, 200); assert.match(up.body.key, new RegExp(`^${ANN}/[0-9a-f-]{36}\\.mp4$`));
   assert.equal((await s.call("POST", "/api/studio/assets/upload-url", { name: "x.exe", size: 10, type: "" }, { "x-test-user": ANN })).body.error, "invalid_file");
-  // Plan limits (studio-limits.ts): Ann is on Creator (200 files, 30 GB, 40 jobs an hour). Fill the library, then the hour.
+  // Plan limits (studio-limits.ts): Ann is on Creator (4,000 files, 30 GB, 40 jobs an hour). Fill the library, then the hour.
   const kept = tables.studio_assets.length;
-  for (let i = 0; i < 200; i++) tables.studio_assets.push({ id: `${i}`, user_id: ANN, kind: "video", status: i % 2 ? "ready" : "uploading", bytes: 1 });
+  for (let i = 0; i < 4000; i++) tables.studio_assets.push({ id: `${i}`, user_id: ANN, kind: "video", status: i % 2 ? "ready" : "uploading", bytes: 1 });
   assert.equal((await s.call("POST", "/api/studio/assets/upload-url", { name: "clip.mp4", size: 1234, type: "video/mp4" }, { "x-test-user": ANN })).body.error, "too_many_files");
   tables.studio_assets.length = kept;
   tables.studio_assets.push({ id: "big", user_id: ANN, kind: "video", status: "ready", bytes: 30 * 1024 ** 3 - 100 });
@@ -242,7 +242,7 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "launch50" }, { "x-test-user": ANN })).body.credits, 50);
   assert.equal((await s.call("POST", "/api/studio/promo", { code: "x" }, { "x-test-user": ANN })).body.error, "invalid_code");
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "blueprint_plus", asset_id: ASSET, options: { copies: 2 } }, { "x-test-user": ANN })).body.error, "tool_not_open", "a tool without a worker refuses jobs");
-  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false, swap: true, restyle: true, trend: true, character: true, instrument: false, assistant: false });
+  assert.deepEqual((await s.call("GET", "/api/studio/plans")).body.tools, { blueprint: true, blueprint_plus: false, recast: true, recast_full: false, swap: true, restyle: true, trend: true, character: true, instrument: false, assistant: false, clips: false, import: false });
   assert.equal((await s.call("POST", "/api/studio/jobs", { tool: "recast", asset_id: ASSET, options: { character: "noah", model: "full" } }, { "x-test-user": ANN })).body.error, "model_not_open", "the full model is closed until measured");
 });
 

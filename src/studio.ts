@@ -20,6 +20,8 @@ import { checkUnsubscribeToken } from "./studio-mail.js";
 import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
 import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
+import { ClipsError, clipsEnabled, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
+import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
 import Stripe from "stripe";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,13 +91,15 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Instruments: every other platform model through one generic tool; opened by flag, narrowed by allow/hidden lists.
     instrument: instrumentsEnabled(env).length > 0,
     // The assistant: a Claude key and not switched off.
-    assistant: !!env.ANTHROPIC_API_KEY && env.STUDIO_ASSISTANT_ENABLED !== "false" };
+    assistant: !!env.ANTHROPIC_API_KEY && env.STUDIO_ASSISTANT_ENABLED !== "false",
+    // Clips from long videos (Claude to choose; ScrapeCreators for YouTube, ElevenLabs for uploads) and bulk link imports.
+    clips: clipsEnabled(env), import: importEnabled(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
 // ---------------------------------------------------------------------------------------------------
-export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument"; credits: number; options: Record<string, any>; summary: string };
+export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import"; credits: number; options: Record<string, any>; summary: string };
 const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const characterChoice = (o: any) => {
   const cast = castChoice(o);
@@ -153,8 +157,12 @@ export function highCapacityCredits(seconds: number, asset: { probe?: any } | nu
   const margin = costs.light_margin ?? 0.2;
   return Math.max(seconds * costs.recast_light_second, costs.credit_floor ? creditsForCost(plan.list_usd, costs.credit_floor, margin) : 0);
 }
-export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
+export function quote(tool: string, options: any, asset: { kind: string; probe?: any; bytes?: number | null } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};
+  if (asset && asset.kind === "video" && isLongSource(asset)) {
+    const min = Math.round(Number(asset.probe?.duration) / 60);
+    throw new StudioError("long_source", `This video is ${min > 0 ? `${min} minutes` : "very large"}. Make clips from it first, then use a clip.`);
+  }
   if (tool === "blueprint" || tool === "blueprint_plus") {
     if (!asset || asset.kind !== "video") throw new StudioError("asset_required", "Pick a video first");
     const copies = Math.floor(Number(o.copies));
@@ -464,7 +472,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
-    if (e instanceof StudioError || e instanceof InstrumentError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
@@ -479,6 +487,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     return u;
   };
   registerPlanChange(app, { sbFn, stripe, env, dashboard, requireUser, fail, log });
+  registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   // every price setting looked up once at start: a sandbox id left behind shows in the log by its setting's name
   if (deps.stripe === undefined && env === process.env && env.STRIPE_SECRET_KEY) setTimeout(() => {
     void missingPrices(stripe(), env).then((bad) => { if (bad.length) console.error(`[studio] ALERT these Stripe price settings are not prices in this Stripe account: ${bad.join(", ")}`); else log("[studio] Stripe prices: all found"); }).catch(() => undefined);
@@ -857,14 +866,23 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     const name = safeName(req.body?.name), size = Number(req.body?.size ?? 0), k = kindFor(name, String(req.body?.type ?? ""));
     if (!k) return res.status(400).json({ error: "invalid_file", detail: "MP4, MOV, JPG or PNG" });
-    if (!(size > 0 && size <= 536870912)) return res.status(400).json({ error: "file_too_large", detail: "at most 512 MB" });
+    // a long video for Clips may be up to 4 GB; pictures stay at 512 MB
+    const maxBytes = k.kind === "video" ? 4294967296 : 536870912;
+    if (!(size > 0 && size <= maxBytes)) return res.status(400).json({ error: "file_too_large", detail: k.kind === "video" ? "at most 4 GB" : "at most 512 MB" });
     try {
       const sb = sbFn();
+      let collectionId: string | null = null;
+      if (req.body?.collection_id) {
+        const c = await sb.from("studio_collections").select("id").eq("id", String(req.body.collection_id)).eq("user_id", u).maybeSingle();
+        if (c.error) throw c.error;
+        if (!c.data) throw new StudioError("collection_not_found", "No such collection", 404);
+        collectionId = c.data.id;
+      }
       // Per-plan library limits (studio-limits.ts): files kept and bytes stored. Credits do not bound uploads, these do.
       const limit = await checkUpload(sb, u, size);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);
       const id = randomUUID(), key = `${u}/${id}.${k.ext}`;
-      const row = await sb.from("studio_assets").insert({ id, user_id: u, kind: k.kind, name, object_key: key, bytes: size, status: "uploading" }).select("id").single();
+      const row = await sb.from("studio_assets").insert({ id, user_id: u, kind: k.kind, name, object_key: key, bytes: size, status: "uploading", ...(collectionId ? { collection_id: collectionId } : {}) }).select("id").single();
       if (row.error) throw row.error;
       const signed = await sb.storage.from("studio-uploads").createSignedUploadUrl(key);
       if (signed.error || !signed.data) throw signed.error ?? new Error("signing_failed");
@@ -904,15 +922,17 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const bytes = Number(obj.metadata?.size ?? a.data.bytes) || a.data.bytes;
       // What the browser measured (duration, size) and whether it stored a poster. A worker's ffprobe later
       // replaces the numbers; the poster is kept unless the worker writes its own.
-      const probe = { ...(a.data.probe ?? {}), ...clientProbe(req.body?.probe) };
+      const probe: Record<string, any> = { ...(a.data.probe ?? {}), ...clientProbe(req.body?.probe) };
+      // a long video is for Clips only: flagged so every other tool and picker treats it as a source to cut, not to use
+      if (bytes > LONG_SOURCE.bytes || Number(probe.duration) > LONG_SOURCE.seconds) probe.long_source = true;
       if (req.body?.poster === true) {
         const posters = await sb.storage.from("studio-outputs").list(`${u}/assets`, { search: `${a.data.id}.jpg`, limit: 5 });
         if (!posters.error && (posters.data ?? []).some((o: any) => o.name === `${a.data.id}.jpg`)) probe.poster_key = assetPosterKey(u, a.data.id);
       }
-      const r = await sb.from("studio_assets").update({ status: "ready", bytes, probe, updated_at: new Date().toISOString() }).eq("id", a.data.id).select("id,kind,name,bytes,status,probe,created_at").single();
+      const r = await sb.from("studio_assets").update({ status: "ready", bytes, probe, updated_at: new Date().toISOString() }).eq("id", a.data.id).select("id,kind,name,bytes,status,probe,created_at,collection_id").single();
       if (r.error) throw r.error;
       // camera changes, in the background: they price a long swap from its real plan
-      if (r.data.kind === "video") void import("./studio-recast.js").then((m) => m.detectCuts(sb, u, r.data.id, { log: (l) => console.log(l) })).catch(() => undefined);
+      if (r.data.kind === "video" && !probe.long_source) void import("./studio-recast.js").then((m) => m.detectCuts(sb, u, r.data.id, { log: (l) => console.log(l) })).catch(() => undefined);
       res.json({ asset: (await withPosterUrls(sb, [r.data]))[0] });
     } catch (e) { fail(res, e); }
   });
@@ -922,9 +942,25 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     try {
       const sb = sbFn();
-      const r = await sb.from("studio_assets").select("id,kind,name,bytes,status,probe,created_at").eq("user_id", u).neq("status", "deleted").order("created_at", { ascending: false }).limit(200);
+      // Filters (all optional): ?collection=<id>|none, ?q= words in the name, a clip's title, hook or transcript,
+      // ?kind=video|image, ?limit=1..200, ?before=<created_at> for the next page.
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 200));
+      let q = sb.from("studio_assets").select("id,kind,name,bytes,status,probe,created_at,collection_id").eq("user_id", u).neq("status", "deleted").order("created_at", { ascending: false }).limit(limit + 1);
+      const col = String(req.query.collection ?? "");
+      if (col === "none") q = q.is("collection_id", null);
+      else if (UUID_RE.test(col)) q = q.eq("collection_id", col);
+      const kind = String(req.query.kind ?? "");
+      if (kind === "video" || kind === "image") q = q.eq("kind", kind);
+      const before = String(req.query.before ?? "");
+      if (before && !Number.isNaN(Date.parse(before))) q = q.lt("created_at", before);
+      const words = String(req.query.q ?? "").replace(/[%_,()\\*]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+      if (words) q = q.or(["name", "probe->>title", "probe->>hook", "probe->>transcript"].map((f) => `${f}.ilike.*${words}*`).join(","));
+      const r = await q;
       if (r.error) throw r.error;
-      res.json({ assets: await withPosterUrls(sb, r.data ?? []) });
+      const rows = (r.data ?? []) as any[];
+      const more = rows.length > limit;
+      const page = more ? rows.slice(0, limit) : rows;
+      res.json({ assets: await withPosterUrls(sb, page), next_before: more ? page[page.length - 1].created_at : null });
     } catch (e) { fail(res, e); }
   });
 
@@ -969,11 +1005,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   });
   /** The person's assets as signed URLs for an instrument quote or estimate (10 minutes is plenty for an estimate). */
   const resolveAssets = (sb: SupabaseClient, u: string) => async (ids: string[]) => {
-    const r = await sb.from("studio_assets").select("id,kind,status,object_key,probe").eq("user_id", u).in("id", ids);
+    const r = await sb.from("studio_assets").select("id,kind,status,object_key,probe,bytes").eq("user_id", u).in("id", ids);
     if (r.error) throw r.error;
     const out = new Map<string, { url: string; kind: string; seconds: number | null }>();
     for (const a of (r.data ?? []) as any[]) {
       if (a.status !== "ready") continue;
+      if (a.kind === "video" && isLongSource(a)) throw new StudioError("long_source", "That video is long: make clips from it first, then use a clip.");
       const s = await sb.storage.from("studio-uploads").createSignedUrl(a.object_key, 600);
       if (s.error || !s.data) continue;
       out.set(a.id, { url: s.data.signedUrl, kind: a.kind, seconds: Number(a.probe?.duration) > 0 ? Number(a.probe.duration) : null });
@@ -986,6 +1023,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       return q;
     }
     const asset = await loadAsset(sb, u, body?.asset_id);
+    if (String(body?.tool ?? "") === "clips") return quoteClips({ env, log }, PLANS, asset, body?.options);
+    if (String(body?.tool ?? "") === "import") return quoteImport(env, PLANS, body?.options);
     return quote(String(body?.tool ?? ""), body?.options, asset, costs);
   };
 
@@ -1009,7 +1048,27 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);
+      // Clips and imports land in a collection that exists from the start, so the run can be watched as it fills.
+      let collectionId: string | null = null, madeCollection = false;
+      if (q.tool === "clips" || q.tool === "import") {
+        const existing = q.tool === "import" ? q.options.collection_id : null;
+        if (existing) {
+          const c = await sb.from("studio_collections").select("id").eq("id", existing).eq("user_id", u).maybeSingle();
+          if (c.error) throw c.error;
+          if (!c.data) throw new StudioError("collection_not_found", "No such collection", 404);
+          collectionId = c.data.id;
+        } else {
+          const s = q.options.source ?? {};
+          const name = q.tool === "clips" ? String(s.title ?? "Clips").slice(0, 100) || "Clips" : String(q.options.name ?? `Import ${new Date().toISOString().slice(0, 10)}`).slice(0, 100);
+          const source = q.tool === "clips" ? { ...s, format: q.options.format, length: q.options.length } : { platform: req.body?.options?.platform === "sheet" ? "sheet" : "links" };
+          const c = await sb.from("studio_collections").insert({ user_id: u, name, kind: q.tool === "clips" ? "clips" : "import", status: "processing", source }).select("id").single();
+          if (c.error) throw c.error;
+          collectionId = c.data.id; madeCollection = true;
+        }
+        q.options.collection_id = collectionId;
+      }
       const create = () => sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: { ...q.options, via: "tool" }, p_credits: q.credits });
+      const dropCollection = async () => { if (madeCollection && collectionId) await sb.from("studio_collections").delete().eq("id", collectionId).eq("user_id", u); };
       let r = await create();
       // short of credits with auto top-up on: top up, then start the job (once)
       if (r.error && /insufficient_credits/.test(String(r.error.message ?? r.error))) {
@@ -1017,13 +1076,15 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         const auto = st ? await chargeAutoTopUp(sb, st, u, log, `job ${q.tool} needs ${q.credits}`) : { ok: false };
         if (auto.ok) r = await create();
         if (r.error && /insufficient_credits/.test(String(r.error.message ?? r.error))) {
+          await dropCollection();
           const bal = await sb.rpc("studio_balance", { p_user: u });
           return res.status(402).json({ error: "insufficient_credits", detail: "Not enough credits for this", needed: q.credits, balance: Number(bal.data ?? 0) });
         }
       }
-      if (r.error) throw r.error;
+      if (r.error) { await dropCollection(); throw r.error; }
+      if (collectionId) await sb.from("studio_collections").update({ job_id: r.data.id, status: "processing", note: null, updated_at: new Date().toISOString() }).eq("id", collectionId);
       log(`[studio] job ${JSON.stringify({ user: u, tool: q.tool, credits: q.credits, job: r.data?.id })}`);
-      res.status(201).json({ job: r.data, quote: q });
+      res.status(201).json({ job: r.data, quote: q, ...(collectionId ? { collection_id: collectionId } : {}) });
       void maybeAutoTopUp(sb, stripeOrNull(), u, log, "after a job").catch(() => undefined);
     } catch (e) { fail(res, e); }
   });
@@ -1182,11 +1243,11 @@ async function referralInfo(sb: SupabaseClient, u: string, c: any) {
 export async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {
   if (assetId == null) return null;
   if (!UUID_RE.test(String(assetId))) throw new StudioError("asset_not_found", "Unknown video", 404);
-  const r = await sb.from("studio_assets").select("id,kind,status,probe").eq("id", assetId).eq("user_id", u).maybeSingle();
+  const r = await sb.from("studio_assets").select("id,kind,status,probe,bytes,name").eq("id", assetId).eq("user_id", u).maybeSingle();
   if (r.error) throw r.error;
   if (!r.data || r.data.status === "deleted") throw new StudioError("asset_not_found", "Unknown video", 404);
   if (r.data.status !== "ready") throw new StudioError("asset_not_ready", "The upload has not finished", 409);
-  return r.data as { id: string; kind: string; status: string; probe: any };
+  return r.data as { id: string; kind: string; status: string; probe: any; bytes: number; name: string };
 }
 
 const LIST_POSTERS = 8;

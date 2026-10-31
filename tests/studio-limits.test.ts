@@ -31,7 +31,14 @@ function sbWith(answers: Record<string, { data?: any; count?: number; error?: an
 }
 test("limits: reads fail open, never closed", async () => {
   const u = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  assert.equal((await checkUpload(sbWith({ studio_customers: { data: { plan_id: "starter", status: "active" } }, studio_assets: { data: Array.from({ length: 60 }, () => ({ bytes: 1 })) } }), u, 5))?.code, "too_many_files");
+  // before the totals function exists (its call errors), the first rows are counted the old way
+  const noTotals = (a: any) => ({ ...sbWith(a), rpc: async () => ({ data: null, error: { message: "function studio_library_usage does not exist" } }) });
+  assert.equal((await checkUpload(noTotals({ studio_customers: { data: { plan_id: "starter", status: "active" } }, studio_assets: { data: Array.from({ length: PLAN_LIMITS.starter.assets }, () => ({ bytes: 1 })) } }), u, 5))?.code, "too_many_files");
+  // with it, the database's exact totals decide
+  const totals = (files: number, bytes: number) => ({ ...sbWith({ studio_customers: { data: { plan_id: "starter", status: "active" } } }), rpc: async () => ({ data: [{ files, bytes }], error: null }) });
+  assert.equal((await checkUpload(totals(PLAN_LIMITS.starter.assets, 0), u, 5))?.code, "too_many_files");
+  assert.equal((await checkUpload(totals(10, PLAN_LIMITS.starter.storage_bytes - 4), u, 5))?.code, "storage_full");
+  assert.equal(await checkUpload(totals(10, 100), u, 5), null);
   assert.equal(await checkUpload(sbWith({ studio_customers: { data: { plan_id: "starter", status: "active" } }, studio_assets: { data: [{ bytes: 1 }] } }), u, 5), null);
   assert.equal(await checkUpload(sbWith({ studio_customers: { error: { message: "down" } }, studio_assets: { data: [] } }), u, 5), null, "a read error enforces nothing");
   assert.equal(await checkUpload({ from() { throw new Error("boom"); } }, u, 5), null);

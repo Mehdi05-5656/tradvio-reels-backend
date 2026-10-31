@@ -98,6 +98,48 @@ export async function downloadYouTube(url: string, target: string, o: DownloadOp
   return { title: title && title !== "NA" ? title : null };
 }
 
+/** The direct stream addresses of a YouTube video (1080p or less; VP9 preferred, it is about a third smaller than H.264
+ *  at the same quality), without downloading anything. ffmpeg then reads only the stretches it cuts. The addresses are
+ *  tied to the IP that asked (forced IPv4, the same proxy) and last about six hours. */
+export type YouTubeStreams = { video: string; audio: string | null; width: number; height: number; fps: number | null; seconds: number | null; proxy: string | null };
+export function streamArgs(url: string, o: { proxy?: string | null; cookies?: string | null; node?: string | null }): string[] {
+  return [
+    "--no-playlist", "--no-warnings", "--quiet", "--no-cache-dir", "--force-ipv4", "--socket-timeout", "30",
+    ...(o.node === null ? [] : ["--no-js-runtimes", "--js-runtimes", `node:${o.node ?? process.execPath}`]),
+    ...(o.proxy ? ["--proxy", o.proxy] : []),
+    ...(o.cookies ? ["--cookies", o.cookies] : []),
+    "-f", "bv*[height<=1080][vcodec^=vp09]+ba/bv*[height<=1080][vcodec^=avc1]+ba/b[height<=1080]",
+    "--print", "dims:%(width)s|%(height)s|%(fps)s|%(duration)s",
+    "--print", "urls",
+    url,
+  ];
+}
+export function parseStreams(stdout: string, proxy: string | null): YouTubeStreams {
+  const lines = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const dims = lines.find((l) => l.startsWith("dims:"))?.slice(5).split("|") ?? [];
+  const urls = lines.filter((l) => /^https?:\/\//.test(l));
+  if (!urls.length) throw new LinkError("link_no_media", "No video stream was found at that link");
+  const n = (v: string | undefined) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : null; };
+  return { video: urls[0], audio: urls[1] ?? null, width: n(dims[0]) ?? 0, height: n(dims[1]) ?? 0, fps: n(dims[2]), seconds: n(dims[3]), proxy };
+}
+export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number } = {}): Promise<YouTubeStreams> {
+  const bin = await ensureYtDlp(o);
+  const env = o.env ?? process.env;
+  const proxy = env.STUDIO_YT_PROXY || null;
+  const args = streamArgs(url, { proxy, cookies: await cookiesFile(env) });
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", killed = false;
+    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, o.timeoutMs ?? 120_000);
+    child.stdout.on("data", (b) => { stdout += b.toString(); if (stdout.length > 65536) stdout = stdout.slice(-65536); });
+    child.stderr.on("data", (b) => { stderr += b.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("close", (code) => { clearTimeout(timer); if (killed) reject(new LinkError("link_fetch_failed", "YouTube took too long to answer")); else resolve({ code, stdout, stderr }); });
+  });
+  if (out.code !== 0) throw classifyYtDlpError(out.stderr || out.stdout);
+  return parseStreams(out.stdout, proxy);
+}
+
 /** The 11-character video id, for a clean name when there is no title. */
 export function youtubeId(url: string): string | null {
   try {

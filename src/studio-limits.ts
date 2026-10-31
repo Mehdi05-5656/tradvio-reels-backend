@@ -10,13 +10,15 @@ export type PlanLimits = {
 };
 
 const GiB = 1024 ** 3;
+// Files are counted generously since Clips (Oct 31 2026): one long video can become 60 clips, and a clip is ~8 MB, so
+// storage is the real bound. The count only stops runaway scripts.
 export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
-  starter: { assets: 60, storage_bytes: 10 * GiB, jobs_per_hour: 20 },
-  creator: { assets: 200, storage_bytes: 30 * GiB, jobs_per_hour: 40 },
-  studio: { assets: 600, storage_bytes: 100 * GiB, jobs_per_hour: 100 },
+  starter: { assets: 1000, storage_bytes: 10 * GiB, jobs_per_hour: 20 },
+  creator: { assets: 4000, storage_bytes: 30 * GiB, jobs_per_hour: 40 },
+  studio: { assets: 12000, storage_bytes: 100 * GiB, jobs_per_hour: 100 },
 };
 /** Someone without an active plan can still upload a little so the first job is ready the moment they pay. */
-export const NO_PLAN_LIMITS: PlanLimits = { assets: 5, storage_bytes: 2 * GiB, jobs_per_hour: 0 };
+export const NO_PLAN_LIMITS: PlanLimits = { assets: 20, storage_bytes: 5 * GiB, jobs_per_hour: 0 };
 
 /** A paid plan (active or trialing), or the owner pass (the owner's own account; migration 20261109000000). */
 export function hasPlanAccess(customer: { status?: string | null; owner_pass?: boolean | null } | null | undefined): boolean {
@@ -51,13 +53,24 @@ export function jobAllowance(limits: PlanLimits, createdLastHour: number): Limit
  *  cannot be read is not enforced, because refusing every upload during a database hiccup is the worse failure. */
 export async function checkUpload(sb: any, user: string, size: number): Promise<LimitError> {
   try {
-    const [cust, assets] = await Promise.all([
+    const [cust, usage] = await Promise.all([
       sb.from("studio_customers").select("plan_id,status,owner_pass").eq("user_id", user).maybeSingle(),
-      sb.from("studio_assets").select("bytes").eq("user_id", user).neq("status", "deleted").limit(1000),
+      sb.rpc("studio_library_usage", { p_user: user }),
     ]);
-    if (cust.error || assets.error) return null;
+    if (cust.error) return null;
+    // exact totals from the database; before that migration, the first 1,000 rows (the old way)
+    const row = !usage.error && usage.data ? (Array.isArray(usage.data) ? usage.data[0] : usage.data) : null;
+    if (row && row.files != null && Number.isFinite(Number(row.files))) return usageAllowance(limitsFor(cust.data), Number(row.files), Number(row.bytes ?? 0), size);
+    const assets = await sb.from("studio_assets").select("bytes").eq("user_id", user).neq("status", "deleted").limit(1000);
+    if (assets.error) return null;
     return uploadAllowance(limitsFor(cust.data), assets.data ?? [], size);
   } catch { return null; }
+}
+/** The same rule from totals: files kept and bytes stored. */
+export function usageAllowance(limits: PlanLimits, files: number, used: number, size: number): LimitError {
+  if (files >= limits.assets) return { code: "too_many_files", message: `Your plan keeps up to ${limits.assets} files. Delete some from the library to upload more.`, status: 409 };
+  if (used + size > limits.storage_bytes) return { code: "storage_full", message: `Your plan stores up to ${gib(limits.storage_bytes)}; ${gib(used)} is in use. Delete some files or pick a larger plan.`, status: 409 };
+  return null;
 }
 export async function checkJobRate(sb: any, user: string, now = new Date()): Promise<LimitError> {
   try {

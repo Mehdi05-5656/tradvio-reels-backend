@@ -50,6 +50,7 @@ export async function detectPeople(sb: SupabaseClient, deps: PeopleDeps, u: stri
   if (a.error) throw a.error;
   if (!a.data || a.data.status !== "ready") throw new AssistantError("asset_not_ready", "That file is not ready", 404);
   if (a.data.kind !== "video") throw new AssistantError("asset_required", "People are found in videos");
+  if (Number(a.data.probe?.duration) > 600 || a.data.probe?.long_source) throw new AssistantError("long_source", "That video is long: make clips from it first, then pick a clip", 400);
   let people: Person[] | null = Array.isArray(a.data.probe?.people) && !opts.refresh ? a.data.probe.people : null;
   if (!people) {
     const dl = await sb.storage.from("studio-uploads").download(a.data.object_key);

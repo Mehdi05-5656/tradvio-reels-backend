@@ -30,6 +30,9 @@ import { registerStudio } from "./studio.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
 import { startInstrumentLoop } from "./studio-instruments.js";
+import { startClipsLoop } from "./studio-clips.js";
+import { startImportLoop } from "./studio-library.js";
+import { PLANS } from "./studio.js";
 import { registerAssistant, startAssistantLoop } from "./studio-assistant.js";
 import { registerAutomations } from "./studio-automations.js";
 import { registerSocial, startSocialLoop } from "./studio-social.js";
@@ -108,6 +111,8 @@ async function main() {
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
   startCharacterLoop(getSb); // Studio characters (Soul portraits); off without HIGGSFIELD_API_KEY
   startInstrumentLoop(getSb); // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
+  startClipsLoop(getSb, { plans: PLANS }); // Clips from long videos, one run at a time; needs ANTHROPIC_API_KEY plus ScrapeCreators or ElevenLabs
+  startImportLoop(getSb, { plans: PLANS }); // bulk link imports into the library; needs SCRAPECREATORS_API_KEY
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
   startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week

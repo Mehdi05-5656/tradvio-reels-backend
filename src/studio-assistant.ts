@@ -25,6 +25,8 @@ import { trendById } from "./studio-trends.js";
 import { probeSeconds, makePoster } from "./studio-recast.js";
 import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { youtubeId } from "./studio-youtube.js";
+import { ClipsError, isLongSource, quoteClips } from "./studio-clips.js";
+import { searchLibrary } from "./studio-library.js";
 import { profileLines } from "./studio-onboarding.js";
 import type { SetupCard } from "./studio-automations.js";
 
@@ -108,12 +110,12 @@ export const TOOLS = [
           items: {
             type: "object", additionalProperties: false,
             properties: {
-              tool: { type: "string", enum: ["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument"] },
+              tool: { type: "string", enum: ["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument", "clips"] },
               label: { type: "string", description: "What this step does, in the person's words" },
               source: { type: ["string", "null"], description: "Video (or picture) asset id, or \"$N\". For a trend: null for a catalog trend (trend_id), or the video asset of a trend the person brought (a fetched link or an upload). Null for character and text-only instruments." },
               options: {
                 type: "object", additionalProperties: true,
-                description: "blueprint: {copies}. recast/swap: {model: light|full, character: preset id, or character_asset_id: library image id or \"$N\" of a character step; swap also takes prompt}. For several people, each with their own character, give cast instead: [{character or character_asset_id, label}] in left-to-right order, labels from choose_people. restyle: {style_name or style_id, prompt?}. trend: {trend_id (catalog) or a video source, trend_name?, model, character or character_asset_id, or cast as above}. character: {mode: human|animal, prompt}. instrument: {endpoint, params: {...}, inputs: {media_field: asset id or [ids] or \"$N\"}}.",
+                description: "blueprint: {copies}. recast/swap: {model: light|full, character: preset id, or character_asset_id: library image id or \"$N\" of a character step; swap also takes prompt}. For several people, each with their own character, give cast instead: [{character or character_asset_id, label}] in left-to-right order, labels from choose_people. restyle: {style_name or style_id, prompt?}. trend: {trend_id (catalog) or a video source, trend_name?, model, character or character_asset_id, or cast as above}. character: {mode: human|animal, prompt}. instrument: {endpoint, params: {...}, inputs: {media_field: asset id or [ids] or \"$N\"}}. clips: {url: a YouTube link, or source = a library video of 2 minutes to 3 hours; format?: vertical|original; length?: short|standard|long}; a clips step makes a whole collection of clips, so no later step can use it as \"$N\": the person picks clips afterwards.",
               },
             },
             required: ["tool", "label", "options"],
@@ -122,6 +124,15 @@ export const TOOLS = [
       },
       required: ["title", "steps"],
     },
+  },
+  {
+    name: "search_library",
+    description: "Find files in the person's library by what they are about, their name or their collection: clips made from long videos (searched by title, hook and transcript), imports, uploads and made characters. Returns up to 20 matches (id, name, kind, seconds, collection, and a clip's title and score), best clips first. Use it before proposing a plan on \"my clip about X\", \"the best clips from my podcast\", \"something from my import\"; then use the ids it returns.",
+    input_schema: { type: "object", additionalProperties: false, properties: {
+      query: { type: "string", description: "Words to look for; empty to list a collection" },
+      collection: { type: "string", description: "A collection's name or id, to search only inside it" },
+      kind: { type: "string", enum: ["video", "image"] },
+    } },
   },
   {
     name: "fetch_link",
@@ -253,23 +264,30 @@ export async function claude(deps: AssistantDeps, body: Record<string, any>, onT
 // Knowledge for this person
 // ---------------------------------------------------------------------------------------------------
 async function userContext(sb: SupabaseClient, u: string): Promise<{ user: KnowledgeUser; assets: any[]; memory: MemoryNote[] }> {
-  const [assets, cust, bal, jobs, mem] = await Promise.all([
-    sb.from("studio_assets").select("id,kind,name,object_key,probe,status,bytes").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(60),
+  const [assets, cust, bal, jobs, mem, cols] = await Promise.all([
+    sb.from("studio_assets").select("id,kind,name,object_key,probe,status,bytes,collection_id").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(120),
     sb.from("studio_customers").select("plan_id,status,parallel_jobs,onboarding").eq("user_id", u).maybeSingle(),
     sb.rpc("studio_balance", { p_user: u }),
     sb.from("studio_jobs").select("id,tool,status,options,asset_id,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(8),
     sb.from("studio_assistant_memory").select("id,note,created_at").eq("user_id", u).order("created_at", { ascending: true }).limit(MEMORY_LIMIT),
+    sb.from("studio_collections").select("id,name,kind,status").eq("user_id", u).order("created_at", { ascending: false }).limit(25),
   ]);
   for (const r of [assets, cust, jobs]) if (r.error) throw r.error;
   // memory is optional: before its migration the table is missing and the assistant simply has no notes
   const memory = (mem.error ? [] : (mem.data ?? [])) as MemoryNote[];
-  const list = (assets.data ?? []) as any[];
+  const all = (assets.data ?? []) as any[];
+  // clips and imports live in collections (listed by name below); the prompt lists loose files, so 60 clips do not crowd it
+  const list = all.filter((a) => !a.collection_id).slice(0, 60);
+  const colRows = (cols.error ? [] : (cols.data ?? [])) as any[];
+  const counts = new Map<string, number>();
+  if (colRows.length) { const c = await sb.from("studio_assets").select("collection_id").eq("user_id", u).neq("status", "deleted").in("collection_id", colRows.map((x) => x.id)).limit(5000); for (const r of (c.data ?? []) as any[]) counts.set(r.collection_id, (counts.get(r.collection_id) ?? 0) + 1); }
   const named = await withAssetNames(sb, u, (jobs.data ?? []) as any[]);
   return {
     assets: list, memory,
     user: {
       plan: cust.data?.plan_id ?? null, status: cust.data?.status ?? null, balance: Number(bal.data ?? 0), parallel_jobs: Number(cust.data?.parallel_jobs ?? 1),
-      assets: list.map((a) => ({ id: a.id, kind: a.kind, name: a.name, seconds: Number(a.probe?.duration) > 0 ? Number(a.probe.duration) : null, character: !!a.probe?.character, prompt: a.probe?.prompt ?? null })),
+      assets: list.map((a) => ({ id: a.id, kind: a.kind, name: a.name, seconds: Number(a.probe?.duration) > 0 ? Number(a.probe.duration) : null, character: !!a.probe?.character, prompt: a.probe?.prompt ?? null, long: isLongSource(a) })),
+      collections: colRows.map((c) => ({ id: c.id, name: c.name, kind: c.kind, status: c.status, count: counts.get(c.id) ?? 0 })),
       recent_jobs: named.map((j: any) => ({ id: j.id, tool: j.tool, status: j.status, label: jobLabel(j) })),
       profile: profileLines(cust.data?.onboarding),
     },
@@ -291,7 +309,7 @@ export type Ctx = { sb: SupabaseClient; u: string; env: Record<string, string | 
 export async function buildCtx(sb: SupabaseClient, deps: AssistantDeps, u: string): Promise<Ctx> {
   const env = deps.env ?? process.env;
   const [assets, styles] = await Promise.all([
-    sb.from("studio_assets").select("id,kind,name,object_key,probe,status").eq("user_id", u).eq("status", "ready").limit(400),
+    sb.from("studio_assets").select("id,kind,name,object_key,probe,status,bytes,collection_id").eq("user_id", u).eq("status", "ready").order("created_at", { ascending: false }).limit(400),
     (deps.styles ?? fetchStyles)(env).catch(() => [] as StudioStyle[]),
   ]);
   if (assets.error) throw assets.error;
@@ -311,6 +329,10 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
   const costs = costsFor(ctx.env);
   const steps: PlanStep[] = [];
   const warnings: string[] = [];
+  // a large library: files the plan names that are older than the newest 400 are looked up by id
+  const named = [...new Set((JSON.stringify(raw.steps).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) ?? []).map((x) => x.toLowerCase()))].filter((x) => !ctx.assets.has(x));
+  if (named.length) { const r = await ctx.sb.from("studio_assets").select("id,kind,name,object_key,probe,status,bytes,collection_id").eq("user_id", ctx.u).eq("status", "ready").in("id", named.slice(0, 50)); for (const a of (r.data ?? []) as any[]) ctx.assets.set(String(a.id).toLowerCase(), a); }
+  const producedTool: string[] = [];
   // the asset a "$N" would be once promoted: its kind and (for video) its seconds
   const produced: Array<{ output: OutputKind; seconds: number | null }> = [];
   const resolveRef = (v: unknown, i: number, want: "video" | "image"): { id: string | null; ref: number | null; pseudo: { kind: string; probe: any } | null } => {
@@ -320,6 +342,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
       const k = Number(m[1]);
       if (!(k >= 1 && k < i)) throw new AssistantError("plan_invalid", `Step ${i} refers to step ${k}, which comes later or does not exist`);
       const p = produced[k - 1];
+      if (producedTool[k - 1] === "clips") throw new AssistantError("plan_invalid", `Step ${i} cannot use step ${k}: a clips step makes a whole collection. Finish the plan at the clips step; the person picks a clip afterwards`);
       if (p.output !== want) throw new AssistantError("plan_invalid", `Step ${i} needs a ${want} but step ${k} makes a ${p.output}`);
       return { id: null, ref: k, pseudo: { kind: want, probe: { duration: p.seconds ?? 5 } } };
     }
@@ -334,13 +357,22 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
   for (let i = 1; i <= raw.steps.length; i++) {
     const st = raw.steps[i - 1] ?? {};
     const tool = String(st.tool ?? "");
-    if (!["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument"].includes(tool)) throw new AssistantError("plan_invalid", `Step ${i}: unknown tool ${tool}`);
+    if (!["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument", "clips"].includes(tool)) throw new AssistantError("plan_invalid", `Step ${i}: unknown tool ${tool}`);
     if (!ctx.tools[tool]) throw new AssistantError("plan_invalid", `Step ${i}: ${tool} is not taking jobs right now`);
     const o = st.options && typeof st.options === "object" ? { ...st.options } : {};
     const label = String(st.label ?? tool).slice(0, 120);
     let credits = 0, estimate = false, summary = "", sourceStr: string | null = null, seconds: number | null = null, output: OutputKind = "video";
 
-    if (tool === "character") {
+    if (tool === "clips") {
+      let asset: any = null;
+      if (st.source != null && st.source !== "") {
+        const src = resolveRef(st.source, i, "video");
+        if (src.ref) throw new AssistantError("plan_invalid", `Step ${i}: clips take a library video or a YouTube link, not another step's result`);
+        sourceStr = src.id; asset = ctx.assets.get(src.id!.toLowerCase());
+      }
+      const q = await quoteClips({ env: ctx.env, fetch: ctx.deps.fetch, log: ctx.deps.log }, PLANS, asset ? { id: asset.id, kind: asset.kind, name: asset.name, bytes: asset.bytes, probe: asset.probe } : null, { url: o.url, format: o.format, length: o.length });
+      credits = q.credits; summary = `${q.summary} (charged for the clips made)`; Object.assign(o, q.options); estimate = true;
+    } else if (tool === "character") {
       const q = quote("character", { mode: o.mode, prompt: o.prompt }, null, costs);
       credits = q.credits; summary = q.summary; Object.assign(o, q.options);
       output = "image";
@@ -407,7 +439,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
     }
     const ex = expectedOutput(tool, o, sourceStr && !sourceStr.startsWith("$") ? Number(ctx.assets.get(sourceStr.toLowerCase())?.probe?.duration) || null : produced[Number(sourceStr?.slice(1) ?? 0) - 1]?.seconds ?? null, output);
     seconds = ex.seconds; output = ex.output;
-    produced.push({ output, seconds });
+    produced.push({ output, seconds }); producedTool.push(tool);
     steps.push({ index: i, tool, label, source: sourceStr, options: o, credits, estimate, output, seconds, summary });
   }
   const total = steps.reduce((n, s) => n + s.credits, 0);
@@ -468,7 +500,7 @@ export function findMediaUrl(body: any): string | null {
 }
 /** The longest video a link may bring in, in seconds (uploads say 10 minutes; STUDIO_LINK_MAX_SECONDS raises it). */
 export const linkMaxSeconds = (env: Record<string, string | undefined>) => Math.max(60, Number(env.STUDIO_LINK_MAX_SECONDS) || 600);
-export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: string, url: string): Promise<Attachment> {
+export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: string, url: string, opts: { maxSeconds?: number; collectionId?: string | null } = {}): Promise<Attachment> {
   const env = deps.env ?? process.env, fetchFn = deps.fetch ?? fetch;
   const platform = linkPlatform(url);
   if (!platform) throw new AssistantError("unsupported_link", "Only TikTok, Instagram and YouTube links can be fetched");
@@ -484,7 +516,7 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
     recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: "/v1/youtube/video", status: meta?.status ?? 0, use: "link" } });
     body = meta && meta.ok ? await meta.json().catch(() => null) : null;
     const ms = Number(body?.durationMs ?? body?.lengthSeconds * 1000);
-    const maxSeconds = linkMaxSeconds(env);
+    const maxSeconds = opts.maxSeconds ?? linkMaxSeconds(env);
     if (ms > 0 && ms / 1000 > maxSeconds) throw new AssistantError("link_too_long", `That video is ${Math.round(ms / 60000)} minutes by its listing (${String(body?.title ?? "").slice(0, 60) || "no title"}); links can be up to ${Math.round(maxSeconds / 60)} minutes`);
     try {
       const got = await (deps.download ?? ((a, b, o) => import("./studio-youtube.js").then((m) => m.downloadYouTube(a, b, { ...o, fetch: fetchFn, env }))))(url, file, { maxBytes: LINK_LIMIT, maxSeconds });
@@ -523,7 +555,7 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
     const handle = url.match(/\/@([A-Za-z0-9_.]+)/)?.[1] ?? (platform === "instagram" ? url.match(/instagram\.com\/([A-Za-z0-9_.]+)\/(?:reel|p)\//)?.[1] : null);
     const label = platform === "tiktok" ? "TikTok" : platform === "instagram" ? "Instagram" : /\/shorts\//.test(url) ? "YouTube Short" : "YouTube";
     const name = `${title || `${label}${handle ? ` @${handle}` : platform === "youtube" ? ` ${youtubeId(url) ?? "video"}` : " video"}`}.mp4`;
-    const ins = await sb.from("studio_assets").insert({ id, user_id: u, kind: "video", name, object_key: objectKey, bytes: bytes.length, status: "ready", probe: { duration: seconds || undefined, poster_key: posterKey, source_url: url, source: platform } });
+    const ins = await sb.from("studio_assets").insert({ id, user_id: u, kind: "video", name, object_key: objectKey, bytes: bytes.length, status: "ready", ...(opts.collectionId ? { collection_id: opts.collectionId } : {}), probe: { duration: seconds || undefined, poster_key: posterKey, source_url: url, source: platform, title: title || undefined } });
     if (ins.error) throw ins.error;
     void import("./studio-recast.js").then((m) => m.detectCuts(sb, u, id, { log: deps.log })).catch(() => undefined); // prices a long swap from its plan
     return { asset_id: id, name, kind: "video", seconds: seconds || null };
@@ -714,14 +746,18 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
             else { memory.push(ins.data as MemoryNote); result = { ok: true }; }
           }
         } else if (use.name === "propose_plan") { plan = await pricePlan(ctx, use.input); result = { ok: true, plan: { title: plan.title, total_credits: plan.total_credits, estimate: plan.estimate, balance: ku.balance, warnings: plan.warnings, steps: plan.steps.map((s) => ({ index: s.index, tool: s.tool, label: s.label, credits: s.credits, estimate: s.estimate, summary: s.summary })) } }; }
-        else if (use.name === "fetch_link") {
+        else if (use.name === "search_library") {
+          const found = await searchLibrary(sb, convo.user_id, { query: use.input?.query, collection: use.input?.collection, kind: use.input?.kind });
+          for (const f of found) ctx.assets.set(String(f.row.id).toLowerCase(), f.row);
+          result = { ok: true, files: found.map((f) => f.view), note: found.length ? undefined : "Nothing matched; try other words, or ask which file they mean" };
+        } else if (use.name === "fetch_link") {
           const a = await importLink(sb, deps, convo.user_id, String(use.input?.url ?? ""));
           ctx.assets.set(a.asset_id, { id: a.asset_id, kind: "video", name: a.name, probe: { duration: a.seconds }, object_key: `${convo.user_id}/${a.asset_id}.mp4` });
           user.attachments = [...(user.attachments ?? []), a];
           result = { ok: true, asset: a };
         } else result = { ok: false, error: "unknown_tool" };
       } catch (e: any) {
-        const code = e instanceof AssistantError || e instanceof StudioError || e instanceof InstrumentError ? e.code : "tool_failed";
+        const code = e instanceof AssistantError || e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError ? e.code : "tool_failed";
         result = { ok: false, error: code, detail: String(e?.message ?? e).slice(0, 300) };
         log(`[assistant] tool ${use.name} ${code}: ${String(e?.message ?? e).slice(0, 200)}`);
       }
@@ -910,6 +946,15 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
             return map;
           });
           credits = q.credits; options = q.options; assetId = null;
+        } else if (ps.tool === "clips") {
+          // priced again at start (the listing may have changed), into a collection made for the run
+          const a = assetId ? await sb.from("studio_assets").select("id,kind,status,probe,bytes,name").eq("id", assetId).eq("user_id", convo.user_id).maybeSingle() : { data: null, error: null };
+          if (a.error) throw a.error;
+          const q = await quoteClips({ env, fetch: deps.fetch, log }, PLANS, a.data ? { id: a.data.id, kind: a.data.kind, name: a.data.name, bytes: a.data.bytes, probe: a.data.probe } : null, { url: o.url, format: o.format, length: o.length });
+          const s = q.options.source ?? {};
+          const c = await sb.from("studio_collections").insert({ user_id: convo.user_id, name: String(s.title ?? "Clips").slice(0, 100) || "Clips", kind: "clips", status: "processing", source: { ...s, format: q.options.format, length: q.options.length } }).select("id").single();
+          if (c.error) throw c.error;
+          credits = q.credits; options = { ...q.options, collection_id: c.data.id };
         } else if (ps.tool !== "character") {
           const a = assetId ? await sb.from("studio_assets").select("id,kind,status,probe").eq("id", assetId).eq("user_id", convo.user_id).maybeSingle() : { data: null, error: null };
           if (a.error) throw a.error;
@@ -921,6 +966,10 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
         // where the job came from, for the admin panel: a chat, or a chat started by an automation
         options = { ...options, via: convo.automation_id ? "automation" : "chat", conversation_id: convo.id, ...(convo.automation_id ? { automation_id: convo.automation_id } : {}) };
         const r = await sb.rpc("studio_create_job", { p_user: convo.user_id, p_tool: ps.tool, p_asset: assetId, p_options: options, p_credits: credits });
+        if (ps.tool === "clips" && options.collection_id) {
+          if (r.error) await sb.from("studio_collections").delete().eq("id", options.collection_id).eq("user_id", convo.user_id);
+          else await sb.from("studio_collections").update({ job_id: r.data.id }).eq("id", options.collection_id);
+        }
         if (r.error) {
           const msg = String(r.error.message ?? r.error);
           if (/too_many_jobs/.test(msg)) continue; // a slot frees up later
@@ -932,7 +981,16 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
       }
     }
     if (run.status === "running" && run.steps.every((s) => s.status === "done")) {
-      finish("done", `All ${run.steps.length === 1 ? "done" : `${run.steps.length} steps are done`}. The results are in the cards above and in your library.`);
+      // Clips steps: say where the clips are, or that YouTube refused and the file is needed
+      const clipCols = run.steps.filter((s) => plan.steps[s.index - 1].tool === "clips" && s.job_id).map((s) => jobs.get(s.job_id!)?.options?.collection_id).filter(Boolean) as string[];
+      let clipWords = "";
+      if (clipCols.length) {
+        const cs = await sb.from("studio_collections").select("id,name,status,note").in("id", clipCols).eq("user_id", convo.user_id);
+        const n = await sb.from("studio_assets").select("collection_id").in("collection_id", clipCols).neq("status", "deleted");
+        const count = (id: string) => ((n.data ?? []) as any[]).filter((x) => x.collection_id === id).length;
+        clipWords = ((cs.data ?? []) as any[]).map((c) => c.status === "needs_file" ? ` "${c.name}": ${c.note ?? "YouTube refused the download."} Open it on the Clips page to upload the file.` : ` ${count(c.id)} clips from "${c.name}" are in your library, best first.${c.note ? ` ${c.note}` : ""}`).join("");
+      }
+      finish("done", clipWords && run.steps.length === 1 ? clipWords.trim() : `All ${run.steps.length === 1 ? "done" : `${run.steps.length} steps are done`}. The results are in the cards above and in your library.${clipWords}`);
       // Finished videos: offer to post them (or, with nothing linked and no recent "not now", to link first).
       try {
         const social = await socialSnapshot(sb, convo.user_id, env);

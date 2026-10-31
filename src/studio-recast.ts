@@ -186,9 +186,11 @@ export async function sceneCuts(path: string, within: number, threshold = 0.3): 
  *  its real plan before it runs. Runs in the background after an upload or an import; a failure only means the quote
  *  falls back to the per-second price (the runner still settles on the real plan, up to what was reserved). */
 export async function detectCuts(sb: SupabaseClient, userId: string, assetId: string, deps: { sceneCuts?: RecastDeps["sceneCuts"]; log?: (l: string) => void } = {}): Promise<number[] | null> {
-  const a = await sb.from("studio_assets").select("id,object_key,kind,probe,status").eq("id", assetId).eq("user_id", userId).maybeSingle();
+  const a = await sb.from("studio_assets").select("id,object_key,kind,probe,status,bytes").eq("id", assetId).eq("user_id", userId).maybeSingle();
   if (a.error || !a.data || a.data.kind !== "video" || a.data.status !== "ready") return null;
   if (Array.isArray(a.data.probe?.cuts)) return a.data.probe.cuts;
+  // a long source (over 512 MB or 10 minutes) is only for Clips, which reads it in stretches; never load it whole here
+  if (Number(a.data.bytes) > 536_870_912 || Number(a.data.probe?.duration) > 600 || a.data.probe?.long_source) return null;
   const dir = await mkdtemp(join(tmpdir(), "studio-cuts-"));
   try {
     const src = await sb.storage.from("studio-uploads").download(a.data.object_key);
