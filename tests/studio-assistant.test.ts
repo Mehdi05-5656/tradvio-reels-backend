@@ -435,7 +435,7 @@ test("Anthropic's event stream is read back into blocks: text deltas handed out,
   await assert.rejects(readAnthropicStream(new Response('event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n').body!, () => undefined), (e: any) => e.code === "assistant_unavailable" && /Overloaded/.test(e.message));
 });
 
-test("a streaming turn reports rounds, text deltas and tool status in order, and the saved text is the last round's", async () => {
+test("a streaming turn reports rounds, text deltas and tool status in order, and the saved text keeps every round in order", async () => {
   const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
   const { fetchFn, asked } = fakeClaude([
     toolReply("propose_plan", { title: "Five originals", steps: [{ tool: "blueprint", label: "Five originals", source: VID, options: { copies: 5 } }] }, "Pricing it now."),
@@ -450,7 +450,7 @@ test("a streaming turn reports rounds, text deltas and tool status in order, and
   assert.ok(!asked[1].messages[1].content.some((b: any) => b.type === "text" && !b.text), "no empty text block is sent back");
   assert.equal((events[3] as any).text, "Pricing the plan");
   assert.equal(events.filter((e) => e.type === "delta").map((e: any) => e.text).join(""), "Pricing it now.Five originals for 20 credits. Confirm in the card.");
-  assert.equal(out.messages[1].text, "Five originals for 20 credits. Confirm in the card.");
+  assert.equal(out.messages[1].text, "Pricing it now.\n\nFive originals for 20 credits. Confirm in the card.", "what it said before the tool ran stays above the answer");
   assert.equal(out.plan!.total_credits, 5 * COSTS.blueprint_copy);
 });
 

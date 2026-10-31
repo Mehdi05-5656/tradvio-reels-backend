@@ -604,7 +604,10 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     } catch (e: any) { log(`[assistant] people ${a.asset_id} ${String(e?.message ?? e).slice(0, 120)}`); }
   }
   if (peopleNotes.length) user.context = peopleNotes.join("\n").slice(0, 1200);
+  // every round's words are kept, in order: what it says before a tool runs stays above what it says after
   let text = "", streamed = "", interrupted = false;
+  const said: string[] = [];
+  const keep = (t: string) => { const x = t.trim(); if (x && said[said.length - 1] !== x) said.push(x); text = said.join("\n\n"); };
   const costs = costsFor(env);
   try {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -612,7 +615,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
     // automatic caching: the instructions, tools and the chat so far are read back at a tenth of the price on the next round
     const reply = await claude({ ...deps, userId: convo.user_id, feature: "assistant" }, { system, tools: social.enabled ? TOOLS : TOOLS.filter((t) => t.name !== "offer_post"), messages, cache_control: { type: "ephemeral" } }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
     const blocks: any[] = Array.isArray(reply?.content) ? reply.content : [];
-    text = blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n").trim() || text;
+    keep(blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n"));
     const uses = blocks.filter((b) => b.type === "tool_use");
     if (!uses.length || reply.stop_reason !== "tool_use") break;
     messages.push({ role: "assistant", content: blocks.filter((b) => !(b.type === "text" && !String(b.text ?? "").trim())) });
@@ -696,7 +699,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   } catch (e: any) {
     // The person stopped the reply (or left): keep what was said so far, marked, and let the chat go on from there.
     if (!(e instanceof AssistantError && e.code === "aborted")) throw e;
-    interrupted = true; text = streamed.trim() || text;
+    interrupted = true; keep(streamed);
     log(`[assistant] turn ${convo.id} stopped by the person`);
   }
   if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
