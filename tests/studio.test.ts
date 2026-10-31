@@ -24,11 +24,12 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
     from(table: string) {
       let rows = () => tables[table] ?? [];
       const filters: ((r: any) => boolean)[] = [];
-      let single = false, maybe = false, pending: any = null, head = false;
+      let single = false, maybe = false, pending: any = null, head = false, hit: any[] = [];
       const q: any = {
         select(_c?: any, o?: any) { if (o?.head) head = true; return q; }, order() { return q; }, limit() { return q; },
         eq(k: string, v: any) { filters.push((r) => r[k] === v); return q; },
         neq(k: string, v: any) { filters.push((r) => r[k] !== v); return q; },
+        is(k: string, v: any) { filters.push((r) => (r[k] ?? null) === v); return q; },
         gte(k: string, v: any) { filters.push((r) => r[k] >= v); return q; },
         in(k: string, v: any[]) { filters.push((r) => v.includes(r[k])); return q; },
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },
@@ -36,8 +37,8 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
         upsert(v: any) { pending = { table, op: "upsert", v }; rows = () => [v]; return q; },
         update(v: any) { pending = { table, op: "update", v }; return q; },
         then(resolve: any, reject: any) {
-          if (pending) { writes.push({ ...pending, filters: filters.length }); if (pending.op === "insert" && table === "studio_stripe_events" && (tables[table] ?? []).some((r) => r.id === pending.v.id)) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key" } }).then(resolve, reject); if (pending.op === "insert") (tables[table] ??= []).push(pending.v); if (pending.op === "update") for (const r of (tables[table] ?? []).filter((r) => filters.every((f) => f(r)))) Object.assign(r, pending.v); }
-          const out = rows().filter((r) => filters.every((f) => f(r)));
+          if (pending) { writes.push({ ...pending, filters: filters.length }); if (pending.op === "insert" && table === "studio_stripe_events" && (tables[table] ?? []).some((r) => r.id === pending.v.id)) return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key" } }).then(resolve, reject); if (pending.op === "insert") (tables[table] ??= []).push(pending.v); if (pending.op === "update") { hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); for (const r of hit) Object.assign(r, pending.v); } }
+          const out = pending?.op === "update" ? hit : rows().filter((r) => filters.every((f) => f(r)));
           const data = head ? null : single || maybe ? (out[0] ?? null) : out;
           return Promise.resolve({ data, error: single && !out.length ? { message: "no rows" } : null, count: head ? out.length : null }).then(resolve, reject);
         },
@@ -196,6 +197,12 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal((await s.call("POST", "/api/studio/stripe/webhook", ev, { "stripe-signature": "bad" })).status, 400);
   assert.deepEqual((await s.call("POST", "/api/studio/stripe/webhook", ev, { "stripe-signature": "good" })).body, { received: true });
   assert.deepEqual((await s.call("POST", "/api/studio/stripe/webhook", ev, { "stripe-signature": "good" })).body, { received: true, duplicate: true }, "the same event twice is a no-op");
+  // an event that failed earlier (stored, never processed) is applied when Stripe retries it, then marked done
+  tables.studio_stripe_events.push({ id: "evt_retry", type: "customer.subscription.updated", processed_at: null, error: "left for retry" });
+  assert.deepEqual((await s.call("POST", "/api/studio/stripe/webhook", { ...ev, id: "evt_retry" }, { "stripe-signature": "good" })).body, { received: true }, "a retry of a failed event is applied");
+  const retried = tables.studio_stripe_events.find((r: any) => r.id === "evt_retry");
+  assert.ok(retried.processed_at); assert.equal(retried.error, null);
+  assert.deepEqual((await s.call("POST", "/api/studio/stripe/webhook", { ...ev, id: "evt_retry" }, { "stripe-signature": "good" })).body, { received: true, duplicate: true });
   tables.studio_customers[0].status = "active";
   const q = await s.call("POST", "/api/studio/quote", { tool: "blueprint", asset_id: ASSET, options: { copies: 10 } }, { "x-test-user": ANN });
   assert.equal(q.body.credits, 40);

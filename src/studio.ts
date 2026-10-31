@@ -14,6 +14,8 @@ import { checkUpload, checkJobRate } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
 import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
 import { randomUUID } from "node:crypto";
+import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
+import { checkUnsubscribeToken } from "./studio-mail.js";
 import Stripe from "stripe";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -700,6 +702,27 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     } catch (e) { fail(res, e); }
   });
 
+  // One-click unsubscribe from the optional notices (results ready, low credits, renewal). The link carries a signed
+  // token; GET shows a small confirm page (so a mail scanner that opens links unsubscribes nobody), POST does it. Gmail
+  // and Yahoo POST "List-Unsubscribe=One-Click" here straight from their own unsubscribe button. Receipts keep coming.
+  const unsubPage = (title: string, body: string, form = "") => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head><body style="margin:0;background:#f5f7f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#0f1720"><div style="max-width:440px;margin:64px auto;padding:28px;background:#fff;border:1px solid #e6eaed;border-radius:14px"><p style="margin:0 0 14px;font-weight:700">Clone8 Studio</p><h1 style="margin:0 0 10px;font-size:20px">${title}</h1><p style="margin:0 0 18px;line-height:1.55;color:#33404a">${body}</p>${form}</div></body></html>`;
+  app.get("/api/studio/email/unsubscribe", (req, res) => {
+    const u = String(req.query.u ?? ""), t = String(req.query.t ?? "");
+    if (!UUID_RE.test(u) || !checkUnsubscribeToken(u, t, env)) return res.status(400).type("html").send(unsubPage("This link is not valid", "Turn emails on or off from the Account page in Clone8 Studio instead."));
+    const action = `/api/studio/email/unsubscribe?u=${encodeURIComponent(u)}&t=${encodeURIComponent(t)}`;
+    res.type("html").send(unsubPage("Stop Clone8 Studio notices?", "You will no longer get emails when results are ready, when credits run low or before your plan renews. Receipts for payments still arrive.", `<form method="post" action="${action}"><button type="submit" style="padding:11px 18px;border:0;border-radius:10px;background:#0f8f7f;color:#fff;font-size:14px;font-weight:600;cursor:pointer">Stop these emails</button></form>`));
+  });
+  app.post("/api/studio/email/unsubscribe", async (req, res) => {
+    const u = String(req.query.u ?? ""), t = String(req.query.t ?? "");
+    if (!UUID_RE.test(u) || !checkUnsubscribeToken(u, t, env)) return res.status(400).type("html").send(unsubPage("This link is not valid", "Turn emails on or off from the Account page in Clone8 Studio instead."));
+    try {
+      const r = await sbFn().from("studio_customers").update({ email_opt_out: true, updated_at: new Date().toISOString() }).eq("user_id", u);
+      if (r.error) throw r.error;
+      log(`[mail] unsubscribed ${u}`);
+      res.type("html").send(unsubPage("You will not get these emails", `Turned off. You can turn them back on any time from the Account page: ${(env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "")}/#studio/account`));
+    } catch (e) { fail(res, e); }
+  });
+
   // Email notices on or off.
   app.post("/api/studio/notices", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
@@ -727,7 +750,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
 
   // Stripe → us. Signature-verified; the raw body is captured by the express.json verify hook in index.ts.
   app.post("/api/studio/stripe/webhook", async (req, res) => {
-    const secret = env.STRIPE_WEBHOOK_SECRET;
+    // trimmed: a secret pasted with a trailing space or newline would otherwise fail every signature
+    const secret = (env.STRIPE_WEBHOOK_SECRET ?? "").trim();
     if (!secret) return res.status(503).json({ error: "webhook_unconfigured" });
     let event: any;
     try { event = stripe().webhooks.constructEvent(String((req as any).rawBody ?? ""), String(req.header("stripe-signature") ?? ""), secret); }
@@ -736,8 +760,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const sb = sbFn();
       const ins = await sb.from("studio_stripe_events").insert({ id: event.id, type: event.type, payload: event }).select("id").maybeSingle();
       if (ins.error) {
-        if (/duplicate|unique|23505/i.test(ins.error.message ?? "") || (ins.error as any).code === "23505") return res.json({ received: true, duplicate: true });
-        throw ins.error;
+        if (!(/duplicate|unique|23505/i.test(ins.error.message ?? "") || (ins.error as any).code === "23505")) throw ins.error;
+        // Seen before. Done: a no-op. Failed earlier (no processed_at): this is Stripe's retry, so apply it again; every
+        // step is idempotent (grants are unique by reference, the subscription row is overwritten with the same values).
+        const seen = await sb.from("studio_stripe_events").select("processed_at").eq("id", event.id).maybeSingle();
+        if (seen.error) throw seen.error;
+        if (!seen.data || seen.data.processed_at) return res.json({ received: true, duplicate: true });
       }
       let outcome = "";
       try { outcome = await applyStripeEvent(sb, stripe(), event); }
@@ -746,10 +774,19 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         console.error("[studio] webhook", event.type, String(e?.message ?? e));
         return res.status(500).json({ error: "webhook_failed" }); // Stripe retries; the event row keeps the error.
       }
-      await sb.from("studio_stripe_events").update({ processed_at: new Date().toISOString() }).eq("id", event.id);
+      // Only the delivery that marks the event processed sends its receipt, so two deliveries at once email once.
+      const done = await sb.from("studio_stripe_events").update({ processed_at: new Date().toISOString(), error: null }).eq("id", event.id).is("processed_at", null).select("id");
       log(`[studio] webhook ${event.type}: ${outcome}`);
       res.json({ received: true });
-    } catch (e) { fail(res, e); }
+      const receipt = receiptFromEvent(event);
+      if (receipt && !done.error && (done.data ?? []).length) {
+        const o = event.data?.object ?? {};
+        const customer = typeof o.customer === "string" ? o.customer : o.customer?.id ?? null;
+        const hint = o.metadata?.user_id ?? o.client_reference_id;
+        const who = typeof hint === "string" && UUID_RE.test(hint) ? hint : await userForCustomer(sb, customer).catch(() => null);
+        void sendReceipt(sb, who, receipt, { env, log });
+      }
+    } catch (e) { if (!res.headersSent) fail(res, e); }
   });
 
   app.post("/api/studio/promo", async (req, res) => {

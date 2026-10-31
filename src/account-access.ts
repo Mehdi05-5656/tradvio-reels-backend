@@ -9,7 +9,7 @@ import { isAdmin, isOperator } from "./auth.js";
 export function selfAuthenticatedPost(path: string, method: string): boolean {
   if (method !== "POST") return false;
   const p = path.replace(/\/+$/, "");
-  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/studio/stripe/webhook" || p === "/api/studio/social/webhook";
+  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/studio/stripe/webhook" || p === "/api/studio/social/webhook" || p === "/api/studio/email/unsubscribe";
 }
 
 // Default-deny legacy/global routes. Ownership is checked on the server, never
@@ -25,6 +25,9 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     // Invite preview: the single-use token in the path is the credential; the handler reveals only the
     // organization name and whether the link is still valid.
     if (/^\/api\/invites\/[^/]+$/.test(path) && ["GET", "HEAD"].includes(req.method)) return next();
+    // Email unsubscribe (GET shows a confirm page, POST is the RFC 8058 one-click): the signed token in the link is the
+    // credential, and the only thing it can do is turn that person's optional notices off.
+    if (path === "/api/studio/email/unsubscribe" && ["GET", "HEAD"].includes(req.method)) return next();
     // The plan catalog is public; it carries no account data.
     if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
     // So is the instrument catalog: the models on offer, their settings and price hints, nothing per person.

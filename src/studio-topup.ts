@@ -6,6 +6,7 @@
 // value floor after Stripe's fee (tests enforce it), so a top-up never sells a credit under what the tools are priced on.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, netPerCredit, type PlanLike } from "./studio-pricing.js";
+import { sendReceipt } from "./studio-receipts.js";
 
 export const TOPUP_MIN_USD = 5, TOPUP_MAX_USD = 1000;
 export const AUTO_MIN_USD = 5, AUTO_MAX_USD = 500;
@@ -97,6 +98,7 @@ export async function chargeAutoTopUp(sb: SupabaseClient, stripe: StripeTopUp, u
     if (g.error) throw g.error;
     await sb.from("studio_customers").update({ auto_topup_error: null }).eq("user_id", u);
     log(`[topup] auto ${JSON.stringify({ user: u, usd, credits, why, payment: pi.id })}`);
+    if (g.data?.granted !== false) void sendReceipt(sb, u, { amount_cents: usd * 100, currency: "usd", items: [`Auto top-up: ${new Intl.NumberFormat("en-US").format(credits)} credits`], credits, invoice_url: null, reference: String(pi.id), paid_at: new Date() }, { log });
     return { ok: true, credits };
   } catch (e: any) {
     const stop = e?.stop ?? (e?.type === "StripeCardError" || /card|authentication|declined/i.test(String(e?.code ?? e?.message ?? "")) ? "The card was declined; update it in Billing and turn auto top-up back on" : null);
