@@ -287,7 +287,13 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     const userId = (s.user_id && UUID_RE.test(s.user_id) ? s.user_id : null) ?? (await userForCustomer(sb, s.customer));
     if (!userId) return "subscription for unknown customer";
     await applySubscription(sb, userId, obj);
-    return `${type} → ${s.plan?.id ?? "unknown plan"} ${s.status}`;
+    // A plan that has ended frees its self-serve posting profile (linked network tokens and a provider plan slot).
+    let social = "";
+    if (["canceled", "incomplete_expired"].includes(String(s.status))) {
+      try { const { releaseSocialProfile } = await import("./studio-social.js"); if (await releaseSocialProfile(sb, userId)) social = ", posting profile removed"; }
+      catch (e: any) { console.error(`[social] ALERT could not remove the posting profile of ${userId}: ${String(e?.message ?? e).slice(0, 160)}`); }
+    }
+    return `${type} → ${s.plan?.id ?? "unknown plan"} ${s.status}${social}`;
   }
   if (type === "invoice.paid") {
     const customer = typeof obj.customer === "string" ? obj.customer : obj.customer?.id ?? null;

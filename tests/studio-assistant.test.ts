@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { accountAccess } from "../src/account-access.js";
 import { COSTS, PLANS } from "../src/studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS } from "../src/studio-knowledge.js";
-import { pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, titleIfNeeded, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
+import { mergeMessages, pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, titleIfNeeded, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
 import { templateFromPlan, instantiate, createAutomation, runAutomation, registerAutomations } from "../src/studio-automations.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CAT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CONVO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -871,4 +871,17 @@ test("publish card routes: linking is noticed once, Post now goes out through th
     assert.equal(ig.body.conversation.messages.find((m: any) => m.publish?.id === "card-1").publish.status, "ignored");
     assert.equal(tables.studio_social_prefs.length, 0, "with networks linked, ignoring is not a no to linking");
   } finally { await new Promise((r) => server.close(r)); }
+});
+
+test("saving a chat never undoes a card press made meanwhile, and keeps the messages the press added", () => {
+  const card = (status: any, extra: any = {}) => ({ id: "c1", items: [], status, ...extra });
+  const mine: any[] = [{ id: "m1", role: "user", text: "hi", at: "1" }, { id: "m2", role: "assistant", text: "post?", at: "2", publish: card("open", { linked_seen: ["tiktok"] }) }, { id: "m4", role: "assistant", text: "new reply", at: "4" }];
+  const stored: any[] = [{ id: "m1", role: "user", text: "hi", at: "1" }, { id: "m2", role: "assistant", text: "post?", at: "2", publish: card("sent", { post_ids: ["p1"], linked_seen: ["youtube"] }) }, { id: "m3", role: "assistant", text: "On its way", at: "3" }];
+  const out = mergeMessages(stored, mine);
+  assert.deepEqual(out.map((m) => m.id), ["m1", "m2", "m3", "m4"]);
+  assert.equal(out[1].publish!.status, "sent"); assert.deepEqual(out[1].publish!.post_ids, ["p1"]);
+  assert.deepEqual(out[1].publish!.linked_seen!.sort(), ["tiktok", "youtube"]);
+  // a card only moves forward: an open stored card does not reopen one this save closed
+  const back = mergeMessages([{ ...stored[1], publish: card("open") }], [{ ...stored[1], publish: card("ignored") }]);
+  assert.equal(back[0].publish!.status, "ignored");
 });

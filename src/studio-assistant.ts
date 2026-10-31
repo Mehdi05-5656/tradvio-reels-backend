@@ -9,8 +9,8 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
-import { getSocialProvider } from "./social-provider.js";
-import { createPosts, socialSnapshot } from "./studio-social.js";
+import { getSocialProvider, SocialError } from "./social-provider.js";
+import { createPosts, socialSnapshot, UNCONFIRMED } from "./studio-social.js";
 import { performanceForChat } from "./studio-insights.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -55,7 +55,7 @@ export type PeopleCard = { id: string; asset_id: string; asset_name: string; rea
  *  press Post or Schedule on it; with nothing linked it walks them through linking and picks up again when they are back. */
 export type PublishItem = { job_id?: string | null; output_key?: string | null; asset_id?: string | null; poster_key?: string | null; url?: string | null };
 export type PublishCard = {
-  id: string; items: PublishItem[]; status: "open" | "sent" | "ignored"; auto?: boolean;
+  id: string; items: PublishItem[]; status: "open" | "sending" | "sent" | "ignored"; auto?: boolean; sending_at?: string | null;
   suggested?: { action?: "now" | "schedule" | null; schedule_at?: string | null; platforms?: string[]; caption?: string | null; note?: string | null };
   /** networks already acknowledged in this chat, so a new link is announced once */
   linked_seen?: string[]; post_ids?: string[]; outcome?: string | null;
@@ -529,6 +529,46 @@ function modelMessages(msgs: Message[], from = 0): any[] {
   return merged;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Saving a conversation that something else may have changed meanwhile (a Post press on a card, the run loop): reload,
+// fold in what the stored copy has that ours lacks (messages are append-only; a card only moves forward), and write
+// only if nobody wrote in between, else again on the fresh copy.
+// ---------------------------------------------------------------------------------------------------
+const CARD_RANK: Record<string, number> = { open: 0, sending: 1, sent: 2, ignored: 2 };
+export function mergeMessages(stored: Message[], mine: Message[]): Message[] {
+  const out = mine.map((m) => ({ ...m }));
+  const byId = new Map(out.map((m) => [m.id, m]));
+  let after: string | null = null;
+  for (const s of stored ?? []) {
+    const m = byId.get(s.id);
+    if (!m) {
+      const i = after ? out.findIndex((x) => x.id === after) + 1 : 0;
+      const copy = { ...s }; out.splice(i, 0, copy); byId.set(s.id, copy);
+    } else if (s.publish && m.publish && s.publish.id === m.publish.id) {
+      const sr = CARD_RANK[s.publish.status] ?? 0, mr = CARD_RANK[m.publish.status] ?? 0;
+      const seen = [...new Set([...(s.publish.linked_seen ?? []), ...(m.publish.linked_seen ?? [])])];
+      if (sr > mr || (sr === mr && sr > 0)) m.publish = { ...s.publish, linked_seen: seen };
+      else m.publish = { ...m.publish, linked_seen: seen };
+    }
+    after = s.id;
+  }
+  return out;
+}
+async function saveConversation(sb: SupabaseClient, convo: Conversation, fields: () => Record<string, any>): Promise<void> {
+  for (let i = 0; i < 6; i++) {
+    const cur = await sb.from("studio_conversations").select("messages,updated_at").eq("id", convo.id).eq("user_id", convo.user_id).maybeSingle();
+    if (cur.error) throw cur.error;
+    if (!cur.data) throw new AssistantError("conversation_not_found", "No such chat", 404);
+    convo.messages = mergeMessages((cur.data as any).messages ?? [], convo.messages);
+    const stamp = new Date(Math.max(Date.now(), Date.parse((cur.data as any).updated_at) + 1)).toISOString();
+    const w = await sb.from("studio_conversations").update({ ...fields(), messages: convo.messages, updated_at: stamp }).eq("id", convo.id).eq("user_id", convo.user_id).eq("updated_at", (cur.data as any).updated_at).select("id");
+    if (w.error) throw w.error;
+    if ((w.data ?? []).length) { convo.updated_at = stamp; return; }
+    await new Promise((r) => setTimeout(r, 25 + Math.random() * 100));
+  }
+  throw new AssistantError("chat_busy", "The chat was changing; try again", 409);
+}
+
 export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation, input: { text: string; attachments: Attachment[]; links: string[] }, events?: (e: TurnEvent) => void): Promise<Conversation> {
   const env = deps.env ?? process.env, log = deps.log ?? (() => undefined);
   const now = () => new Date(deps.now?.() ?? Date.now()).toISOString();
@@ -556,7 +596,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   try {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     events?.({ type: "round" }); streamed = "";
-    const reply = await claude(deps, { system, tools: TOOLS, messages }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
+    const reply = await claude(deps, { system, tools: social.enabled ? TOOLS : TOOLS.filter((t) => t.name !== "offer_post"), messages }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
     const blocks: any[] = Array.isArray(reply?.content) ? reply.content : [];
     text = blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n").trim() || text;
     const uses = blocks.filter((b) => b.type === "tool_use");
@@ -660,9 +700,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   if (input.attachments.length || input.links.length) for (const m of convo.messages) if (m.request?.status === "open") m.request.status = "done";
   convo.messages = [...convo.messages, assistant];
   if (plan) { if (convo.plan && convo.plan.status === "proposed") convo.plan.status = "superseded"; convo.plan = plan; convo.title = plan.title; }
-  convo.updated_at = now();
-  const w = await sb.from("studio_conversations").update({ title: convo.title, messages: convo.messages, plan: convo.plan, updated_at: convo.updated_at }).eq("id", convo.id).eq("user_id", convo.user_id);
-  if (w.error) throw w.error;
+  await saveConversation(sb, convo, () => ({ title: convo.title, plan: convo.plan }));
   return convo;
 }
 
@@ -846,9 +884,7 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
     log(`[assistant] run ${convo.id} ${code}: ${String(e?.message ?? e).slice(0, 200)}`);
     finish("failed", `The run stopped: ${code}. Any reserved credits were refunded.`);
   }
-  convo.updated_at = new Date().toISOString();
-  const w = await sb.from("studio_conversations").update({ status: convo.status, messages: convo.messages, plan: convo.plan, run: convo.run, updated_at: convo.updated_at }).eq("id", convo.id);
-  if (w.error) throw w.error;
+  await saveConversation(sb, convo, () => ({ status: convo.status, plan: convo.plan, run: convo.run }));
   return convo;
 }
 
@@ -908,7 +944,7 @@ export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversat
       else if (j.status === "failed" || j.status === "canceled") { m.choice!.status = "failed"; m.choice!.error_code = j.error_code ?? j.status; changed = true; }
     }
   }
-  if (changed) { const w = await sb.from("studio_conversations").update({ messages: c.messages }).eq("id", c.id).eq("user_id", u); if (w.error) throw w.error; }
+  if (changed) await saveConversation(sb, c, () => ({}));
   const keys = c.messages.flatMap((m) => [...[...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])].map((o) => o.poster_key), ...(m.people?.people ?? []).map((p) => p.key), ...(m.publish?.items ?? []).map((i) => i.poster_key)].filter(Boolean) as string[]);
   if (keys.length) {
     const signed = await sb.storage.from("studio-outputs").createSignedUrls([...new Set(keys)], 900);
@@ -971,7 +1007,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     const msg = String(e?.message ?? e);
     if (/relation .* does not exist/i.test(msg)) return res.status(503).json({ error: "assistant_unavailable", detail: "The assistant migration has not been applied" });
     console.error("[assistant]", msg);
-    res.status(500).json({ error: "assistant_failed", detail: msg.slice(0, 200) });
+    res.status(500).json({ error: "assistant_failed", detail: "Something went wrong on our side; try again in a moment" });
   };
   const load = async (sb: SupabaseClient, u: string, id: string): Promise<Conversation> => {
     if (!UUID_RE.test(id)) throw new AssistantError("conversation_not_found", "No such conversation", 404);
@@ -989,48 +1025,73 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
   // with nothing linked, quiets the unasked offer for a while); social-linked is called by the interface when it sees
   // new networks after the linking page, so the chat can say so and carry on, like a connector coming back.
   const publishCard = (c: Conversation, id: string) => { const m = c.messages.find((x) => x.publish?.id === id); if (!m?.publish) throw new AssistantError("card_not_found", "No such card", 404); return m.publish; };
-  const save = async (sb: SupabaseClient, u: string, c: Conversation) => { c.updated_at = new Date().toISOString(); const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: c.updated_at }).eq("id", c.id).eq("user_id", u); if (w.error) throw w.error; };
   const say = (c: Conversation, text: string) => { c.messages = [...c.messages, { id: randomUUID(), role: "assistant", text, at: new Date().toISOString() }]; };
+  // Every card change is a compare-and-swap on the conversation's updated_at: reload, change, write only if nobody wrote
+  // in between, else try again on the fresh copy. Two presses of Post (or a run writing at the same moment) cannot
+  // both win, and neither can undo the other's change.
+  const changeCard = async (sb: SupabaseClient, u: string, cid: string, cardId: string, change: (card: PublishCard, c: Conversation) => void | Promise<void>): Promise<Conversation> => {
+    for (let i = 0; i < 5; i++) {
+      const c = await load(sb, u, cid), card = publishCard(c, cardId);
+      await change(card, c);
+      const stamp = new Date(Math.max(Date.now(), Date.parse(c.updated_at) + 1)).toISOString();
+      const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: stamp }).eq("id", c.id).eq("user_id", u).eq("updated_at", c.updated_at).select("id");
+      if (w.error) throw w.error;
+      if ((w.data ?? []).length) { c.updated_at = stamp; return c; }
+      await new Promise((r) => setTimeout(r, 30 + Math.random() * 120));
+    }
+    throw new AssistantError("chat_busy", "The chat was changing; try again", 409);
+  };
   app.post("/api/studio/assistant/conversations/:id/publish/:cardId", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const sb = sbFn(), c = await load(sb, u, req.params.id), card = publishCard(c, req.params.cardId);
-      if (card.status !== "open") throw new AssistantError("card_closed", "That card was already used", 409);
+      const sb = sbFn();
       const p = getSocialProvider({ env, fetch: deps.fetch, log });
       if (!p) throw new AssistantError("social_off", "Posting to socials is not switched on yet", 503);
       const b = req.body ?? {}, schedule = b.action === "schedule";
-      const items = card.items.map((i) => (i.asset_id ? { asset_id: i.asset_id } : { job_id: i.job_id, output_key: i.output_key }));
-      let posts: any[];
-      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options }, { conversationId: c.id, log }); }
-      catch (e: any) { if (e?.code) throw new AssistantError(e.code, e.message, e.status ?? 400); throw e; }
+      // 1. claim the card (a send left hanging for an hour by a crash can be claimed again; the posts it made are refused
+      //    as repeats, so a reclaim cannot post the same video twice)
+      let items: any[] = [];
+      await changeCard(sb, u, req.params.id, req.params.cardId, (card) => {
+        const stuck = card.status === "sending" && card.sending_at && Date.now() - Date.parse(card.sending_at) > 60 * 60_000;
+        if (card.status !== "open" && !stuck) throw new AssistantError(card.status === "sending" ? "card_busy" : "card_closed", card.status === "sending" ? "That card is already sending" : "That card was already used", 409);
+        card.status = "sending"; card.sending_at = new Date().toISOString();
+        items = card.items.map((i) => (i.asset_id ? { asset_id: i.asset_id } : { job_id: i.job_id, output_key: i.output_key }));
+      });
+      // 2. post (outside any lock); 3. record the outcome on a fresh copy
+      let posts: any[] = [], failure: any = null;
+      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options }, { conversationId: req.params.id, log, env }); }
+      catch (e: any) { failure = e; }
       const ok = posts.filter((x) => x.status !== "failed"), nets = listNames([...new Set(posts.flatMap((x) => x.platforms as string[]))]);
-      const when = typeof b.when_label === "string" ? b.when_label.replace(/[^\w ,:.'-]/g, "").slice(0, 60) : "";
-      if (!ok.length) { say(c, `That did not go out: ${posts[0]?.error ?? "the networks refused it"}. Fix it on the card and try again.`); }
-      else {
+      const unsure = posts.filter((x) => x.error === UNCONFIRMED).length;
+      const gap = Math.min(Math.max(Number(b.spacing_minutes ?? 0) || 0, 0), 7 * 24 * 60);
+      const when = typeof b.when_label === "string" ? b.when_label.replace(/[^\p{L}\p{N} ,:.'\u00a0\u202f-]/gu, "").slice(0, 60) : "";
+      const c = await changeCard(sb, u, req.params.id, req.params.cardId, (card, conv) => {
+        card.sending_at = null;
+        if (failure || !ok.length) { card.status = "open"; if (!failure) say(conv, `That did not go out: ${posts[0]?.error ?? "the networks refused it"}. Fix it on the card and try again.`); return; }
         card.status = "sent"; card.post_ids = posts.map((x) => x.id);
         card.outcome = schedule ? `Scheduled${when ? ` for ${when}` : ""} on ${nets}` : `Sent to ${nets}`;
         const n = ok.length > 1 ? `${ok.length} videos` : "it";
-        say(c, schedule
-          ? `Scheduled: ${n} go${ok.length > 1 ? "" : "es"} out${when ? ` ${when}` : ""} on ${nets}${ok.length > 1 && b.spacing_minutes ? `, ${b.spacing_minutes >= 60 ? `${Math.round(b.spacing_minutes / 60)} h` : `${b.spacing_minutes} min`} apart` : ""}. You can change or cancel ${ok.length > 1 ? "them" : "it"} on the Publish page.${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}`
-          : `On its way to ${nets}. The links show on the card as each network finishes; TikTok takes a minute or two.${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}`);
-      }
-      await save(sb, u, c);
-      log(`[assistant] publish card ${card.id} ${schedule ? "scheduled" : "sent"} ${ok.length}/${posts.length}`);
+        say(conv, schedule
+          ? `Scheduled: ${n} go${ok.length > 1 ? "" : "es"} out${when ? ` ${when}` : ""} on ${nets}${ok.length > 1 && gap ? `, ${gap >= 60 ? `${Math.round(gap / 60)} h` : `${gap} min`} apart` : ""}. You can change or cancel ${ok.length > 1 ? "them" : "it"} on the Publish page.${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}${unsure ? ` ${unsure === posts.length ? "The posting service did not confirm it yet" : `${unsure} did not get a confirmation yet`}; check Publish before sending again.` : ""}`
+          : `${unsure === posts.length ? `Sent, but the posting service did not confirm it yet. Check ${nets} before posting it again; Publish shows when it settles.` : `On its way to ${nets}. The links show on the card as each network finishes; TikTok takes a minute or two.`}${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}`);
+      });
+      if (failure) { if (failure instanceof SocialError) throw new AssistantError(failure.code, failure.message, failure.status ?? 400); throw failure; }
+      log(`[assistant] publish card ${req.params.cardId} ${schedule ? "scheduled" : "sent"} ${ok.length}/${posts.length}`);
       await respond(sb, u, c, res);
     } catch (e) { fail(res, e); }
   });
   app.post("/api/studio/assistant/conversations/:id/publish/:cardId/ignore", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const sb = sbFn(), c = await load(sb, u, req.params.id), card = publishCard(c, req.params.cardId);
-      if (card.status === "open") {
-        card.status = "ignored";
+      const sb = sbFn();
+      let ignored = false;
+      const c = await changeCard(sb, u, req.params.id, req.params.cardId, (card) => { if (card.status === "open") { card.status = "ignored"; ignored = true; } });
+      if (ignored) {
         const social = await socialSnapshot(sb, u, env).catch(() => null);
         if (social && !social.linked.length) {
           const prev = await sb.from("studio_social_prefs").select("connect_dismissals").eq("user_id", u).maybeSingle();
           await sb.from("studio_social_prefs").upsert({ user_id: u, connect_dismissed_at: new Date().toISOString(), connect_dismissals: Number(prev.data?.connect_dismissals ?? 0) + 1, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
         }
-        await save(sb, u, c);
       }
       await respond(sb, u, c, res);
     } catch (e) { fail(res, e); }
@@ -1038,7 +1099,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
   app.post("/api/studio/assistant/conversations/:id/social-linked", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const sb = sbFn(), c = await load(sb, u, req.params.id);
+      const sb = sbFn();
       const p = getSocialProvider({ env, fetch: deps.fetch, log });
       const prof = p ? await sb.from("studio_social_profiles").select("profile_key").eq("user_id", u).maybeSingle() : null;
       let linked: string[] = [];
@@ -1047,14 +1108,17 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
         await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
         linked = accounts.map((a) => a.platform);
       }
-      const card = [...c.messages].reverse().find((m) => m.publish?.status === "open")?.publish;
-      const fresh = card ? linked.filter((x) => !(card.linked_seen ?? []).includes(x)) : [];
-      if (card && fresh.length) {
-        card.linked_seen = linked;
-        const n = card.items.length > 1 ? "these" : "it";
-        say(c, `${listNames(fresh)} ${fresh.length === 1 ? "is" : "are"} linked. Want me to post ${n} now or schedule ${n}? I can write the caption from the video, or use yours.`);
-        await save(sb, u, c);
-      }
+      const c0 = await load(sb, u, req.params.id);
+      const open = [...c0.messages].reverse().find((m) => m.publish?.status === "open")?.publish;
+      const c = open && linked.some((x) => !(open.linked_seen ?? []).includes(x))
+        ? await changeCard(sb, u, req.params.id, open.id, (card, conv) => {
+          const fresh = linked.filter((x) => !(card.linked_seen ?? []).includes(x));
+          if (!fresh.length) return; // another call announced them first
+          card.linked_seen = linked;
+          const n = card.items.length > 1 ? "these" : "it";
+          say(conv, `${listNames(fresh)} ${fresh.length === 1 ? "is" : "are"} linked. Want me to post ${n} now or schedule ${n}? I can write the caption from the video, or use yours.`);
+        })
+        : c0;
       await respond(sb, u, c, res);
     } catch (e) { fail(res, e); }
   });
@@ -1077,8 +1141,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: "character", p_asset: null, p_options: q.options, p_credits: q.credits });
       if (r.error) { const msg = String(r.error.message ?? r.error); if (/insufficient_credits/.test(msg)) throw new AssistantError("insufficient_credits", "Not enough credits for the options", 402); if (/too_many_jobs/.test(msg)) throw new AssistantError("too_many_jobs", "Your jobs are all busy; try again in a moment", 429); throw r.error; }
       m.choice.status = "generating"; m.choice.job_id = r.data.id; m.choice.credits = q.credits; m.choice.error_code = null; m.choice.auto = auto; m.choice.count = auto ? 1 : 4;
-      const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
-      if (w.error) throw w.error;
+      await saveConversation(sb, c, () => ({}));
       log(`[assistant] choice ${m.choice.id} job ${r.data.id}`);
       await respond(sb, u, c, res);
     } catch (e) { fail(res, e); }
@@ -1094,8 +1157,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       const id = String(req.body?.asset_id ?? "");
       if (![...(m.choice.options ?? []), ...(m.choice.existing ?? [])].some((o) => o.asset_id === id)) throw new AssistantError("choice_invalid", "Pick one of the options");
       m.choice.status = "picked"; m.choice.picked = id;
-      const w = await sb.from("studio_conversations").update({ messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
-      if (w.error) throw w.error;
+      await saveConversation(sb, c, () => ({}));
       await respond(sb, u, c, res);
     } catch (e) { fail(res, e); }
   });
@@ -1269,8 +1331,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
         c.run.status = "canceled"; c.run.finished_at = new Date().toISOString(); c.status = "canceled";
         c.messages = [...c.messages, { id: randomUUID(), role: "assistant", text: "Stopped. Queued steps were canceled and refunded; anything already rendering finishes on its own.", at: new Date().toISOString() }];
       } else if (c.plan && c.plan.status === "proposed") { c.plan.status = "superseded"; }
-      const w = await sb.from("studio_conversations").update({ status: c.status, plan: c.plan, run: c.run, messages: c.messages, updated_at: new Date().toISOString() }).eq("id", c.id).eq("user_id", u);
-      if (w.error) throw w.error;
+      await saveConversation(sb, c, () => ({ status: c.status, plan: c.plan, run: c.run }));
       await respond(sb, u, c, res);
     } catch (e) { fail(res, e); }
   });

@@ -99,9 +99,12 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id:
   const dir = await mkdtemp(join(tmpdir(), "c8-caption-"));
   try {
     const file = join(dir, "v.mp4");
-    const dl = await f(s.data.signedUrl);
-    if (!dl.ok) throw new SocialError("video_unavailable", "That video could not be read", 502);
-    await writeFile(file, Buffer.from(await dl.arrayBuffer()));
+    const dl = await f(s.data.signedUrl, { signal: AbortSignal.timeout(60_000) }).catch(() => null);
+    if (!dl?.ok) throw new SocialError("video_unavailable", "That video could not be read", 502);
+    if (Number(dl.headers.get("content-length") ?? 0) > 500_000_000) throw new SocialError("video_too_large", "That video is too large to write a caption from", 413);
+    const buf = Buffer.from(await dl.arrayBuffer());
+    if (buf.length > 500_000_000) throw new SocialError("video_too_large", "That video is too large to write a caption from", 413);
+    await writeFile(file, buf);
     const [frames, speech] = await Promise.all([(deps.frames ?? videoFrames)(file), (deps.speech ?? speechOf(env, f))(file)]);
     if (!frames.length) throw new SocialError("video_unreadable", "No frames could be read from that video", 422);
     const targets = req.platforms.map((p) => NAMES[p] ?? p).join(", ") || "TikTok, Instagram Reels";

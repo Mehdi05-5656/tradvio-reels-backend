@@ -180,6 +180,8 @@ function fakeSb(tables: Record<string, any[]>) {
         eq(k: string, v: any) { filters.push((r) => r[k] === v); return q; },
         neq(k: string, v: any) { filters.push((r) => r[k] !== v); return q; },
         lt(k: string, v: any) { filters.push((r) => r[k] < v); return q; },
+        gte(k: string, v: any) { filters.push((r) => r[k] >= v); return q; },
+        is(k: string, v: any) { filters.push((r) => (r[k] ?? null) === v); return q; },
         in(k: string, v: any[]) { filters.push((r) => v.includes(r[k])); return q; },
         not(k: string, _op: string, _v: any) { filters.push((r) => r[k] != null); return q; },
         or(expr: string) { const lt = expr.match(/schedule_at\.lt\.(.+)$/)?.[1]; filters.push((r) => r.schedule_at == null || (lt ? r.schedule_at < lt : false)); return q; },
@@ -254,14 +256,22 @@ test("routes: post now and scheduled with spacing; ownership, linking and the 30
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1, "44444444-4444-4444-8444-444444444444")], platforms: ["tiktok"], caption: "x" })).body.error, "video_not_found", "someone else's job is not found");
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() + 40 * 86400_000).toISOString() })).body.error, "too_late");
 
-  const now = await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok", "youtube"], caption: "Launch day\n#clone8" });
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() - 60_000).toISOString() })).body.error, "too_soon", "a time that has passed is refused, not posted now");
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() + 2 * 60_000).toISOString() })).body.error, "too_soon");
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1), item(1)], platforms: ["youtube"] })).body.error, "same_video_twice");
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["twitter"] })).body.error, "platform_unavailable", "a network not offered is refused, not dropped");
+  assert.equal(ayr.calls.filter((c) => c.path === "/post").length, 0, "nothing was sent by the refusals");
+
+  const now = await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["youtube"], caption: "Launch day\n#clone8" });
   assert.equal(now.status, 201);
-  assert.equal(now.body.posts[0].status, "sending");
+  assert.equal(now.body.posts[0].status, "posted");
   const sent = ayr.calls.filter((c) => c.path === "/post").at(-1)!;
   assert.equal(sent.headers["Profile-Key"], "pk-ann");
   assert.equal(sent.body.youTubeOptions.title, "Launch day");
   assert.equal(sent.body.idempotencyKey, tables.studio_social_posts[0].id);
   assert.ok(sb.signed.at(-1).ttl >= 7 * 86400, "the video link outlives the provider's 7-day ask");
+  const again = await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["youtube"] });
+  assert.equal(again.body.error, "already_posted", "the same video to the same network in a day is refused");
 
   const at = new Date(Date.now() + 2 * 3600_000);
   const sch = await s.call("POST", "/api/studio/social/posts", { items: [item(1), item(2)], platforms: ["tiktok"], caption: "", schedule_at: at.toISOString(), spacing_minutes: 180 });
@@ -269,7 +279,7 @@ test("routes: post now and scheduled with spacing; ownership, linking and the 30
   const dates = ayr.calls.filter((c) => c.path === "/post").slice(-2).map((c) => Date.parse(c.body.scheduleDate));
   assert.equal(dates[1] - dates[0], 180 * 60_000);
 
-  const posted = tables.studio_social_posts.find((p) => p.status === "sending")!;
+  const posted = tables.studio_social_posts.find((p) => p.status === "posted" || p.status === "sending")!;
   assert.equal((await s.call("DELETE", `/api/studio/social/posts/${posted.id}`)).body.error, "not_cancelable");
   const first = tables.studio_social_posts.find((p) => p.status === "scheduled")!;
   assert.equal((await s.call("DELETE", `/api/studio/social/posts/${first.id}`)).body.post.status, "canceled");
@@ -290,6 +300,10 @@ test("routes: post now and scheduled with spacing; ownership, linking and the 30
 
   const list = await s.call("GET", "/api/studio/social/posts");
   assert.equal(list.body.posts.length, 3);
+  // fail closed: without the signing secret no delivery is trusted, even with the right token
+  const open = await serve(sb, ayr.fetchFn, { ...ENV, STUDIO_SOCIAL_WEBHOOK_SECRET: "" });
+  assert.equal((await open.call("POST", "/api/studio/social/webhook?token=tok123", raw, {})).status, 401);
+  await open.close();
   assert.equal(list.body.posts[0].poster_url.endsWith(".jpg"), true);
   await s.close();
 });
@@ -339,4 +353,55 @@ test("captions: frames and speech go to Claude with a JSON schema (no forced too
   for (let i = 0; i < 30; i++) assert.equal(allowCaption("rate-user", t0 + i), true);
   assert.equal(allowCaption("rate-user", t0 + 31), false);
   assert.equal(allowCaption("rate-user", t0 + 3600_001 + 31), true, "the hour rolls over");
+});
+
+test("routes: a send the service never answers is kept as unconfirmed, never sent again; a TikTok-only delivery merges", async () => {
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active" }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }], webhook_hash: "x" }], studio_jobs: [doneJob()], studio_social_posts: [] };
+  const sb = fakeSb(tables);
+  let down = true;
+  const ayr = fakeAyr({ "POST /post": (body) => (down ? { status: 503, body: { message: "upstream Ayrshare timeout" } } : { body: { status: "success", posts: [{ status: "success", id: "post-m", postIds: body.platforms.map((p: string) => ({ platform: p, status: "success", id: p === "tiktok" ? "pending" : "y1", postUrl: p === "tiktok" ? undefined : "https://youtube.example/1" })) }] } }) });
+  const s = await serve(sb, ayr.fetchFn);
+  const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
+  const r = await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], caption: "x" });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.posts[0].status, "sending", "unknown is not failed");
+  assert.match(r.body.posts[0].error, /could not confirm/i);
+  assert.doesNotMatch(JSON.stringify(r.body), /ayrshare/i);
+  down = false;
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"] })).body.error, "already_posted", "an unconfirmed send blocks a resend");
+  assert.equal(ayr.calls.filter((c) => c.path === "/post").length, 1);
+  // after 30 minutes with no answer the loop closes it as unconfirmed (it still blocks a resend)
+  tables.studio_social_posts[0].created_at = new Date(Date.now() - 31 * 60_000).toISOString();
+  await socialTick(sb, { env: ENV, fetch: ayr.fetchFn, log: () => {} });
+  assert.equal(tables.studio_social_posts[0].status, "failed");
+  assert.match(tables.studio_social_posts[0].error, /could not confirm/i);
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"] })).body.error, "already_posted");
+
+  // video 2 to both networks: YouTube answers at once, TikTok later on its own
+  const both = await s.call("POST", "/api/studio/social/posts", { items: [item(2)], platforms: ["tiktok", "youtube"] });
+  const row = tables.studio_social_posts.find((p) => p.provider_post_id === "post-m")!;
+  assert.equal(both.body.posts[0].status, "sending");
+  const raw = JSON.stringify({ action: "scheduled", status: "success", id: "post-m", postIds: [{ platform: "tiktok", status: "success", id: "t1", postUrl: "https://www.tiktok.com/@ann/video/1" }] });
+  await s.call("POST", "/api/studio/social/webhook?token=tok123", raw, { "x-authorization-content-sha256": createHmac("sha256", "whsec").update(raw).digest("hex") });
+  assert.equal(row.status, "posted", "both networks done");
+  assert.deepEqual(row.results.map((x: any) => x.platform).sort(), ["tiktok", "youtube"], "the YouTube result survives the TikTok delivery");
+  assert.equal(row.results.find((x: any) => x.platform === "youtube").url, "https://youtube.example/1");
+  // a forged-looking link never becomes clickable
+  const bad = JSON.stringify({ action: "scheduled", status: "success", id: "post-m", postIds: [{ platform: "tiktok", status: "success", id: "t1", postUrl: "javascript:alert(1)" }] });
+  await s.call("POST", "/api/studio/social/webhook?token=tok123", bad, { "x-authorization-content-sha256": createHmac("sha256", "whsec").update(bad).digest("hex") });
+  assert.equal(row.results.find((x: any) => x.platform === "tiktok").url, null);
+  await s.close();
+});
+
+test("routes: the daily allowance is counted per person by network sends", async () => {
+  const outputs = Array.from({ length: 6 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active" }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }] }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
+  const sb = fakeSb(tables), ayr = fakeAyr();
+  const s = await serve(sb, ayr.fetchFn, { ...ENV, STUDIO_SOCIAL_DAILY_POSTS: "5" });
+  const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1), item(2)], platforms: ["tiktok", "youtube"] })).status, 201);
+  const over = await s.call("POST", "/api/studio/social/posts", { items: [item(3), item(4)], platforms: ["tiktok"] });
+  assert.equal(over.status, 429); assert.equal(over.body.error, "daily_limit"); assert.match(over.body.detail, /1 left/);
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(3)], platforms: ["tiktok"] })).status, 201);
+  await s.close();
 });

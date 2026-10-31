@@ -61,7 +61,7 @@ test("analyze: each post against its own platform's median; facts only with 3 po
 
 test("insight cleaning keeps only real posts and tools; suggestions and the chat brief come from their data", () => {
   const a = analyze([post(1, { views: 9000 }), post(2), post(3), post(4)], [], { range_days: 28, now: NOW, offset_min: 0, platform: null });
-  const ins = cleanInsight({ headline: "x".repeat(400), working: [{ title: "Short hooks", evidence: "e", why: "w", post_ids: ["p1", "nope"] }], not_working: [], moves: [{ title: "Make originals", detail: "d", tool: "blueprint", post_id: "p1", prompt: null }, { title: "Bad", detail: "d", tool: "hack" as any, post_id: null, prompt: null }, { title: "Ask", detail: "d", tool: "chat", post_id: "ghost", prompt: "Plan my week" }], sources: [{ label: "Mosseri", url: "https://x.example" }, { label: "bad", url: "javascript:alert(1)" }] }, new Set(a.posts.map((p) => p.id)));
+  const ins = cleanInsight({ headline: "x".repeat(400), working: [{ title: "Short hooks", evidence: "e", why: "w", post_ids: ["p1", "nope"] }], not_working: [], moves: [{ title: "Make originals", detail: "d", tool: "blueprint", post_id: "p1", prompt: null }, { title: "Bad", detail: "d", tool: "hack" as any, post_id: null, prompt: null }, { title: "Ask", detail: "d", tool: "chat", post_id: "ghost", prompt: "Plan my week" }], sources: [{ label: "Buffer", url: "https://buffer.com/resources/social-media-benchmarks/" }, { label: "made up", url: "https://x.example" }, { label: "bad", url: "javascript:alert(1)" }] }, new Set(a.posts.map((p) => p.id)));
   assert.equal(ins.headline.length, 180); assert.deepEqual(ins.working[0].post_ids, ["p1"]);
   assert.deepEqual(ins.moves.map((m) => m.tool), ["blueprint", "chat"]); assert.equal(ins.moves[1].post_id, null); assert.equal(ins.sources.length, 1);
   const sug = suggestionsFrom(a, ins);
@@ -143,7 +143,7 @@ test("refresh: the provider's private analytics first, matched to what Clone8 po
 });
 
 test("routes: not linked, first open reads the accounts, the overview is stored and limited, a post is used through the library", async () => {
-  const tables: Record<string, any[]> = { studio_social_profiles: [], studio_social_posts: [], studio_perf_insights: [], studio_assets: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", user_id: ANN, kind: "video", status: "ready", probe: {} }] };
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active" }], studio_social_profiles: [], studio_social_posts: [], studio_perf_insights: [], studio_assets: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", user_id: ANN, kind: "video", status: "ready", probe: {} }] };
   const sb = fakeSb(tables); const net = fakeNet();
   let wrote = 0;
   const app = express(); app.use(express.json());
@@ -190,4 +190,11 @@ test("overview request: their numbers, post pictures by link, the sourced playbo
   assert.ok(content.some((c: any) => c.type === "image" && c.source.type === "url" && c.source.url === "https://signed/t1.jpg"));
   const text = content.at(-1).text;
   assert.match(text, /THEIR NUMBERS/); assert.match(text, /A1 Instagram, Adam Mosseri/); assert.match(text, /DO NOT SAY/); assert.match(text, /welcome back/);
+});
+
+test("analyze: odd numbers from a network (negative or huge lengths, zero views) never break the page", () => {
+  const rows: PostRow[] = [post(0, { duration_s: -2 }), post(1, { duration_s: 1e9 }), post(2, { duration_s: Number.NaN as any, views: 0 }), post(3, { views: null as any }), post(4)];
+  const a = analyze(rows, [], { range_days: 28, now: NOW, offset_min: 0, platform: null });
+  assert.ok(Array.isArray(a.by_length));
+  assert.doesNotMatch(JSON.stringify(a), /NaN|Infinity/);
 });

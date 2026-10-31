@@ -23,7 +23,19 @@ export type PublishRequest = {
 };
 export type PublishResult = { providerPostId: string | null; status: SocialPostStatus; results: SocialResult[]; error: string | null };
 /** One status change pushed by the provider (a webhook) or read back from it. */
-export type SocialEvent = { providerPostId: string; status: SocialPostStatus; results: SocialResult[]; error: string | null };
+export type SocialEvent = { providerPostId: string; status: SocialPostStatus; results: SocialResult[]; error: string | null; partial?: boolean };
+
+/** A post's overall status from its networks: pending ones keep it open. */
+export function statusOf(results: SocialResult[], scheduled: boolean): SocialPostStatus {
+  if (!results.length) return "failed";
+  const n = results.length, ok = results.filter((r) => r.status === "posted").length, bad = results.filter((r) => r.status === "failed").length;
+  if (bad === n) return "failed";
+  if (ok === n) return "posted";
+  if (ok + bad === n) return "partial";
+  return scheduled ? "scheduled" : "sending";
+}
+
+
 /** A webhook delivery we act on: a post settled, or a network was linked, unlinked or needs relinking. */
 export type SocialWebhook = { kind: "post"; event: SocialEvent } | { kind: "account"; refId: string; platform: string; change: "link" | "unlink" | "refresh"; bySystem: boolean };
 

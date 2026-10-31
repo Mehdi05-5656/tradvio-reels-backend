@@ -8,11 +8,15 @@
 // Env: AYRSHARE_API_KEY (required), AYRSHARE_DOMAIN (optional), STUDIO_SOCIAL_WEBHOOK_SECRET (signing secret),
 // AYRSHARE_X_API_KEY / AYRSHARE_X_API_SECRET (optional, to offer X).
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { SocialError, type ProviderAccountStats, type ProviderPost, type PublishRequest, type PublishResult, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type SocialWebhook } from "./social-provider.js";
+import { SocialError, statusOf, type ProviderAccountStats, type ProviderPost, type PublishRequest, type PublishResult, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type SocialWebhook } from "./social-provider.js";
 
 const BASE = "https://api.ayrshare.com/api";
 
 type AyrError = { code?: number; message?: string; platform?: string; status?: string };
+/** A link we show the person: https only, nothing else (a forged or odd value never becomes a clickable link). */
+export const safeUrl = (v: any): string | null => { if (typeof v !== "string" || v.length > 2048) return null; try { const u = new URL(v); return u.protocol === "https:" ? u.toString() : null; } catch { return null; } };
+/** The vendor never reaches a person: its name is replaced in anything it says. */
+const clean = (v: any, fallback: string) => String(v ?? fallback).replace(/ayrshare/gi, "the posting service").slice(0, 240);
 
 /** One network's outcome from an Ayrshare postIds / errors entry. */
 function resultsOf(postIds: any[] | undefined, errors: AyrError[] | undefined, platforms: string[], scheduled: boolean): SocialResult[] {
@@ -23,7 +27,7 @@ function resultsOf(postIds: any[] | undefined, errors: AyrError[] | undefined, p
     const id = String(p?.id ?? "");
     const st = String(p?.status ?? "");
     const status: SocialResult["status"] = st === "error" || id === "failed" ? "failed" : id === "pending" || st === "pending" ? "pending" : st === "success" ? "posted" : scheduled ? "scheduled" : "pending";
-    out.set(platform, { platform, status, url: p?.postUrl ? String(p.postUrl) : null, error: null });
+    out.set(platform, { platform, status, url: safeUrl(p?.postUrl), error: null });
   }
   for (const e of errors ?? []) {
     const platform = String(e?.platform ?? "");
@@ -42,18 +46,11 @@ export function friendlyError(e: AyrError): string {
   if ([161, 250, 272].includes(code)) return `${name} needs to be linked again. Relink it in Accounts, then retry.`;
   if (code === 106) return "The monthly post limit is used up; it resets on the 1st.";
   if (code === 176) return "The YouTube title is too long (100 characters at most).";
-  return String(e?.message ?? "The network refused the post").replace(/ayrshare/gi, "the posting service").slice(0, 240);
+  return clean(e?.message, "The network refused the post");
 }
 
-/** A post's overall status from its networks: pending ones keep it open. */
-export function statusOf(results: SocialResult[], scheduled: boolean): SocialEvent["status"] {
-  if (!results.length) return "failed";
-  const n = results.length, ok = results.filter((r) => r.status === "posted").length, bad = results.filter((r) => r.status === "failed").length;
-  if (bad === n) return "failed";
-  if (ok === n) return "posted";
-  if (ok + bad === n) return "partial";
-  return scheduled ? "scheduled" : "sending";
-}
+/** A post's overall status from its networks (kept in social-provider.ts, re-exported for the tests). */
+export { statusOf };
 
 /** Verify an Ayrshare webhook signature: HMAC-SHA256 hex of the raw body, any v1= value may match (secret rotation). */
 export function verifySignature(rawBody: string, headers: Record<string, string | undefined>, secret: string): boolean {
@@ -115,17 +112,29 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
   if (!key) return null;
   const f = deps.fetch ?? fetch;
   const xHeaders: Record<string, string> = env.AYRSHARE_X_API_KEY && env.AYRSHARE_X_API_SECRET ? { "X-Twitter-OAuth1-Api-Key": env.AYRSHARE_X_API_KEY, "X-Twitter-OAuth1-Api-Secret": env.AYRSHARE_X_API_SECRET } : {};
-  const call = async (method: string, path: string, opts: { profileKey?: string; body?: any } = {}): Promise<any> => {
-    const r = await f(`${BASE}${path}`, {
-      method,
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...(opts.profileKey ? { "Profile-Key": opts.profileKey } : {}), ...xHeaders },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
-    const text = await r.text();
+  // Every call has a time limit. A failure where the service may still have acted (no answer, a timeout, a 5xx) is
+  // "unknown", never "refused": a post with an unknown outcome must not be sent again as if it never went.
+  const call = async (method: string, path: string, opts: { profileKey?: string; body?: any; timeoutMs?: number; any?: boolean } = {}): Promise<any> => {
+    let r: Response;
+    try {
+      r = await f(`${BASE}${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...(opts.profileKey ? { "Profile-Key": opts.profileKey } : {}), ...xHeaders },
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+      });
+    } catch (e: any) {
+      throw Object.assign(new SocialError("provider_unreachable", "The posting service did not answer", 504), { unknown: true });
+    }
+    let text = "";
+    try { text = await r.text(); } catch { throw Object.assign(new SocialError("provider_unreachable", "The posting service did not answer", 504), { unknown: true }); }
     let j: any = null;
     try { j = text ? JSON.parse(text) : null; } catch { j = null; }
-    if (!r.ok && r.status !== 400) throw new SocialError(r.status === 429 ? "provider_busy" : "provider_failed", `posting service ${r.status}: ${String(j?.message ?? text).slice(0, 200)}`, r.status === 429 ? 429 : 502);
-    return { status: r.status, body: j ?? {} };
+    if (opts.any || r.ok || r.status === 400) return { status: r.status, body: j ?? {} };
+    const first: AyrError | undefined = Array.isArray(j?.errors) ? j.errors[0] : j?.code ? j : undefined;
+    const msg = first ? friendlyError(first) : clean(j?.message, `The posting service answered ${r.status}`);
+    if (r.status >= 500) throw Object.assign(new SocialError("provider_failed", msg, 502), { unknown: true });
+    throw new SocialError(r.status === 429 ? "provider_busy" : "provider_refused", msg, r.status === 429 ? 429 : 502);
   };
   const offered = (): string[] => ["tiktok", "instagram", "youtube", "facebook", "linkedin", "threads", "bluesky", ...(xHeaders["X-Twitter-OAuth1-Api-Key"] ? ["twitter"] : [])];
 
@@ -137,7 +146,7 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
       const r = await call("POST", "/profiles", { body: { title, hideLogo: true, topHeader: "Clone8", subHeader: "Link the accounts you want to post to from Clone8" } });
       if (r.status === 400 || !r.body?.profileKey) {
         if (Number(r.body?.code) === 146) throw new SocialError("profile_title_taken", "A profile with that title already exists", 409);
-        throw new SocialError("profile_failed", String(r.body?.message ?? "Could not create a posting profile").slice(0, 200), 502);
+        throw new SocialError("profile_failed", clean(r.body?.message, "Could not create a posting profile"), 502);
       }
       return { profileKey: String(r.body.profileKey), refId: r.body.refId ? String(r.body.refId) : null };
     },
@@ -150,22 +159,23 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
       if (opts.origin) body.origin = opts.origin;
       if (env.AYRSHARE_DOMAIN) body.domain = env.AYRSHARE_DOMAIN;
       const r = await call("POST", "/profiles/link-sessions", { profileKey, body });
-      if (r.status === 400 || !r.body?.url) throw new SocialError("link_failed", String(r.body?.message ?? "Could not open the linking page").slice(0, 200), 502);
+      if (r.status === 400 || !r.body?.url) throw new SocialError("link_failed", clean(r.body?.message, "Could not open the linking page"), 502);
       const exp = r.body.expiresAt ? Math.max(1, Math.round((Date.parse(r.body.expiresAt) - Date.now()) / 60_000)) : 5;
       return { url: String(r.body.url), expiresInMinutes: exp };
     },
 
     async accounts(profileKey) {
       const r = await call("GET", "/user", { profileKey });
-      if (r.status === 400) throw new SocialError("accounts_failed", String(r.body?.message ?? "Could not read the linked accounts"), 502);
+      if (r.status === 400) throw new SocialError("accounts_failed", clean(r.body?.message, "Could not read the linked accounts"), 502);
       const active = new Set<string>((r.body?.activeSocialAccounts ?? []).map(String));
       return ((r.body?.displayNames ?? []) as any[]).filter((d) => active.has(String(d?.platform))).map((d): SocialAccount => ({
         platform: String(d.platform),
         username: d.platform === "youtube" ? (d.handle ?? d.channelTitle ?? d.username ?? null) : (d.username ?? null),
         display_name: d.platform === "youtube" ? (d.channelTitle ?? d.displayName ?? null) : (d.displayName ?? null),
-        image_url: d.userImage ?? null,
-        profile_url: d.profileUrl ?? null,
-        refresh_required: d.refreshRequired === true,
+        image_url: safeUrl(d.userImage),
+        profile_url: safeUrl(d.profileUrl),
+        // a date (or true) once the network wants the link renewed; due when it has passed or no days remain
+        refresh_required: d.refreshRequired === true || (typeof d.refreshRequired === "string" && Date.parse(d.refreshRequired) <= Date.now()) || (d.refreshDaysRemaining != null && Number(d.refreshDaysRemaining) <= 0),
       }));
     },
 
@@ -187,12 +197,18 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
       }
       if (req.platforms.includes("instagram")) body.instagramOptions = { shareReelsFeed: true };
       if (req.platforms.includes("tiktok")) body.tikTokOptions = { visibility: "public", isAIGenerated: true };
-      const r = await call("POST", "/post", { profileKey, body });
+      // A video post can take a while (the service checks the file; some networks answer slowly).
+      const r = await call("POST", "/post", { profileKey, body, timeoutMs: 150_000, any: true });
       const p = Array.isArray(r.body?.posts) ? r.body.posts[0] : r.body;
-      const errors: AyrError[] = [...(p?.errors ?? []), ...(r.body?.errors ?? [])];
+      if (r.status >= 500 && !p?.id) throw Object.assign(new SocialError("provider_failed", "The posting service had a problem", 502), { unknown: true });
+      if ((r.status < 200 || r.status >= 300) && r.status !== 400 && r.status < 500 && !p?.id) {
+        const e0: AyrError | undefined = (p?.errors ?? r.body?.errors ?? [])[0] ?? (r.body?.code ? r.body : undefined);
+        return { providerPostId: null, status: "failed", results: resultsOf([], [], req.platforms, scheduled).map((x) => ({ ...x, status: "failed" as const })), error: e0 ? friendlyError(e0) : clean(r.body?.message, "The post was refused") };
+      }
+      const errors: AyrError[] = p === r.body ? [...(p?.errors ?? [])] : [...(p?.errors ?? []), ...(r.body?.errors ?? [])];
       const results = resultsOf(p?.postIds, errors, req.platforms, scheduled);
       const id = p?.id ? String(p.id) : null;
-      if (!id) return { providerPostId: null, status: "failed", results, error: errors.length ? friendlyError(errors[0]) : String(r.body?.message ?? "The post was refused").slice(0, 240) };
+      if (!id) return { providerPostId: null, status: "failed", results, error: errors.length ? friendlyError(errors[0]) : clean(r.body?.message, "The post was refused") };
       const status = scheduled && p?.status === "scheduled" ? "scheduled" : statusOf(results, scheduled);
       return { providerPostId: id, status, results, error: status === "failed" && errors.length ? friendlyError(errors[0]) : null };
     },
@@ -212,24 +228,24 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
 
     async cancel(profileKey, providerPostId) {
       const r = await call("DELETE", "/post", { profileKey, body: { id: providerPostId } });
-      if (r.status === 400 && ![114, 383].includes(Number(r.body?.code))) throw new SocialError("cancel_failed", String(r.body?.message ?? "Could not cancel").slice(0, 200), 502);
+      if (r.status === 400 && ![114, 383].includes(Number(r.body?.code))) throw new SocialError("cancel_failed", clean(r.body?.message, "Could not cancel"), 502);
     },
 
     async registerWebhook(profileKey, url) {
       const secret = env.STUDIO_SOCIAL_WEBHOOK_SECRET;
       for (const action of ["scheduled", "social"]) {
         const r = await call("POST", "/hook/webhook", { profileKey, body: { action, url, ...(secret ? { secret } : {}) } });
-        if (r.status === 400) throw new SocialError("webhook_failed", String(r.body?.message ?? "Could not register the webhook").slice(0, 200), 502);
+        if (r.status === 400) throw new SocialError("webhook_failed", clean(r.body?.message, "Could not register the webhook"), 502);
       }
     },
 
     async recentPosts(profileKey, platform, limit): Promise<ProviderPost[]> {
       const r = await call("GET", `/history/${encodeURIComponent(platform)}?limit=${Math.min(Math.max(limit, 1), 100)}`, { profileKey });
-      if (r.status === 400) throw new SocialError("history_failed", String(r.body?.message ?? "Could not read the posts").slice(0, 200), 502);
+      if (r.status === 400) throw new SocialError("history_failed", clean(r.body?.message, "Could not read the posts"), 502);
       const items: any[] = Array.isArray(r.body?.posts) ? r.body.posts : [];
       const posts: ProviderPost[] = items.filter((x) => x?.id).map((x) => ({
-        platform, id: String(x.id), url: x.postUrl ?? x.permalink ?? x.url ?? null, caption: x.post ?? x.caption ?? x.title ?? null,
-        published_at: isoOf(x.created ?? x.published ?? x.publishedAt), thumb_url: x.thumbnailUrl ?? x.mediaUrl ?? (Array.isArray(x.mediaUrls) ? x.mediaUrls[0] : null) ?? null,
+        platform, id: String(x.id), url: safeUrl(x.postUrl ?? x.permalink ?? x.url), caption: x.post ?? x.caption ?? x.title ?? null,
+        published_at: isoOf(x.created ?? x.published ?? x.publishedAt), thumb_url: safeUrl(x.thumbnailUrl ?? x.thumbnail_url ?? x.coverImageUrl) ,
         ...metricsOf(platform, x),
       }));
       // only TikTok's list carries its analytics; the rest are read in one batch by their network ids
@@ -239,8 +255,8 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
         for (const p of posts) {
           const e = byId.get(p.id); if (!e) continue;
           const m = metricsOf(platform, e.a);
-          Object.assign(p, { views: m.views ?? p.views, likes: m.likes ?? p.likes, comments: m.comments ?? p.comments, shares: m.shares ?? p.shares, saves: m.saves ?? p.saves, duration_s: m.duration_s ?? p.duration_s, extra: { ...p.extra, ...Object.fromEntries(Object.entries(m.extra).filter(([, v]) => v != null)) }, url: p.url ?? e.postUrl });
-          if (platform === "youtube" && e.a?.thumbnailUrl && !p.thumb_url) p.thumb_url = e.a.thumbnailUrl;
+          Object.assign(p, { views: m.views ?? p.views, likes: m.likes ?? p.likes, comments: m.comments ?? p.comments, shares: m.shares ?? p.shares, saves: m.saves ?? p.saves, duration_s: m.duration_s ?? p.duration_s, extra: { ...p.extra, ...Object.fromEntries(Object.entries(m.extra).filter(([, v]) => v != null)) }, url: p.url ?? safeUrl(e.postUrl) });
+          if (e.a?.thumbnailUrl && !p.thumb_url) p.thumb_url = safeUrl(e.a.thumbnailUrl);
         }
       }
       return posts.filter((p) => p.url);
@@ -257,14 +273,17 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
 
     parseWebhook(headers, rawBody): SocialWebhook | null {
       const secret = env.STUDIO_SOCIAL_WEBHOOK_SECRET;
-      if (secret && !verifySignature(rawBody, headers, secret)) throw new SocialError("webhook_unverified", "Signature mismatch", 401);
+      // fail closed: without our signing secret no delivery is trusted
+      if (!secret) throw new SocialError("webhook_unconfigured", "No signing secret", 401);
+      if (!verifySignature(rawBody, headers, secret)) throw new SocialError("webhook_unverified", "Signature mismatch", 401);
       let b: any;
       try { b = JSON.parse(rawBody || "{}"); } catch { return null; }
       if (b?.action === "scheduled" && b?.id) {
         const platforms = ((b.postIds ?? []) as any[]).map((p) => String(p.platform)).concat(((b.errors ?? []) as any[]).map((e) => String(e.platform ?? ""))).filter(Boolean);
         const results = resultsOf(b.postIds, b.errors, [...new Set(platforms)], false);
         const status = b.status === "error" && !results.some((x) => x.status === "posted") ? "failed" : statusOf(results, false);
-        return { kind: "post", event: { providerPostId: String(b.id), status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null } };
+        // a delivery can carry only some of the networks (TikTok reports on its own): the row merges by network
+        return { kind: "post", event: { providerPostId: String(b.id), status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null, partial: true } };
       }
       if (b?.action === "social" && b?.refId && b?.platform) return { kind: "account", refId: String(b.refId), platform: String(b.platform), change: b.type === "unlink" ? "unlink" : b.type === "refresh" ? "refresh" : "link", bySystem: b.source === "system" };
       return null;

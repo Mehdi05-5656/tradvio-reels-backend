@@ -87,17 +87,19 @@ export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, o
   const r = await f("https://api.anthropic.com/v1/messages", {
     method: "POST", redirect: "error",
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-    body: JSON.stringify({ model: env.STUDIO_INSIGHT_MODEL || INSIGHT_MODEL, max_tokens: 8000, system: SYSTEM, fallbacks: "default", output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content: [...images, { type: "text", text }] }] }),
+    body: JSON.stringify({ model: env.STUDIO_INSIGHT_MODEL || INSIGHT_MODEL, max_tokens: 16000, system: SYSTEM, fallbacks: "default", output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content: [...images, { type: "text", text }] }] }),
     signal: AbortSignal.timeout(120_000),
   });
   if (!r.ok) throw new Error(`insights_http_${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`);
   const body: any = await r.json();
   if (body?.stop_reason === "refusal") throw new Error("insights_refused");
+  if (body?.stop_reason === "max_tokens") throw new Error("insights_cut_short");
   const raw = (body?.content ?? []).find((b: any) => b?.type === "text")?.text ?? "";
   const parsed = JSON.parse(raw) as Insight;
   return cleanInsight(parsed, new Set(a.posts.map((p) => p.id)));
 }
 
+const PLAYBOOK_URLS = new Set(PLAYBOOK.match(/https:\/\/\S+/g) ?? []);
 /** Keep only what the page can act on: known post ids, known tools, short text, at most a handful of each. */
 export function cleanInsight(x: Insight, ids: Set<string>): Insight {
   const s = (v: any, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
@@ -106,7 +108,7 @@ export function cleanInsight(x: Insight, ids: Set<string>): Insight {
     working: (x.working ?? []).slice(0, 4).map((w) => ({ title: s(w.title, 90), evidence: s(w.evidence, 300), why: s(w.why, 400), post_ids: (w.post_ids ?? []).filter((id) => ids.has(id)).slice(0, 3) })),
     not_working: (x.not_working ?? []).slice(0, 2).map((w) => ({ title: s(w.title, 90), evidence: s(w.evidence, 300), fix: s(w.fix, 300) })),
     moves: (x.moves ?? []).filter((m) => (MOVE_TOOLS as readonly string[]).includes(m.tool)).slice(0, 5).map((m) => ({ title: s(m.title, 70), detail: s(m.detail, 300), tool: m.tool, post_id: m.post_id && ids.has(m.post_id) ? m.post_id : null, prompt: m.prompt ? s(m.prompt, 160) : null })),
-    sources: (x.sources ?? []).filter((y) => /^https:\/\//.test(String(y.url))).slice(0, 8).map((y) => ({ label: s(y.label, 120), url: s(y.url, 400) })),
+    sources: (x.sources ?? []).filter((y) => /^https:\/\//.test(String(y.url)) && PLAYBOOK_URLS.has(String(y.url).trim())).slice(0, 8).map((y) => ({ label: s(y.label, 120), url: s(y.url, 400) })),
   };
 }
 

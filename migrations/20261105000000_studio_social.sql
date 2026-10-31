@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS public.studio_social_profiles (
   -- the last known linked networks, [{platform, username, display_name, image_url, profile_url}], refreshed on read
   accounts jsonb NOT NULL DEFAULT '[]'::jsonb,
   webhook_registered_at timestamptz,
+  webhook_hash text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -40,8 +41,9 @@ CREATE TABLE IF NOT EXISTS public.studio_social_posts (
   results jsonb NOT NULL DEFAULT '[]'::jsonb,
   error text,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  CHECK (output_key IS NOT NULL OR asset_id IS NOT NULL)
+  updated_at timestamptz NOT NULL DEFAULT now()
+  -- no CHECK that output_key or asset_id is set: deleting an upload sets asset_id to null and must not be refused
+  -- (the post row stays as history); the routes always set one of them when a post is created
 );
 CREATE INDEX IF NOT EXISTS studio_social_posts_user ON public.studio_social_posts(user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS studio_social_posts_provider_id ON public.studio_social_posts(provider, provider_post_id) WHERE provider_post_id IS NOT NULL;

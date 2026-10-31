@@ -136,6 +136,24 @@ export function fromProvider(platform: PerfPlatform, x: ProviderPost): PerfPost 
 // ---------------------------------------------------------------------------------------------------
 export const REFRESH_EVERY_MS = 6 * 3600_000;
 
+const THUMB_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+/** One post's thumbnail kept in storage: https only, an image the overview can read, 5 MB at most. */
+async function saveThumb(sb: SupabaseClient, f: typeof fetch, u: string, platform: string, postId: string, url: string): Promise<string | null> {
+  try {
+    if (typeof url !== "string" || new URL(url).protocol !== "https:") return null;
+    const r = await f(url, { signal: AbortSignal.timeout(15_000) });
+    if (!r.ok || (r.url && !r.url.startsWith("https://"))) return null;
+    const type = String(r.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (!THUMB_TYPES.includes(type)) return null;
+    if (Number(r.headers.get("content-length") ?? 0) > 5_000_000) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (!buf.length || buf.length > 5_000_000) return null;
+    const key = `${u}/perf/${platform}/${postId.replace(/[^\w-]/g, "_").slice(0, 80)}.jpg`;
+    const up = await sb.storage.from("studio-outputs").upload(key, buf, { contentType: type, upsert: true });
+    return up.error ? null : key;
+  } catch { return null; } // the post shows without its picture
+}
+
 export async function refreshPerformance(sb: SupabaseClient, u: string, deps: PerfDeps = {}): Promise<{ platforms: string[]; posts: number; errors: string[] }> {
   const log = deps.log ?? ((s: string) => console.log(s)), f = deps.fetch ?? fetch;
   const now = new Date(deps.now?.() ?? Date.now());
@@ -171,15 +189,19 @@ export async function refreshPerformance(sb: SupabaseClient, u: string, deps: Pe
       const { profile, posts } = read;
       const have = await sb.from("studio_perf_posts").select("platform_post_id,thumb_key").eq("user_id", u).eq("platform", platform);
       const thumbs = new Map(((have.data ?? []) as any[]).map((x) => [x.platform_post_id, x.thumb_key]));
+      // one row per post (the same post listed twice would make the upsert refuse the whole batch)
+      const uniq = [...new Map(posts.map((p) => [p.platform_post_id, p])).values()].slice(0, 80);
+      // thumbnails: a few at a time, images only (the overview sends them to the model; a video or HEIC file would fail it)
+      const want = uniq.filter((p) => !thumbs.get(p.platform_post_id) && p.thumb_url);
+      for (let i = 0; i < want.length; i += 6) {
+        await Promise.all(want.slice(i, i + 6).map(async (p) => {
+          const key = await saveThumb(sb, f, u, platform, p.platform_post_id, p.thumb_url!);
+          if (key) thumbs.set(p.platform_post_id, key);
+        }));
+      }
       const rows = [];
-      for (const p of posts.slice(0, 80)) {
-        let thumb_key = thumbs.get(p.platform_post_id) ?? null;
-        if (!thumb_key && p.thumb_url) {
-          try {
-            const r = await f(p.thumb_url, { signal: AbortSignal.timeout(20_000) });
-            if (r.ok) { const key = `${u}/perf/${platform}/${p.platform_post_id}.jpg`; const up = await sb.storage.from("studio-outputs").upload(key, Buffer.from(await r.arrayBuffer()), { contentType: r.headers.get("content-type") ?? "image/jpeg", upsert: true }); if (!up.error) thumb_key = key; }
-          } catch { /* the post shows without its picture */ }
-        }
+      for (const p of uniq) {
+        const thumb_key = thumbs.get(p.platform_post_id) ?? null;
         const m = made.get(`${platform}:${p.platform_post_id}`);
         rows.push({ user_id: u, platform, platform_post_id: p.platform_post_id, url: p.url, caption: p.caption?.slice(0, 2200) ?? null, published_at: p.published_at, duration_s: p.duration_s, thumb_key,
           views: p.views, likes: p.likes, comments: p.comments, shares: p.shares, saves: p.saves, extra: p.extra ?? {}, refreshed_at: now.toISOString(), ...(m ? { social_post_id: m.id, job_id: m.job_id } : {}) });
@@ -273,9 +295,9 @@ export function analyze(rows: PostRow[], snapshots: Array<{ platform: string; da
     const xs = inRange.filter((r) => pick(r) === d.key);
     return { key: d.key, label: d.label, n: xs.length, median_multiple: median(xs.map((r) => r.multiple ?? NaN)), median_views: median(xs.map((r) => r.views ?? NaN)) };
   });
-  const by_time = bucket(TIME_BLOCKS, (r) => { if (!r.published_at) return null; const h = local(r.published_at, offset_min).hour; return TIME_BLOCKS.find((b) => h >= b.from && h < b.to)!.key; });
+  const by_time = bucket(TIME_BLOCKS, (r) => { if (!r.published_at) return null; const h = local(r.published_at, offset_min).hour; return TIME_BLOCKS.find((b) => h >= b.from && h < b.to)?.key ?? null; });
   const by_weekday = bucket(DAYS.map((d, i) => ({ key: String(i), label: d })), (r) => (r.published_at ? String(local(r.published_at, offset_min).day) : null));
-  const by_length = bucket(LENGTHS, (r) => (r.duration_s == null ? null : LENGTHS.find((b) => r.duration_s! >= b.from && r.duration_s! < b.to)!.key));
+  const by_length = bucket(LENGTHS, (r) => (r.duration_s == null ? null : LENGTHS.find((b) => r.duration_s! >= b.from && r.duration_s! < b.to)?.key ?? null));
   const c8 = inRange.filter((r) => r.clone8), others = inRange.filter((r) => !r.clone8);
   const clone8 = { n: c8.length, median_multiple: median(c8.map((r) => r.multiple ?? NaN)), others_median_multiple: median(others.map((r) => r.multiple ?? NaN)) };
 

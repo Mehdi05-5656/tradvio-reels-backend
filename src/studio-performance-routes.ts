@@ -14,6 +14,12 @@ const RANGES = [7, 28, 90];
 const MANUAL_GAP_MS = 15 * 60_000, INSIGHTS_PER_DAY = 6;
 const running = new Map<string, Promise<any>>();
 const manual = new Map<string, number>();
+/** Overview attempts per person in the last day, failed ones included (each is a paid model call), and one at a time. */
+const attempts = new Map<string, number[]>();
+const writing = new Set<string>();
+const ATTEMPTS_PER_DAY = 10;
+/** How long the first open waits for the first read before answering "still reading". */
+const FIRST_WAIT_MS = 8_000;
 
 /** One refresh at a time per person; a second caller waits for the same one. */
 function refreshOnce(sb: SupabaseClient, u: string, deps: PerfDeps) {
@@ -30,10 +36,17 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
   const fail = (res: Response, e: any) => {
     const msg = String(e?.message ?? e);
     if (/relation .* does not exist/i.test(msg)) return res.status(503).json({ error: "performance_unavailable", detail: "The performance migration has not been applied" });
-    if (e?.status && e?.code) return res.status(e.status).json({ error: e.code, detail: msg });
+    if (e?.status && e?.code && typeof e.status === "number") return res.status(e.status).json({ error: e.code, detail: msg });
     console.error("[performance]", msg);
-    res.status(500).json({ error: "performance_failed", detail: msg.slice(0, 200) });
+    res.status(500).json({ error: "performance_failed", detail: "Something went wrong on our side; try again in a moment" });
   };
+  // Refreshing and the overview spend public-data credits and model calls: they come with a plan. Reading what is
+  // already stored stays open, so a lapsed person still sees their numbers.
+  const hasPlan = async (sb: SupabaseClient, u: string) => {
+    const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
+    return !!c.data && ["active", "trialing"].includes(c.data.status);
+  };
+  const needPlan = async (sb: SupabaseClient, u: string) => { if (!(await hasPlan(sb, u))) throw Object.assign(new Error("Fresh numbers and overviews come with a plan"), { status: 409, code: "subscription_required" }); };
   const params = (req: Request) => {
     const range = RANGES.includes(Number(req.query.range ?? req.body?.range)) ? Number(req.query.range ?? req.body?.range) : 28;
     const p = String(req.query.platform ?? req.body?.platform ?? "");
@@ -67,8 +80,13 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       const acc = await sb.from("studio_perf_accounts").select("refreshed_at").eq("user_id", u);
       const oldest = Math.min(...((acc.data ?? []) as any[]).map((a) => Date.parse(a.refreshed_at)), Number.POSITIVE_INFINITY);
       const never = !(acc.data ?? []).length;
-      if (never) await refreshOnce(sb, u, { ...deps, env }); // first open: read them now so the page is not empty
-      else if (Date.now() - oldest > REFRESH_EVERY_MS) refreshOnce(sb, u, { ...deps, env }).catch((e) => log(`[performance] refresh ${u}: ${String(e?.message ?? e)}`));
+      const plan = (never || Date.now() - oldest > REFRESH_EVERY_MS) && (await hasPlan(sb, u));
+      if (plan) {
+        const job = refreshOnce(sb, u, { ...deps, env });
+        job.catch((e) => log(`[performance] refresh ${u}: ${String(e?.message ?? e)}`));
+        // first open: wait a little so a quick read fills the page; a slow one carries on and the page polls
+        if (never) await Promise.race([job.catch(() => undefined), new Promise((r) => setTimeout(r, FIRST_WAIT_MS))]);
+      }
       res.json({ connected: true, ...(await payload(sb, u, range, platform, tz, running.has(u))) });
     } catch (e) { fail(res, e); }
   });
@@ -77,6 +95,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn(), { range, platform, tz } = params(req);
+      await needPlan(sb, u);
       const last = manual.get(u) ?? 0;
       if (Date.now() - last < MANUAL_GAP_MS) return res.status(429).json({ error: "refresh_too_soon", detail: "Fresh numbers arrive every few minutes at most", retry_in_s: Math.ceil((MANUAL_GAP_MS - (Date.now() - last)) / 1000) });
       manual.set(u, Date.now());
@@ -89,6 +108,10 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn(), { range, platform, tz } = params(req);
+      await needPlan(sb, u);
+      if (writing.has(u)) return res.status(409).json({ error: "insights_busy", detail: "An overview is already being written" });
+      const recent = (attempts.get(u) ?? []).filter((t) => Date.now() - t < 86400_000);
+      if (recent.length >= ATTEMPTS_PER_DAY) return res.status(429).json({ error: "insights_limit", detail: "A few overviews a day; the numbers do not move faster than that" });
       const day = await sb.from("studio_perf_insights").select("id").eq("user_id", u).gte("created_at", new Date(Date.now() - 86400_000).toISOString());
       if ((day.data ?? []).length >= INSIGHTS_PER_DAY) return res.status(429).json({ error: "insights_limit", detail: "A few overviews a day; the numbers do not move faster than that" });
       const L = await loadPerformance(sb, u, range, platform, tz);
@@ -97,7 +120,11 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       const transcripts = await (deps.transcripts ?? scTranscripts(env, deps.fetch))(tops.map((p) => p.url)).catch(() => new Map<string, string>());
       const byUrl = new Map(tops.map((p) => [p.url, p.id]));
       const t2 = new Map([...transcripts.entries()].filter(([url]) => byUrl.has(url)).map(([url, t]) => [byUrl.get(url)!, t]));
-      const body = await (deps.insight ?? writeInsight)(sb, u, L.analysis, { platform, thumbs: L.thumbs, transcripts: t2 }, { ...deps, env });
+      attempts.set(u, [...recent, Date.now()]);
+      writing.add(u);
+      let body;
+      try { body = await (deps.insight ?? writeInsight)(sb, u, L.analysis, { platform, thumbs: L.thumbs, transcripts: t2 }, { ...deps, env }); }
+      finally { writing.delete(u); }
       const ins = await sb.from("studio_perf_insights").insert({ user_id: u, scope: platform ?? "all", range_days: range, input_hash: insightHash(L.analysis, platform), body, model: env.STUDIO_INSIGHT_MODEL || "claude-opus-5-5" }).select("created_at").single();
       if (ins.error) throw ins.error;
       log(`[performance] overview for ${u} (${platform ?? "all"}, ${range} d)`);
@@ -114,6 +141,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
     try {
       const sb = sbFn();
       if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "post_not_found" });
+      await needPlan(sb, u);
       const r = await sb.from("studio_perf_posts").select("*").eq("id", req.params.id).eq("user_id", u).maybeSingle();
       if (r.error) throw r.error;
       const post = r.data as any;
@@ -167,7 +195,8 @@ function scTranscripts(env: Record<string, string | undefined>, f: typeof fetch 
 /** Once a day: refresh the people who opened the dashboard in the last 7 days. */
 export function startPerformanceLoop(sbFn: () => SupabaseClient, deps: PerfDeps = {}): void {
   const env = deps.env ?? process.env;
-  if (!env.SCRAPECREATORS_API_KEY || env.STUDIO_SOCIAL_ENABLED !== "true") return;
+  if (env.STUDIO_SOCIAL_ENABLED !== "true" || !(env.SCRAPECREATORS_API_KEY || env.AYRSHARE_API_KEY)) return;
+  let busy = false;
   const tick = async () => {
     const sb = sbFn();
     const r = await sb.from("studio_social_profiles").select("user_id").gte("perf_viewed_at", new Date(Date.now() - 7 * 86400_000).toISOString()).limit(500);
@@ -177,5 +206,9 @@ export function startPerformanceLoop(sbFn: () => SupabaseClient, deps: PerfDeps 
       if (Date.now() - oldest > 20 * 3600_000) await refreshOnce(sb, row.user_id, { ...deps, env }).catch(() => undefined);
     }
   };
-  setInterval(() => { tick().catch((e) => console.error("[performance] tick", String(e?.message ?? e))); }, 3600_000).unref?.();
+  setInterval(() => {
+    if (busy) return; // the last pass is still going
+    busy = true;
+    tick().catch((e) => console.error("[performance] tick", String(e?.message ?? e))).finally(() => { busy = false; });
+  }, 3600_000).unref?.();
 }
