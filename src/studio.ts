@@ -6,6 +6,7 @@
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { registerPlanChange, ensurePortalConfig, missingPrices, isNoSuchPrice, upgradeCredits } from "./studio-plan-change.js";
 import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
@@ -403,8 +404,11 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     // A new period replaces what was left; a mid-cycle upgrade adds its credits on top.
     const expire = reason === "subscription_cycle" || reason === "subscription_create" || reason === "";
     // Credits are priced per month. An annual invoice pays for twelve of them at once, so it grants the
-    // year's credits in one go; they last until the next annual invoice replaces them.
-    const credits = s.plan.credits * (s.interval === "year" ? 12 : 1);
+    // year's credits in one go; they last until the next annual invoice replaces them. A mid-period upgrade buys the new
+    // plan's credits for the time left, less the old plan's unused share, as Stripe prorates the price.
+    const prorated = reason === "subscription_update" ? upgradeCredits(obj) : null;
+    const credits = prorated ?? s.plan.credits * (s.interval === "year" ? 12 : 1);
+    if (credits <= 0) return `invoice.paid → upgrade with no credits to add (${reason})`;
     const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: `${s.plan.name} ${s.interval === "year" ? "annual " : ""}${reason || "invoice"}` });
     if (g.error) throw g.error;
     // The first paid invoice of a referred person credits both sides, once; the function is a no-op otherwise.
@@ -465,6 +469,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
     if (/relation .* does not exist|function .* does not exist/i.test(msg)) return res.status(503).json({ error: "studio_unavailable", detail: "The Studio migration has not been applied" });
+    if (isNoSuchPrice(e)) { console.error(`[studio] ALERT a STRIPE_PRICE_* setting is not a price in this Stripe account: ${msg.slice(0, 160)}`); return res.status(503).json({ error: "billing_misconfigured", detail: "That plan is not set up in billing yet. We have been alerted." }); }
     console.error("[studio]", msg);
     res.status(500).json({ error: "studio_failed", detail: msg.slice(0, 200) });
   };
@@ -473,6 +478,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (!u) { res.status(401).json({ error: "unauthorized" }); return null; }
     return u;
   };
+  registerPlanChange(app, { sbFn, stripe, env, dashboard, requireUser, fail, log });
+  // every price setting looked up once at start: a sandbox id left behind shows in the log by its setting's name
+  if (deps.stripe === undefined && env === process.env && env.STRIPE_SECRET_KEY) setTimeout(() => {
+    void missingPrices(stripe(), env).then((bad) => { if (bad.length) console.error(`[studio] ALERT these Stripe price settings are not prices in this Stripe account: ${bad.join(", ")}`); else log("[studio] Stripe prices: all found"); }).catch(() => undefined);
+    void ensurePortalConfig(stripe(), env, log).catch(() => undefined);
+  }, 8000).unref?.();
 
   app.get("/api/studio/plans", (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
@@ -520,7 +531,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     try {
       const sb = sbFn();
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
-      const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id";
+      const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id,stripe_subscription_id";
       const [cust0, bal, jobs, ledger] = await Promise.all([
         sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error,owner_pass`).eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
@@ -539,7 +550,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const labels = new Map(((named.data ?? []) as any[]).map((j) => [j.id, { label: jobLabel(j), status: j.status }]));
       const ledgerOut = ((ledger.data ?? []) as any[]).map((l) => (l.job_id && labels.has(l.job_id) ? { ...l, job_label: labels.get(l.job_id)!.label, job_status: labels.get(l.job_id)!.status } : l));
       res.json({
-        subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id } : null,
+        subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id, has_subscription: !!c.stripe_subscription_id && ["active", "trialing", "past_due"].includes(c.status) } : null,
         active: hasPlanAccess(c),
         ...(c?.owner_pass ? { owner_pass: true } : {}),
         balance: Number(bal.data ?? 0),
@@ -589,9 +600,10 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (!price) return res.status(503).json({ error: "billing_unavailable", detail: "That plan is not configured in Stripe yet" });
     try {
       const sb = sbFn();
-      const cust = await sb.from("studio_customers").select("stripe_customer_id,status").eq("user_id", u).maybeSingle();
+      const cust = await sb.from("studio_customers").select("stripe_customer_id,stripe_subscription_id,status").eq("user_id", u).maybeSingle();
       if (cust.error) throw cust.error;
-      if (cust.data?.status === "active" || cust.data?.status === "trialing") return res.status(409).json({ error: "already_subscribed", detail: "Change plans from the billing portal" });
+      // a real subscription changes plan in place (POST /api/studio/billing/change); a second one is never started
+      if ((cust.data?.status === "active" || cust.data?.status === "trialing") && cust.data?.stripe_subscription_id) return res.status(409).json({ error: "already_subscribed", detail: "Change plans from the plan page" });
       const email = req.auth && "email" in req.auth ? req.auth.email : undefined;
       const session = await stripe().checkout.sessions.create({
         mode: "subscription",
@@ -781,7 +793,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const cust = await sb.from("studio_customers").select("stripe_customer_id").eq("user_id", u).maybeSingle();
       if (cust.error) throw cust.error;
       if (!cust.data?.stripe_customer_id) return res.status(409).json({ error: "no_billing_account" });
-      const session = await stripe().billingPortal.sessions.create({ customer: cust.data.stripe_customer_id, return_url: `${dashboard()}/#studio/account` });
+      const configuration = await ensurePortalConfig(stripe(), env, log);
+      const session = await stripe().billingPortal.sessions.create({ customer: cust.data.stripe_customer_id, return_url: `${dashboard()}/#studio/account`, ...(configuration ? { configuration } : {}) });
       res.json({ url: session.url });
     } catch (e) { fail(res, e); }
   });

@@ -167,7 +167,7 @@ test("Stripe's webhook is exempt from both request guards; everything else still
 });
 
 test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", async (t) => {
-  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, stripe_customer_id: "cus_1", status: "active", plan_id: "creator", onboarding: {} }],
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, stripe_customer_id: "cus_1", stripe_subscription_id: "sub_1", status: "active", plan_id: "creator", onboarding: {} }],
     studio_assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", probe: { duration: 10 }, object_key: `${ANN}/${ASSET}.mp4`, bytes: 1 }], studio_jobs: [], studio_credit_ledger: [], studio_stripe_events: [] };
   const sb = fakeSb(tables, (name, args) => {
     if (name === "studio_balance") return { data: 900, error: null };
@@ -438,4 +438,78 @@ test("a customer never sees what a job cost us", async () => {
   assert.equal("spend_usd" in pj.progress, false);
   assert.deepEqual(Object.keys(publicJob({ id: "y", tool: "swap", status: "running", options: {}, progress: { spend_usd: 1, pending_spend: { r: { usd: 1 } }, spend_priced: "estimate", note: "n" } }).progress), ["note"]);
   assert.deepEqual(pj.progress.offer, { engine: "seedance", credits: 180 }, "the offer and its price are theirs to see");
+});
+
+test("plan changes: which way a change goes, and an upgrade's credits follow the prorated money", async () => {
+  const { changeKind, upgradeCredits } = await import("../src/studio-plan-change.js");
+  assert.equal(changeKind({ plan: "creator", interval: "month" }, { plan: "studio", interval: "month" }), "upgrade");
+  assert.equal(changeKind({ plan: "creator", interval: "year" }, { plan: "studio", interval: "month" }), "upgrade", "a higher plan, whatever the interval");
+  assert.equal(changeKind({ plan: "creator", interval: "month" }, { plan: "creator", interval: "year" }), "upgrade");
+  assert.equal(changeKind({ plan: "creator", interval: "year" }, { plan: "creator", interval: "month" }), "downgrade");
+  assert.equal(changeKind({ plan: "studio", interval: "month" }, { plan: "starter", interval: "month" }), "downgrade");
+  assert.equal(changeKind({ plan: "starter", interval: "year" }, { plan: "starter", interval: "year" }), "same");
+  // Creator monthly to Studio monthly half way through the month: half of Studio's month, less half of Creator's
+  const half = 15.22 * 86400, t0 = 1_800_000_000;
+  const inv = { lines: { data: [
+    { amount: -3950, pricing: { price_details: { price: "price_cm" } }, period: { start: t0, end: t0 + half } },
+    { amount: 9950, pricing: { price_details: { price: "price_um" } }, period: { start: t0, end: t0 + half } },
+  ] } };
+  const studio = PLANS.find((p) => p.id === "studio")!.credits, creator = PLANS.find((p) => p.id === "creator")!.credits;
+  assert.equal(upgradeCredits(inv, ENV as any), Math.round(studio / 2 - creator / 2));
+  assert.equal(upgradeCredits({ lines: { data: [inv.lines.data[1]] } }, ENV as any), null, "no credit-back line: not an upgrade");
+});
+
+test("plan change routes: an upgrade goes to Stripe's confirm page for that change; extra accounts preview the prorated amount; a downgrade opens the portal; no subscription buys a plan", async () => {
+  const OWNER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const tables: Record<string, any[]> = { studio_customers: [
+    { user_id: ANN, stripe_customer_id: "cus_1", stripe_subscription_id: "sub_1", status: "active", plan_id: "creator", billing_interval: "month", onboarding: {} },
+    { user_id: OWNER, stripe_customer_id: null, stripe_subscription_id: null, status: "none", plan_id: null, owner_pass: true, onboarding: {} },
+  ], studio_stripe_events: [] };
+  const sb = fakeSb(tables, () => ({ data: {}, error: null }));
+  const sessions: any[] = [], previews: any[] = [], updates: any[] = [];
+  const subs: Record<string, any> = { sub_1: sub({ items: { data: [{ id: "si_plan", price: { id: "price_cm" }, quantity: 1 }] } }) };
+  const stripe: any = { ...fakeStripe(subs),
+    billingPortal: { sessions: { create: async (p: any) => { sessions.push(p); return { url: `https://billing.stripe.com/flow/${sessions.length}` }; } } },
+    invoices: { createPreview: async (p: any) => { previews.push(p); return { amount_due: 5000, currency: "usd" }; } },
+  };
+  stripe.subscriptions.update = async (id: string, p: any) => { updates.push({ id, p }); return { id, status: "active" }; };
+  const s = await serve(sb, stripe);
+  try {
+    const H = { "x-test-user": ANN };
+    const up = await s.call("POST", "/api/studio/billing/change", { plan: "studio", interval: "month" }, H);
+    assert.equal(up.status, 200, JSON.stringify(up.body)); assert.equal(up.body.kind, "upgrade"); assert.match(up.body.url, /billing\.stripe\.com\/flow/);
+    const flow = sessions.at(-1).flow_data;
+    assert.equal(flow.type, "subscription_update_confirm");
+    assert.deepEqual(flow.subscription_update_confirm, { subscription: "sub_1", items: [{ id: "si_plan", price: "price_um", quantity: 1 }] }, "the same subscription, its plan item swapped");
+    assert.match(flow.after_completion.redirect.return_url, /#studio\/account\?plan=changed/);
+    assert.equal((await s.call("POST", "/api/studio/billing/change", { plan: "creator", interval: "month" }, H)).body.error, "same_plan");
+    const down = await s.call("POST", "/api/studio/billing/change", { plan: "starter", interval: "month" }, H);
+    assert.equal(down.body.kind, "downgrade"); assert.equal(down.body.at_renewal, true); assert.match(down.body.url, /billing\.stripe\.com/);
+    // with extra social accounts: Stripe's page takes one item only, so the amount is previewed and charged on Confirm
+    subs.sub_1 = sub({ items: { data: [{ id: "si_plan", price: { id: "price_cm" }, quantity: 1 }, { id: "si_seat", price: { id: "price_seat_m" }, quantity: 2 }] } });
+    const seats = await s.call("POST", "/api/studio/billing/change", { plan: "studio", interval: "month" }, H);
+    assert.deepEqual(seats.body.confirm, { amount_due: 50, currency: "usd", plan: "studio", interval: "month" });
+    assert.deepEqual(previews.at(-1).subscription_details.items, [{ id: "si_plan", price: "price_um", quantity: 1 }, { id: "si_seat" }]);
+    const done = await s.call("POST", "/api/studio/billing/change/confirm", { plan: "studio", interval: "month" }, H);
+    assert.equal(done.status, 200); assert.equal(updates.at(-1).p.proration_behavior, "always_invoice"); assert.equal(updates.at(-1).p.payment_behavior, "error_if_incomplete");
+    // no Stripe subscription (the owner pass): change refuses, checkout opens a normal purchase
+    assert.equal((await s.call("POST", "/api/studio/billing/change", { plan: "studio", interval: "year" }, { "x-test-user": OWNER })).body.error, "no_subscription");
+    const buy = await s.call("POST", "/api/studio/checkout", { plan: "creator", interval: "year" }, { "x-test-user": OWNER });
+    assert.equal(buy.status, 200, JSON.stringify(buy.body)); assert.match(buy.body.url, /checkout\.stripe\.com/);
+  } finally { await s.close(); }
+});
+
+test("a price setting that is not in the Stripe account is said plainly, never as Stripe's raw message", async () => {
+  const tables: Record<string, any[]> = { studio_customers: [], studio_stripe_events: [] };
+  const sb = fakeSb(tables, () => ({ data: {}, error: null }));
+  const stripe: any = fakeStripe();
+  stripe.checkout.sessions.create = async () => { throw Object.assign(new Error("No such price: 'price_1UVHHKPayAebgHW3lVc0Aliy'"), { code: "resource_missing", param: "line_items[0][price]" }); };
+  const s = await serve(sb, stripe);
+  try {
+    const r = await s.call("POST", "/api/studio/checkout", { plan: "creator", interval: "year" }, { "x-test-user": ANN });
+    assert.equal(r.status, 503); assert.equal(r.body.error, "billing_misconfigured"); assert.ok(!JSON.stringify(r.body).includes("price_1"), "no Stripe ids on screen");
+  } finally { await s.close(); }
+  const { missingPrices } = await import("../src/studio-plan-change.js");
+  const bad = await missingPrices({ prices: { retrieve: async (id: string) => { if (id === "price_cy") throw new Error("No such price"); return { id, active: true }; } } }, ENV as any);
+  assert.deepEqual(bad, ["STRIPE_PRICE_CREATOR_YEAR"]);
 });
