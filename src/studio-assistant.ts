@@ -54,6 +54,10 @@ export function matchingCharacters<T extends { kind: string; name?: string; prob
 }
 /** A voice card: a few voices that fit a description, each with a sample to play; the pick names the voice. */
 export type VoiceCard = { id: string; description: string; voices: Array<{ id: string; name: string; labels: Record<string, string>; preview_url: string | null }>; picked?: string | null; status: "open" | "done" };
+/** A "who plays them" card: one slot per person (the face from the clip when there is one), each filled from the
+ *  presets, the person's own characters (most used first) or a photo upload. The answer arrives as a "Who plays:" message
+ *  with the chosen pictures attached. */
+export type CastCard = { id: string; asset_id: string | null; reason: string; slots: Array<{ index: number; label: string; key?: string | null; url?: string | null }>; status: "open" | "done" };
 /** A people card: the faces found in a clip, for the person to say who gets swapped (all that apply). */
 export type PeopleCard = { id: string; asset_id: string; asset_name: string; reason: string; people: Array<{ index: number; label: string; url?: string | null; key?: string | null }>; status: "open" | "done" };
 /** A publish card: videos to post on the person's own linked networks, now or on a schedule. Nothing is posted until they
@@ -65,7 +69,7 @@ export type PublishCard = {
   /** networks already acknowledged in this chat, so a new link is announced once */
   linked_seen?: string[]; post_ids?: string[]; outcome?: string | null;
 };
-export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; publish?: PublishCard | null; setup?: SetupCard | null; context?: string | null };
+export type Message = { id: string; role: "user" | "assistant"; text: string; attachments?: Attachment[]; links?: string[]; plan_id?: string | null; at: string; interrupted?: boolean; choice?: Choice | null; request?: RequestCard | null; people?: PeopleCard | null; voices?: VoiceCard | null; publish?: PublishCard | null; setup?: SetupCard | null; cast?: CastCard | null; context?: string | null };
 export type OutputKind = "video" | "image" | "audio" | "text";
 export type PlanStep = { index: number; tool: string; label: string; source: string | null; options: Record<string, any>; credits: number; estimate: boolean; output: OutputKind; seconds: number | null; summary: string };
 export type Plan = { id: string; title: string; steps: PlanStep[]; total_credits: number; estimate: boolean; status: "proposed" | "confirmed" | "superseded"; created_at: string; warnings: string[] };
@@ -133,6 +137,11 @@ export const TOOLS = [
     name: "choose_people",
     description: "When a swap or recast is wanted on a clip with more than one person, show the faces found in it so the person can tick who changes (all that apply, or everyone). Use the asset id of that clip. Wait for their answer; it arrives as a message naming the chosen people, which you then pass as options.targets (the labels) in propose_plan.",
     input_schema: { type: "object", additionalProperties: false, properties: { asset_id: { type: "string" }, reason: { type: "string", description: "One short line" } }, required: ["asset_id", "reason"] },
+  },
+  {
+    name: "choose_characters",
+    description: "Whenever you need to know who plays one or more people (a swap, recast or trend), show this card instead of listing presets or asking for photos in text. It has one slot per person: the presets, the person's own characters (most used first) and a photo upload. Pass the clip's asset_id when there is one (its faces label the slots, left to right) and, for a clip with several people, only those who change in people (their labels from choose_people); with no clip, pass people as plain labels (\"the character\"). Wait for the answer: a message starting \"Who plays:\" naming each pick, with the chosen pictures attached in slot order.",
+    input_schema: { type: "object", additionalProperties: false, properties: { asset_id: { type: "string" }, people: { type: "array", items: { type: "string" }, description: "Labels of the people who change, left to right" }, reason: { type: "string", description: "One short line" } }, required: ["reason"] },
   },
   {
     name: "preview_voices",
@@ -594,7 +603,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
   const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null, social, performance: perf.brief });
   const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
-  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, setup: SetupCard | null = null, publish: PublishCard | null = null;
+  let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, setup: SetupCard | null = null, cast: CastCard | null = null, publish: PublishCard | null = null;
   // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes
   const peopleNotes: string[] = [];
   for (const a of input.attachments.filter((x) => x.kind === "video").slice(0, 2)) {
@@ -629,6 +638,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         else if (use.name === "remember") events?.({ type: "status", text: "Saving a note" });
         else if (use.name === "preview_characters") events?.({ type: "status", text: "Preparing options" });
         else if (use.name === "choose_people") events?.({ type: "status", text: "Finding the faces" });
+        else if (use.name === "choose_characters") events?.({ type: "status", text: "Getting the characters ready" });
         else if (use.name === "preview_voices") events?.({ type: "status", text: "Picking voices" });
         else if (use.name === "save_automation") events?.({ type: "status", text: "Saving the automation" });
         else if (use.name === "offer_post") events?.({ type: "status", text: "Getting the post ready" });
@@ -657,6 +667,21 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
         } else if (use.name === "request_video") {
           request = { id: randomUUID(), kind: use.input?.kind === "image" ? "image" : "video", reason: String(use.input?.reason ?? "").slice(0, 160), status: "open" };
           result = { ok: true, note: "The card is shown. Say in one line what you will do once it arrives; do not propose a plan yet." };
+        } else if (use.name === "choose_characters") {
+          // the slots: the faces of the clip (only the ones named, when some were), else the labels given, else one slot
+          const want = (Array.isArray(use.input?.people) ? use.input.people : []).map((x: unknown) => String(x).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 8);
+          const id = String(use.input?.asset_id ?? "");
+          const asset = UUID_RE.test(id) ? ctx.assets.get(id.toLowerCase()) : null;
+          let slots: CastCard["slots"] = [];
+          if (asset && asset.kind === "video") {
+            const { detectPeople } = await import("./studio-people.js");
+            const found = await Promise.race([detectPeople(sb, deps, convo.user_id, asset.id), new Promise<null>((r) => setTimeout(() => r(null), 25_000))]).catch(() => null);
+            const pick = (found ?? []).filter((p) => !want.length || want.some((w: string) => w.toLowerCase() === p.label.toLowerCase()));
+            slots = (pick.length ? pick : found ?? []).map((p, k) => ({ index: k + 1, label: p.label, key: p.key ?? null }));
+          }
+          if (!slots.length) slots = (want.length ? want : ["The character"]).map((label: string, k: number) => ({ index: k + 1, label }));
+          cast = { id: randomUUID(), asset_id: asset?.id ?? null, reason: String(use.input?.reason ?? "").slice(0, 160), slots, status: "open" };
+          result = { ok: true, shown: "characters card", slots: slots.map((x) => x.label), note: "The card is shown, one pick per slot. Wait for their \"Who plays:\" answer; then use the attached pictures (character_asset_id) or the preset names, in slot order (cast for several people)." };
         } else if (use.name === "preview_characters") {
           if (!tools.character) throw new AssistantError("plan_invalid", "Characters are not taking jobs right now");
           const q = quote("character", { mode: use.input?.mode, prompt: use.input?.prompt, count: 4 }, null, costs);
@@ -715,12 +740,14 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   if (!text && people) text = "Tick who gets swapped, or choose everyone.";
   if (!text && voices) text = "Play the samples and pick a voice.";
   if (!text && setup) text = "Choose what changes each time you run it, then press Save.";
+  if (!text && cast) text = cast.slots.length > 1 ? "Pick who plays each person." : "Pick who plays them.";
   if (!text && publish) text = social.linked.length ? "Pick where it goes, then post it now or schedule it." : "Connect your socials below and I will post it from here.";
   if (!text) text = interrupted ? "(stopped before answering)" : plan ? `Here is the plan: ${plan.title}, ${plan.total_credits} credits in ${plan.steps.length} ${plan.steps.length === 1 ? "step" : "steps"}. Confirm it in the card to start.` : "I did not get that. Could you say it another way?";
-  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}), ...(publish ? { publish } : {}), ...(setup ? { setup } : {}) };
+  const assistant: Message = { id: randomUUID(), role: "assistant", text, plan_id: plan?.id ?? null, at: now(), ...(interrupted ? { interrupted: true } : {}), ...(choice ? { choice } : {}), ...(request ? { request } : {}), ...(people ? { people } : {}), ...(voices ? { voices } : {}), ...(publish ? { publish } : {}), ...(setup ? { setup } : {}), ...(cast ? { cast } : {}) };
   const voicePick = input.text.match(/^Use the voice .* \(voice ([A-Za-z0-9]+)\)/);
   if (voicePick) for (const m of convo.messages) if (m.voices?.status === "open") { m.voices.status = "done"; m.voices.picked = voicePick[1]; }
   if (/^(swap|change) (only|these|everyone)/i.test(input.text)) for (const m of convo.messages) if (m.people?.status === "open") m.people.status = "done";
+  if (/^who plays:/i.test(input.text)) for (const m of convo.messages) if (m.cast?.status === "open") m.cast.status = "done";
   // a new attachment or link answers any open request card
   if (input.attachments.length || input.links.length) for (const m of convo.messages) if (m.request?.status === "open") m.request.status = "done";
   convo.messages = [...convo.messages, assistant];
@@ -814,6 +841,20 @@ export async function promoteOutput(sb: SupabaseClient, deps: AssistantDeps, u: 
   return id;
 }
 
+/** Why a step stopped, in words a person reads (the code stays on the job for the operator console). */
+export function failureWords(code: string | null | undefined): string {
+  switch (code) {
+    case "light_refused": return "the renderer turned this clip down after trying it more than once.";
+    case "renderer_busy": case "recast_timeout": return "the renderer was too busy and timed out.";
+    case "recast_nsfw": return "the renderer's content check stopped it.";
+    case "recast_balance": case "recast_auth": case "recast_not_configured": return "rendering is unavailable on our side right now.";
+    case "character_missing": case "character_invalid": return "a picture it needed is no longer in your library.";
+    case "source_missing": case "source_not_ready": return "the video it needed is no longer in your library.";
+    case "source_too_short_recast": return "the clip is too short (under 4 seconds).";
+    default: return "the renderer could not finish it.";
+  }
+}
+
 /** One pass over a running conversation: start what can start, finish what finished. */
 export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo: Conversation): Promise<Conversation> {
   const env = deps.env ?? process.env, log = deps.log ?? (() => undefined);
@@ -842,7 +883,7 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
         st.status = "done";
       } else if ((j.status === "failed" || j.status === "canceled") && st.status !== j.status) {
         st.status = j.status; st.error_code = j.error_code ?? null;
-        finish(j.status === "failed" ? "failed" : "canceled", j.status === "failed" ? `Step ${st.index} (${plan.steps[st.index - 1].label}) failed: ${j.error_code ?? "unknown"}. Its credits were refunded and the later steps did not run.` : `Step ${st.index} was canceled, so the later steps did not run.`);
+        finish(j.status === "failed" ? "failed" : "canceled", j.status === "failed" ? `Step ${st.index} (${plan.steps[st.index - 1].label}) did not finish: ${failureWords(j.error_code)} Its credits were refunded${plan.steps.length > 1 ? " and the later steps did not run" : ""}. Say "try again" to run it once more.` : `Step ${st.index} was canceled, so the later steps did not run.`);
         break;
       } else if (j.status === "running" || j.status === "queued") st.status = j.status;
     }
@@ -972,13 +1013,14 @@ export async function hydrateChoices(sb: SupabaseClient, u: string, c: Conversat
     }
   }
   if (changed) await saveConversation(sb, c, () => ({}));
-  const keys = c.messages.flatMap((m) => [...[...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])].map((o) => o.poster_key), ...(m.people?.people ?? []).map((p) => p.key), ...(m.publish?.items ?? []).map((i) => i.poster_key)].filter(Boolean) as string[]);
+  const keys = c.messages.flatMap((m) => [...[...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])].map((o) => o.poster_key), ...(m.people?.people ?? []).map((p) => p.key), ...(m.cast?.slots ?? []).map((p) => p.key), ...(m.publish?.items ?? []).map((i) => i.poster_key)].filter(Boolean) as string[]);
   if (keys.length) {
     const signed = await sb.storage.from("studio-outputs").createSignedUrls([...new Set(keys)], 900);
     const urls = new Map(((signed.data ?? []) as any[]).map((x) => [x.path, x.signedUrl]));
     for (const m of c.messages) {
       for (const o of [...(m.choice?.options ?? []), ...(m.choice?.existing ?? [])]) o.url = o.poster_key ? urls.get(o.poster_key) ?? null : null;
       for (const p of m.people?.people ?? []) p.url = p.key ? urls.get(p.key) ?? null : null;
+      for (const p of m.cast?.slots ?? []) p.url = p.key ? urls.get(p.key) ?? null : null;
       for (const i of m.publish?.items ?? []) i.url = i.poster_key ? urls.get(i.poster_key) ?? null : null;
     }
   }

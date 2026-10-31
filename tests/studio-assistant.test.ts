@@ -6,6 +6,7 @@ import { accountAccess } from "../src/account-access.js";
 import { COSTS, PLANS } from "../src/studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS } from "../src/studio-knowledge.js";
 import { mergeMessages, pricePlan, runTurn, startRun, advanceRun, importLink, linkPlatform, findMediaUrl, registerAssistant, startAssistantLoop, TOOLS, AssistantError, expectedOutput, readAnthropicStream, compactIfNeeded, needsCompaction, hydrateChoices, titleIfNeeded, COMPACT_AFTER, KEEP_RAW, MEMORY_LIMIT, type Conversation, type TurnEvent } from "../src/studio-assistant.js";
+import { rankCharacters, characterIdsOf } from "../src/studio-character-library.js";
 import { templateFromPlan, instantiate, createAutomation, runAutomation, registerAutomations, applyAnswers, isEachRun, cleanGiven, settlePeople } from "../src/studio-automations.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CAT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CONVO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -109,7 +110,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,preview_voices,preview_characters,offer_post,save_automation,remember");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,fetch_link,request_video,choose_people,choose_characters,preview_voices,preview_characters,offer_post,save_automation,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {
@@ -334,7 +335,7 @@ test("a run stops when a step fails, when a slot is busy it waits, and when cred
   tables.studio_jobs[0].status = "failed"; tables.studio_jobs[0].error_code = "render_failed";
   await advanceRun(sb, d, c);
   assert.equal(c.run!.status, "failed"); assert.equal(c.status, "failed"); assert.equal(c.run!.steps[0].status, "failed"); assert.equal(c.run!.steps[1].status, "skipped");
-  assert.match(c.messages[c.messages.length - 1].text, /Step 1 \(Three\) failed: render_failed/);
+  assert.match(c.messages[c.messages.length - 1].text, /Step 1 \(Three\) did not finish: the renderer could not finish it\. .*try again/);
   // short on credits
   const t2 = baseTables(); const sb2 = fakeSb(t2, (name, args) => name === "studio_create_job" ? { data: null, error: { message: "insufficient_credits" } } : rpcs(t2)(name, args));
   const p2 = await pricePlan(ctxFor(sb2) as any, { title: "x", steps: [{ tool: "blueprint", label: "Fifty", source: VID, options: { copies: 50 } }] });
@@ -779,6 +780,40 @@ test("automation routes: setup questions from a chat, save with answers, the ass
   } finally { await s.close(); }
 });
 
+
+test("who plays them: the assistant shows a characters card with the clip's faces as slots; the Who plays answer closes it", async () => {
+  const tables = baseTables();
+  (tables.studio_assets[0] as any).probe = { duration: 12.2, people: [{ index: 1, label: "Black cap, left", box: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, key: `${ANN}/assets/${VID}/people/1.jpg` }, { index: 2, label: "Dark hair, right", box: { x: 0.6, y: 0.1, w: 0.2, h: 0.2 }, key: `${ANN}/assets/${VID}/people/2.jpg` }] };
+  const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn } = fakeClaude([
+    toolReply("choose_characters", { asset_id: VID, reason: "Who replaces the two people" }),
+    textReply("Pick who plays each person on the card."),
+    textReply("Swap both"),
+    textReply("Got it."),
+  ]);
+  const s = await serve(sb, fetchFn);
+  try {
+    const made = await s.call("POST", "/api/studio/assistant/conversations"); const id = made.body.conversation.id;
+    const r = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "replace both people", attachments: [VID] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const card = r.body.conversation.messages.at(-1).cast;
+    assert.equal(card.status, "open"); assert.equal(card.asset_id, VID);
+    assert.deepEqual(card.slots.map((x: any) => [x.index, x.label]), [[1, "Black cap, left"], [2, "Dark hair, right"]]);
+    assert.match(card.slots[0].url, /people\/1\.jpg/, "the faces are signed for the card");
+    const a = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "Who plays: person 1 (Black cap, left) is Maya; person 2 (Dark hair, right) is Orange cat.jpg", attachments: [CAT] });
+    assert.equal(a.body.conversation.messages.find((m: any) => m.cast).cast.status, "done");
+  } finally { await s.close(); }
+});
+
+const P1 = "11111111-0000-4000-8000-000000000001", P2 = "11111111-0000-4000-8000-000000000002", C1 = "11111111-0000-4000-8000-000000000003", X1 = "11111111-0000-4000-8000-000000000004";
+test("your characters: pictures used as characters, most used first; made ones show before their first use", () => {
+  const imgs = [{ id: P1, name: "images.jpg", created_at: "2026-10-30" }, { id: P2, name: "getty.jpg", created_at: "2026-10-31" }, { id: C1, name: "Character: a fox", created_at: "2026-10-29", probe: { character: true } }, { id: X1, name: "logo.png", created_at: "2026-10-31" }];
+  const jobs = [{ options: { character_asset_id: P2 }, created_at: "2026-10-31T09:00" }, { options: { cast: [{ character_asset_id: P1 }, { character_asset_id: P2 }], character_asset_id: P1 }, created_at: "2026-10-31T08:00" }];
+  const r = rankCharacters(imgs, jobs);
+  assert.deepEqual(r.map((c) => [c.asset_id, c.uses]), [[P2, 2], [P1, 1], [C1, 0]], "a picture counts once per job; never-used plain pictures stay out");
+  assert.equal(r[2].name, "a fox"); assert.equal(r[2].made, true);
+  assert.deepEqual(characterIdsOf({ cast: [{ character_asset_id: "AAAAAAAA-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] }), ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
+});
 
 test("a request card asks for the video instead of guessing, the next attachment closes it, and the animal card offers the library cat for free", async () => {
   const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));

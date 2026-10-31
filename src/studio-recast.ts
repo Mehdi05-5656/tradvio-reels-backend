@@ -134,6 +134,14 @@ export function isTransientFailure(raw: any): boolean {
   const text = typeof raw?.error === "string" ? raw.error : typeof raw?.message === "string" ? raw.message : JSON.stringify(raw ?? "");
   return /took too long|try again|timed? ?out|timeout|overload|busy|capacity|temporar|rate.?limit|too many requests|unavailable|\b50[234]\b/i.test(text);
 }
+/** "Generation failed" and nothing else: the renderer gave no reason. On a long-path piece (already cut at camera
+ *  changes, so not the shot-change refusal) this has come back for byte-identical inputs that rendered minutes later
+ *  (Oct 31: two jobs failed this way, the same files went through at the third try). Failed requests are not billed, so
+ *  the piece is sent again before the job gives up. */
+export function isGenericFailure(raw: any): boolean {
+  const text = typeof raw?.error === "string" ? raw.error : typeof raw?.message === "string" ? raw.message : "";
+  return /^\s*(generation failed|failed)?\.?\s*$/i.test(text);
+}
 /** The most a retry on another route may cost us: what the job's credits bring in at the lowest net price a credit sells
  *  for, less our smallest margin (the 20% of the expensive models). Above it, the retry would lose money on the job. */
 export function retryCeilingUsd(creditsReserved: number, creditFloor: number | null | undefined): number {
@@ -456,10 +464,10 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       }
       // A piece the renderer timed out on: forget its request and requeue the job. The next attempt sends only the pieces
       // without a request (this one), on the same engine, and picks the others' results up where they are.
-      const resendPiece = async (i: number): Promise<never> => {
+      const resendPiece = async (i: number, why: "busy" | "no_reason" = "busy"): Promise<never> => {
         pieces[i] = { ...pieces[i], request_id: null };
-        await renew(sb, job, { pieces, note: "The renderer was busy; sending it again" });
-        throw new RecastError("recast_failed", `piece ${i + 1} timed out or the renderer was busy; sending it again`, true);
+        await renew(sb, job, { pieces, note: why === "busy" ? "The renderer was busy; sending it again" : "One part did not render; sending it again", resent: (Number(job.progress?.resent) || 0) + 1 });
+        throw new RecastError("recast_failed", why === "busy" ? `piece ${i + 1} timed out or the renderer was busy; sending it again` : `piece ${i + 1} failed without a reason; sending it again`, true);
       };
       if (pieces.some((p) => !p.request_id)) {
         const images = await characterUrls(sb, deps, job, false);
@@ -516,6 +524,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
               log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: ai + 1, request: pieces[ai].request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
               if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(ai);
+              if (st.status === "failed" && job.attempts < 3 && isGenericFailure(st.raw)) await resendPiece(ai, "no_reason");
               throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
             }
             await renew(sb, job, { note: "Rendering your video: the first part sets the character for the rest" });
@@ -552,6 +561,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: i + 1, request: p.request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
             // the renderer timed out or was busy on this piece: send just this one again, keep the others rendering
             if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(i);
+            // no reason given: the same piece again (free when it fails); the job only stops on the last attempt
+            if (st.status === "failed" && job.attempts < 3 && isGenericFailure(st.raw)) await resendPiece(i, "no_reason");
             // the job is lost: stop paying for the pieces still rendering
             for (const [k, other] of pieces.entries()) if (k !== i && !urls[k] && other.request_id) { await cancelRecast(deps, other.request_id).catch(() => undefined); if (job.progress?.pending_spend?.[other.request_id]) await renew(sb, job, bookSpend(other.request_id)).catch(() => undefined); }
             if (st.status === "failed" && p.engine === "light" && failureCode(st.raw) === "recast_failed" && !chosenRoute) {

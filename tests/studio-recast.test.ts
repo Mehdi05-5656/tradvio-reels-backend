@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT, isTransientFailure, retryCeilingUsd, estimateRequestUsd, billedUsdOf } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, isGenericFailure, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT, isTransientFailure, retryCeilingUsd, estimateRequestUsd, billedUsdOf } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -426,10 +426,34 @@ test("the long path stops paying for the other pieces when one is refused", asyn
   };
   const { writeFile: wf } = await import("node:fs/promises");
   const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 50 }, name: "long.mp4" }] });
-  const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" }, sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 2, options: { model: "light", seconds: 50, character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
+  const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" }, sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 3, options: { model: "light", seconds: 50, character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
   assert.equal(out, "failed");
   assert.ok(calls.some((c) => c.method === "POST" && c.url.endsWith("/requests/piece_1/cancel")), "the piece still rendering is cancelled");
   assert.equal(sb.calls.at(-1).args.p_reason, "light_refused", "a refused Light piece offers the high-capacity route");
+});
+
+test("a long-path piece that fails with no reason is sent again, alone, before the job gives up (Oct 31: identical files went through minutes later)", async () => {
+  const calls: any[] = [];
+  const fetchFn: any = async (url: string, init: any = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    const res = (status: number, body: any) => ({ ok: status < 300, status, text: async () => JSON.stringify(body), arrayBuffer: async () => body });
+    if (init.method === "HEAD") return { ok: true, status: 200 };
+    if (init.method === "POST" && (url === `${HF_BASE}/${LONG_ENDPOINT}` || /genjutsu-light\//.test(url))) { const n = calls.filter((c) => c.method === "POST").length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+    if (url.endsWith("/requests/piece_1/status")) return res(200, { status: "in_progress" });
+    if (url.endsWith("/requests/piece_2/status")) return res(200, { status: "failed", error: "Generation failed" });
+    if (/\/cancel$/.test(url)) return res(200, { status: "cancelled" });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const { writeFile: wf } = await import("node:fs/promises");
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 50 }, name: "long.mp4" }] });
+  const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" }, sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 1, options: { model: "light", seconds: 50, cast: [{ label: "1", character: "noah" }, { label: "2", character: "maya" }], character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
+  assert.equal(out, "requeued", "not failed: the next attempt sends that piece again");
+  assert.equal(sb.calls.at(-1).args.p_reason, "recast_failed"); assert.equal(sb.calls.at(-1).args.p_retry, true);
+  assert.ok(!calls.some((c) => c.url.endsWith("/requests/piece_1/cancel")), "the piece still rendering keeps rendering");
+  const pieces = sb.calls.filter((c: any) => c.name === "studio_renew" && c.args.p_progress?.pieces).at(-1)?.args.p_progress.pieces;
+  assert.equal(pieces[1].request_id, null, "only the failed piece is cleared"); assert.equal(pieces[0].request_id, "piece_1");
+  assert.equal(isGenericFailure({ status: "failed", error: "Generation failed" }), true);
+  assert.equal(isGenericFailure({ status: "failed", error: "Content policy violation: faces" }), false);
 });
 
 test("a long-path job that stopped half way through sending sends only the pieces still missing", async () => {
