@@ -31,6 +31,7 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
         neq(k: string, v: any) { filters.push((r) => r[k] !== v); return q; },
         is(k: string, v: any) { filters.push((r) => (r[k] ?? null) === v); return q; },
         gte(k: string, v: any) { filters.push((r) => r[k] >= v); return q; },
+        like(k: string, pat: string) { const re = new RegExp(`^${pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*")}$`); filters.push((r) => re.test(String(r[k] ?? ""))); return q; },
         in(k: string, v: any[]) { filters.push((r) => v.includes(r[k])); return q; },
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },
         insert(v: any) { pending = { table, op: "insert", v }; rows = () => (Array.isArray(v) ? v : [v]); return q; },
@@ -512,4 +513,17 @@ test("a price setting that is not in the Stripe account is said plainly, never a
   const { missingPrices } = await import("../src/studio-plan-change.js");
   const bad = await missingPrices({ prices: { retrieve: async (id: string) => { if (id === "price_cy") throw new Error("No such price"); return { id, active: true }; } } }, ENV as any);
   assert.deepEqual(bad, ["STRIPE_PRICE_CREATOR_YEAR"]);
+});
+
+test("a referral code saved on the account at sign-up is applied once, before any payment, wherever the email was opened", async () => {
+  const { applySignupReferral } = await import("../src/studio.js");
+  const calls: any[] = [];
+  const mk = (ref: string | null) => ({ auth: { admin: { getUserById: async () => ({ data: { user: { user_metadata: ref ? { ref } : {} } } }) } }, rpc: async (name: string, a: any) => { calls.push({ name, a }); return { data: { applied: true, referrer: "r1" }, error: null }; } }) as any;
+  assert.equal(await applySignupReferral(mk("PP7AFYM6"), "u-new-1", { status: "none" }), true);
+  assert.deepEqual(calls.at(-1), { name: "studio_apply_referral", a: { p_user: "u-new-1", p_code: "PP7AFYM6" } });
+  assert.equal(await applySignupReferral(mk("PP7AFYM6"), "u-new-1", { status: "none" }), false, "looked at once per person");
+  assert.equal(await applySignupReferral(mk("PP7AFYM6"), "u-paid", { status: "active", stripe_subscription_id: "sub_1" }), false, "never after paying");
+  assert.equal(await applySignupReferral(mk("PP7AFYM6"), "u-ref", { status: "none", referred_by: "x" }), false, "never twice");
+  assert.equal(await applySignupReferral(mk("bad code!"), "u-new-2", { status: "none" }), false);
+  assert.equal(calls.length, 1);
 });

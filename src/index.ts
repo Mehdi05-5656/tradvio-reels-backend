@@ -36,6 +36,7 @@ import { registerSocial, startSocialLoop } from "./studio-social.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerPeople } from "./studio-people.js";
 import { registerCharacters } from "./studio-character-library.js";
+import { registerCreators, startCreatorLoop } from "./studio-creators.js";
 import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
 import { initEvents } from "./studio-events.js";
@@ -101,6 +102,8 @@ async function main() {
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
   registerPeople(app, getSb); // who is in a clip: faces for the chat card and the Swap page
   registerCharacters(app, getSb); // the pictures a person uses as characters, most used first
+  registerCreators(app, getSb); // the Creator Program: paid views on creators' own TikTok / Instagram; off until STUDIO_CREATORS_ENABLED=true
+  startCreatorLoop(getSb); // reads enrolled accounts' videos and views every few hours (off with the program)
   registerVoices(app); // the voice library for the picker and the chat's voice card; empty without ELEVENLABS_API_KEY
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
   startCharacterLoop(getSb); // Studio characters (Soul portraits); off without HIGGSFIELD_API_KEY

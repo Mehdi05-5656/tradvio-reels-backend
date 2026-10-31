@@ -559,7 +559,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         ledger: ledgerOut,
         costs,
         topup: c ? topupInfo(c, spent) : null,
-        referral: await referralInfo(sb, u, c, ledger.data ?? []),
+        referral: await referralInfo(sb, u, (await applySignupReferral(sb, u, c)) ? { ...c, referred_by: true } : c),
         email_opt_out: !!c?.email_opt_out,
         // the owner's account sees the admin button; the key is absent for everyone else
         ...((await isStudioAdmin(req, sb, env)) ? { admin: true } : {}),
@@ -1148,13 +1148,35 @@ export async function studioOverview(sb: SupabaseClient, env: Record<string, str
   };
 }
 
-/** The person's referral link and what it earned. The code is minted on first sight; a missing migration yields nulls. */
-async function referralInfo(sb: SupabaseClient, u: string, c: any, ledger: any[]) {
+/** Sign-up codes already looked at in this process (one lookup per person, not one per page load). */
+const signupRefChecked = new Set<string>();
+/** A code saved on the account at sign-up (user metadata "ref"): applied here when the browser that opened the link is
+ *  not the one that finished signing up (the confirmation email opened on a phone). Before any payment, once. */
+export async function applySignupReferral(sb: SupabaseClient, u: string, c: any): Promise<boolean> {
+  if (c?.referred_by || c?.stripe_subscription_id || !["none", "incomplete", undefined, null].includes(c?.status) || signupRefChecked.has(u)) return false;
+  signupRefChecked.add(u);
+  try {
+    const got = await (sb as any).auth?.admin?.getUserById?.(u);
+    const code = String(got?.data?.user?.user_metadata?.ref ?? "").trim().toUpperCase();
+    if (!/^[A-Z2-9]{8}$/.test(code)) return false;
+    const r = await sb.rpc("studio_apply_referral", { p_user: u, p_code: code });
+    if (r.error) throw r.error;
+    if (r.data?.applied) console.log(`[studio] referral from sign-up ${JSON.stringify({ user: u, referrer: r.data.referrer })}`);
+    return !!r.data?.applied;
+  } catch (e: any) { console.error(`[studio] sign-up referral for ${u}: ${String(e?.message ?? e).slice(0, 160)}`); return false; }
+}
+
+/** The person's referral link and what it earned: friends who joined with it, friends who subscribed (both sides got
+ *  credits), and the credits earned. The code is minted on first sight; a missing migration yields nulls. */
+async function referralInfo(sb: SupabaseClient, u: string, c: any) {
   let code: string | null = c?.referral_code ?? null;
   if (!code) { const r = await sb.rpc("studio_referral_code", { p_user: u }); code = r.error ? null : (r.data as string | null); }
-  const earned = ledger.filter((l) => l.reason === "promo" && String(l.ref ?? "").startsWith("referral:")).reduce((n, l) => n + l.delta, 0);
-  const referred = ledger.filter((l) => l.reason === "promo" && String(l.ref ?? "").startsWith("referral:")).length;
-  return { code, url: code ? `${(process.env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "")}/#signup?ref=${code}` : null, credits_each: REFERRAL_CREDITS, referred, earned, referred_by: !!c?.referred_by };
+  const [joined, rewards] = await Promise.all([
+    sb.from("studio_customers").select("user_id", { count: "exact", head: true }).eq("referred_by", u),
+    sb.from("studio_credit_ledger").select("delta").eq("user_id", u).eq("reason", "promo").like("ref", "referral:%").limit(1000),
+  ]);
+  const rows = ((rewards.data ?? []) as any[]);
+  return { code, url: code ? `${(process.env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "")}/#signup?ref=${code}` : null, credits_each: REFERRAL_CREDITS, joined: joined.count ?? 0, referred: rows.length, earned: rows.reduce((n, l) => n + (Number(l.delta) || 0), 0), referred_by: !!c?.referred_by };
 }
 
 export async function loadAsset(sb: SupabaseClient, u: string, assetId: any) {
