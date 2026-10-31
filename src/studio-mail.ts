@@ -7,9 +7,10 @@
 // prices or sales words). Notices that a person can turn off carry RFC 8058 one-click unsubscribe headers, which
 // Gmail and Yahoo ask of senders; receipts do not (they are not optional). Each message gets its own X-Entity-Ref-ID
 // so Gmail does not fold separate notices into one thread. Sender authentication (DKIM on clone8.io, DMARC) lives in DNS.
+import { recordEvent } from "./studio-events.js";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type Mail = { to: string; subject: string; text: string; html?: string; unsubscribeUrl?: string | null };
+export type Mail = { to: string; subject: string; text: string; html?: string; unsubscribeUrl?: string | null; /** for the admin panel's email counts */ kind?: string; userId?: string | null };
 export type MailDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void };
 
 /** The one address for Clone8 support: emails come from it, replies go to it, and the site and app show it. */
@@ -33,7 +34,8 @@ export async function sendMail(mail: Mail, deps: MailDeps = {}): Promise<string 
     body: JSON.stringify({ from: mailFrom(env), to: [mail.to], subject: mail.subject, text: mail.text, html: mail.html ?? toHtml(mail.text), reply_to: env.STUDIO_MAIL_REPLY_TO || SUPPORT_EMAIL, headers }),
   });
   const body: any = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(`mail_failed_${r.status}:${String(body?.message ?? "").slice(0, 120)}`);
+  if (!r.ok) { recordEvent({ user_id: mail.userId ?? null, kind: "email", name: mail.kind ?? "mail", props: { ok: false, status: r.status } }); throw new Error(`mail_failed_${r.status}:${String(body?.message ?? "").slice(0, 120)}`); }
+  recordEvent({ user_id: mail.userId ?? null, kind: "email", name: mail.kind ?? "mail", props: { ok: true } });
   return String(body?.id ?? "");
 }
 

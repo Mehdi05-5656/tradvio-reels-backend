@@ -93,7 +93,7 @@ export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, o
   });
   if (!r.ok) throw new Error(`insights_http_${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`);
   const body: any = await r.json();
-  logClaudeCost(deps.log, "overview", env.STUDIO_INSIGHT_MODEL || INSIGHT_MODEL, body?.usage);
+  logClaudeCost(deps.log, "overview", String(body?.model ?? env.STUDIO_INSIGHT_MODEL ?? INSIGHT_MODEL), body?.usage, u);
   if (body?.stop_reason === "refusal") throw new Error("insights_refused");
   if (body?.stop_reason === "max_tokens") throw new Error("insights_cut_short");
   const raw = (body?.content ?? []).find((b: any) => b?.type === "text")?.text ?? "";

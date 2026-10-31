@@ -2,6 +2,7 @@
 // never typed in by hand. The rule: a tool may cost at most (1 - MARGIN_TARGET) of what its credits earn on
 // the cheapest plan after Stripe. Change a Higgsfield rate here when their price page changes; every quote,
 // plan card and runner charge follows. See docs/Clone8-Studio-unit-economics.md for the worked sheet.
+import { recordEvent } from "./studio-events.js";
 
 export type Resolution = "480p" | "720p" | "1080p";
 export type PlanLike = { id: string; monthly_usd: number; annual_usd_per_month: number; credits: number };
@@ -156,14 +157,16 @@ export function packsClearFloor(plans: PlanLike[]): boolean {
   return PACKS.every((p) => netPerCredit(p.usd, p.credits) >= floor);
 }
 
-/** Every Claude call's cost in the log ("[cost] claude ..."): Clone8 pays these itself, so they are watched, not charged. */
-export function logClaudeCost(log: ((l: string) => void) | undefined, feature: string, model: string, usage: any) {
-  if (!usage || !log) return;
+/** Every Claude call's cost, in the log ("[cost] claude ...") and in studio_events for the admin panel: Clone8 pays
+ *  these itself, so they are watched, not charged. `user` is the person the call was made for, when there is one. */
+export function logClaudeCost(log: ((l: string) => void) | undefined, feature: string, model: string, usage: any, user?: string | null) {
+  if (!usage) return;
   const rates: Record<string, { input: number; output: number; cache_read: number }> = { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 } };
   const r = rates[model] ?? rates["claude-opus-5-5"];
   const inp = Number(usage.input_tokens ?? 0), outp = Number(usage.output_tokens ?? 0), read = Number(usage.cache_read_input_tokens ?? 0), write = Number(usage.cache_creation_input_tokens ?? 0);
   const usd = (inp * r.input + write * r.input * 1.25 + read * r.cache_read + outp * r.output) / 1e6;
-  log(`[cost] claude ${JSON.stringify({ feature, model, input: inp, cache_write: write, cache_read: read, output: outp, usd: Math.round(usd * 10000) / 10000 })}`);
+  log?.(`[cost] claude ${JSON.stringify({ feature, model, input: inp, cache_write: write, cache_read: read, output: outp, usd: Math.round(usd * 10000) / 10000 })}`);
+  recordEvent({ user_id: user ?? null, kind: "claude", name: feature, usd, props: { model, input: inp, cache_write: write, cache_read: read, output: outp } });
 }
 
 /** Social accounts a plan posts to (owner's decision, Oct 30 2026), and the price of each extra one added to a plan.

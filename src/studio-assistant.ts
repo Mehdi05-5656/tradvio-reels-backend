@@ -6,6 +6,8 @@
 // The model is Claude (Anthropic Messages API, tool use). It knows only what studio-knowledge.ts tells it: the live
 // tools, prices, catalog and the person's own library. It never starts work: propose_plan returns a priced plan to
 // the person; confirm is a separate route the interface calls on their click.
+import { OVERHEAD } from "./studio-pricing.js";
+import { recordEvent } from "./studio-events.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
@@ -75,6 +77,8 @@ export type MemoryNote = { id: string; note: string; created_at: string };
 
 export type AssistantDeps = {
   fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; now?: () => number;
+  /** Who the Claude calls are for and what they do, for the cost record (studio_events). */
+  userId?: string | null; feature?: string;
   /** Fetches a YouTube video to a file (yt-dlp in production; tests inject one). */
   download?: (url: string, target: string, o: { maxBytes: number; maxSeconds: number }) => Promise<{ title: string | null }>;
   /** Aborted when the person stops a reply or leaves; the model request is cut and the partial text is kept. */
@@ -230,7 +234,7 @@ export async function claude(deps: AssistantDeps, body: Record<string, any>, onT
     }
     const model = String(body.model ?? env.STUDIO_ASSISTANT_MODEL ?? DEFAULT_MODEL);
     const out = !onText ? await r.json() : r.body ? await readAnthropicStream(r.body, onText, ctl.signal).catch((e) => { if (deps.signal?.aborted) throw aborted(); throw e instanceof AssistantError ? e : new AssistantError("assistant_unavailable", "The reply broke off", 503); }) : (() => { throw new AssistantError("assistant_unavailable", "Claude sent no stream", 503); })();
-    logClaudeCost(deps.log, "assistant", model, out?.usage);
+    logClaudeCost(deps.log, deps.feature ?? "assistant", String(out?.model ?? model), out?.usage, deps.userId);
     return out;
   } finally { clearTimeout(timer); deps.signal?.removeEventListener("abort", stop); }
 }
@@ -467,6 +471,7 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
   if (platform === "youtube") {
     // metadata first (title, length) so an over-long video is refused before anything is downloaded
     const meta = await fetchFn(`https://api.scrapecreators.com/v1/youtube/video?url=${encodeURIComponent(url)}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(60_000) }).catch(() => null);
+    recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: "/v1/youtube/video", status: meta?.status ?? 0, use: "link" } });
     body = meta && meta.ok ? await meta.json().catch(() => null) : null;
     const ms = Number(body?.durationMs ?? body?.lengthSeconds * 1000);
     const maxSeconds = linkMaxSeconds(env);
@@ -482,6 +487,7 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
   } else {
     const path = platform === "tiktok" ? `/v2/tiktok/video?url=${encodeURIComponent(url)}&download_media=true&trim=true` : `/v1/instagram/post?url=${encodeURIComponent(url)}&download_media=true&trim=true`;
     const r = await fetchFn(`https://api.scrapecreators.com${path}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
+    recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: path.split("?")[0], status: r.status, use: "link" } });
     if (!r.ok) throw new AssistantError("link_fetch_failed", `The link could not be read (${r.status})`, 502);
     body = await r.json().catch(() => null);
     const media = findMediaUrl(body);
@@ -604,7 +610,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     events?.({ type: "round" }); streamed = "";
     // automatic caching: the instructions, tools and the chat so far are read back at a tenth of the price on the next round
-    const reply = await claude(deps, { system, tools: social.enabled ? TOOLS : TOOLS.filter((t) => t.name !== "offer_post"), messages, cache_control: { type: "ephemeral" } }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
+    const reply = await claude({ ...deps, userId: convo.user_id, feature: "assistant" }, { system, tools: social.enabled ? TOOLS : TOOLS.filter((t) => t.name !== "offer_post"), messages, cache_control: { type: "ephemeral" } }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
     const blocks: any[] = Array.isArray(reply?.content) ? reply.content : [];
     text = blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n").trim() || text;
     const uses = blocks.filter((b) => b.type === "tool_use");
@@ -727,7 +733,7 @@ export async function titleIfNeeded(sb: SupabaseClient, deps: AssistantDeps, con
   const first = convo.messages.find((m) => m.role === "user")?.text?.trim() ?? "";
   const raw = convo.title === "New chat" || (first && convo.title === first.replace(/\s+/g, " ").slice(0, 60));
   if (!raw || convo.messages.length < 2 || !first) return false;
-  const reply = await claude({ ...deps, signal: undefined }, { system: "Name this chat in three to six words, sentence case (capital only on the first word and names), plain, no quotes, no period, no emoji. It is a chat between a creator and a video assistant; name it by what the person wants.", max_tokens: 24, messages: [{ role: "user", content: convo.messages.slice(0, 4).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text.slice(0, 300)}`).join("\n") }] });
+  const reply = await claude({ ...deps, signal: undefined, userId: convo.user_id, feature: "chat_title" }, { system: "Name this chat in three to six words, sentence case (capital only on the first word and names), plain, no quotes, no period, no emoji. It is a chat between a creator and a video assistant; name it by what the person wants.", max_tokens: 24, messages: [{ role: "user", content: convo.messages.slice(0, 4).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text.slice(0, 300)}`).join("\n") }] });
   const text = (Array.isArray(reply?.content) ? reply.content : []).filter((b: any) => b.type === "text").map((b: any) => String(b.text)).join(" ").replace(/["\n]+/g, " ").replace(/[.\s]+$/, "").trim().slice(0, 60);
   if (!text) return false;
   convo.title = text;
@@ -742,7 +748,7 @@ export async function compactIfNeeded(sb: SupabaseClient, deps: AssistantDeps, c
   const from = convo.summary_through ?? 0, to = convo.messages.length - KEEP_RAW;
   if (to <= from) return false;
   const part = convo.messages.slice(from, to).map((m) => `${m.role === "user" ? "Person" : "Assistant"}: ${m.text}${m.attachments?.length ? ` [attached: ${m.attachments.map((a) => `${a.name} id ${a.asset_id}`).join(", ")}]` : ""}${m.links?.length ? ` [links: ${m.links.join(", ")}]` : ""}`).join("\n");
-  const reply = await claude({ ...deps, signal: undefined }, { system: SUMMARY_PROMPT, max_tokens: 700, messages: [{ role: "user", content: `${convo.summary ? `Summary so far:\n${convo.summary}\n\n` : ""}New part of the chat:\n${part}` }] });
+  const reply = await claude({ ...deps, signal: undefined, userId: convo.user_id, feature: "chat_summary" }, { system: SUMMARY_PROMPT, max_tokens: 700, messages: [{ role: "user", content: `${convo.summary ? `Summary so far:\n${convo.summary}\n\n` : ""}New part of the chat:\n${part}` }] });
   const text = (Array.isArray(reply?.content) ? reply.content : []).filter((b: any) => b.type === "text").map((b: any) => String(b.text)).join("\n").trim();
   if (!text) return false;
   convo.summary = text.slice(0, 6000); convo.summary_through = to;
@@ -860,6 +866,8 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
         }
         const limit = await checkJobRate(sb, convo.user_id);
         if (limit) { if (limit.code === "rate_limited") continue; throw new AssistantError(limit.code, limit.message, limit.status); }
+        // where the job came from, for the admin panel: a chat, or a chat started by an automation
+        options = { ...options, via: convo.automation_id ? "automation" : "chat", conversation_id: convo.id, ...(convo.automation_id ? { automation_id: convo.automation_id } : {}) };
         const r = await sb.rpc("studio_create_job", { p_user: convo.user_id, p_tool: ps.tool, p_asset: assetId, p_options: options, p_credits: credits });
         if (r.error) {
           const msg = String(r.error.message ?? r.error);
@@ -1146,7 +1154,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       // "Let Clone8 decide" draws one portrait and picks it for them; otherwise four to choose from
       const auto = req.body?.mode === "auto";
       const q = quote("character", { mode: m.choice.mode, prompt: m.choice.prompt, count: auto ? 1 : 4 }, null, costsFor(env));
-      const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: "character", p_asset: null, p_options: q.options, p_credits: q.credits });
+      const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: "character", p_asset: null, p_options: { ...q.options, via: "chat", conversation_id: c.id }, p_credits: q.credits });
       if (r.error) { const msg = String(r.error.message ?? r.error); if (/insufficient_credits/.test(msg)) throw new AssistantError("insufficient_credits", "Not enough credits for the options", 402); if (/too_many_jobs/.test(msg)) throw new AssistantError("too_many_jobs", "Your jobs are all busy; try again in a moment", 429); throw r.error; }
       m.choice.status = "generating"; m.choice.job_id = r.data.id; m.choice.credits = q.credits; m.choice.error_code = null; m.choice.auto = auto; m.choice.count = auto ? 1 : 4;
       await saveConversation(sb, c, () => ({}));

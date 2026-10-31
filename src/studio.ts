@@ -17,6 +17,8 @@ import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
 import { checkUnsubscribeToken } from "./studio-mail.js";
 import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
+import { recordEvent, recordPageViews } from "./studio-events.js";
+import { isStudioAdmin } from "./studio-admin-auth.js";
 import Stripe from "stripe";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -542,8 +544,18 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         topup: c ? topupInfo(c, spent) : null,
         referral: await referralInfo(sb, u, c, ledger.data ?? []),
         email_opt_out: !!c?.email_opt_out,
+        // the owner's account sees the admin button; the key is absent for everyone else
+        ...((await isStudioAdmin(req, sb, env)) ? { admin: true } : {}),
       });
     } catch (e) { fail(res, e); }
+  });
+
+  // Pages people open, sent by the dashboard in small batches, for the admin panel's usage counts.
+  app.post("/api/studio/events", (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    let kept = 0;
+    try { kept = recordPageViews(u, req.body?.events); } catch { /* never fails the page */ }
+    res.status(202).json({ kept });
   });
 
   app.post("/api/studio/onboarding", async (req, res) => {
@@ -585,6 +597,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         cancel_url: `${dashboard()}/#studio/pricing?checkout=canceled`,
       });
       log(`[studio] checkout ${JSON.stringify({ user: u, plan: plan.id, interval, session: session.id })}`);
+      recordEvent({ user_id: u, kind: "checkout", name: "plan", props: { plan: plan.id, interval } });
       res.json({ url: session.url });
     } catch (e) { fail(res, e); }
   });
@@ -647,6 +660,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         cancel_url: `${dashboard()}/${back}?topup=canceled`,
       });
       log(`[studio] top-up checkout ${JSON.stringify({ user: u, usd, credits, session: session.id })}`);
+      recordEvent({ user_id: u, kind: "checkout", name: "topup", usd, props: { credits } });
       res.json({ url: session.url, credits });
     } catch (e) { fail(res, e); }
   });
@@ -698,6 +712,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         allow_promotion_codes: true,
       });
       log(`[studio] pack checkout ${JSON.stringify({ user: u, pack: pack.id, session: session.id })}`);
+      recordEvent({ user_id: u, kind: "checkout", name: "pack", usd: pack.usd, props: { pack: pack.id } });
       res.json({ url: session.url });
     } catch (e) { fail(res, e); }
   });
@@ -971,7 +986,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);
-      const create = () => sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: q.options, p_credits: q.credits });
+      const create = () => sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: { ...q.options, via: "tool" }, p_credits: q.credits });
       let r = await create();
       // short of credits with auto top-up on: top up, then start the job (once)
       if (r.error && /insufficient_credits/.test(String(r.error.message ?? r.error))) {

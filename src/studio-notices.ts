@@ -105,7 +105,7 @@ export async function noticesTick(sb: SupabaseClient, deps: NoticeDeps = {}): Pr
     const to = cust.data?.email_opt_out ? null : await emailOf(sb, userId);
     if (to) {
       const m = jobsNotice(batch, env, userId);
-      try { await sendMail({ to, subject: m.subject, text: m.text, html: m.html, unsubscribeUrl: m.unsubscribeUrl }, deps); out.jobs += batch.length; }
+      try { await sendMail({ to, subject: m.subject, text: m.text, html: m.html, unsubscribeUrl: m.unsubscribeUrl, kind: "jobs_done", userId }, deps); out.jobs += batch.length; }
       catch (e: any) { log(`[notices] jobs mail for ${userId} failed: ${String(e?.message ?? e).slice(0, 120)}`); continue; }
     } else out.skipped += batch.length;
     for (const job of batch) { const mark = await sb.rpc("studio_mark_notified", { p_job: job.id }); if (mark.error) throw mark.error; }
@@ -127,9 +127,9 @@ export async function noticesTick(sb: SupabaseClient, deps: NoticeDeps = {}): Pr
       const to = await emailOf(sb, c.user_id);
       if (to) {
         try {
-          const subject = `${n(balance)} credits left`;
+          const subject = `${n(balance)} credits left`, kind = "low_credits";
           const body = renderEmail({ preheader: `Your ${plan?.name ?? ""} plan has ${n(balance)} credits left.`, heading: `${n(balance)} credits left`, paragraphs: [`Your ${plan?.name ?? ""} plan has ${n(balance)} credits left${c.period_end ? `; it renews on ${longDate(c.period_end)}` : ""}.`, "Your account page shows your balance and the ways to add more when you need it."], button: { label: "See your balance", url: account }, footer: ["You are getting this because your Clone8 Studio balance ran low."], unsubscribeUrl: unsub });
-          await sendMail({ to, subject, ...body, unsubscribeUrl: unsub }, deps);
+          await sendMail({ to, subject, ...body, unsubscribeUrl: unsub, kind, userId: c.user_id }, deps);
           out.low++;
         } catch (e: any) { log(`[notices] low-credits mail failed for ${c.user_id}: ${String(e?.message ?? e).slice(0, 120)}`); continue; }
       }
@@ -140,9 +140,9 @@ export async function noticesTick(sb: SupabaseClient, deps: NoticeDeps = {}): Pr
       const to = await emailOf(sb, c.user_id);
       if (to) {
         try {
-          const subject = `Your plan renews on ${longDate(periodEnd)}`;
+          const subject = `Your plan renews on ${longDate(periodEnd)}`, kind = "renewal";
           const body = renderEmail({ preheader: `${n(c.credits_per_period)} new credits arrive on ${longDate(periodEnd)}.`, heading: subject, paragraphs: [`Your ${plan?.name ?? ""} plan renews on ${longDate(periodEnd)} with ${n(c.credits_per_period)} new credits.`, `You have ${n(balance)} credits left. Plan credits that are unused expire when the new ones arrive; top-up and bundle credits carry over.`, "You can change or cancel the plan from your account page."], button: { label: "Open your account", url: account }, footer: ["You are getting this because your Clone8 Studio plan renews soon."], unsubscribeUrl: unsub });
-          await sendMail({ to, subject, ...body, unsubscribeUrl: unsub }, deps);
+          await sendMail({ to, subject, ...body, unsubscribeUrl: unsub, kind, userId: c.user_id }, deps);
           out.renewals++;
         } catch (e: any) { log(`[notices] renewal mail failed for ${c.user_id}: ${String(e?.message ?? e).slice(0, 120)}`); continue; }
       }

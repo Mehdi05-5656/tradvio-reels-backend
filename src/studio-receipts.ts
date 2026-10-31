@@ -88,7 +88,7 @@ export async function sendReceipt(sb: SupabaseClient, userId: string | null, r: 
     const to = u?.data?.user?.email;
     if (typeof to !== "string" || !to) throw new Error("no email on file");
     const m = receiptMail(r, (env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, ""));
-    const id = await sendMail({ to, ...m }, { ...deps, env, log });
+    const id = await sendMail({ to, ...m, kind: "receipt", userId }, { ...deps, env, log });
     log(`[receipt] ${JSON.stringify({ user: userId, amount: r.amount_cents, ref: r.reference, sent: id !== null })}`);
     return id !== null;
   } catch (e: any) {

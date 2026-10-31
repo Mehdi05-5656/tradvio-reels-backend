@@ -8,6 +8,8 @@
 // Analyze: plain arithmetic first (analyze()): each post against the person's own median on that platform, engagement,
 // share and save rates, posting times, lengths, Clone8 or not. These numbers are the evidence; the AI overview
 // (studio-insights.ts) only explains them, with the research playbook behind it.
+import { OVERHEAD } from "./studio-pricing.js";
+import { recordEvent } from "./studio-events.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSocialProvider, type ProviderPost, type SocialAccount } from "./social-provider.js";
 
@@ -61,6 +63,7 @@ async function scGet(deps: PerfDeps, path: string): Promise<any> {
   const key = (deps.env ?? process.env).SCRAPECREATORS_API_KEY;
   if (!key) throw new Error("metrics_unconfigured");
   const r = await (deps.fetch ?? fetch)(`${SC}${path}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(45_000) });
+  recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: path.split("?")[0], status: r.status, use: "performance" } });
   if (!r.ok) throw new Error(`metrics_http_${r.status}`);
   const b: any = await r.json();
   if (b?.success === false) throw new Error("metrics_unsuccessful");

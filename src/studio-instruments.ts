@@ -271,7 +271,7 @@ export function instrumentCredits(usd: number, plans: PlanLike[], env: Record<st
   return Math.max(1, creditsForCost(cost, floor, perSecond != null ? marginForSecond(perSecond, plans) : MARGIN_TARGET));
 }
 
-export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; priced_by: "estimate" | "table"; units: number; output: "video" | "image" | "audio" | "text" }; summary: string };
+export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; cost_usd?: number | null; priced_by: "estimate" | "table"; units: number; output: "video" | "image" | "audio" | "text" }; summary: string };
 
 /** Validate, price and describe one instrument request. `signInputs` turns the person's assets into URLs for the estimate. */
 export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], raw: any, resolveAssets: (ids: string[]) => Promise<Map<string, { url: string; kind: string; seconds: number | null }>>): Promise<InstrumentQuote> {
@@ -295,13 +295,15 @@ export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], r
   // audio instruments price from their own table; the video models ask the platform's estimate first
   let usd = inst.provider === "elevenlabs" ? null : await estimateUsd(deps, apiPath(inst), body), priced_by: "estimate" | "table" = "estimate";
   if (usd == null) { usd = tableUsd(inst, params, sourceSeconds); priced_by = "table"; }
+  // what the job will really cost us (the platform's estimate for our account, else the table), kept for the admin panel
+  const costUsd = usd;
   // the estimate may already carry our account's discount: never price under the list table
-  else { const list = tableUsd(inst, params, sourceSeconds); if (list != null && list > usd) usd = list; }
+  if (priced_by === "estimate" && usd != null) { const list = tableUsd(inst, params, sourceSeconds); if (list != null && list > usd) usd = list; }
   if (usd == null) throw new InstrumentError("price_unavailable", "This model cannot be priced right now; try again in a moment", 503);
   // the premium tier is judged per second of generated video; per-minute audio tools (dubbing) keep the standard margin
   const credits = instrumentCredits(usd, plans, env, { inst, seconds: inst.output === "video" && !inst.pricing ? units : null });
   const summary = inst.pricing ? `${inst.pricing.per === "kchars" ? `${Math.round(units * 1000)} characters` : inst.pricing.per === "minute" ? `${units} min` : inst.pricing.per === "hour" ? `${Math.round(units * 60)} min` : "1 sound"} · ${credits}` : inst.output === "image" ? `${units} ${units === 1 ? "image" : "images"} · ${credits}` : `${units} s · ${credits}`;
-  return { tool: "instrument", credits, options: { endpoint: inst.id, params, inputs, usd: Math.round(usd * 1000) / 1000, priced_by, units, output: inst.output }, summary };
+  return { tool: "instrument", credits, options: { endpoint: inst.id, params, inputs, usd: Math.round(usd * 1000) / 1000, cost_usd: costUsd != null ? Math.round(costUsd * 10000) / 10000 : null, priced_by, units, output: inst.output }, summary };
 }
 
 /** The request body: validated parameters plus the signed URL of every named asset. */

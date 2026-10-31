@@ -2,6 +2,8 @@
 // writes the overview). Reads are cheap; refreshes cost a few public-data lookups, so they are paced: on open when the
 // data is older than 6 hours, by hand at most every 15 minutes, and once a day in the background for people who opened
 // the dashboard in the last week.
+import { OVERHEAD } from "./studio-pricing.js";
+import { recordEvent } from "./studio-events.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { refreshPerformance, REFRESH_EVERY_MS, type PerfDeps } from "./studio-performance.js";
@@ -191,6 +193,7 @@ function scTranscripts(env: Record<string, string | undefined>, f: typeof fetch 
     for (const url of urls.slice(0, 2)) {
       try {
         const r = await f(`https://api.scrapecreators.com/v1/tiktok/video/transcript?url=${encodeURIComponent(url)}`, { headers: { "x-api-key": key }, signal: AbortSignal.timeout(45_000) });
+        recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: "/v1/tiktok/video/transcript", status: r.status, use: "transcript" } });
         const b: any = r.ok ? await r.json() : null;
         const text = String(b?.transcript ?? "").replace(/WEBVTT|\d\d:\d\d:\d\d\.\d+ --> \d\d:\d\d:\d\d\.\d+/g, " ").replace(/\s+/g, " ").trim();
         if (text) out.set(url, text);

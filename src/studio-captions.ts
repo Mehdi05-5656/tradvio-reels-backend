@@ -122,7 +122,7 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id:
     }).catch(() => { throw new SocialError("captions_unavailable", "The caption writer did not answer; write it by hand or try again", 503); });
     if (!r.ok) { (deps.log ?? console.log)(`[captions] ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`); throw new SocialError("captions_unavailable", "The caption writer did not answer; write it by hand or try again", 503); }
     const body: any = await r.json();
-  logClaudeCost(deps.log, "caption", env.STUDIO_CAPTION_MODEL || CAPTION_MODEL, body?.usage);
+  logClaudeCost(deps.log, "caption", String(body?.model ?? env.STUDIO_CAPTION_MODEL ?? CAPTION_MODEL), body?.usage, u);
     if (body?.stop_reason === "refusal") throw new SocialError("caption_refused", "No caption could be written for that video; write it by hand", 422);
     const raw = (body?.content ?? []).find((b: any) => b?.type === "text")?.text ?? "";
     let parsed: any;

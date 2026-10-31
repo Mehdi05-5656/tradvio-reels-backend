@@ -63,7 +63,7 @@ export async function detectPeople(sb: SupabaseClient, deps: PeopleDeps, u: stri
       // is judged by its opening, which is what gets swapped
       await (deps.frame ?? extractFrame)(file, Math.min(seconds * 0.5, 6), frame);
       const jpg = await readFile(frame);
-      const reply = await claude({ ...deps, signal: undefined }, { system: PROMPT, max_tokens: 500, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpg.toString("base64") } }, { type: "text", text: "Who is in this frame?" }] }] });
+      const reply = await claude({ ...deps, signal: undefined, feature: "people" }, { system: PROMPT, max_tokens: 500, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpg.toString("base64") } }, { type: "text", text: "Who is in this frame?" }] }] });
       const text = (Array.isArray(reply?.content) ? reply.content : []).filter((b: any) => b.type === "text").map((b: any) => String(b.text)).join("\n");
       const found = parsePeople(text);
       people = [];
