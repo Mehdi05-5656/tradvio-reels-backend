@@ -1158,10 +1158,10 @@ export async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[])
   return jobs.map((j) => ({ ...j, asset_name: j.asset_id ? names.get(j.asset_id) ?? null : null }));
 }
 
-/** A job's progress as its owner sees it: what we pay the renderer (spend_usd) stays ours. */
+/** A job's progress as its owner sees it: what we pay the renderer (spend_usd, pending_spend, spend_priced) stays ours. */
 export function customerProgress(p: any): Record<string, any> {
   if (!p || typeof p !== "object") return {};
-  const { spend_usd: _spend, ...rest } = p;
+  const { spend_usd: _spend, pending_spend: _pending, spend_priced: _priced, ...rest } = p;
   return rest;
 }
 export function publicJob(j: any) {

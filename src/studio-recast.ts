@@ -46,6 +46,8 @@ export type RecastDeps = {
   /** Shot changes inside the first seconds of a file (ffmpeg in production; tests inject one). */
   sceneCuts?: (path: string, within: number) => Promise<number[]>;
   fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>;
+  /** What Higgsfield says this exact request costs our account, in USD (its estimate endpoint); null when it has no answer. */
+  estimateUsd?: (path: string, body: Record<string, any>) => Promise<number | null>;
   now?: () => number; mux?: (output: string, source: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number>; poster?: (video: string, target: string) => Promise<void>;
   prescale?: (source: string, target: string, maxSeconds?: number, startSeconds?: number) => Promise<void>;
   /** Joins rendered pieces into one picture track (ffmpeg in production; tests inject one). */
@@ -84,6 +86,26 @@ async function hf(deps: RecastDeps, path: string, init: RequestInit & { idempote
   return body;
 }
 
+/** Higgsfield's own price for one request, before it is sent: POST /estimate/<the same path> with the same body. It answers
+ *  in USD for our account (discounts included). Never throws: no answer means the rate table is used instead. */
+export async function estimateRequestUsd(deps: RecastDeps, path: string, body: Record<string, any>): Promise<number | null> {
+  if (deps.estimateUsd) return deps.estimateUsd(path, body).catch(() => null);
+  if ((deps.env?.STUDIO_HF_ESTIMATE ?? process.env.STUDIO_HF_ESTIMATE) === "off") return null;
+  try {
+    const r = await hf(deps, `/estimate/${path.replace(/^\//, "")}`, { method: "POST", body: JSON.stringify(body) });
+    const usd = Number(r?.usd ?? r?.cost?.usd ?? r?.price?.usd);
+    return Number.isFinite(usd) && usd >= 0 ? usd : null;
+  } catch { return null; }
+}
+/** The charge a finished request reports about itself, when the status response carries one (field names vary by API
+ *  version, so the likely ones are read); null when it does not, and the estimate stands. */
+export function billedUsdOf(raw: any): number | null {
+  for (const v of [raw?.cost?.usd, raw?.usd, raw?.price?.usd, raw?.billing?.usd, raw?.cost_usd, raw?.charged_usd]) {
+    const n = Number(v); if (v != null && Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+}
+
 export async function submitRecast(deps: RecastDeps, p: { tool?: SuiteTool; model: "full" | "light"; videoUrl: string; imageUrls: string[]; prompt?: string; presetId?: string; resolution?: "480p" | "720p" | "1080p"; idempotencyKey: string }) {
   const tool = p.tool ?? "recast";
   const body: any = { video_url: p.videoUrl };
@@ -92,9 +114,10 @@ export async function submitRecast(deps: RecastDeps, p: { tool?: SuiteTool; mode
   else body.image_urls = p.imageUrls.slice(0, 8);
   if (p.prompt) body.prompt = p.prompt;
   if (p.resolution) body.resolution = p.resolution;
+  const estimate = await estimateRequestUsd(deps, endpointFor(tool, p.model), body);
   const r = await hf(deps, `/${endpointFor(tool, p.model)}`, { method: "POST", body: JSON.stringify(body), idempotency: p.idempotencyKey });
   if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
-  return { request_id: String(r.request_id), status: String(r.status ?? "queued"), status_url: r.status_url ? String(r.status_url) : `${HF_BASE}/requests/${r.request_id}/status` };
+  return { request_id: String(r.request_id), status: String(r.status ?? "queued"), status_url: r.status_url ? String(r.status_url) : `${HF_BASE}/requests/${r.request_id}/status`, estimate_usd: estimate };
 }
 
 /** A "failed" status whose message is about OUR account (platform balance, key) is an ops failure, not the customer's video. */
@@ -342,7 +365,20 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     let assetRow: { kind: string; probe?: any } | null = null;
     // What we pay the renderer, estimated at our rates, summed over every request a job sends (retries included). It stays
     // on the job, so the operator console can show what refunded jobs and retries cost us.
-    const addSpend = (usd: number) => ({ spend_usd: Math.round(((Number(job.progress?.spend_usd) || 0) + usd) * 1000) / 1000 });
+    // Higgsfield bills a request only when it succeeds (failed and moderated ones are free), so a request's price is held
+    // as pending when it is sent (Higgsfield's estimate, else our rate table) and booked to spend_usd when it completes,
+    // at the charge the status reports when it reports one. A piece we cancel while it renders is booked too (it may be
+    // billed). spend_usd is therefore what we were charged, as closely as the API lets us know it.
+    const holdSpend = (requestId: string, usd: number, priced: "estimate" | "table") => ({ pending_spend: { ...(job.progress?.pending_spend ?? {}), [requestId]: { usd: Math.round(usd * 10000) / 10000, priced } } });
+    const bookSpend = (requestId: string | null | undefined, raw?: any) => {
+      const pending = { ...(job.progress?.pending_spend ?? {}) } as Record<string, { usd: number; priced: string }>;
+      const held = requestId ? pending[requestId] : undefined;
+      if (!requestId || !held) return {};
+      delete pending[requestId];
+      const billed = raw !== undefined ? billedUsdOf(raw) : null;
+      const usd = billed ?? held.usd;
+      return { pending_spend: pending, spend_usd: Math.round(((Number(job.progress?.spend_usd) || 0) + usd) * 10000) / 10000, spend_priced: billed != null ? "billed" : held.priced };
+    };
     // The high-capacity route, offered with its price when the standard renderer is busy or refuses the clip. Never taken
     // without the person's yes: they start it from the failed job's card, as a new job priced on the button.
     const offerHighCapacity = async (): Promise<{ engine: "seedance"; credits: number } | null> => {
@@ -442,17 +478,21 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           await renew(sb, job, { note: pieces.length > 1 ? `Sending piece ${i + 1} of ${pieces.length} to the renderer` : "Sending your video to the renderer" });
           const refs = [...images.slice(0, 8 - extra.length), ...extra];
           let requestId: string;
+          let estimate: number | null = null;
           if (p.engine === "light") {
             const base = genjutsuPrompt(tool, job);
-            requestId = (await submitRecast(deps, { tool, model: "light", videoUrl: signed.data.signedUrl, imageUrls: refs, prompt: extra.length ? `${base ? `${base} ` : ""}${ANCHOR_PROMPT}` : base, idempotencyKey: `${job.id}:${job.attempts}:${i + 1}`, resolution: RECAST_RESOLUTION })).request_id;
+            const sub = await submitRecast(deps, { tool, model: "light", videoUrl: signed.data.signedUrl, imageUrls: refs, prompt: extra.length ? `${base ? `${base} ` : ""}${ANCHOR_PROMPT}` : base, idempotencyKey: `${job.id}:${job.attempts}:${i + 1}`, resolution: RECAST_RESOLUTION });
+            requestId = sub.request_id; estimate = sub.estimate_usd;
           } else {
-            const r = await hf(deps, `/${LONG_ENDPOINT}`, { method: "POST", body: JSON.stringify({ video_url: signed.data.signedUrl, image_urls: refs, prompt: extra.length ? `${longPrompt} ${ANCHOR_PROMPT}` : longPrompt, resolution: RECAST_RESOLUTION, generate_audio: false }), idempotency: `${job.id}:${job.attempts}:${i + 1}` });
+            const longBody = { video_url: signed.data.signedUrl, image_urls: refs, prompt: extra.length ? `${longPrompt} ${ANCHOR_PROMPT}` : longPrompt, resolution: RECAST_RESOLUTION, generate_audio: false };
+            estimate = await estimateRequestUsd(deps, LONG_ENDPOINT, longBody);
+            const r = await hf(deps, `/${LONG_ENDPOINT}`, { method: "POST", body: JSON.stringify(longBody), idempotency: `${job.id}:${job.attempts}:${i + 1}` });
             if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
             requestId = String(r.request_id);
           }
           pieces[i] = { ...p, request_id: requestId, input_key: inputKey };
-          const pieceUsd = p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, len) - 1e-6) * higgsfieldCostPerSecond("light", deps.env) : Math.ceil(len - 1e-6) * seedanceEditCostPerSecond(deps.env);
-          await renew(sb, job, { pieces, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString(), ...addSpend(pieceUsd) });
+          const tableUsd = p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, len) - 1e-6) * higgsfieldCostPerSecond("light", deps.env) : Math.ceil(len - 1e-6) * seedanceEditCostPerSecond(deps.env);
+          await renew(sb, job, { pieces, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString(), ...holdSpend(requestId, estimate ?? tableUsd, estimate != null ? "estimate" : "table") });
           log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, engine: p.engine ?? "seedance", piece: i + 1, of: pieces.length, request: requestId, anchored: extra.length > 0 })}`);
         };
         // One character for the whole video: the longest piece renders first, a still of the character from it goes to
@@ -470,7 +510,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
             let st: { status: string; videoUrl: string | null; raw: any };
             try { st = await pollRecast(deps, pieces[ai].request_id!); }
             catch (e: any) { if (e instanceof RecastError && e.retry) { await sleep(POLL_MS); continue; } throw e; }
-            if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); videoUrl = st.videoUrl; break; }
+            if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); videoUrl = st.videoUrl; if (job.progress?.pending_spend?.[pieces[ai].request_id!]) await renew(sb, job, bookSpend(pieces[ai].request_id, st.raw)); break; }
             if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
               log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: ai + 1, request: pieces[ai].request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
               if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(ai);
@@ -505,13 +545,13 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           let st: { status: string; videoUrl: string | null; raw: any };
           try { st = await pollRecast(deps, p.request_id!); }
           catch (e: any) { if (e instanceof RecastError && e.retry) { pending++; continue; } throw e; }
-          if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); urls[i] = st.videoUrl; continue; }
+          if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); urls[i] = st.videoUrl; if (job.progress?.pending_spend?.[p.request_id!]) await renew(sb, job, bookSpend(p.request_id, st.raw)); continue; }
           if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
             log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: i + 1, request: p.request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
             // the renderer timed out or was busy on this piece: send just this one again, keep the others rendering
             if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(i);
             // the job is lost: stop paying for the pieces still rendering
-            for (const [k, other] of pieces.entries()) if (k !== i && !urls[k] && other.request_id) await cancelRecast(deps, other.request_id).catch(() => undefined);
+            for (const [k, other] of pieces.entries()) if (k !== i && !urls[k] && other.request_id) { await cancelRecast(deps, other.request_id).catch(() => undefined); if (job.progress?.pending_spend?.[other.request_id]) await renew(sb, job, bookSpend(other.request_id)).catch(() => undefined); }
             if (st.status === "failed" && p.engine === "light" && failureCode(st.raw) === "recast_failed" && !chosenRoute) {
               await renew(sb, job, { offer: await offerHighCapacity() });
               throw new RecastError(isTransientFailure(st.raw) ? "renderer_busy" : "light_refused");
@@ -569,7 +609,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.attempts ? `${job.id}:${job.attempts}` : job.id, resolution: RECAST_RESOLUTION });
         requestId = sub.request_id;
         const sentSeconds = Math.ceil(Math.min(drivingUrl ? sourceSeconds || 15 : windowSeconds(job.options, MAX_SECONDS[model]), sourceSeconds || Infinity) - 1e-6);
-        await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue", ...addSpend(sentSeconds * higgsfieldCostPerSecond(model, deps.env)) });
+        await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue", ...holdSpend(requestId, sub.estimate_usd ?? sentSeconds * higgsfieldCostPerSecond(model, deps.env), sub.estimate_usd != null ? "estimate" : "table") });
         log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, request: requestId })}`);
       }
 
@@ -581,7 +621,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         let st: { status: string; videoUrl: string | null; raw: any };
         try { st = await pollRecast(deps, requestId); }
         catch (e: any) { if (e instanceof RecastError && e.retry) { await renew(sb, job, { note: "Waiting for the renderer" }); await sleep(POLL_MS); continue; } throw e; }
-        if (st.status === "completed") { result = st; break; }
+        if (st.status === "completed") { result = st; if (job.progress?.pending_spend?.[requestId]) { log(`[recast] status fields ${JSON.stringify({ job: job.id, keys: Object.keys(st.raw ?? {}).slice(0, 30) })}`); await renew(sb, job, bookSpend(requestId, st.raw)); } break; }
         if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
           log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
           const code = st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled";

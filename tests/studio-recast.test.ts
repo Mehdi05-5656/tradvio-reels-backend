@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT, isTransientFailure, retryCeilingUsd } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT, isTransientFailure, retryCeilingUsd, estimateRequestUsd, billedUsdOf } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -48,7 +48,7 @@ function fakeSb(job: any, opts: { renew?: boolean; completeError?: any; failErro
 }
 
 const job = (over: any = {}) => ({ id: JOB, user_id: ANN, lease_token: TOKEN, asset_id: ASSET, options: { model: "full", seconds: 20, character: "noah", character_asset_id: null }, credits_reserved: 240, progress: {}, attempts: 1, ...over });
-const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, prescale: async (_s: string, t: string, max?: number) => { (globalThis as any).__lastPrescaleMax = max; await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, motion: async () => [], frame: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "still"); }, ...over });
+const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, estimateUsd: async () => null, sleep: async () => undefined, prescale: async (_s: string, t: string, max?: number) => { (globalThis as any).__lastPrescaleMax = max; await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, motion: async () => [], frame: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "still"); }, ...over });
 
 test("auth header follows the key shape; quotes stop at Higgsfield's limits", () => {
   assert.equal(higgsfieldAuth("id:secret"), "Key id:secret");
@@ -207,8 +207,8 @@ test("the suite picks the right Genjutsu endpoint and body per tool", async () =
   assert.equal(endpointFor("restyle", "light"), "higgsfield/genjutsu/restyle/v1.0", "restyle has no light model");
   const calls: any[] = [];
   const fetchFn: any = async (url: string, init: any) => { calls.push({ url, body: JSON.parse(init.body) }); return new Response(JSON.stringify({ request_id: "r1", status: "queued" }), { status: 200 }); };
-  await submitRecast({ fetch: fetchFn, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "swap", model: "full", videoUrl: "https://v/1.mp4", imageUrls: ["https://i/cat.jpg"], prompt: SWAP_DEFAULT_PROMPT, idempotencyKey: "job-1", resolution: "720p" });
-  await submitRecast({ fetch: fetchFn, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "restyle", model: "full", videoUrl: "https://v/1.mp4", imageUrls: [], presetId: "11111111-1111-4111-8111-111111111111", idempotencyKey: "job-2", resolution: "720p" });
+  await submitRecast({ fetch: fetchFn, estimateUsd: async () => null, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "swap", model: "full", videoUrl: "https://v/1.mp4", imageUrls: ["https://i/cat.jpg"], prompt: SWAP_DEFAULT_PROMPT, idempotencyKey: "job-1", resolution: "720p" });
+  await submitRecast({ fetch: fetchFn, estimateUsd: async () => null, env: { HIGGSFIELD_API_KEY: "id:secret" } }, { tool: "restyle", model: "full", videoUrl: "https://v/1.mp4", imageUrls: [], presetId: "11111111-1111-4111-8111-111111111111", idempotencyKey: "job-2", resolution: "720p" });
   assert.match(calls[0].url, /object-swap\/v1\.0$/); assert.deepEqual(Object.keys(calls[0].body).sort(), ["image_urls", "prompt", "resolution", "video_url"]);
   assert.match(calls[1].url, /restyle\/v1\.0$/); assert.deepEqual(calls[1].body, { video_url: "https://v/1.mp4", preset_id: "11111111-1111-4111-8111-111111111111", resolution: "720p" }, "restyle sends the style id and no empty image list");
 });
@@ -304,6 +304,7 @@ test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot o
   });
   const out = await runRecastJob(sb, d, job({ tool: "swap", options: { model: "light", seconds: 44, character: "noah", character_asset_id: null }, credits_reserved: 44 * 22 }));
   assert.equal(out, "done");
+  { const p = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress; assert.deepEqual(p.pending_spend, {}, "every piece that finished is booked"); assert.ok(p.spend_usd > 9 && p.spend_usd < 12, `booked about $10.20 (${p.spend_usd})`); }
   assert.deepEqual(prescales, [[9.7, 12.4], [0, 6.9], [6.9, 0.47], [7.37, 2.33], [22.1, 10.7], [32.3, 11.2]], "the longest shot renders first (the character reference); one piece a shot; the 21.4 s shot split in two, the second half starting 0.5 s early to fade over");
   assert.deepEqual(padded, [4, 4], "the two shots under 4 s are held to 4 s"); assert.deepEqual(trimmed, [0.47, 2.33], "and cut back after");
   const submits = calls.filter((c) => c.method === "POST");
@@ -569,7 +570,7 @@ test("busy after every retry: refunded as renderer_busy, with the high-capacity 
   assert.equal(out, "failed");
   assert.equal(sb.calls.find((c: any) => c.name === "studio_fail").args.p_reason, "renderer_busy");
   const p = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
-  assert.ok(p.offer.credits > 80); assert.ok(p.spend_usd > 0, "what the attempt cost us is on the job");
+  assert.ok(p.offer.credits > 80); assert.ok(!p.spend_usd, "Higgsfield does not bill a failed request, so the attempt cost us nothing");
 });
 
 test("the high-capacity route, once the person picks it: priced on the quote, sent to Seedance from the start", async () => {
@@ -594,4 +595,48 @@ test("the high-capacity route, once the person picks it: priced on the quote, se
   assert.equal(out, "done");
   assert.ok(posts.length && posts.every((u) => u === `${HF_BASE}/${LONG_ENDPOINT}`), "straight to the high-capacity renderer, no Light attempt first");
   assert.ok(sb.calls.find((c: any) => c.name === "studio_complete").args.p_credits_charged <= high.credits, "never more than the price on the button");
+});
+
+test("spend is what Higgsfield charges: its estimate is held when a request is sent and booked only when it completes", async () => {
+  const lastProgress = (sb: any) => sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
+  const seen: any[] = [];
+  const estimateUsd = async (path: string, body: any) => { seen.push([path, body]); return 1.234; };
+  // held at the estimate while it renders, booked at the estimate when it completes
+  const h = fakeHiggsfield([{ status: "in_progress" }, { status: "completed", video: { url: "https://cdn.example/out.mp4" } }]);
+  const sb = fakeSb(job());
+  assert.equal(await runRecastJob(sb, deps(h.fetchFn, { estimateUsd }), job()), "done");
+  assert.equal(seen.length, 1); assert.equal(`${HF_BASE}/${seen[0][0]}`, h.calls.find((c) => c.method === "POST").url);
+  assert.deepEqual(seen[0][1], h.calls.find((c) => c.method === "POST").body, "the estimate is asked for the exact body that is sent");
+  const held = sb.calls.find((c: any) => c.name === "studio_renew" && c.args.p_progress.pending_spend?.req_1).args.p_progress;
+  assert.deepEqual(held.pending_spend.req_1, { usd: 1.234, priced: "estimate" }); assert.ok(!held.spend_usd, "nothing is booked before it completes");
+  const booked = lastProgress(sb);
+  assert.equal(booked.spend_usd, 1.234); assert.equal(booked.spend_priced, "estimate"); assert.deepEqual(booked.pending_spend, {});
+  // a charge reported on the finished request wins over the estimate
+  const billed = fakeHiggsfield([{ status: "completed", video: { url: "https://cdn.example/out.mp4" }, cost: { usd: "0.98" } }]);
+  const sbb = fakeSb(job());
+  assert.equal(await runRecastJob(sbb, deps(billed.fetchFn, { estimateUsd }), job()), "done");
+  assert.equal(lastProgress(sbb).spend_usd, 0.98); assert.equal(lastProgress(sbb).spend_priced, "billed");
+  // no estimate: the rate table holds it instead
+  const t = fakeHiggsfield([{ status: "completed", video: { url: "https://cdn.example/out.mp4" } }]);
+  const sbt = fakeSb(job());
+  assert.equal(await runRecastJob(sbt, deps(t.fetchFn), job()), "done");
+  assert.equal(lastProgress(sbt).spend_priced, "table"); assert.ok(lastProgress(sbt).spend_usd > 0);
+  // a failed request is free
+  const f = fakeHiggsfield([{ status: "failed" }]);
+  const sbf = fakeSb(job({ attempts: 2 }));
+  assert.equal(await runRecastJob(sbf, deps(f.fetchFn, { estimateUsd }), job({ attempts: 2 })), "failed");
+  assert.ok(!sbf.calls.filter((c: any) => c.name === "studio_renew").some((c: any) => c.args.p_progress.spend_usd), "nothing booked for a failed render");
+});
+
+test("the estimate endpoint: same path under /estimate, usd read as a number, never throws", async () => {
+  const calls: any[] = [];
+  const ok: any = async (url: string, init: any) => { calls.push([url, init.method, JSON.parse(init.body)]); return { ok: true, status: 200, text: async () => JSON.stringify({ usd: "2.3125" }) }; };
+  assert.equal(await estimateRequestUsd({ fetch: ok, env: { HIGGSFIELD_API_KEY: "id:secret" } }, "higgsfield/genjutsu-light/motion-transfer/v1.0", { a: 1 }), 2.3125);
+  assert.deepEqual(calls[0], [`${HF_BASE}/estimate/higgsfield/genjutsu-light/motion-transfer/v1.0`, "POST", { a: 1 }]);
+  const bad: any = async () => ({ ok: false, status: 404, text: async () => "{}" });
+  assert.equal(await estimateRequestUsd({ fetch: bad, env: { HIGGSFIELD_API_KEY: "id:secret" } }, "x", {}), null);
+  const odd: any = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ credits: 4 }) });
+  assert.equal(await estimateRequestUsd({ fetch: odd, env: { HIGGSFIELD_API_KEY: "id:secret" } }, "x", {}), null);
+  assert.equal(await estimateRequestUsd({ fetch: ok, env: { HIGGSFIELD_API_KEY: "id:secret", STUDIO_HF_ESTIMATE: "off" } }, "x", {}), null, "it can be switched off");
+  assert.equal(billedUsdOf({ status: "completed" }), null); assert.equal(billedUsdOf({ cost: { usd: 1.5 } }), 1.5); assert.equal(billedUsdOf({ usd: "0" }), 0);
 });

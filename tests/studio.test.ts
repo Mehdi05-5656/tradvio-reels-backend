@@ -425,5 +425,6 @@ test("a customer never sees what a job cost us", async () => {
   const { publicJob } = await import("../src/studio.js");
   const pj = publicJob({ id: "x", tool: "swap", status: "failed", options: {}, credits_reserved: 80, progress: { spend_usd: 1.5, offer: { engine: "seedance", credits: 180 }, note: "n" } });
   assert.equal("spend_usd" in pj.progress, false);
+  assert.deepEqual(Object.keys(publicJob({ id: "y", tool: "swap", status: "running", options: {}, progress: { spend_usd: 1, pending_spend: { r: { usd: 1 } }, spend_priced: "estimate", note: "n" } }).progress), ["note"]);
   assert.deepEqual(pj.progress.offer, { engine: "seedance", credits: 180 }, "the offer and its price are theirs to see");
 });
