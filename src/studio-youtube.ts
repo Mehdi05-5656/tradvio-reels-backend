@@ -146,7 +146,8 @@ async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<
   const env = o.env ?? process.env;
   const cookies = await cookiesFile(env);
   const full = [
-    "--no-playlist", "--no-warnings", "--quiet", "--no-progress", "--force-ipv4", "--socket-timeout", "30", "--retries", "3",
+    // not --quiet: when ffmpeg fails inside yt-dlp, its own words are the only clue, and --quiet swallows them
+    "--no-playlist", "--no-warnings", "--no-progress", "--force-ipv4", "--socket-timeout", "30", "--retries", "3",
     "--no-js-runtimes", "--js-runtimes", `node:${process.execPath}`,
     ...(env.STUDIO_YT_PROXY ? ["--proxy", env.STUDIO_YT_PROXY] : []),
     ...(cookies ? ["--cookies", cookies] : []),
@@ -161,8 +162,22 @@ async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
     child.on("close", (code) => { clearTimeout(timer); if (killed) reject(new LinkError("link_fetch_failed", "YouTube took too long to send the video")); else resolve({ code, stdout, stderr }); });
   });
-  if (out.code !== 0) throw classifyYtDlpError(out.stderr || out.stdout);
+  if (out.code !== 0) {
+    const said = redactProxy(`${out.stderr}\n${out.stdout}`).split("\n").filter((l) => l.trim() && !/^\[(download|youtube|info|hlsnative)\]/.test(l)).slice(-12).join(" | ");
+    console.log(`[youtube] yt-dlp failed: ${said.slice(-900)}`);
+    throw classifyYtDlpError(out.stderr || out.stdout);
+  }
   return out.stdout;
+}
+/** Any proxy address with a password in a line of text, the password blanked. */
+export const redactProxy = (text: string) => text.replace(/(\w+:\/\/)[^\s:@/]+:[^\s@/]+@/g, "$1***:***@");
+/** What the server's ffmpeg is and whether it opens https addresses (Clips reads signed upload links and YouTube through it). */
+export async function ffmpegReport(): Promise<string> {
+  const run = (args: string[]) => new Promise<string>((resolve) => { const c = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] }); let o = ""; c.stdout.on("data", (b) => { o += b; }); c.stderr.on("data", (b) => { o += b; }); c.on("error", () => resolve("missing")); c.on("close", () => resolve(o)); });
+  const version = (await run(["-hide_banner", "-version"])).split("\n")[0]?.slice(0, 120) ?? "?";
+  const protocols = await run(["-hide_banner", "-protocols"]);
+  const has = (p: string) => new RegExp(`^\\s*${p}\\s*$`, "m").test(protocols.split("Output:")[0] ?? "");
+  return `${version}; https ${has("https") ? "yes" : "NO"}, tls ${has("tls") ? "yes" : "NO"}, httpproxy ${has("httpproxy") ? "yes" : "NO"}`;
 }
 /** One stretch of a YouTube video, cut exactly (keyframes forced at the cuts) to an H.264 + AAC MP4 at up to 1080 lines.
  *  yt-dlp fetches it itself: YouTube refuses its stream addresses when another program asks for them (seen Oct 31 2026:
