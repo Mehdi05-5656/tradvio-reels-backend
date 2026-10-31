@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { command } from "./video-render.js";
-import { probeSeconds, probeDimensions, sceneCuts } from "./studio-recast.js";
+import { probeSeconds, probeDimensions } from "./studio-recast.js";
 import { claude, AssistantError, type AssistantDeps } from "./studio-assistant.js";
 import { StudioError } from "./studio.js";
 
@@ -24,7 +24,7 @@ export type PeopleDeps = AssistantDeps & {
 };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Bumped when the way people are found changes, so lists found the old way are found again on next use. */
-export const PEOPLE_VERSION = 2;
+export const PEOPLE_VERSION = 3;
 /** The people stored on an asset, if they were found the current way. */
 export const cachedPeople = (probe: any): Person[] | null => (Array.isArray(probe?.people) && Number(probe?.people_v) >= PEOPLE_VERSION ? probe.people : null);
 
@@ -67,13 +67,24 @@ export async function cropFace(image: string, box: Box, target: string) {
   await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", image, "-vf", `crop=${r.side}:${r.side}:${r.x}:${r.y},scale=320:320:flags=lanczos`, "-q:v", "3", target], undefined, 60_000);
 }
 
+/** Camera cuts inside the picture. A film posted as a vertical video carries black bars that never change, and they
+ *  hide most of a cut from the frame-difference score; the bars are measured (cropdetect) and cut off first. */
+export async function pictureCuts(video: string, within: number): Promise<number[]> {
+  const found = await command("ffmpeg", ["-v", "info", "-nostdin", "-t", String(within), "-i", video, "-an", "-vf", "fps=2,cropdetect=limit=24:round=2:reset=0", "-f", "null", "-"], undefined, 120_000).catch(() => Buffer.from(""));
+  const crops = [...found.toString().matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)].map((m) => m.slice(1).map(Number));
+  const c = crops[crops.length - 1];
+  const crop = c && c[0] > 32 && c[1] > 32 ? `crop=${c[0]}:${c[1]}:${c[2]}:${c[3]},` : "";
+  const raw = await command("ffmpeg", ["-v", "info", "-nostdin", "-i", video, "-t", String(within), "-an", "-vf", `${crop}scale=320:-2,select='gt(scene,0.2)',showinfo`, "-f", "null", "-"], undefined, 120_000);
+  return [...raw.toString().matchAll(/pts_time:([0-9.]+)/g)].map((m) => Number(m[1])).filter((t) => Number.isFinite(t) && t > 0 && t < within);
+}
 /** When to take the stills: the middle of each of the longest shots inside the window (up to six), or, with few cuts,
  *  moments spread across it. Never in the first or last quarter second (fades, black frames). */
 export function stillTimes(cuts: number[], window: number, max = 6): number[] {
   const pts = [0, ...cuts.filter((c) => c > 0.25 && c < window - 0.25).sort((a, b) => a - b), window];
   const shots = pts.slice(0, -1).map((s, k) => ({ s, e: pts[k + 1] })).filter((x) => x.e - x.s >= 0.6);
   let times = shots.sort((a, b) => (b.e - b.s) - (a.e - a.s)).slice(0, max).map((x) => (x.s + x.e) / 2);
-  if (times.length < 3) for (const f of [0.2, 0.5, 0.8]) { const t = window * f; if (times.length < max && !times.some((x) => Math.abs(x - t) < 1.5)) times.push(t); }
+  // few shots found (or none): moments spread across the clip fill up to six, the opening one included
+  if (times.length < 4) for (const f of [0.06, 0.22, 0.38, 0.54, 0.7, 0.86]) { const t = window * f; if (times.length < max && !times.some((x) => Math.abs(x - t) < 1.5)) times.push(t); }
   times = times.map((t) => Math.min(Math.max(0.25, t), Math.max(0.25, window - 0.25))).sort((a, b) => a - b);
   return times;
 }
@@ -116,7 +127,7 @@ export async function detectPeople(sb: SupabaseClient, deps: PeopleDeps, u: stri
       const seconds = Number(a.data.probe?.duration) || (await (deps.probeSeconds ?? probeSeconds)(file).catch(() => 10));
       // the stretch the renderers take (Light: up to two minutes), seen at its longest shots
       const window = Math.max(0.5, Math.min(seconds, 120));
-      const cuts = await (deps.cuts ?? sceneCuts)(file, window).catch(() => [] as number[]);
+      const cuts = await (deps.cuts ?? pictureCuts)(file, window).catch(() => [] as number[]);
       const times = stillTimes(cuts, window);
       const content: any[] = [];
       for (const [k, t] of times.entries()) {

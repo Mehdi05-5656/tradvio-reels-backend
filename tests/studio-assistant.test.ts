@@ -618,7 +618,7 @@ test("a failed options job marks the card failed and lets the person try again",
 const PH1 = "11111111-aaaa-4aaa-8aaa-111111111111", PH2 = "22222222-aaaa-4aaa-8aaa-222222222222", PH3 = "33333333-aaaa-4aaa-8aaa-333333333333", PH4 = "44444444-aaaa-4aaa-8aaa-444444444444";
 const photo = (id: string, name: string) => ({ id, user_id: ANN, kind: "image", name, object_key: `${ANN}/${id}.jpg`, bytes: 100, status: "ready", probe: {} });
 const twoPeople = [{ index: 1, label: "Black cap, varsity jacket, left", box: { x: 0.1, y: 0.2, w: 0.2, h: 0.2 } }, { index: 2, label: "Short dark hair, right", box: { x: 0.6, y: 0.2, w: 0.2, h: 0.2 } }];
-const other = (id: string, name: string, people?: any[]) => ({ ...video, id, name, object_key: `${ANN}/${id}.mp4`, probe: { duration: 8, ...(people ? { people, people_v: 2 } : {}) } });
+const other = (id: string, name: string, people?: any[]) => ({ ...video, id, name, object_key: `${ANN}/${id}.mp4`, probe: { duration: 8, ...(people ? { people, people_v: 3 } : {}) } });
 
 test("automations: every changeable part is an input; the owner's case (same clip, new photos each run) keeps the clip and asks for the photos", async () => {
   const tables = baseTables(); tables.studio_assets.push(photo(PH1, "images.jpg"), photo(PH2, "getty.jpg"), photo(PH3, "images-1.jpg"), photo(PH4, "images-2.jpg"));
@@ -680,7 +680,7 @@ test("automation runs: a new video's people are found again; several people must
   const tables = baseTables();
   const NEW2 = "abababab-abab-4bab-8bab-abababababab", NEW1 = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
   tables.studio_assets.push(photo(PH1, "images.jpg"), photo(PH2, "getty.jpg"), other(NEW2, "duo.mp4", twoPeople), other(NEW1, "solo.mp4", [twoPeople[1]]));
-  (tables.studio_assets[0] as any).probe = { duration: 12.2, people: twoPeople, people_v: 2 };
+  (tables.studio_assets[0] as any).probe = { duration: 12.2, people: twoPeople, people_v: 3 };
   const sb = fakeSb(tables, rpcs(tables));
   const ctx = { ...ctxFor(sb), assets: new Map(tables.studio_assets.map((a: any) => [a.id, a])) };
   const plan = await pricePlan(ctx as any, { title: "Swap both", steps: [{ tool: "swap", label: "Both", source: VID, options: { model: "light", cast: [{ label: twoPeople[0].label, character_asset_id: PH1 }, { label: twoPeople[1].label, character_asset_id: PH2 }] } }] });
@@ -783,7 +783,7 @@ test("automation routes: setup questions from a chat, save with answers, the ass
 
 test("who plays them: the assistant shows a characters card with the clip's faces as slots; the Who plays answer closes it", async () => {
   const tables = baseTables();
-  (tables.studio_assets[0] as any).probe = { duration: 12.2, people_v: 2, people: [{ index: 1, label: "Black cap, left", box: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, key: `${ANN}/assets/${VID}/people/1.jpg` }, { index: 2, label: "Dark hair, right", box: { x: 0.6, y: 0.1, w: 0.2, h: 0.2 }, key: `${ANN}/assets/${VID}/people/2.jpg` }] };
+  (tables.studio_assets[0] as any).probe = { duration: 12.2, people_v: 3, people: [{ index: 1, label: "Black cap, left", box: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, key: `${ANN}/assets/${VID}/people/1.jpg` }, { index: 2, label: "Dark hair, right", box: { x: 0.6, y: 0.1, w: 0.2, h: 0.2 }, key: `${ANN}/assets/${VID}/people/2.jpg` }] };
   const sb = fakeSb(tables, rpcs(tables));
   const { fetchFn } = fakeClaude([
     toolReply("choose_characters", { asset_id: VID, reason: "Who replaces the two people" }),

@@ -15,7 +15,7 @@ test("the model's answer becomes a clean list: bad boxes dropped, labels tidy an
 });
 
 test("stills come from the longest shots, or spread out when there are few cuts; faces are cut square inside the picture", () => {
-  assert.deepEqual(stillTimes([], 17.4).map((t) => +t.toFixed(2)), [3.48, 8.7, 13.92]);
+  assert.deepEqual(stillTimes([], 17.4).map((t) => +t.toFixed(2)), [1.04, 3.83, 6.61, 8.7, 12.18, 14.96], "no cuts found: six moments, the opening included");
   const t = stillTimes([2, 2.3, 9, 15, 30], 40);
   assert.equal(t.length, 5, "every shot long enough (the 0.3 s flash is skipped)");
   assert.ok(t.includes(5.65) && t.includes(35), "the middle of each shot");
@@ -55,13 +55,13 @@ test("people are found once from several stills, cropped from the still where ea
   const write = async (target: string) => { const { writeFile } = await import("node:fs/promises"); await writeFile(target, Buffer.from([0xff, 0xd8])); };
   const deps = { fetch: fetchFn, env: { ANTHROPIC_API_KEY: "k" }, cuts: async () => [4, 8], frame: async (_v: string, _at: number, target: string) => write(target), small: async (_i: string, target: string) => write(target), crop: async (image: string, _b: any, target: string) => { crops.push(image.split("/").pop()!); await write(target); } };
   const people = await detectPeople(sb, deps as any, ANN, VID);
-  assert.equal(images, 3, "one still per shot");
+  assert.equal(images, 4, "one still per shot, and an early one: three shots are few");
   assert.deepEqual(people.map((p) => p.label), ["denim jacket, dark hair", "red hoodie, glasses"], "left to right");
   assert.deepEqual(crops, ["s2.jpg", "s3.jpg"], "each face from its clearest still");
-  assert.deepEqual([people[0].at, people[1].at], [6, 10]);
+  assert.deepEqual([people[0].at, people[1].at], [6, 8.4]);
   assert.deepEqual(uploads, [`${ANN}/assets/${VID}/people/1.jpg`, `${ANN}/assets/${VID}/people/2.jpg`]);
   assert.match(people[0].url!, /^https:\/\/signed\//);
-  assert.equal(updates.length, 1); assert.equal(asset.probe.people_v, 2); assert.ok(asset.probe.people_at);
+  assert.equal(updates.length, 1); assert.equal(asset.probe.people_v, PEOPLE_VERSION); assert.ok(asset.probe.people_at);
   const again = await detectPeople(sb, deps as any, ANN, VID);
   assert.equal(claudeCalls, 1, "the second call reads the cache"); assert.equal(again.length, 2);
   await detectPeople(sb, deps as any, ANN, VID, { refresh: true });
