@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, refineJoins, JOIN_OVERLAP, ANCHOR_PROMPT, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -48,7 +48,7 @@ function fakeSb(job: any, opts: { renew?: boolean; completeError?: any; failErro
 }
 
 const job = (over: any = {}) => ({ id: JOB, user_id: ANN, lease_token: TOKEN, asset_id: ASSET, options: { model: "full", seconds: 20, character: "noah", character_asset_id: null }, credits_reserved: 240, progress: {}, attempts: 1, ...over });
-const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, prescale: async (_s: string, t: string, max?: number) => { (globalThis as any).__lastPrescaleMax = max; await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, ...over });
+const deps = (fetchFn: any, over: any = {}) => ({ fetch: fetchFn, env: ENV, log: () => undefined, sleep: async () => undefined, prescale: async (_s: string, t: string, max?: number) => { (globalThis as any).__lastPrescaleMax = max; await (await import("node:fs/promises")).writeFile(t, "scaled"); }, mux: async (_r: string, _s: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "muxed"); }, probeSeconds: async () => 19.4, poster: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "jpg"); }, motion: async () => [], frame: async (_v: string, t: string) => { await (await import("node:fs/promises")).writeFile(t, "still"); }, ...over });
 
 test("auth header follows the key shape; quotes stop at Higgsfield's limits", () => {
   assert.equal(higgsfieldAuth("id:secret"), "Key id:secret");
@@ -278,7 +278,7 @@ test("pieces: at most 30 s each, ending on a camera change when one falls late i
   assert.equal(chooseEngine("recast", "light", 10, [0.2]), "genjutsu", "a cut in the first half second is the clip starting, not a shot change");
 });
 
-test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot on Light (about $10, not $20.84 on Seedance), short shots padded and cut back", async () => {
+test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot on Light (about $10.20, not about $21 on Seedance), short shots padded and cut back", async () => {
   const calls: any[] = [];
   const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`;
   const fetchFn: any = async (url: string, init: any = {}) => {
@@ -298,25 +298,27 @@ test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot o
     prescale: async (_s: string, t: string, max?: number, start?: number) => { prescales.push([start ?? 0, max]); await wf(t, "piece"); },
     pad: async (_s: string, t: string, secs: number) => { padded.push(secs); await wf(t, "padded"); },
     trim: async (_s: string, t: string, secs: number) => { trimmed.push(secs); await wf(t, "trimmed"); },
-    concat: async (files: string[], t: string) => { joined.push(files.length); await wf(t, "joined"); },
+    join: async (files: string[], blends: number[], t: string) => { joined.push([files.length, blends]); await wf(t, "joined"); },
     mux: async (r: string, s: string, t: string) => { muxed.push([r.split("/").pop(), s.split("/").pop()]); await wf(t, "final"); },
     probeSeconds: async () => 43.4,
   });
   const out = await runRecastJob(sb, d, job({ tool: "swap", options: { model: "light", seconds: 44, character: "noah", character_asset_id: null }, credits_reserved: 44 * 22 }));
   assert.equal(out, "done");
-  assert.deepEqual(prescales, [[0, 6.9], [6.9, 0.47], [7.37, 2.33], [9.7, 12.4], [22.1, 10.7], [32.8, 10.7]], "one piece a shot; the 21.4 s shot split in two");
+  assert.deepEqual(prescales, [[9.7, 12.4], [0, 6.9], [6.9, 0.47], [7.37, 2.33], [22.1, 10.7], [32.3, 11.2]], "the longest shot renders first (the character reference); one piece a shot; the 21.4 s shot split in two, the second half starting 0.5 s early to fade over");
   assert.deepEqual(padded, [4, 4], "the two shots under 4 s are held to 4 s"); assert.deepEqual(trimmed, [0.47, 2.33], "and cut back after");
   const submits = calls.filter((c) => c.method === "POST");
   assert.ok(submits.every((c) => c.url === LIGHT), "every piece goes to Light");
   assert.match(submits[0].body.prompt, /Replace the person/); assert.equal(submits[0].body.resolution, "720p");
-  assert.equal(submits[0].headers["idempotency-key"], `${JOB}:1:1`); assert.equal(submits[5].headers["idempotency-key"], `${JOB}:1:6`);
-  assert.deepEqual(joined, [6]); assert.deepEqual(muxed, [["joined.mp4", "original.mp4"]], "the person's own sound goes back on the joined picture");
+  assert.equal(submits[0].headers["idempotency-key"], `${JOB}:1:4`, "the anchor piece is the fourth shot"); assert.equal(submits[1].headers["idempotency-key"], `${JOB}:1:1`);
+  assert.equal(submits[0].body.image_urls.length, 1, "the anchor piece has only the character");
+  for (const sub of submits.slice(1)) { assert.equal(sub.body.image_urls.length, 2); assert.match(sub.body.image_urls[1], /anchor\.jpg/); assert.ok(sub.body.prompt.endsWith(ANCHOR_PROMPT)); }
+  assert.deepEqual(joined, [[6, [0, 0, 0, 0, 0, 0.5]]], "hard cuts at the camera changes, one fade inside the long shot"); assert.deepEqual(muxed, [["joined.mp4", "original.mp4"]], "the person's own sound goes back on the joined picture");
   const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
   assert.equal(done.p_outputs[0].piece_engine, "light"); assert.equal(done.p_outputs[0].pieces, 6); assert.equal(done.p_outputs[0].audio, "muxed_from_source");
   assert.equal(done.p_credits_charged, 44 * 22, "44 s at the Light rate");
   const plan = planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], {});
-  assert.equal(plan.engine, "light"); assert.equal(plan.usd, 10); assert.equal(plan.other_usd, 20.835);
-  assert.equal(planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], { HIGGSFIELD_DISCOUNT: "0.15" }).usd, 8.5, "the account's Genjutsu discount lowers Light, not Seedance");
+  assert.equal(plan.engine, "light"); assert.equal(plan.usd, 10.2, "51 billed seconds: the fade overlap adds one"); assert.ok(plan.other_usd > 20 && plan.other_usd < 21.5);
+  assert.equal(planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], { HIGGSFIELD_DISCOUNT: "0.15" }).usd, 8.67, "the account's Genjutsu discount lowers Light, not Seedance");
 });
 
 test("the long path by cost: many very short shots stay on Seedance, in up to 30 s pieces", async () => {
@@ -343,7 +345,8 @@ test("the long path by cost: many very short shots stay on Seedance, in up to 30
 
 test("the long path: shots, costs and the Seedance-only retry", () => {
   assert.deepEqual(shotPieces(12, []), [{ start: 0, end: 12 }]);
-  assert.deepEqual(shotPieces(31, []), [{ start: 0, end: 10.33 }, { start: 10.33, end: 20.67 }, { start: 20.67, end: 31 }], "a long shot in even parts of at most 15 s");
+  assert.deepEqual(shotPieces(31, []), [{ start: 0, end: 10.33 }, { start: 10.33, end: 20.67 }, { start: 20.67, end: 31 }], "a long shot in even parts, leaving room for the fade-in overlap");
+  assert.equal(shotPieces(29, []).length, 2); assert.equal(shotPieces(29.5, []).length, 3, "two 14.75 s halves plus a 0.5 s overlap would pass Light's 15 s");
   assert.deepEqual(shotPieces(10, [0.2, 5, 9.8]), [{ start: 0, end: 5 }, { start: 5, end: 10 }], "cuts at the very start or end are not shots");
   assert.equal(planLongPath(44, [], {}).engine, "light");
   assert.equal(planLongPath(44, [], {}, true).engine, "seedance", "after Light refused the clip, Seedance only");
@@ -419,7 +422,7 @@ test("the long path stops paying for the other pieces when one is refused", asyn
   };
   const { writeFile: wf } = await import("node:fs/promises");
   const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 50 }, name: "long.mp4" }] });
-  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 2, options: { model: "light", seconds: 50, character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
+  const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" }, sceneCuts: async () => [], prescale: async (_s: string, t: string) => { await wf(t, "piece"); } }), job({ attempts: 2, options: { model: "light", seconds: 50, character: "noah", character_asset_id: null }, credits_reserved: 50 * 22 }));
   assert.equal(out, "failed");
   assert.ok(calls.some((c) => c.method === "POST" && c.url.endsWith("/requests/piece_1/cancel")), "the piece still rendering is cancelled");
   assert.equal(sb.calls.at(-1).args.p_reason, "recast_failed");
@@ -440,7 +443,44 @@ test("a long-path job that stopped half way through sending sends only the piece
   const { writeFile: wf } = await import("node:fs/promises");
   const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 30 }, name: "two.mp4" }] });
   const half = { engine: "seedance", piece_engine: "light", submitted_at: new Date().toISOString(), pieces: [{ start: 0, end: 15, request_id: "piece_old", input_key: "k1", engine: "light" }, { start: 15, end: 30, request_id: null, input_key: null, engine: "light" }] };
-  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => [15], prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, concat: async (f: string[], t: string) => { assert.equal(f.length, 2); await wf(t, "j"); }, mux: async (_r: string, _s: string, t: string) => { await wf(t, "f"); }, probeSeconds: async () => 30 }), job({ tool: "swap", attempts: 2, progress: half, options: { model: "light", seconds: 30, character: "noah", character_asset_id: null }, credits_reserved: 30 * 22 }));
+  const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, STUDIO_RECAST_ANCHOR: "off" }, sceneCuts: async () => [15], prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, join: async (f: string[], _b: number[], t: string) => { assert.equal(f.length, 2); await wf(t, "j"); }, concat: async (f: string[], t: string) => { assert.equal(f.length, 2); await wf(t, "j"); }, mux: async (_r: string, _s: string, t: string) => { await wf(t, "f"); }, probeSeconds: async () => 30 }), job({ tool: "swap", attempts: 2, progress: half, options: { model: "light", seconds: 30, character: "noah", character_asset_id: null }, credits_reserved: 30 * 22 }));
   assert.equal(out, "done");
   assert.equal(calls.filter((c) => c.method === "POST").length, 1, "only the missing piece is sent; the first is not paid for twice");
+});
+
+test("joins inside a shot move to the calmest moment nearby and overlap for a fade; joins on camera changes stay hard cuts", () => {
+  // a 30 s single shot split in three; the picture is busy around 10 s and 20 s and still at 9 s and 21.5 s
+  const motion: Array<[number, number]> = Array.from({ length: 301 }, (_, i) => { const t = i / 10; return [t, Math.abs(t - 9) < 0.3 || Math.abs(t - 21.5) < 0.3 ? 0.001 : 0.2]; });
+  const out = refineJoins([{ start: 0, end: 10 }, { start: 10, end: 20 }, { start: 20, end: 30 }], [], motion, 15);
+  assert.deepEqual(out.map((p) => [p.start, p.end, p.blend]), [[0, 9], [8.5, 21.5], [21, 30]].map(([a, b], i) => [a, b, i ? JOIN_OVERLAP : 0]));
+  for (const p of out) assert.ok(p.end - p.start <= 15 && p.end - p.start >= 4, JSON.stringify(p));
+  const cut = refineJoins([{ start: 0, end: 7 }, { start: 7, end: 14 }], [7], motion, 15);
+  assert.deepEqual(cut.map((p) => [p.start, p.end, p.blend]), [[0, 7, 0], [7, 14, 0]], "a join on a camera change is left alone");
+  const flat = refineJoins([{ start: 0, end: 10 }, { start: 10, end: 20 }], [], [], 15);
+  assert.deepEqual(flat.map((p) => [p.start, p.end, p.blend]), [[0, 10, 0], [9.5, 20, JOIN_OVERLAP]], "without motion data the join stays, still faded");
+});
+
+test("the character reference: off by setting, and never with several people", async () => {
+  const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`;
+  const run = async (env: any, cast: any) => {
+    const calls: any[] = [];
+    const fetchFn: any = async (url: string, init: any = {}) => {
+      calls.push({ url, method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined });
+      const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
+      if (init.method === "HEAD") return { ok: true, status: 200 };
+      if (url === LIGHT) { const n = calls.filter((c) => c.method === "POST").length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+      const m = url.match(/\/requests\/(piece_\d+)\/status$/); if (m) return res(200, { status: "completed", video: { url: `https://cdn.example/${m[1]}.mp4` } });
+      if (url.startsWith("https://cdn.example/")) return res(200, Buffer.from("video"), true);
+      if (/presets|signed/.test(url)) return res(200, {});
+      throw new Error(`unexpected fetch ${url}`);
+    };
+    const { writeFile: wf } = await import("node:fs/promises");
+    const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 24 }, name: "two.mp4" }, { id: PHOTO, user_id: ANN, kind: "image", status: "ready", object_key: `${ANN}/${PHOTO}.jpg` }] });
+    const out = await runRecastJob(sb, deps(fetchFn, { env: { ...ENV, ...env }, sceneCuts: async () => [12], prescale: async (_s: string, t: string) => { await wf(t, "p"); }, concat: async (_f: string[], t: string) => { await wf(t, "j"); }, probeSeconds: async () => 24 }), job({ tool: "swap", options: { model: "light", seconds: 24, character: "noah", character_asset_id: null, ...(cast ? { cast } : {}) }, credits_reserved: 24 * 22 }));
+    assert.equal(out, "done");
+    return calls.filter((c) => c.method === "POST").map((c) => c.body.image_urls.length);
+  };
+  assert.deepEqual(await run({}, null), [1, 2], "on by default: the second piece gets the still");
+  assert.deepEqual(await run({ STUDIO_RECAST_ANCHOR: "off" }, null), [1, 1]);
+  assert.deepEqual(await run({}, [{ character: "noah", character_asset_id: null }, { character: null, character_asset_id: PHOTO }]), [2, 2], "two people: no extra still");
 });
