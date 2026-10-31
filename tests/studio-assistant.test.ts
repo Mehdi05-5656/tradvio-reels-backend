@@ -380,6 +380,12 @@ test("routes: create, message, confirm, read with hydrated jobs, cancel; strange
     const made = await s.call("POST", "/api/studio/assistant/conversations");
     assert.equal(made.status, 201); assert.equal(made.body.conversation.title, "New chat");
     const id = made.body.conversation.id;
+    // without a plan a message is refused before any reply is written (a reply costs us); the dashboard opens the plans
+    tables.studio_customers[0].status = "none";
+    const refused = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "five originals of my podcast" });
+    assert.deepEqual([refused.status, refused.body.error], [402, "subscription_required"]);
+    assert.equal((await s.call("POST", `/api/studio/assistant/conversations/${id}/confirm`, {})).status, 402);
+    tables.studio_customers[0].status = "active";
     assert.equal((await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "   " })).body.error, "message_empty");
     const msg = await s.call("POST", `/api/studio/assistant/conversations/${id}/messages`, { text: "five originals of my podcast", attachments: [VID, "not-an-id"] });
     assert.equal(msg.status, 200, JSON.stringify(msg.body));

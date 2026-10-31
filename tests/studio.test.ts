@@ -187,6 +187,17 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   assert.equal(co.status, 200); assert.equal(co.body.url, "https://checkout.stripe.com/cs_1");
   assert.deepEqual([stripe.created[0].line_items[0].price, stripe.created[0].customer, stripe.created[0].metadata.user_id, stripe.created[0].mode], ["price_uy", "cus_1", ANN, "subscription"]);
   assert.equal("customer_creation" in stripe.created[0], false, "subscription mode refuses customer_creation");
+  assert.match(stripe.created[0].success_url, /\/#studio\/account\?checkout=success$/, "no page to come back to: the account");
+  // sent from a tool to pick a plan: back to that tool (with an instrument's id), and nothing but a Studio page is accepted
+  await s.call("POST", "/api/studio/checkout", { plan: "studio", return_hash: "#studio/swap" }, { "x-test-user": ANN });
+  assert.match(stripe.created.at(-1).success_url, /\/#studio\/swap\?checkout=success$/);
+  await s.call("POST", "/api/studio/checkout", { plan: "studio", return_hash: "#studio/instrument?id=bytedance%2Fseedance-2.5" }, { "x-test-user": ANN });
+  assert.match(stripe.created.at(-1).success_url, /\/#studio\/instrument\?id=bytedance%2Fseedance-2\.5&checkout=success$/);
+  for (const bad of ["https://evil.example", "#studio/swap?next=https://evil.example", "javascript:alert(1)", "#/../x"]) {
+    await s.call("POST", "/api/studio/checkout", { plan: "studio", return_hash: bad }, { "x-test-user": ANN });
+    assert.match(stripe.created.at(-1).success_url, /\/#studio\/account\?checkout=success$/, bad);
+  }
+  stripe.created.splice(1);
   tables.studio_customers[0].stripe_customer_id = null;
   await s.call("POST", "/api/studio/checkout", { plan: "starter" }, { "x-test-user": ANN });
   assert.deepEqual([stripe.created[1].customer, stripe.created[1].customer_email, "customer_creation" in stripe.created[1]], [undefined, "ann@synthetic.invalid", false], "a first-time buyer is identified by email only");

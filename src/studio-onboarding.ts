@@ -7,22 +7,22 @@ type Spec = { multi?: boolean; max?: number; values: Record<string, string> };
 
 /** Every question, its allowed answers and how each reads in a sentence. */
 export const QUESTIONS: Record<string, Spec> = {
-  role: { values: { creator: "a creator or personal brand", business: "their own business", agency: "clients (agency, editor or freelancer)", pages: "theme, faceless or clip pages they run", exploring: "just looking" } },
+  role: { values: { creator: "a creator growing their own audience", clipper: "a clipper paid to clip streams, podcasts and campaigns", pages: "a page owner (faceless, theme or meme pages)", ugc: "a UGC creator or affiliate (brand deals, TikTok Shop, affiliate links)", ai_influencer: "an AI influencer builder", business: "a brand or startup marketing a product, app or shop", agency: "an agency or SMMA making content for clients", exploring: "just exploring" } },
   niche: { multi: true, max: 3, values: { money: "business and money", fitness: "fitness and health", beauty: "beauty and fashion", gaming: "gaming and streaming", comedy: "comedy and entertainment", education: "education and how-to", tech: "tech and AI", food: "food", travel: "travel and lifestyle", music: "music", podcast: "podcasts and interviews", sports: "sports", motivation: "motivation and mindset", news: "news and commentary", other: "something else" } },
   sells: { values: { ecommerce: "physical products", app: "an app or software", services: "coaching, courses or services", local: "a local business", media: "media, music or entertainment", other: "something else" } },
   team: { values: { solo: "just them", "2_5": "2 to 5 people", "6_20": "6 to 20 people", gt20: "more than 20 people" } },
   clients: { values: { "1_3": "1 to 3 clients", "4_10": "4 to 10 clients", "11_30": "11 to 30 clients", gt30: "more than 30 clients" } },
-  goals: { multi: true, values: { multiply: "more posts from videos they have (Blueprint)", network: "posting on many accounts without duplicates (Blueprint)", faceless: "videos without being on camera (Recast)", character: "an AI character or influencer (Characters)", swap: "swapping people or styles in their videos (Swap, Styles)", trends: "jumping on trends (Trends)", ads: "ads and UGC for a product", generate: "creating from a prompt (Instruments)", publish: "scheduling and posting everywhere (Publish)", analytics: "knowing what to post next (Performance)", managed: "having Clone8 run it for them (managed service)" } },
+  goals: { multi: true, values: { multiply: "turning one video into many (Blueprint)", network: "running a page network without duplicate files (Blueprint)", faceless: "going faceless (Recast)", character: "building an AI influencer (Characters)", swap: "swapping people or styles in their videos (Swap, Styles)", trends: "hopping on trends fast (Trends)", ads: "UGC ads and product videos", generate: "creating from a prompt (Instruments)", publish: "posting and scheduling everywhere (Publish)", analytics: "growing with their numbers (Performance)", managed: "done-for-you posting (managed service)" } },
   goal: { values: {} }, // one of goals; checked against them below
   platforms: { multi: true, values: { tiktok: "TikTok", instagram: "Instagram", youtube: "YouTube", facebook: "Facebook", x: "X", linkedin: "LinkedIn", threads: "Threads", snapchat: "Snapchat", none: "not posting yet" } },
   accounts: { values: { one: "1 account", "2_5": "2 to 5 accounts", "6_20": "6 to 20 accounts", "21_100": "21 to 100 accounts", gt100: "more than 100 accounts" } },
   posts_now: { values: { none: "not posting yet", lt10: "a few a month", "10_30": "a few a week", "30_100": "1 to 3 a day", "100_500": "several a day", gt500: "dozens a day" } },
   posts_goal: { values: { lt30: "up to 1 a day", "30_100": "1 to 3 a day", "100_500": "several a day", "500_2000": "dozens a day", gt2000: "hundreds a day" } },
   library: { values: { none: "no finished videos yet", lt20: "under 20 finished videos", "20_100": "20 to 100 finished videos", "100_500": "100 to 500 finished videos", gt500: "more than 500 finished videos" } },
-  blocker: { values: { volume: "not enough videos to post", filming: "filming takes too long", camera: "not wanting to be on camera", views: "flat views without knowing why", flagged: "reposts getting flagged or buried", accounts: "running many accounts is a grind", cost: "editors and tools cost too much", quality: "AI video not looking real enough" } },
+  blocker: { values: { volume: "can't post enough", filming: "editing and filming eat their time", camera: "not wanting to show their face", views: "flat views without knowing why", flagged: "reposts getting flagged as unoriginal", monetize: "not making money from it yet", accounts: "running many accounts is a grind", cost: "editors and UGC creators cost too much", quality: "AI video still looking fake" } },
   tools: { multi: true, values: { capcut: "CapCut", higgsfield: "Higgsfield", heygen: "HeyGen or Synthesia", captions: "Captions", ugc: "Arcads, Creatify or MakeUGC", clipping: "OpusClip or another clipper", models: "Kling, Veo, Runway or Sora", chatgpt: "ChatGPT or Claude", editor: "an editor or agency", scheduler: "a scheduler", none: "nothing yet" } },
   spend: { values: { zero: "$0", lt100: "under $100", "100_500": "$100 to $500", "500_2000": "$500 to $2,000", gt2000: "over $2,000" } },
-  heard: { values: { tiktok: "TikTok", instagram: "Instagram", youtube: "YouTube", x: "X", reddit: "Reddit", google: "Google", ai: "ChatGPT or another AI", friend: "a friend or colleague", creator: "a creator they follow", other: "somewhere else" } },
+  heard: { values: { tiktok: "TikTok", instagram: "Instagram", youtube: "YouTube", x: "X", discord: "Discord", reddit: "Reddit", google: "Google", ai: "ChatGPT or another AI", friend: "a friend", creator: "a creator they follow", other: "somewhere else" } },
 };
 /** Version 1 keys still accepted (people who answered before Oct 31 2026, or an old cached dashboard). */
 const V1 = new Set(["intent", "source", "recast_reason", "length", "character", "start"]);
@@ -75,7 +75,7 @@ export function profileLines(ob: Record<string, any> | null | undefined): string
   const who = said("role", ob.role);
   if (who) {
     const more = [said("sells", ob.sells) && `sells ${said("sells", ob.sells)}`, said("clients", ob.clients), said("team", ob.team) && `content made by ${said("team", ob.team)}`, saidAll("niche", ob.niche).length && `about ${saidAll("niche", ob.niche).join(", ")}`].filter(Boolean);
-    lines.push(`Makes content for ${who}${more.length ? `: ${more.join("; ")}` : ""}.`);
+    lines.push(`They are ${who}${more.length ? ` (${more.join("; ")})` : ""}.`);
   }
   const goals = saidAll("goals", ob.goals);
   if (goals.length) lines.push(`Wants: ${goals.join("; ")}${said("goals", ob.goal) && goals.length > 1 ? `. First priority: ${said("goals", ob.goal)}` : ""}.`);

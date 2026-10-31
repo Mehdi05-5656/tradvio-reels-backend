@@ -1015,6 +1015,14 @@ export async function publishItems(sb: SupabaseClient, convo: Conversation, ctx:
   return out.filter((i) => { const k = i.asset_id ?? `${i.job_id}:${i.output_key}`; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 25);
 }
 
+/** Chat replies, runs and character drafts cost us (Claude) or spend credits: people without a plan can look around
+ *  the Studio, but these need a plan. The dashboard sends them to the plans first; this is the server's own check. */
+async function requirePlan(sb: SupabaseClient, u: string) {
+  const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
+  if (c.error) throw c.error;
+  if (!["active", "trialing"].includes(String(c.data?.status))) throw new AssistantError("subscription_required", "Chat comes with a plan", 402);
+}
+
 export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps: AssistantDeps = {}): void {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
@@ -1145,6 +1153,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn();
+      await requirePlan(sb, u);
       const c = await load(sb, u, req.params.id);
       const m = c.messages.find((x) => x.choice?.id === req.params.choiceId);
       if (!m?.choice) throw new AssistantError("choice_not_found", "No such card", 404);
@@ -1273,6 +1282,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     try {
       if (!toolsEnabled(env).assistant) throw new AssistantError("assistant_unavailable", "The assistant is not switched on", 503);
       const sb = sbFn();
+      await requirePlan(sb, u);
       const c = await load(sb, u, req.params.id);
       const text = String(req.body?.text ?? "").trim();
       const ids: string[] = Array.isArray(req.body?.attachments) ? req.body.attachments.map(String).filter((x: string) => UUID_RE.test(x)).slice(0, 20) : [];
@@ -1324,6 +1334,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn();
+      await requirePlan(sb, u);
       const c = await load(sb, u, req.params.id);
       if (req.body?.plan_id && c.plan?.id !== req.body.plan_id) throw new AssistantError("plan_stale", "That plan was replaced; confirm the latest one", 409);
       startRun(c);

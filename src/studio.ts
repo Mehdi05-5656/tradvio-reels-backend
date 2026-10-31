@@ -572,6 +572,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     } catch (e) { fail(res, e); }
   });
 
+  /** A Studio page to land back on after checkout: #studio/<page>, with an instrument's id at most. Anything else: none. */
+  const returnTo = (h: unknown): string | null => (typeof h === "string" && /^#studio\/[a-z-]{1,30}(\?id=[\w.%/-]{1,160})?$/.test(h) ? h : null);
+
   app.post("/api/studio/checkout", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     const plan = planById(req.body?.plan), interval: Interval = req.body?.interval === "year" ? "year" : "month";
@@ -593,7 +596,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         metadata: { user_id: u, plan_id: plan.id, interval },
         subscription_data: { metadata: { user_id: u, plan_id: plan.id } },
         allow_promotion_codes: true,
-        success_url: `${dashboard()}/#studio/account?checkout=success`,
+        // back to the page they left to pick a plan (their setup is kept there), else their account
+        success_url: `${dashboard()}/${returnTo(req.body?.return_hash) ?? "#studio/account"}${returnTo(req.body?.return_hash)?.includes("?") ? "&" : "?"}checkout=success`,
         cancel_url: `${dashboard()}/#studio/pricing?checkout=canceled`,
       });
       log(`[studio] checkout ${JSON.stringify({ user: u, plan: plan.id, interval, session: session.id })}`);

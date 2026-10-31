@@ -34,11 +34,11 @@ test("every question has answers that read in a sentence, with ids the dashboard
 test("the assistant reads who they are, what they want, their size, their problem and their first idea", () => {
   const lines = profileLines({ role: "agency", clients: "4_10", niche: ["fitness"], goals: ["network", "publish"], goal: "network", platforms: ["tiktok", "instagram"], accounts: "21_100", posts_now: "30_100", posts_goal: "500_2000", library: "100_500", blocker: "flagged", tools: ["capcut", "none"], first_make: "Ten originals of my best gym clip" });
   assert.deepEqual(lines, [
-    "Makes content for clients (agency, editor or freelancer): 4 to 10 clients; about fitness and health.",
-    "Wants: posting on many accounts without duplicates (Blueprint); scheduling and posting everywhere (Publish). First priority: posting on many accounts without duplicates (Blueprint).",
+    "They are an agency or SMMA making content for clients (4 to 10 clients; about fitness and health).",
+    "Wants: running a page network without duplicate files (Blueprint); posting and scheduling everywhere (Publish). First priority: running a page network without duplicate files (Blueprint).",
     "Posts on: TikTok, Instagram, 21 to 100 accounts.",
     "Volume: 1 to 3 a day today, wants dozens a day; has 100 to 500 finished videos.",
-    "Biggest problem: reposts getting flagged or buried.",
+    "Biggest problem: reposts getting flagged as unoriginal.",
     "Uses today: CapCut.",
     "First thing they said they want to make: \"Ten originals of my best gym clip\"",
   ]);
@@ -75,7 +75,12 @@ test("who is signing up: counts per answer, paying alongside, sources and first 
   assert.equal(s.answered, 4); assert.equal(s.version2, 3); assert.equal(s.skipped, 1);
   assert.deepEqual(s.by.role.map((r) => [r.id, r.n, r.paying]), [["creator", 2, 1], ["agency", 1, 1]]);
   assert.deepEqual(s.by.goals.map((r) => [r.id, r.n]), [["trends", 2], ["faceless", 1], ["network", 1]]);
-  assert.equal(s.by.goal[0].label, "videos without being on camera", "labels drop the tool in brackets");
+  assert.equal(s.by.goal[0].label, "going faceless", "labels drop the tool in brackets");
   assert.deepEqual(s.sources, [{ source: "google.com", n: 1 }, { source: "tiktok", n: 1 }]);
   assert.deepEqual(s.first_makes, ["a"]);
+});
+
+test("today's roles, blockers and sources are kept", () => {
+  assert.deepEqual(sanitizeAnswers({ role: "clipper", blocker: "monetize", heard: "discord" }), { role: "clipper", blocker: "monetize", heard: "discord" });
+  for (const r of ["ugc", "ai_influencer", "pages", "agency"]) assert.equal(sanitizeAnswers({ role: r }).role, r);
 });
