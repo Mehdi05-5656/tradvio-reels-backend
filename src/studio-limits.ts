@@ -18,7 +18,13 @@ export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 /** Someone without an active plan can still upload a little so the first job is ready the moment they pay. */
 export const NO_PLAN_LIMITS: PlanLimits = { assets: 5, storage_bytes: 2 * GiB, jobs_per_hour: 0 };
 
-export function limitsFor(customer: { plan_id?: string | null; status?: string | null } | null | undefined): PlanLimits {
+/** A paid plan (active or trialing), or the owner pass (the owner's own account; migration 20261109000000). */
+export function hasPlanAccess(customer: { status?: string | null; owner_pass?: boolean | null } | null | undefined): boolean {
+  return !!customer && (customer.status === "active" || customer.status === "trialing" || customer.owner_pass === true);
+}
+
+export function limitsFor(customer: { plan_id?: string | null; status?: string | null; owner_pass?: boolean | null } | null | undefined): PlanLimits {
+  if (customer?.owner_pass) return PLAN_LIMITS.studio; // the owner works at the largest plan's limits
   const active = customer?.status === "active" || customer?.status === "trialing";
   const plan = customer?.plan_id ? PLAN_LIMITS[customer.plan_id as PlanId] : undefined;
   return active && plan ? plan : NO_PLAN_LIMITS;
@@ -46,7 +52,7 @@ export function jobAllowance(limits: PlanLimits, createdLastHour: number): Limit
 export async function checkUpload(sb: any, user: string, size: number): Promise<LimitError> {
   try {
     const [cust, assets] = await Promise.all([
-      sb.from("studio_customers").select("plan_id,status").eq("user_id", user).maybeSingle(),
+      sb.from("studio_customers").select("plan_id,status,owner_pass").eq("user_id", user).maybeSingle(),
       sb.from("studio_assets").select("bytes").eq("user_id", user).neq("status", "deleted").limit(1000),
     ]);
     if (cust.error || assets.error) return null;
@@ -57,7 +63,7 @@ export async function checkJobRate(sb: any, user: string, now = new Date()): Pro
   try {
     const since = new Date(now.getTime() - 3600_000).toISOString();
     const [cust, jobs] = await Promise.all([
-      sb.from("studio_customers").select("plan_id,status").eq("user_id", user).maybeSingle(),
+      sb.from("studio_customers").select("plan_id,status,owner_pass").eq("user_id", user).maybeSingle(),
       sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("user_id", user).gte("created_at", since),
     ]);
     if (cust.error || jobs.error) return null;

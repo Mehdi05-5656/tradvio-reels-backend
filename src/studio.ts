@@ -10,7 +10,7 @@ import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, pla
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
 import { isAdmin } from "./auth.js";
-import { checkUpload, checkJobRate } from "./studio-limits.js";
+import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
 import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
 import { randomUUID } from "node:crypto";
@@ -517,13 +517,13 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id";
       const [cust0, bal, jobs, ledger] = await Promise.all([
-        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error`).eq("user_id", u).maybeSingle(),
+        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error,owner_pass`).eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
         sb.from("studio_jobs").select("id,tool,status,credits_reserved,credits_charged,created_at").eq("user_id", u).gte("created_at", since).order("created_at", { ascending: false }).limit(200),
         sb.from("studio_credit_ledger").select("delta,reason,job_id,ref,note,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(50),
       ]);
       // Before the referrals migration those three columns do not exist: read the row without them, referral stays empty.
-      const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
+      const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup|owner_pass/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
       for (const r of [cust, bal, jobs, ledger]) if (r.error) throw r.error;
       const c: any = cust.data ?? null;
       const plan = planById(c?.plan_id);
@@ -535,7 +535,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const ledgerOut = ((ledger.data ?? []) as any[]).map((l) => (l.job_id && labels.has(l.job_id) ? { ...l, job_label: labels.get(l.job_id)!.label, job_status: labels.get(l.job_id)!.status } : l));
       res.json({
         subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id } : null,
-        active: !!c && (c.status === "active" || c.status === "trialing"),
+        active: hasPlanAccess(c),
+        ...(c?.owner_pass ? { owner_pass: true } : {}),
         balance: Number(bal.data ?? 0),
         onboarding: c?.onboarding ?? {},
         usage_30d: { jobs: (jobs.data ?? []).length, credits: spent },

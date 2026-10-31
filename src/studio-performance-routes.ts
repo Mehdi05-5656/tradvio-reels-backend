@@ -11,6 +11,7 @@ import { profileSuggestions } from "./studio-onboarding.js";
 import { insightHash, latestInsight, loadPerformance, performanceForChat, suggestionsFrom, writeInsight } from "./studio-insights.js";
 import { importLink, promoteOutput } from "./studio-assistant.js";
 import { withPosterUrls } from "./studio.js";
+import { hasPlanAccess } from "./studio-limits.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RANGES = [7, 28, 90];
@@ -46,8 +47,8 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
   // Refreshing and the overview spend public-data credits and model calls: they come with a plan. Reading what is
   // already stored stays open, so a lapsed person still sees their numbers.
   const hasPlan = async (sb: SupabaseClient, u: string) => {
-    const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
-    return !!c.data && ["active", "trialing"].includes(c.data.status);
+    const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
+    return hasPlanAccess(c.data);
   };
   const needPlan = async (sb: SupabaseClient, u: string) => { if (!(await hasPlan(sb, u))) throw Object.assign(new Error("Fresh numbers and overviews come with a plan"), { status: 409, code: "subscription_required" }); };
   const params = (req: Request) => {

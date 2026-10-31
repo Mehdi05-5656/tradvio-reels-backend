@@ -220,3 +220,13 @@ test("a failed write drops the rows and never throws", async () => {
   assert.equal(await flushEvents(), 0);
   resetEventsForTests();
 });
+
+test("the owner pass: plan access and the largest plan's limits, for the flagged account only", async () => {
+  const { hasPlanAccess, limitsFor, PLAN_LIMITS, NO_PLAN_LIMITS } = await import("../src/studio-limits.js");
+  assert.equal(hasPlanAccess({ status: "none", owner_pass: true }), true);
+  assert.equal(hasPlanAccess({ status: "active" }), true);
+  assert.equal(hasPlanAccess({ status: "canceled", owner_pass: false }), false);
+  assert.equal(hasPlanAccess(null), false);
+  assert.deepEqual(limitsFor({ status: "none", plan_id: null, owner_pass: true }), PLAN_LIMITS.studio);
+  assert.deepEqual(limitsFor({ status: "none", plan_id: null }), NO_PLAN_LIMITS);
+});

@@ -10,6 +10,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftCaption, type CaptionDraft } from "./studio-captions.js";
 import { getSocialProvider, isSocialPlatform, SocialError, statusOf, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult } from "./social-provider.js";
+import { hasPlanAccess } from "./studio-limits.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Outputs are kept 30 days after the job finishes; a post must go out a day before that. */
@@ -52,12 +53,13 @@ export function webhookUrl(env: Record<string, string | undefined>): string | nu
 /** How many social accounts a person may post to: the plan's own plus the extra ones they added. */
 export type Allowance = { plan: string | null; included: number; extra: number; total: number; price_usd_month: number; interval: "month" | "year"; max_extra: number };
 export async function allowanceOf(sb: SupabaseClient, u: string): Promise<Allowance> {
-  let c = await sb.from("studio_customers").select("plan_id,status,billing_interval,social_extra").eq("user_id", u).maybeSingle();
-  if (c.error && /social_extra/.test(String(c.error.message ?? ""))) c = await sb.from("studio_customers").select("plan_id,status,billing_interval").eq("user_id", u).maybeSingle() as any;
+  let c = await sb.from("studio_customers").select("plan_id,status,billing_interval,social_extra,owner_pass").eq("user_id", u).maybeSingle();
+  if (c.error && /social_extra|owner_pass/.test(String(c.error.message ?? ""))) c = await sb.from("studio_customers").select("plan_id,status,billing_interval").eq("user_id", u).maybeSingle() as any;
   if (c.error) throw c.error;
   const d: any = c.data ?? {};
-  const live = ["active", "trialing"].includes(d.status);
-  const included = live ? SOCIAL_ACCOUNTS[d.plan_id] ?? 1 : 0, extra = live ? Math.max(0, Number(d.social_extra ?? 0)) : 0;
+  const live = hasPlanAccess(d);
+  // the owner pass posts to as many accounts as the largest plan
+  const included = d.owner_pass && !SOCIAL_ACCOUNTS[d.plan_id] ? SOCIAL_ACCOUNTS.studio : live ? SOCIAL_ACCOUNTS[d.plan_id] ?? 1 : 0, extra = live ? Math.max(0, Number(d.social_extra ?? 0)) : 0;
   const interval = d.billing_interval === "year" ? "year" : "month";
   return { plan: d.plan_id ?? null, included, extra, total: included + extra, price_usd_month: interval === "year" ? SOCIAL_SEAT_USD.year_per_month : SOCIAL_SEAT_USD.month, interval, max_extra: MAX_SOCIAL_EXTRA };
 }
@@ -90,9 +92,9 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     return r.data as { user_id: string; profile_key: string; accounts: SocialAccount[]; webhook_registered_at: string | null; webhook_hash?: string | null } | null;
   };
   const requirePlan = async (sb: SupabaseClient, u: string) => {
-    const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
+    const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
     if (c.error) throw c.error;
-    if (!c.data || !["active", "trialing"].includes(c.data.status)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
+    if (!hasPlanAccess(c.data)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
   };
   const ensureWebhook = async (sb: SupabaseClient, p: SocialProvider, u: string, profileKey: string, registeredHash: string | null | undefined) => {
     const url = webhookUrl(env);
@@ -319,9 +321,9 @@ async function resolveItems(sb: SupabaseClient, u: string, items: any[]): Promis
 /** Post or schedule videos for a person; every path that posts (the Publish page, the chat's card) comes through here. */
 export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: string, b: any, opts: { conversationId?: string | null; log?: (s: string) => void; env?: Record<string, string | undefined> } = {}) {
   const log = opts.log ?? ((s: string) => console.log(s)), env = opts.env ?? process.env;
-  const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
+  const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
   if (c.error) throw c.error;
-  if (!c.data || !["active", "trialing"].includes(c.data.status)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
+  if (!hasPlanAccess(c.data)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
   const pr = await sb.from("studio_social_profiles").select("profile_key,accounts").eq("user_id", u).maybeSingle();
   if (pr.error) throw pr.error;
   const prof = pr.data as { profile_key: string; accounts: SocialAccount[] } | null;

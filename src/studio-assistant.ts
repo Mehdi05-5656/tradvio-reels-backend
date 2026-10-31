@@ -23,7 +23,7 @@ import { buildSystemPrompt, PRESET_CHARACTERS, type KnowledgeUser } from "./stud
 import { quoteInstrument, instrumentById, tableUsd, tableUnits, instrumentCredits, InstrumentError, inputAssetIds } from "./studio-instruments.js";
 import { trendById } from "./studio-trends.js";
 import { probeSeconds, makePoster } from "./studio-recast.js";
-import { checkUpload, checkJobRate } from "./studio-limits.js";
+import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { youtubeId } from "./studio-youtube.js";
 import { profileLines } from "./studio-onboarding.js";
 
@@ -1018,9 +1018,9 @@ export async function publishItems(sb: SupabaseClient, convo: Conversation, ctx:
 /** Chat replies, runs and character drafts cost us (Claude) or spend credits: people without a plan can look around
  *  the Studio, but these need a plan. The dashboard sends them to the plans first; this is the server's own check. */
 async function requirePlan(sb: SupabaseClient, u: string) {
-  const c = await sb.from("studio_customers").select("status").eq("user_id", u).maybeSingle();
+  const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
   if (c.error) throw c.error;
-  if (!["active", "trialing"].includes(String(c.data?.status))) throw new AssistantError("subscription_required", "Chat comes with a plan", 402);
+  if (!hasPlanAccess(c.data)) throw new AssistantError("subscription_required", "Chat comes with a plan", 402);
 }
 
 export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps: AssistantDeps = {}): void {
