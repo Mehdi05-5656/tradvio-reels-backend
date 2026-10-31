@@ -172,17 +172,17 @@ export const inputAssetIds = (inputs: Record<string, string | string[]>): string
 // ---------------------------------------------------------------------------------------------------
 /** `by_resolution`: what a second costs at each output size; `usd` is used when the size is not one of them. */
 export type UnitPrice = { per: "second" | "image"; usd: number; by_resolution?: Partial<Record<string, number>> };
-// Seedance bills by output size, and our Oct 30 2026 bills put Seedance 2.5 video edit at $0.481 a second at 720p (its
-// default size), 2.76 times the 480p page price. The $0.206 "from" price undercharged every 720p run by more than half.
-// 480p is the page's; 720p is measured for video edit and derived by the same ratio for the others; 1080p is 720p
-// scaled by pixels (2.25x). All unmeasured ones are marked as estimates in the code that uses them.
-const SEEDANCE_25_EDIT = { "480p": 0.174, "720p": 0.481, "1080p": 1.08 }, SEEDANCE_25_GEN = { "480p": 0.145, "720p": 0.401, "1080p": 0.9 };
-const SEEDANCE_20_REF = { "480p": 0.118, "720p": 0.326, "1080p": 0.734 }, SEEDANCE_20_GEN = { "480p": 0.099, "720p": 0.274, "1080p": 0.616 };
+// Seedance bills by output size. Seedance 2.5 at 720p (its default) lists at $0.4622 a second and 1080p at $1.137
+// (open.higgsfield.ai, Oct 30 2026; our Oct 30 bills match); the $0.206 "from" price undercharged every 720p run by more
+// than half. Video edit / reference: 480p from the pricing page; text/image-to-video 480p from the page, 720p and 1080p
+// taken at the edit rates (unmeasured, on the safe side). Seedance 2.0: the page's 480p, scaled like 2.5 (estimates).
+const SEEDANCE_25_EDIT = { "480p": 0.174, "720p": 0.463, "1080p": 1.137 }, SEEDANCE_25_GEN = { "480p": 0.145, "720p": 0.463, "1080p": 1.137 };
+const SEEDANCE_20_REF = { "480p": 0.118, "720p": 0.314, "1080p": 0.771 }, SEEDANCE_20_GEN = { "480p": 0.099, "720p": 0.264, "1080p": 0.647 };
 export const LIST_PRICES: Record<string, UnitPrice> = {
-  "bytedance/seedance-2.5": { per: "second", usd: 0.401, by_resolution: SEEDANCE_25_GEN },
-  "bytedance/seedance-2.5/video-edit": { per: "second", usd: 0.481, by_resolution: SEEDANCE_25_EDIT }, "bytedance/seedance-2.5/video-extend": { per: "second", usd: 0.481, by_resolution: SEEDANCE_25_EDIT },
-  "bytedance/seedance-2.5/reference-to-video": { per: "second", usd: 0.481, by_resolution: SEEDANCE_25_EDIT },
-  "bytedance/seedance-2.0": { per: "second", usd: 0.274, by_resolution: SEEDANCE_20_GEN }, "bytedance/seedance-2.0/reference-to-video": { per: "second", usd: 0.326, by_resolution: SEEDANCE_20_REF },
+  "bytedance/seedance-2.5": { per: "second", usd: 0.463, by_resolution: SEEDANCE_25_GEN },
+  "bytedance/seedance-2.5/video-edit": { per: "second", usd: 0.463, by_resolution: SEEDANCE_25_EDIT }, "bytedance/seedance-2.5/video-extend": { per: "second", usd: 0.463, by_resolution: SEEDANCE_25_EDIT },
+  "bytedance/seedance-2.5/reference-to-video": { per: "second", usd: 0.463, by_resolution: SEEDANCE_25_EDIT },
+  "bytedance/seedance-2.0": { per: "second", usd: 0.264, by_resolution: SEEDANCE_20_GEN }, "bytedance/seedance-2.0/reference-to-video": { per: "second", usd: 0.314, by_resolution: SEEDANCE_20_REF },
   "minimax/h3": { per: "second", usd: 0.13 }, "alibaba/wan-3.0-prime": { per: "second", usd: 0.068 }, "alibaba/wan-3.0": { per: "second", usd: 0.05 },
   "higgsfield/cinema-studio": { per: "second", usd: 0.206 }, "kling-video/v3.0": { per: "second", usd: 0.084 }, "kling-video/v3.0-turbo": { per: "second", usd: 0.084 },
   "lightricks/ltx-2.5/image-to-video/fast": { per: "second", usd: 0.09 }, "lightricks/ltx-2.5/text-to-video/fast": { per: "second", usd: 0.09 },

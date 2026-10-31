@@ -278,7 +278,7 @@ test("pieces: at most 30 s each, ending on a camera change when one falls late i
   assert.equal(chooseEngine("recast", "light", 10, [0.2]), "genjutsu", "a cut in the first half second is the clip starting, not a shot change");
 });
 
-test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot on Light (about $10, not $21.65 on Seedance), short shots padded and cut back", async () => {
+test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot on Light (about $10, not $20.84 on Seedance), short shots padded and cut back", async () => {
   const calls: any[] = [];
   const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`;
   const fetchFn: any = async (url: string, init: any = {}) => {
@@ -315,7 +315,8 @@ test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot o
   assert.equal(done.p_outputs[0].piece_engine, "light"); assert.equal(done.p_outputs[0].pieces, 6); assert.equal(done.p_outputs[0].audio, "muxed_from_source");
   assert.equal(done.p_credits_charged, 44 * 22, "44 s at the Light rate");
   const plan = planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], {});
-  assert.equal(plan.engine, "light"); assert.equal(plan.usd, 10); assert.equal(plan.other_usd, 21.645);
+  assert.equal(plan.engine, "light"); assert.equal(plan.usd, 10); assert.equal(plan.other_usd, 20.835);
+  assert.equal(planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], { HIGGSFIELD_DISCOUNT: "0.15" }).usd, 8.5, "the account's Genjutsu discount lowers Light, not Seedance");
 });
 
 test("the long path by cost: many very short shots stay on Seedance, in up to 30 s pieces", async () => {

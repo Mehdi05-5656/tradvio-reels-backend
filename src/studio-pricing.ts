@@ -16,13 +16,15 @@ export const HIGGSFIELD_RATES: Record<"full" | "light", Record<Resolution, numbe
   full: { "480p": 0.318, "720p": 0.681, "1080p": 1.632 },
   light: { "480p": 0.20, "720p": 0.20, "1080p": 0.20 },
 };
-/** Seedance 2.5 video edit (the long path's renderer), USD a second of source, by resolution. 480p is Higgsfield's page
- *  (open.higgsfield.ai, Oct 30 2026); 720p is what our own bills show (Oct 30 2026: $12.51 for a 26.03 s piece, $8.36 for
- *  17.39 s, both $0.481 a second), more than twice the $0.206 "from" price; 1080p is 720p scaled by pixels, unmeasured. */
-export const SEEDANCE_EDIT_RATES: Record<Resolution, number> = { "480p": 0.174, "720p": 0.481, "1080p": 1.08 };
-/** Seedance's own discount, when the console grants one (its max-discount tier is 30%); falls back to HIGGSFIELD_DISCOUNT. */
+/** Seedance 2.5 video edit (the long path's renderer), USD a second of source rounded up per request, by resolution.
+ *  480p is Higgsfield's page; 720p is its list price ($0.4622, open.higgsfield.ai, Oct 30 2026), which our bills match
+ *  with whole-second rounding ($12.51 for a 26.03 s piece = 27 s, $8.36 for 17.39 s = 18 s): no discount applies to it.
+ *  1080p is the page's $1.137. */
+export const SEEDANCE_EDIT_RATES: Record<Resolution, number> = { "480p": 0.174, "720p": 0.463, "1080p": 1.137 };
+/** Seedance's own discount, only when the console grants one (its max-discount tier is 30%). The account's Genjutsu
+ *  discount (HIGGSFIELD_DISCOUNT) does not reach Seedance: the Oct 30 bills are at list. */
 export function seedanceDiscount(env: Record<string, string | undefined> = process.env): number {
-  const d = Number(env.HIGGSFIELD_SEEDANCE_DISCOUNT ?? env.HIGGSFIELD_DISCOUNT ?? 0);
+  const d = Number(env.HIGGSFIELD_SEEDANCE_DISCOUNT ?? 0);
   return Number.isFinite(d) ? Math.min(0.9, Math.max(0, d)) : 0;
 }
 export function seedanceEditCostPerSecond(env?: Record<string, string | undefined>, resolution: Resolution = RECAST_RESOLUTION): number {
