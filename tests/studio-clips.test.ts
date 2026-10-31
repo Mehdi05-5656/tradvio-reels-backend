@@ -193,15 +193,16 @@ const choose = async () => [
 
 test("a YouTube run: transcript in, moments chosen and saved, two clips cut into the collection, charged for what was made", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
-  const cut: any[] = [];
+  const cut: any[] = [], got: any[] = [];
   const deps: any = { env: ENV, plans: PLANS, log: () => {},
     meta: async () => ({ id: "x", url: "u", title: "Show", channel: "C", description: "", seconds: 1200, thumbnail_url: null, chapters: [], replay: [] }),
     transcript: async () => segs, choose,
-    streams: async () => ({ video: "https://v", audio: "https://a", proxy: null, width: 1920, height: 1080, fps: 30, seconds: 1200 }),
+    download: async (url: string, target: string, h: number) => { got.push([url, h]); const { writeFile } = await import("node:fs/promises"); await writeFile(target, "mp4"); },
     cut: async (ctx: any, m: any) => { cut.push([m.rank, ctx.src.video, ctx.collectionId]); sb.t.studio_assets.push({ id: `clip${m.rank}`, collection_id: ctx.collectionId }); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1200 }) as any), "done");
   assert.deepEqual(cut.map((c) => c[0]).sort(), [1, 2]);
-  assert.ok(cut.every((c) => c[1] === "https://v" && c[2] === "col1"));
+  assert.deepEqual(got, [["https://www.youtube.com/watch?v=L_Guz73e6fw", 1080]], "the whole video is fetched once (1080 lines under an hour)");
+  assert.ok(cut.every((c) => String(c[1]).endsWith("youtube.mp4") && c[2] === "col1"), "every clip is cut from that local file");
   assert.ok(sb.files.has(`studio-outputs/${U}/clips/col1/plan.txt`), "the chosen moments are saved, so a retry or an upload can reuse them");
   const done = sb.calls.find((c: any) => c.fn === "studio_complete");
   assert.ok(done.args.p_credits_charged >= CLIP_LIMITS.min_credits && done.args.p_credits_charged <= 400);
@@ -215,7 +216,7 @@ test("YouTube refusing our servers: the moments are kept, only choosing is charg
   const deps: any = { env: ENV, plans: PLANS, log: () => {},
     meta: async () => ({ id: "x", url: "u", title: "Show", channel: "C", description: "", seconds: 1200, thumbnail_url: null, chapters: [], replay: [] }),
     transcript: async () => segs, choose,
-    streams: async () => { throw new LinkError("link_blocked", "YouTube refused"); },
+    download: async () => { throw new LinkError("link_blocked", "YouTube refused"); },
     cut: async () => { throw new Error("must not cut"); } };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1200 }) as any), "needs_file");
   assert.equal(sb.t.studio_collections[0].status, "needs_file");

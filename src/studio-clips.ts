@@ -20,7 +20,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, creditsForCost, logClaudeCost, MARGIN_TARGET, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { transcribeWords, type TimedWord } from "./studio-eleven.js";
-import { youtubeAudio, youtubeId, youtubeSection, youtubeStreams, LinkError, type YouTubeStreams } from "./studio-youtube.js";
+import { youtubeAudio, youtubeDownload, youtubeId, youtubeSection, youtubeStreams, LinkError, type YouTubeStreams } from "./studio-youtube.js";
 import { checkUpload } from "./studio-limits.js";
 
 // ---------------------------------------------------------------------------------------------------
@@ -47,6 +47,9 @@ export const CLIP_COST = {
   render_usd_per_clip: 0.003,             // web-service CPU and the stored file
   lookup_usd: 2 * OVERHEAD.scrapecreators_usd_per_call,
   clip_bytes_per_second: 200_000,         // a 1080p stretch with sound read through the proxy: measured 133-166 kB/s on YouTube (Oct 31 2026), kept with margin
+  // the whole video is downloaded once through the proxy (yt-dlp's own downloader is the one YouTube lets through):
+  // H.264 1080p with AAC measured 90 kB/s (843 s talk, 61.7 MB of picture); 720p for videos over an hour, about half
+  full_bytes_per_second: 110_000, full_bytes_per_second_long: 60_000, long_after_seconds: 3600,
 };
 /** What the proxy charges per GB (0 without one: then YouTube refuses us and nothing is read through it). */
 export const proxyUsdPerGb = (env: Record<string, string | undefined>) => (env.STUDIO_YT_PROXY ? (Number(env.STUDIO_YT_PROXY_USD_PER_GB) > 0 ? Number(env.STUDIO_YT_PROXY_USD_PER_GB) : 3) : 0);
@@ -58,7 +61,8 @@ export function clipsCostUsd(p: { seconds: number; platform: "youtube" | "upload
   let usd = p.clips * (CLIP_COST.frame_usd_per_clip + CLIP_COST.render_usd_per_clip);
   if (p.choose) usd += hours * CLIP_COST.choose_usd_per_hour;
   if (p.transcribe) usd += hours * CLIP_COST.transcribe_usd_per_hour;
-  if (p.platform === "youtube") usd += (p.choose ? CLIP_COST.lookup_usd : 0) + (p.clips * (p.clipSeconds + 1) * CLIP_COST.clip_bytes_per_second / 1e9) * proxyUsdPerGb(p.env);
+  // the whole video comes through the proxy once, whatever the number of clips (nothing when YouTube is not cut here)
+  if (p.platform === "youtube") usd += (p.choose ? CLIP_COST.lookup_usd : 0) + (p.clips > 0 ? (p.seconds * (p.seconds > CLIP_COST.long_after_seconds ? CLIP_COST.full_bytes_per_second_long : CLIP_COST.full_bytes_per_second) / 1e9) * proxyUsdPerGb(p.env) : 0);
   return usd;
 }
 export const clipsCredits = (usd: number, plans: PlanLike[], floorCredits: number = CLIP_LIMITS.min_credits) => Math.max(floorCredits, creditsForCost(usd, creditValueFloor(plans), MARGIN_TARGET));
@@ -81,6 +85,7 @@ export type ClipsDeps = {
   choose?: (input: ChooseInput) => Promise<RawMoment[]>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<CutResult>;
   section?: (url: string, start: number, end: number, target: string) => Promise<void>;
+  download?: (url: string, target: string, maxHeight: number) => Promise<void>;
   ytAudio?: (url: string, target: string) => Promise<void>;
 };
 const metaCache = new Map<string, { at: number; meta: YtMeta }>();
@@ -632,8 +637,11 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     let src: SourceInput;
     if (o.platform === "youtube" && !o.plan_from) {
       try {
-        const st = await (deps.streams ?? ((x) => youtubeStreams(x, { env, fetch: deps.fetch })))(o.url);
-        src = { video: st.video, audio: st.audio, proxy: st.proxy, width: st.width, height: st.height, fps: st.fps, youtube: o.url };
+        // the whole video, once, by yt-dlp's own downloader; every clip is then cut from the local file
+        await renew(sb, job, { message: "Fetching the video" });
+        const file = join(dir, "youtube.mp4");
+        await (deps.download ?? ((u, t, h) => youtubeDownload(u, t, { env, fetch: deps.fetch, maxHeight: h })))(o.url, file, p.seconds > CLIP_COST.long_after_seconds ? 720 : 1080);
+        src = { video: file, audio: null, proxy: null, width: 0, height: 0, fps: null };
       } catch (e: any) {
         if (e instanceof LinkError && (e.code === "link_blocked" || e.code === "link_fetch_failed")) {
           // YouTube refused our servers: keep the chosen moments, charge for choosing only, ask for the file.

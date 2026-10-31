@@ -191,6 +191,17 @@ export async function youtubeSection(url: string, start: number, end: number, ta
   ], { ...o, timeoutMs: 8 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched"); }
 }
+/** The whole video, downloaded by yt-dlp's own downloader (no ffmpeg reading YouTube: through the proxy on Render every
+ *  ffmpeg read of a YouTube address got 403, Oct 31 2026). H.264 + AAC preferred so nothing needs converting; at most
+ *  `maxHeight` lines (1080, or 720 for long videos to keep the proxy's bytes down). */
+export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number } = {}): Promise<void> {
+  const h = o.maxHeight ?? 1080;
+  await runYtDlp([
+    "-f", `bv*[height<=${h}][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${h}]+ba/b[height<=${h}]/b`,
+    "--merge-output-format", "mp4", "--concurrent-fragments", "4", "-o", target, url,
+  ], { ...o, timeoutMs: 40 * 60_000 });
+  try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The video could not be downloaded"); }
+}
 /** The sound of a YouTube video (for speech-to-text when it has no captions), fetched by yt-dlp. */
 export async function youtubeAudio(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined> } = {}): Promise<void> {
   await runYtDlp(["-f", "ba[abr<=96]/ba/b", "-o", target, url], { ...o, timeoutMs: 20 * 60_000 });
