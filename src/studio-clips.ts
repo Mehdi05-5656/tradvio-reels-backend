@@ -20,7 +20,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, creditsForCost, logClaudeCost, MARGIN_TARGET, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { transcribeWords, type TimedWord } from "./studio-eleven.js";
-import { youtubeId, youtubeStreams, LinkError, type YouTubeStreams } from "./studio-youtube.js";
+import { youtubeAudio, youtubeId, youtubeSection, youtubeStreams, LinkError, type YouTubeStreams } from "./studio-youtube.js";
 import { checkUpload } from "./studio-limits.js";
 
 // ---------------------------------------------------------------------------------------------------
@@ -80,6 +80,8 @@ export type ClipsDeps = {
   extractAudio?: (input: SourceInput, target: string) => Promise<void>;
   choose?: (input: ChooseInput) => Promise<RawMoment[]>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<CutResult>;
+  section?: (url: string, start: number, end: number, target: string) => Promise<void>;
+  ytAudio?: (url: string, target: string) => Promise<void>;
 };
 const metaCache = new Map<string, { at: number; meta: YtMeta }>();
 async function sc(deps: ClipsDeps, path: string): Promise<any> {
@@ -305,7 +307,9 @@ const clean = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").tr
 // Media: where the source is read from, and the commands
 // ---------------------------------------------------------------------------------------------------
 /** How ffmpeg reaches the source: one file (an upload's signed address) or YouTube's separate picture and sound. */
-export type SourceInput = { video: string; audio: string | null; proxy: string | null; width: number; height: number; fps: number | null };
+export type SourceInput = { video: string; audio: string | null; proxy: string | null; width: number; height: number; fps: number | null;
+  /** a YouTube page: each stretch is fetched by yt-dlp (YouTube refuses its stream addresses to any other program) */
+  youtube?: string | null };
 export function inputArgs(src: SourceInput, start: number | null, seconds: number | null): string[] {
   const seek = (s: number | null) => (s != null && s > 0 ? ["-ss", s.toFixed(3)] : []);
   const net = (u: string) => (/^https?:/.test(u) ? ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "30000000"] : []);
@@ -440,8 +444,10 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   const { sb, u, dir } = ctx;
   const mezz = join(dir, `m${m.rank}.mp4`), out = join(dir, `c${m.rank}.mp4`), still = join(dir, `p${m.rank}.jpg`);
   const seconds = m.end - m.start;
-  // 1. the stretch, cut exactly (seek before and after the decoder), kept near-lossless at up to 1080 lines
-  await ffmpeg(["-v", "error", "-nostdin", "-y", ...inputArgs(ctx.src, m.start, seconds), "-vf", "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'",
+  // 1. the stretch, cut exactly, kept near-lossless at up to 1080 lines: from YouTube through yt-dlp (keyframes forced at
+  //    the cuts), from an upload by seeking the signed address before and after the decoder
+  if (ctx.src.youtube) await (ctx.deps.section ?? ((u, a, b, t) => youtubeSection(u, a, b, t, { env: ctx.deps.env, fetch: ctx.deps.fetch })))(ctx.src.youtube, m.start, m.end, mezz);
+  else await ffmpeg(["-v", "error", "-nostdin", "-y", ...inputArgs(ctx.src, m.start, seconds), "-vf", "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'",
     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k", "-ac", "2", mezz], { timeoutMs: 8 * 60_000, proxy: ctx.src.proxy });
   const info = await probeLocal(mezz);
   const dur = info.seconds || seconds;
@@ -596,8 +602,9 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         if (segs?.length) lines = linesFromSegments(segs);
         else {
           if (!env.ELEVENLABS_API_KEY) throw new ClipsError("clips_no_transcript", "That video has no captions to read; upload the file instead", 422);
-          const st = await (deps.streams ?? ((x) => youtubeStreams(x, { env, fetch: deps.fetch })))(o.url);
-          await transcribe({ video: st.audio ?? st.video, audio: null, proxy: st.proxy, width: st.width, height: st.height, fps: st.fps });
+          const sound = join(dir!, "youtube-sound");
+          await (deps.ytAudio ?? ((u, t) => youtubeAudio(u, t, { env, fetch: deps.fetch })))(o.url, sound);
+          await transcribe({ video: sound, audio: null, proxy: null, width: 0, height: 0, fps: null });
         }
       } else {
         await transcribe(await signedSource(sb, u, job.asset_id!));
@@ -626,7 +633,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     if (o.platform === "youtube" && !o.plan_from) {
       try {
         const st = await (deps.streams ?? ((x) => youtubeStreams(x, { env, fetch: deps.fetch })))(o.url);
-        src = { video: st.video, audio: st.audio, proxy: st.proxy, width: st.width, height: st.height, fps: st.fps };
+        src = { video: st.video, audio: st.audio, proxy: st.proxy, width: st.width, height: st.height, fps: st.fps, youtube: o.url };
       } catch (e: any) {
         if (e instanceof LinkError && (e.code === "link_blocked" || e.code === "link_fetch_failed")) {
           // YouTube refused our servers: keep the chosen moments, charge for choosing only, ask for the file.
@@ -651,7 +658,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
           if (e instanceof ClipsError && e.code === "clip_source_refused" && o.platform === "youtube" && !o.plan_from && !refreshed) {
             refreshed = true; // the stream addresses expire after a few hours: ask for fresh ones once
             const st = await (deps.streams ?? ((x) => youtubeStreams(x, { env, fetch: deps.fetch })))(o.url);
-            ctx.src = { video: st.video, audio: st.audio, proxy: st.proxy, width: st.width, height: st.height, fps: st.fps };
+            ctx.src = { video: st.video, audio: st.audio, proxy: st.proxy, width: st.width, height: st.height, fps: st.fps, youtube: o.url };
             continue;
           }
           if (attempt >= 1) throw e;

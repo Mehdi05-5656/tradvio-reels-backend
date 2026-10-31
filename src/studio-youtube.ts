@@ -140,6 +140,48 @@ export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env
   return parseStreams(out.stdout, proxy);
 }
 
+/** yt-dlp run with our usual settings (proxy, cookies, Node for YouTube's challenges); its complaint becomes a LinkError. */
+async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number }): Promise<string> {
+  const bin = await ensureYtDlp(o);
+  const env = o.env ?? process.env;
+  const cookies = await cookiesFile(env);
+  const full = [
+    "--no-playlist", "--no-warnings", "--quiet", "--no-progress", "--force-ipv4", "--socket-timeout", "30", "--retries", "3",
+    "--no-js-runtimes", "--js-runtimes", `node:${process.execPath}`,
+    ...(env.STUDIO_YT_PROXY ? ["--proxy", env.STUDIO_YT_PROXY] : []),
+    ...(cookies ? ["--cookies", cookies] : []),
+    ...args,
+  ];
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(bin, full, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "", killed = false;
+    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, o.timeoutMs ?? 8 * 60_000);
+    child.stdout.on("data", (b) => { stdout += b.toString(); if (stdout.length > 65536) stdout = stdout.slice(-65536); });
+    child.stderr.on("data", (b) => { stderr += b.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("close", (code) => { clearTimeout(timer); if (killed) reject(new LinkError("link_fetch_failed", "YouTube took too long to send the video")); else resolve({ code, stdout, stderr }); });
+  });
+  if (out.code !== 0) throw classifyYtDlpError(out.stderr || out.stdout);
+  return out.stdout;
+}
+/** One stretch of a YouTube video, cut exactly (keyframes forced at the cuts) to an H.264 + AAC MP4 at up to 1080 lines.
+ *  yt-dlp fetches it itself: YouTube refuses its stream addresses when another program asks for them (seen Oct 31 2026:
+ *  every external ffmpeg read got 403 while yt-dlp's own section download worked from the same address). */
+export async function youtubeSection(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined> } = {}): Promise<void> {
+  await runYtDlp([
+    "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
+    "--download-sections", `*${start.toFixed(2)}-${end.toFixed(2)}`, "--force-keyframes-at-cuts",
+    "--downloader-args", "ffmpeg_o:-c:v libx264 -preset ultrafast -crf 16 -pix_fmt yuv420p -c:a aac -b:a 192k -ac 2",
+    "--merge-output-format", "mp4", "-o", target, url,
+  ], { ...o, timeoutMs: 8 * 60_000 });
+  try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched"); }
+}
+/** The sound of a YouTube video (for speech-to-text when it has no captions), fetched by yt-dlp. */
+export async function youtubeAudio(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined> } = {}): Promise<void> {
+  await runYtDlp(["-f", "ba[abr<=96]/ba/b", "-o", target, url], { ...o, timeoutMs: 20 * 60_000 });
+  try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The sound of the video could not be fetched"); }
+}
+
 /** The 11-character video id, for a clean name when there is no title. */
 export function youtubeId(url: string): string | null {
   try {
