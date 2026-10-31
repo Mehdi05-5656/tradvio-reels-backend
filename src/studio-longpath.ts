@@ -1,6 +1,6 @@
 // The long path's plan, with no I/O: which renderer a clip goes to, in which pieces, where the joins fall, and what it
 // costs us. Shared by the quote (what a person is charged) and the runner (what is sent), so the two cannot disagree.
-import { higgsfieldCostPerSecond, seedanceEditCostPerSecond } from "./studio-pricing.js";
+import { higgsfieldCostPerSecond, higgsfieldListPerSecond, seedanceEditCostPerSecond, seedanceListPerSecond } from "./studio-pricing.js";
 
 /** What one Genjutsu request accepts: the full model trims sources to 30 s, Light 15 s; both want one continuous shot.
  *  Longer or multi-shot Light jobs go to the long path (Seedance video edit, pieces of up to PIECE_SECONDS). */
@@ -81,5 +81,7 @@ export function planLongPath(window: number, cuts: number[], env?: Record<string
   const seedUsd = seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceEditCostPerSecond(env);
   const lightUsd = light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldCostPerSecond("light", env);
   const useLight = !seedanceOnly && light.length <= MAX_SHOT_PIECES && lightUsd <= seedUsd;
-  return { engine: (useLight ? "light" : "seedance") as "light" | "seedance", pieces: useLight ? light : seed, usd: Math.round((useLight ? lightUsd : seedUsd) * 1000) / 1000, other_usd: Math.round((useLight ? seedUsd : lightUsd) * 1000) / 1000 };
+  // list_usd: the same plan at list prices, which is what a person is charged on (a discount is our margin)
+  const listUsd = useLight ? light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldListPerSecond("light") : seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceListPerSecond();
+  return { engine: (useLight ? "light" : "seedance") as "light" | "seedance", pieces: useLight ? light : seed, usd: Math.round((useLight ? lightUsd : seedUsd) * 1000) / 1000, other_usd: Math.round((useLight ? seedUsd : lightUsd) * 1000) / 1000, list_usd: Math.round(listUsd * 1000) / 1000 };
 }

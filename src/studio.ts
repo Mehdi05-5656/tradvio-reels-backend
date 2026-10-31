@@ -120,7 +120,7 @@ export function lightCredits(seconds: number, asset: { probe?: any } | null, cos
   const cuts: number[] | null = Array.isArray(asset?.probe?.cuts) ? asset!.probe.cuts.filter((c: number) => c >= 0.5 && c < seconds - 0.5) : null;
   if (!costs.credit_floor || costs.light_margin == null || (seconds <= GENJUTSU_MAX.light && !cuts?.length)) return base;
   const plan = planLongPath(seconds, cuts ?? [], env);
-  return Math.max(base, creditsForCost(plan.usd, costs.credit_floor, costs.light_margin));
+  return Math.max(base, creditsForCost(plan.list_usd, costs.credit_floor, costs.light_margin));
 }
 export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};

@@ -30,6 +30,11 @@ export function seedanceDiscount(env: Record<string, string | undefined> = proce
 export function seedanceEditCostPerSecond(env?: Record<string, string | undefined>, resolution: Resolution = RECAST_RESOLUTION): number {
   return SEEDANCE_EDIT_RATES[resolution] * (1 - seedanceDiscount(env));
 }
+// Owner's rule (Oct 30 2026): any discount a vendor gives Clone8 is Clone8's margin, never passed on. Prices are always
+// worked out from LIST prices; the discounted figures below are what we actually pay, used only to choose the cheaper
+// renderer and to show the real margin on the economics sheet.
+/** Seedance video edit at list, per second: what prices are built on. */
+export const seedanceListPerSecond = (resolution: Resolution = RECAST_RESOLUTION) => SEEDANCE_EDIT_RATES[resolution];
 /** The resolution we render at; pinned on every request so a default change on their side cannot move our cost. */
 export const RECAST_RESOLUTION: Resolution = "720p";
 /** What a Blueprint copy costs us: about 18 s of a $25/month worker, 6 MB stored for 30 days, one download. Blueprint+ adds two Claude calls. */
@@ -77,6 +82,8 @@ export function creditsForCost(usd: number, floor: number, margin = MARGIN_TARGE
 export function higgsfieldCostPerSecond(model: "full" | "light", env?: Record<string, string | undefined>, resolution: Resolution = RECAST_RESOLUTION): number {
   return HIGGSFIELD_RATES[model][resolution] * (1 - higgsfieldDiscount(env));
 }
+/** Genjutsu at list, per second: what prices are built on (a discount is our margin, not the person's). */
+export const higgsfieldListPerSecond = (model: "full" | "light", resolution: Resolution = RECAST_RESOLUTION) => HIGGSFIELD_RATES[model][resolution];
 
 /** Credits per unit. Swap, Restyle and Trend ride on Genjutsu at the same per-second rates as Recast (Full) and Recast Light,
  *  so they share recast_second / recast_light_second; a character image has its own unit. */
@@ -88,10 +95,10 @@ export function studioCosts(env: Record<string, string | undefined> = process.en
   return {
     blueprint_copy: Math.max(PRICE_FLOORS.blueprint_copy, creditsForCost(BLUEPRINT_COPY_COST_USD, floor)),
     blueprint_plus_copy: Math.max(PRICE_FLOORS.blueprint_plus_copy, creditsForCost(BLUEPRINT_PLUS_COPY_COST_USD, floor)),
-    recast_second: Math.max(PRICE_FLOORS.recast_second, creditsPerSecond(higgsfieldCostPerSecond("full", env), plans)),
-    recast_light_second: Math.max(PRICE_FLOORS.recast_light_second, creditsPerSecond(higgsfieldCostPerSecond("light", env), plans)),
-    character_image: Math.max(PRICE_FLOORS.character_image, creditsForCost(CHARACTER_IMAGE_COST_USD * (1 - higgsfieldDiscount(env)), floor)),
-    credit_floor: floor, light_margin: marginForSecond(higgsfieldCostPerSecond("light", env), plans),
+    recast_second: Math.max(PRICE_FLOORS.recast_second, creditsPerSecond(higgsfieldListPerSecond("full"), plans)),
+    recast_light_second: Math.max(PRICE_FLOORS.recast_light_second, creditsPerSecond(higgsfieldListPerSecond("light"), plans)),
+    character_image: Math.max(PRICE_FLOORS.character_image, creditsForCost(CHARACTER_IMAGE_COST_USD, floor)),
+    credit_floor: floor, light_margin: marginForSecond(higgsfieldListPerSecond("light"), plans),
   };
 }
 
@@ -109,9 +116,9 @@ export function unitEconomics(env: Record<string, string | undefined> = process.
   const units = [
     { tool: "blueprint_copy", credits: costs.blueprint_copy, cost_usd: BLUEPRINT_COPY_COST_USD },
     { tool: "blueprint_plus_copy", credits: costs.blueprint_plus_copy, cost_usd: BLUEPRINT_PLUS_COPY_COST_USD },
-    { tool: "recast_second", credits: costs.recast_second, cost_usd: higgsfieldCostPerSecond("full", env), tier_margin: marginForSecond(higgsfieldCostPerSecond("full", env), plans) },
-    { tool: "recast_light_second", credits: costs.recast_light_second, cost_usd: higgsfieldCostPerSecond("light", env), tier_margin: marginForSecond(higgsfieldCostPerSecond("light", env), plans) },
-    { tool: "long_path_seedance_second", credits: creditsPerSecond(seedanceEditCostPerSecond(env), plans), cost_usd: seedanceEditCostPerSecond(env), tier_margin: marginForSecond(seedanceEditCostPerSecond(env), plans) },
+    { tool: "recast_second", credits: costs.recast_second, cost_usd: higgsfieldCostPerSecond("full", env), tier_margin: marginForSecond(higgsfieldListPerSecond("full"), plans) },
+    { tool: "recast_light_second", credits: costs.recast_light_second, cost_usd: higgsfieldCostPerSecond("light", env), tier_margin: marginForSecond(higgsfieldListPerSecond("light"), plans) },
+    { tool: "long_path_seedance_second", credits: creditsPerSecond(seedanceListPerSecond(), plans), cost_usd: seedanceEditCostPerSecond(env), tier_margin: marginForSecond(seedanceListPerSecond(), plans) },
     { tool: "character_image", credits: costs.character_image, cost_usd: CHARACTER_IMAGE_COST_USD * (1 - discount) },
   ];
   const rows = plans.flatMap((p) => (["month", "year"] as const).map((interval) => {

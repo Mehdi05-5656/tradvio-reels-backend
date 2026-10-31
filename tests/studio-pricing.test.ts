@@ -32,15 +32,15 @@ test("the premium tier: 30 s that would cost a person $10 or more at 50% (on the
   assert.equal(creditsPerSecond(0.463, PLANS), 36);
 });
 
-test("a confirmed Higgsfield discount lowers the prices (and can move Light back to the standard tier); nonsense values are ignored", () => {
+test("a discount we get is our margin: prices stay at list whatever HIGGSFIELD_DISCOUNT says; nonsense values are ignored", () => {
   assert.equal(higgsfieldDiscount({ HIGGSFIELD_DISCOUNT: "0.5" }), 0.5);
   assert.equal(higgsfieldDiscount({ HIGGSFIELD_DISCOUNT: "banana" }), 0);
   assert.equal(higgsfieldDiscount({ HIGGSFIELD_DISCOUNT: "5" }), 0.9);
-  const d = studioCosts({ HIGGSFIELD_DISCOUNT: "0.5" }, PLANS);
-  assert.deepEqual([d.recast_second, d.recast_light_second, d.light_margin], [27, 13, MARGIN_TARGET], "Light at $0.10 is no longer premium");
-  const e = studioCosts({ HIGGSFIELD_DISCOUNT: "0.15" }, PLANS);
-  assert.deepEqual([e.recast_second, e.recast_light_second], [45, 14]);
-  assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, d).credits, 11 * 27, "a 10 s file bills 11 at Higgsfield");
+  for (const d of ["0.15", "0.5"]) assert.deepEqual(studioCosts({ HIGGSFIELD_DISCOUNT: d, HIGGSFIELD_SEEDANCE_DISCOUNT: d }, PLANS), studioCosts({}, PLANS), `a ${d} discount does not lower prices`);
+  const e = unitEconomics({ HIGGSFIELD_DISCOUNT: "0.5" }, PLANS);
+  const light = e.rows[0].tools.find((t) => t.tool === "recast_light_second")!;
+  assert.ok(light.margin > unitEconomics({}, PLANS).rows[0].tools.find((t) => t.tool === "recast_light_second")!.margin, "the sheet shows the discount as extra margin");
+  assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, studioCosts({ HIGGSFIELD_DISCOUNT: "0.5" }, PLANS)).credits, 11 * 53, "a 10 s file bills 11 at Higgsfield, at list");
 });
 
 test("social accounts: 1, 3 and 10 with the plan; an extra one is $19 a month ($17 on annual), 50% over the posting service's $8.99", () => {

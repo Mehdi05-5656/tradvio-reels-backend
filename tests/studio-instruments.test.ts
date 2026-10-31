@@ -96,7 +96,7 @@ test("a quote prices through the estimate endpoint, falls back to the table, and
   };
   const assets = async (ids: string[]) => new Map(ids.map((id) => [id, id === IMG ? { url: `https://signed/${id}.jpg`, kind: "image", seconds: null } : { url: `https://signed/${id}.mp4`, kind: "video", seconds: 6 }]));
   const q = await quoteInstrument({ fetch: fetchFn, env: ENV }, PLANS, { endpoint: "bytedance/seedance-2.5/image-to-video", params: { prompt: "zoom", duration: 6 }, inputs: { image_url: IMG } }, assets);
-  assert.equal(q.tool, "instrument"); assert.equal(q.options.priced_by, "estimate"); assert.equal(q.options.usd, 1.5); assert.equal(q.options.units, 6);
+  assert.equal(q.tool, "instrument"); assert.equal(q.options.priced_by, "estimate"); assert.equal(q.options.usd, 2.778, "an estimate under the list table (it may carry our discount) is raised to list"); assert.equal(q.options.units, 6);
   assert.equal(calls[0].body.image_url, `https://signed/${IMG}.jpg`, "the estimate is asked with the real signed inputs");
   assert.ok(q.credits >= 1); assert.match(q.summary, /6 s · \d+/);
   // table fallback

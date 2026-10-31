@@ -265,7 +265,8 @@ export function instrumentDiscount(inst: Pick<Instrument, "provider" | "id"> & {
  *  margin when it is expensive (30 s would reach $10 at the standard margin); pictures and sound keep the standard one. */
 export function instrumentCredits(usd: number, plans: PlanLike[], env: Record<string, string | undefined> = process.env, opts: { inst?: (Pick<Instrument, "provider" | "id" | "output"> & { api_path?: string }) | null; seconds?: number | null } = {}): number {
   const floor = creditValueFloor(plans);
-  const cost = usd * (1 - instrumentDiscount(opts.inst ?? null, env));
+  // list price: a discount we get is our margin, not the person's (instrumentDiscount is for the economics sheet only)
+  const cost = usd;
   const perSecond = opts.inst?.output === "video" && opts.seconds && opts.seconds > 0 ? cost / opts.seconds : null;
   return Math.max(1, creditsForCost(cost, floor, perSecond != null ? marginForSecond(perSecond, plans) : MARGIN_TARGET));
 }
@@ -294,6 +295,8 @@ export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], r
   // audio instruments price from their own table; the video models ask the platform's estimate first
   let usd = inst.provider === "elevenlabs" ? null : await estimateUsd(deps, apiPath(inst), body), priced_by: "estimate" | "table" = "estimate";
   if (usd == null) { usd = tableUsd(inst, params, sourceSeconds); priced_by = "table"; }
+  // the estimate may already carry our account's discount: never price under the list table
+  else { const list = tableUsd(inst, params, sourceSeconds); if (list != null && list > usd) usd = list; }
   if (usd == null) throw new InstrumentError("price_unavailable", "This model cannot be priced right now; try again in a moment", 503);
   // the premium tier is judged per second of generated video; per-minute audio tools (dubbing) keep the standard margin
   const credits = instrumentCredits(usd, plans, env, { inst, seconds: inst.output === "video" && !inst.pricing ? units : null });

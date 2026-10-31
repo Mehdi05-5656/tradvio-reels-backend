@@ -11,7 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { targetsPrompt } from "./studio-people.js";
 import { PLANS, WINDOW, billableSeconds, windowSeconds } from "./studio.js";
-import { RECAST_RESOLUTION, creditsForCost, higgsfieldCostPerSecond, seedanceEditCostPerSecond, studioCosts } from "./studio-pricing.js";
+import { RECAST_RESOLUTION, creditsForCost, higgsfieldListPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
 import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath } from "./studio-longpath.js";
 export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath };
@@ -603,7 +603,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     let planCredits = 0;
     if (engine === "seedance" && Array.isArray(job.progress?.pieces) && costs.credit_floor && costs.light_margin != null) {
       const ps = job.progress.pieces as Array<{ start: number; end: number; engine?: string }>;
-      const usd = ps.reduce((n, p) => n + (p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6) * higgsfieldCostPerSecond("light", deps.env) : Math.ceil(p.end - p.start - 1e-6) * seedanceEditCostPerSecond(deps.env)), 0);
+      const usd = ps.reduce((n, p) => n + (p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6) * higgsfieldListPerSecond("light") : Math.ceil(p.end - p.start - 1e-6) * seedanceListPerSecond()), 0);
       planCredits = creditsForCost(usd, costs.credit_floor, costs.light_margin);
     }
     const charged = Math.min(job.credits_reserved, Math.max(billed * per, planCredits));
