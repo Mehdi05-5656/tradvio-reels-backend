@@ -278,7 +278,9 @@ function genjutsuPrompt(tool: SuiteTool, job: { options: any }): string | undefi
   const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
   if (tool === "swap") return cast ? `${String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null);
   if (tool === "restyle") return String(job.options?.prompt ?? "").trim() || undefined;
-  return cast ? castPrompt(cast) : undefined;
+  // a recast or trend on a clip with several people: only the one(s) they picked change
+  const targets = Array.isArray(job.options?.targets) ? job.options.targets : null;
+  return cast ? castPrompt(cast) : targets?.length ? targetsPrompt("", targets).trim() : undefined;
 }
 /** Rendered pieces joined into one picture track. Each piece is brought to the same size, rate and clock first (the
  *  concat filter, not the demuxer: pieces come back with differing frame rates and timebases, and the demuxer leaves
@@ -449,14 +451,14 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           }
         }
         pieces = plan.pieces.map((p) => ({ start: p.start, end: p.end, blend: p.blend, request_id: null, input_key: null, engine: plan.engine }));
-        await renew(sb, job, { pieces, piece_engine: plan.engine, done: 0, total: pieces.length, note: pieces.length > 1 ? `Preparing ${pieces.length} pieces` : "Preparing your video" });
+        await renew(sb, job, { pieces, piece_engine: plan.engine, done: 0, total: pieces.length, note: "Preparing your video" });
         log(`[recast] long path plan ${JSON.stringify({ job: job.id, engine: plan.engine, pieces: pieces.length, usd: plan.usd, instead_of: plan.other_usd })}`);
       }
       // A piece the renderer timed out on: forget its request and requeue the job. The next attempt sends only the pieces
       // without a request (this one), on the same engine, and picks the others' results up where they are.
       const resendPiece = async (i: number): Promise<never> => {
         pieces[i] = { ...pieces[i], request_id: null };
-        await renew(sb, job, { pieces, note: pieces.length > 1 ? `The renderer was busy on piece ${i + 1}; sending it again` : "The renderer was busy; sending it again" });
+        await renew(sb, job, { pieces, note: "The renderer was busy; sending it again" });
         throw new RecastError("recast_failed", `piece ${i + 1} timed out or the renderer was busy; sending it again`, true);
       };
       if (pieces.some((p) => !p.request_id)) {
@@ -475,7 +477,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           if (put.error) throw put.error;
           const signed = await sb.storage.from("studio-outputs").createSignedUrl(inputKey, 7200);
           if (signed.error || !signed.data) throw signed.error ?? new RecastError("source_missing");
-          await renew(sb, job, { note: pieces.length > 1 ? `Sending piece ${i + 1} of ${pieces.length} to the renderer` : "Sending your video to the renderer" });
+          await renew(sb, job, { note: "Sending your video to the renderer" });
           const refs = [...images.slice(0, 8 - extra.length), ...extra];
           let requestId: string;
           let estimate: number | null = null;
@@ -516,7 +518,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
               if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(ai);
               throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
             }
-            await renew(sb, job, { note: `Rendering piece ${ai + 1} of ${pieces.length} first, to keep the character the same in every piece` });
+            await renew(sb, job, { note: "Rendering your video: the first part sets the character for the rest" });
             await sleep(POLL_MS);
           }
           const dl = await (deps.fetch ?? fetch)(videoUrl, { signal: AbortSignal.timeout(300_000) });
@@ -561,12 +563,12 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           pending++;
         }
         const done = urls.filter(Boolean).length;
-        await renew(sb, job, { done, total: pieces.length, note: pieces.length > 1 ? `Rendering piece ${Math.min(done + 1, pieces.length)} of ${pieces.length}` : ({ recast: "Rendering your recast", swap: "Rendering your swap" } as Record<string, string>)[tool] ?? "Rendering" });
+        await renew(sb, job, { done, total: pieces.length, note: ({ recast: "Rendering your recast", swap: "Rendering your swap", trend: "Rendering your trend" } as Record<string, string>)[tool] ?? "Rendering your video" }); // one video to the person, however many pieces
         if (!pending) break;
         await sleep(POLL_MS);
       }
       // 3a. Fetch the pieces, join them, put the person's own sound back.
-      await renew(sb, job, { note: pieces.length > 1 ? "Joining the pieces" : "Fetching the result" });
+      await renew(sb, job, { note: "Finishing your video" });
       const files: string[] = [];
       for (const [i, u] of urls.entries()) {
         const dl = await (deps.fetch ?? fetch)(u!, { signal: AbortSignal.timeout(300_000) });

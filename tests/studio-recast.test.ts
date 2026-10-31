@@ -640,3 +640,14 @@ test("the estimate endpoint: same path under /estimate, usd read as a number, ne
   assert.equal(await estimateRequestUsd({ fetch: ok, env: { HIGGSFIELD_API_KEY: "id:secret", STUDIO_HF_ESTIMATE: "off" } }, "x", {}), null, "it can be switched off");
   assert.equal(billedUsdOf({ status: "completed" }), null); assert.equal(billedUsdOf({ cost: { usd: 1.5 } }), 1.5); assert.equal(billedUsdOf({ usd: "0" }), 0);
 });
+
+test("one person in a group: Recast and Trends keep who changes, like Swap; a cast (a character each) ignores it", () => {
+  const video = { kind: "video", probe: { duration: 8 } };
+  const r = quote("recast", { model: "light", character: "noah", targets: ["Black cap, gray jacket, left", " "] }, video);
+  assert.deepEqual(r.options.targets, ["Black cap, gray jacket, left"]);
+  const s = quote("swap", { model: "light", character: "noah", targets: ["Short dark hair, right"] }, video);
+  assert.deepEqual(s.options.targets, ["Short dark hair, right"]);
+  const each = quote("recast", { model: "light", cast: [{ character: "noah", label: "a" }, { character: "maya", label: "b" }], targets: ["a"] }, video);
+  assert.equal(each.options.targets, undefined);
+  assert.equal(quote("recast", { model: "light", character: "noah" }, video).options.targets, undefined, "nobody picked: everyone");
+});

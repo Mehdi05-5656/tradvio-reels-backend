@@ -103,6 +103,12 @@ const characterChoice = (o: any) => {
   return { character: o.character ?? null, character_asset_id: o.character_asset_id ?? null };
 };
 export type CastMember = { character: string | null; character_asset_id: string | null; label: string | null };
+/** Which people change when the clip has several (Swap, Recast, Trends): plain labels, carried into the renderer's
+ *  prompt ("replace only this person"). None means everyone. Ignored when there is a cast (a character each). */
+export function targetsOf(o: any): string[] {
+  if (Array.isArray(o?.cast) && o.cast.length > 1) return [];
+  return Array.isArray(o?.targets) ? o.targets.map((t: unknown) => String(t).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 6) : [];
+}
 /** A character per person, left to right (2 to 8). One member collapses to the plain single choice; none means no cast. */
 export function castChoice(o: any): { character: string | null; character_asset_id: string | null; cast?: CastMember[] } | null {
   if (!Array.isArray(o?.cast) || !o.cast.length) return null;
@@ -168,7 +174,7 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     const high = model === "light" && o.engine === "seedance";
     const credits = model === "light" ? (high ? highCapacityCredits(seconds, asset, costs) : lightCredits(seconds, asset, costs)) : seconds * per;
-    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, ...(high ? { engine: "seedance" } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}${high ? " (high capacity)" : ""}` };
+    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, ...(targetsOf(o).length ? { targets: targetsOf(o) } : {}), ...(high ? { engine: "seedance" } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}${high ? " (high capacity)" : ""}` };
   }
   if (tool === "swap") {
     // Object swap: the person or thing in the video replaced by the reference image, scene and motion kept. Same rates as
@@ -181,8 +187,7 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const seconds = billableSeconds(duration, cap);
     const who = characterChoice(o);
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
-    // which people change when the clip has several: plain labels, carried into the renderer's prompt
-    const targets = Array.isArray(o.targets) ? o.targets.map((t: unknown) => String(t).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 6) : [];
+    const targets = targetsOf(o);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
     const high = model === "light" && o.engine === "seedance";
     const credits = model === "light" ? (high ? highCapacityCredits(seconds, asset, costs) : lightCredits(seconds, asset, costs)) : seconds * per;
@@ -213,13 +218,13 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
       const who = characterChoice(o);
       const trend_name = typeof o.trend_name === "string" && o.trend_name.trim() ? o.trend_name.trim().slice(0, 80) : "Your trend";
       const credits = model === "light" ? lightCredits(seconds, asset, costs) : seconds * per;
-      return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), trend_id: null, trend_name, ...who }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
+      return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), trend_id: null, trend_name, ...who, ...(targetsOf(o).length ? { targets: targetsOf(o) } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
     }
     const trend = trendById(o.trend_id);
     if (!trend) throw new StudioError("trend_required", "Pick a trend");
     const seconds = billableSeconds(trend.seconds, model === "light" ? 15 : 30);
     const who = characterChoice(o);
-    return { tool, credits: seconds * per, options: { model, seconds, trend_id: trend.id, trend_name: trend.name, ...who }, summary: `${seconds} s × ${per}` };
+    return { tool, credits: seconds * per, options: { model, seconds, trend_id: trend.id, trend_name: trend.name, ...who, ...(targetsOf(o).length ? { targets: targetsOf(o) } : {}) }, summary: `${seconds} s × ${per}` };
   }
   if (tool === "character") {
     // Character: a reusable character image from a prompt (human or animal), saved to the library for Recast, Swap and Trend.
