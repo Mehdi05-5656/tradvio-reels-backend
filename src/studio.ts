@@ -6,7 +6,8 @@
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
+import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
+import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { isAdmin } from "./auth.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
@@ -25,11 +26,11 @@ export type Plan = { id: PlanId; name: string; tagline: string; monthly_usd: num
 
 export const PLANS: Plan[] = [
   { id: "starter", name: "Starter", tagline: "For one creator with a library to put to work", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000, parallel: 1,
-    features: ["1 job at a time", "Downloads in 1080×1920"] },
+    features: ["1 job at a time", "Downloads in 1080×1920", "Post to 1 social account"] },
   { id: "creator", name: "Creator", tagline: "For creators and small teams posting daily", monthly_usd: 79, annual_usd_per_month: 66, credits: 3500, parallel: 2, popular: true,
-    features: ["2 jobs at a time", "Priority queue"] },
+    features: ["2 jobs at a time", "Priority queue", "Post to 3 social accounts"] },
   { id: "studio", name: "Studio", tagline: "For brands and agencies running many accounts", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000, parallel: 4,
-    features: ["4 jobs at a time", "Priority queue", "A path to managed distribution"] },
+    features: ["4 jobs at a time", "Priority queue", "Post to 10 social accounts", "A path to managed distribution"] },
 ];
 
 // What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the
@@ -50,6 +51,15 @@ export function priceIdFor(plan: PlanId, interval: Interval, env: Record<string,
 }
 export function packPriceIdFor(packId: string, env: Record<string, string | undefined> = process.env): string | null {
   return env[`STRIPE_PRICE_${packId.toUpperCase()}`] || null;
+}
+/** The Stripe price of one extra social account, matching the plan's billing interval. */
+export function seatPriceId(interval: Interval, env: Record<string, string | undefined> = process.env): string | null {
+  return env[`STRIPE_PRICE_SOCIAL_ACCOUNT_${interval.toUpperCase()}`] || null;
+}
+/** Extra social accounts on a subscription: the quantity of its "extra social account" item. */
+export function seatsOf(sub: any, env: Record<string, string | undefined> = process.env): number {
+  const ids = new Set([seatPriceId("month", env), seatPriceId("year", env)].filter(Boolean));
+  return ((sub?.items?.data ?? []) as any[]).filter((it) => ids.has(it?.price?.id ?? it?.plan?.id)).reduce((n, it) => n + (Number(it.quantity) || 0), 0);
 }
 export function planForPrice(priceId: string | null | undefined, env: Record<string, string | undefined> = process.env): { plan: Plan; interval: Interval } | null {
   if (!priceId) return null;
@@ -102,6 +112,16 @@ export function castChoice(o: any): { character: string | null; character_asset_
   return { character: cast[0].character, character_asset_id: cast[0].character_asset_id, cast };
 }
 
+/** Credits for a Light swap, recast or brought trend: the per-second price, or (when the clip is longer than one Light
+ *  request or has camera changes) what its long-path plan costs at the Light tools' margin, whichever is higher. The
+ *  plan needs the clip's cuts (found in the background after an upload); without them the per-second price stands. */
+export function lightCredits(seconds: number, asset: { probe?: any } | null, costs: StudioCosts, env: Record<string, string | undefined> = process.env): number {
+  const base = seconds * costs.recast_light_second;
+  const cuts: number[] | null = Array.isArray(asset?.probe?.cuts) ? asset!.probe.cuts.filter((c: number) => c >= 0.5 && c < seconds - 0.5) : null;
+  if (!costs.credit_floor || costs.light_margin == null || (seconds <= GENJUTSU_MAX.light && !cuts?.length)) return base;
+  const plan = planLongPath(seconds, cuts ?? [], env);
+  return Math.max(base, creditsForCost(plan.usd, costs.credit_floor, costs.light_margin));
+}
 export function quote(tool: string, options: any, asset: { kind: string; probe?: any } | null, costs: StudioCosts = COSTS): Quote {
   const o = options && typeof options === "object" && !Array.isArray(options) ? options : {};
   if (tool === "blueprint" || tool === "blueprint_plus") {
@@ -122,7 +142,8 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     const seconds = billableSeconds(duration, cap);
     const who = characterChoice(o);
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    return { tool, credits: seconds * per, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who }, summary: `${seconds} s × ${per}` };
+    const credits = model === "light" ? lightCredits(seconds, asset, costs) : seconds * per;
+    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
   }
   if (tool === "swap") {
     // Object swap: the person or thing in the video replaced by the reference image, scene and motion kept. Same rates as
@@ -138,7 +159,8 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     // which people change when the clip has several: plain labels, carried into the renderer's prompt
     const targets = Array.isArray(o.targets) ? o.targets.map((t: unknown) => String(t).replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean).slice(0, 6) : [];
     const per = model === "light" ? costs.recast_light_second : costs.recast_second;
-    return { tool, credits: seconds * per, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, prompt, ...(targets.length ? { targets } : {}) }, summary: `${seconds} s × ${per}` };
+    const credits = model === "light" ? lightCredits(seconds, asset, costs) : seconds * per;
+    return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), ...who, prompt, ...(targets.length ? { targets } : {}) }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
   }
   if (tool === "restyle") {
     // Restyle: every frame redrawn in a Higgsfield style; motion, camera and audio stay. Full model only, up to 30 s.
@@ -164,7 +186,8 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
       const seconds = billableSeconds(duration, cap);
       const who = characterChoice(o);
       const trend_name = typeof o.trend_name === "string" && o.trend_name.trim() ? o.trend_name.trim().slice(0, 80) : "Your trend";
-      return { tool, credits: seconds * per, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), trend_id: null, trend_name, ...who }, summary: `${seconds} s × ${per}` };
+      const credits = model === "light" ? lightCredits(seconds, asset, costs) : seconds * per;
+      return { tool, credits, options: { model, seconds, ...(cap < WINDOW[model] ? { max_seconds: cap } : {}), trend_id: null, trend_name, ...who }, summary: credits === seconds * per ? `${seconds} s × ${per}` : `${seconds} s, ${credits}` };
     }
     const trend = trendById(o.trend_id);
     if (!trend) throw new StudioError("trend_required", "Pick a trend");
@@ -209,7 +232,9 @@ export class StudioError extends Error { constructor(public code: string, messag
 const iso = (unix: any) => (Number.isFinite(Number(unix)) && Number(unix) > 0 ? new Date(Number(unix) * 1000).toISOString() : null);
 
 export function subscriptionSnapshot(sub: any) {
-  const item = sub?.items?.data?.[0] ?? null;
+  // the plan's item (a subscription may also carry an "extra social account" item)
+  const items: any[] = sub?.items?.data ?? [];
+  const item = items.find((it) => planForPrice(it?.price?.id ?? it?.plan?.id)) ?? items[0] ?? null;
   const priceId: string | null = item?.price?.id ?? item?.plan?.id ?? null;
   const match = planForPrice(priceId);
   return {
@@ -223,7 +248,15 @@ export function subscriptionSnapshot(sub: any) {
     period_end: iso(item?.current_period_end ?? sub?.current_period_end),
     cancel_at_period_end: !!sub?.cancel_at_period_end,
     user_id: (sub?.metadata?.user_id as string | undefined) ?? null,
+    social_extra: seatsOf(sub),
   };
+}
+/** Whether an invoice charges for a plan (a line priced at a plan's Stripe price with a positive amount). */
+export function invoiceChargesPlan(inv: any, env: Record<string, string | undefined> = process.env): boolean {
+  return ((inv?.lines?.data ?? []) as any[]).some((l) => {
+    const price = l?.pricing?.price_details?.price ?? l?.price?.id ?? l?.plan?.id ?? null;
+    return !!planForPrice(typeof price === "string" ? price : price?.id, env) && Number(l?.amount ?? 0) > 0;
+  });
 }
 export function invoiceSubscriptionId(inv: any): string | null {
   const p = inv?.parent?.subscription_details?.subscription ?? inv?.subscription ?? null;
@@ -236,7 +269,7 @@ const toStatus = (s: string) => (STATUS_OK.has(s) ? s : s === "incomplete_expire
 type StripeLike = {
   checkout: { sessions: { create: (p: any) => Promise<{ url: string | null; id: string }> } };
   billingPortal: { sessions: { create: (p: any) => Promise<{ url: string }> } };
-  subscriptions: { retrieve: (id: string) => Promise<any> };
+  subscriptions: { retrieve: (id: string) => Promise<any>; update?: (id: string, p: any) => Promise<any> };
   webhooks: { constructEvent: (raw: string, sig: string, secret: string) => any };
 };
 
@@ -255,6 +288,11 @@ async function applySubscription(sb: SupabaseClient, userId: string, sub: any) {
     p_credits_per_period: s.plan?.credits ?? 0, p_parallel: s.plan?.parallel ?? 1,
   });
   if (r.error) throw r.error;
+  // extra social accounts follow the subscription's item (best effort: the route also writes it, and the next event syncs)
+  try {
+    const seats = await sb.from("studio_customers").update({ social_extra: Math.min(100, s.social_extra) }).eq("user_id", userId);
+    if (seats?.error && !/social_extra/.test(String(seats.error.message ?? ""))) console.error(`[studio] social_extra sync for ${userId}: ${seats.error.message}`);
+  } catch (e: any) { console.error(`[studio] social_extra sync for ${userId}: ${String(e?.message ?? e).slice(0, 120)}`); }
   return s;
 }
 
@@ -317,6 +355,9 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     const s = await applySubscription(sb, userId, sub);
     if (!s.plan) return "invoice for unknown plan";
     const reason = String(obj.billing_reason ?? "");
+    // An invoice for extra social accounts alone (added mid-period) buys no credits: only an invoice that charges for the
+    // plan itself grants them (otherwise adding an account would hand out a month of credits).
+    if (reason === "subscription_update" && !invoiceChargesPlan(obj)) return `invoice.paid → extra social accounts only (${s.social_extra}), no credits`;
     // A new period replaces what was left; a mid-cycle upgrade adds its credits on top.
     const expire = reason === "subscription_cycle" || reason === "subscription_create" || reason === "";
     // Credits are priced per month. An annual invoice pays for twelve of them at once, so it grants the
@@ -500,6 +541,39 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     } catch (e) { fail(res, e); }
   });
 
+  // Extra social accounts: the same plan, made larger. The "extra social account" item on the person's subscription is
+  // set to the number asked for; Stripe charges the prorated difference now (and refunds it as credit when lowered).
+  app.post("/api/studio/billing/social-accounts", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    const extra = Math.floor(Number(req.body?.extra));
+    if (!(extra >= 0 && extra <= MAX_SOCIAL_EXTRA)) return res.status(400).json({ error: "invalid_extra", detail: `Between 0 and ${MAX_SOCIAL_EXTRA} extra accounts` });
+    try {
+      const sb = sbFn();
+      const cust = await sb.from("studio_customers").select("status,stripe_subscription_id,billing_interval,plan_id").eq("user_id", u).maybeSingle();
+      if (cust.error) throw cust.error;
+      if (!cust.data || !["active", "trialing"].includes(cust.data.status) || !cust.data.stripe_subscription_id) return res.status(409).json({ error: "subscription_required", detail: "Extra accounts are added to a plan; pick a plan first" });
+      const interval: Interval = cust.data.billing_interval === "year" ? "year" : "month";
+      const price = seatPriceId(interval, env);
+      if (!price) return res.status(503).json({ error: "billing_unavailable", detail: "Extra accounts are not on sale yet" });
+      const st = stripe();
+      if (!st.subscriptions.update) return res.status(503).json({ error: "billing_unavailable", detail: "Billing is not configured yet" });
+      const sub = await st.subscriptions.retrieve(cust.data.stripe_subscription_id);
+      const item = ((sub?.items?.data ?? []) as any[]).find((it) => (it?.price?.id ?? it?.plan?.id) === price);
+      const items = item ? [extra > 0 ? { id: item.id, quantity: extra } : { id: item.id, deleted: true }] : extra > 0 ? [{ price, quantity: extra }] : [];
+      if (items.length) {
+        // the difference is invoiced now; a card that fails leaves the subscription as it was
+        const updated = await st.subscriptions.update(sub.id, { items, proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
+        const seats = await sb.from("studio_customers").update({ social_extra: seatsOf(updated, env), updated_at: new Date().toISOString() }).eq("user_id", u);
+        if (seats.error) throw seats.error;
+      }
+      log(`[studio] social accounts ${JSON.stringify({ user: u, extra, interval })}`);
+      res.json({ extra, price_usd_month: interval === "year" ? SOCIAL_SEAT_USD.year_per_month : SOCIAL_SEAT_USD.month, interval });
+    } catch (e: any) {
+      if (e?.type === "StripeCardError" || e?.code === "card_declined" || /payment/i.test(String(e?.message ?? ""))) return res.status(402).json({ error: "payment_failed", detail: "The card on file was declined; update it in Billing and try again" });
+      fail(res, e);
+    }
+  });
+
   // One-off credit pack: Stripe Checkout in payment mode; the webhook grants the credits when it is paid.
   app.post("/api/studio/checkout-pack", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
@@ -665,6 +739,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       }
       const r = await sb.from("studio_assets").update({ status: "ready", bytes, probe, updated_at: new Date().toISOString() }).eq("id", a.data.id).select("id,kind,name,bytes,status,probe,created_at").single();
       if (r.error) throw r.error;
+      // camera changes, in the background: they price a long swap from its real plan
+      if (r.data.kind === "video") void import("./studio-recast.js").then((m) => m.detectCuts(sb, u, r.data.id, { log: (l) => console.log(l) })).catch(() => undefined);
       res.json({ asset: (await withPosterUrls(sb, [r.data]))[0] });
     } catch (e) { fail(res, e); }
   });

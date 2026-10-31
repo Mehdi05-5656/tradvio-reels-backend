@@ -154,7 +154,8 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
     async deleteProfile(profileKey) { await call("DELETE", "/profiles", { profileKey }); },
 
     async connectUrl(profileKey, opts = {}) {
-      const body: Record<string, any> = { allowedSocial: offered() };
+      // `only`: at the plan's account limit the page offers just the networks already linked (to relink them)
+      const body: Record<string, any> = { allowedSocial: opts.only?.length ? offered().filter((n) => opts.only!.includes(n)) : offered() };
       if (opts.redirect) body.redirect = opts.redirect;
       if (opts.origin) body.origin = opts.origin;
       if (env.AYRSHARE_DOMAIN) body.domain = env.AYRSHARE_DOMAIN;

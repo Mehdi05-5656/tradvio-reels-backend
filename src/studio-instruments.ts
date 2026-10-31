@@ -20,7 +20,7 @@ import elevenJson from "./data/eleven-catalog.json";
 import { elevenEnabled, runElevenJob } from "./studio-eleven.js";
 import { HF_BASE, higgsfieldAuth, RecastError, makePoster, probeSeconds } from "./studio-recast.js";
 import { toJpeg } from "./studio-characters.js";
-import { creditValueFloor, creditsForCost, higgsfieldDiscount, type PlanLike } from "./studio-pricing.js";
+import { creditValueFloor, creditsForCost, higgsfieldDiscount, marginForSecond, seedanceDiscount, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -253,10 +253,21 @@ export async function estimateUsd(deps: InstrumentDeps, endpoint: string, body: 
   } catch (e) { if (e instanceof RecastError && (e.code === "recast_auth" || e.code === "recast_balance" || e.code === "recast_not_configured")) throw e; return null; }
 }
 
-/** Credits for a cost, by the margin rule at the cheapest plan's credit value. */
-export function instrumentCredits(usd: number, plans: PlanLike[], env: Record<string, string | undefined> = process.env): number {
+/** The discount we get on a model's list price: none on ElevenLabs (its own account, list prices), Seedance's own
+ *  (it is billed at list on the platform), the platform's discount on everything else. */
+export function instrumentDiscount(inst: Pick<Instrument, "provider" | "id"> & { api_path?: string } | null | undefined, env: Record<string, string | undefined> = process.env): number {
+  if (!inst) return higgsfieldDiscount(env);
+  if (inst.provider === "elevenlabs" || String(inst.id).startsWith("audio/")) return 0;
+  if (/^bytedance\/seedance/.test(String(inst.api_path ?? inst.id))) return seedanceDiscount(env);
+  return higgsfieldDiscount(env);
+}
+/** Credits for a cost, by the margin rule at the cheapest plan's credit value. Video sold by the second takes the premium
+ *  margin when it is expensive (30 s would reach $10 at the standard margin); pictures and sound keep the standard one. */
+export function instrumentCredits(usd: number, plans: PlanLike[], env: Record<string, string | undefined> = process.env, opts: { inst?: (Pick<Instrument, "provider" | "id" | "output"> & { api_path?: string }) | null; seconds?: number | null } = {}): number {
   const floor = creditValueFloor(plans);
-  return Math.max(1, creditsForCost(usd * (1 - higgsfieldDiscount(env)), floor));
+  const cost = usd * (1 - instrumentDiscount(opts.inst ?? null, env));
+  const perSecond = opts.inst?.output === "video" && opts.seconds && opts.seconds > 0 ? cost / opts.seconds : null;
+  return Math.max(1, creditsForCost(cost, floor, perSecond != null ? marginForSecond(perSecond, plans) : MARGIN_TARGET));
 }
 
 export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; priced_by: "estimate" | "table"; units: number; output: "video" | "image" | "audio" | "text" }; summary: string };
@@ -284,7 +295,8 @@ export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], r
   let usd = inst.provider === "elevenlabs" ? null : await estimateUsd(deps, apiPath(inst), body), priced_by: "estimate" | "table" = "estimate";
   if (usd == null) { usd = tableUsd(inst, params, sourceSeconds); priced_by = "table"; }
   if (usd == null) throw new InstrumentError("price_unavailable", "This model cannot be priced right now; try again in a moment", 503);
-  const credits = instrumentCredits(usd, plans, env);
+  // the premium tier is judged per second of generated video; per-minute audio tools (dubbing) keep the standard margin
+  const credits = instrumentCredits(usd, plans, env, { inst, seconds: inst.output === "video" && !inst.pricing ? units : null });
   const summary = inst.pricing ? `${inst.pricing.per === "kchars" ? `${Math.round(units * 1000)} characters` : inst.pricing.per === "minute" ? `${units} min` : inst.pricing.per === "hour" ? `${Math.round(units * 60)} min` : "1 sound"} · ${credits}` : inst.output === "image" ? `${units} ${units === 1 ? "image" : "images"} · ${credits}` : `${units} s · ${credits}`;
   return { tool: "instrument", credits, options: { endpoint: inst.id, params, inputs, usd: Math.round(usd * 1000) / 1000, priced_by, units, output: inst.output }, summary };
 }
@@ -459,7 +471,8 @@ export function publicInstrument(inst: Instrument, env: Record<string, string | 
     return { name, kind, multiple: d.type === "array", maxItems: d.maxItems ?? null, description: String(d.description ?? "").slice(0, 300), required: inst.required.includes(name) };
   });
   const price = inst.pricing ?? listPrice(apiPath(inst));
-  const hint = price && plans.length ? { per: price.per, credits: instrumentCredits(price.usd, plans, env), unit: unitLabel(inst) } : null;
+  const unitUsd = price ? ((price as any).by_resolution?.[String(inst.schema?.properties?.resolution?.default ?? "")] ?? price.usd) : 0;
+  const hint = price && plans.length ? { per: price.per, credits: instrumentCredits(unitUsd, plans, env, { inst, seconds: inst.output === "video" && !inst.pricing ? 1 : null }), unit: unitLabel(inst) } : null;
   // the provider is ours to know; the person sees a Clone8 family
   return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider === "elevenlabs" ? "Clone8" : inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: null, price_hint: hint };
 }

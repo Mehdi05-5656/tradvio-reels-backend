@@ -2,6 +2,7 @@
 // by Claude, which answers in a fixed JSON shape: the caption, a few hashtags and, when YouTube is in the mix, a title.
 // Used by the Publish page and the chat's publish card; the person can always write their own instead.
 // Raw HTTP to the Messages API like the assistant (studio-assistant.ts), so tests can swap fetch.
+import { logClaudeCost } from "./studio-pricing.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,6 +122,7 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id:
     }).catch(() => { throw new SocialError("captions_unavailable", "The caption writer did not answer; write it by hand or try again", 503); });
     if (!r.ok) { (deps.log ?? console.log)(`[captions] ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`); throw new SocialError("captions_unavailable", "The caption writer did not answer; write it by hand or try again", 503); }
     const body: any = await r.json();
+  logClaudeCost(deps.log, "caption", env.STUDIO_CAPTION_MODEL || CAPTION_MODEL, body?.usage);
     if (body?.stop_reason === "refusal") throw new SocialError("caption_refused", "No caption could be written for that video; write it by hand", 422);
     const raw = (body?.content ?? []).find((b: any) => b?.type === "text")?.text ?? "";
     let parsed: any;

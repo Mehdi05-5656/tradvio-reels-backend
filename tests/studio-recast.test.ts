@@ -315,7 +315,9 @@ test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot o
   assert.deepEqual(joined, [[6, [0, 0, 0, 0, 0, 0.5]]], "hard cuts at the camera changes, one fade inside the long shot"); assert.deepEqual(muxed, [["joined.mp4", "original.mp4"]], "the person's own sound goes back on the joined picture");
   const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
   assert.equal(done.p_outputs[0].piece_engine, "light"); assert.equal(done.p_outputs[0].pieces, 6); assert.equal(done.p_outputs[0].audio, "muxed_from_source");
-  assert.equal(done.p_credits_charged, 44 * 22, "44 s at the Light rate");
+  // settled on what the plan cost us ($10.20: 51 billed Light seconds) at the premium margin, which is above 44 s x the
+  // per-second price and under the 968 reserved
+  assert.equal(done.p_credits_charged, 793, "the long path is charged on its real plan");
   const plan = planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], {});
   assert.equal(plan.engine, "light"); assert.equal(plan.usd, 10.2, "51 billed seconds: the fade overlap adds one"); assert.ok(plan.other_usd > 20 && plan.other_usd < 21.5);
   assert.equal(planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], { HIGGSFIELD_DISCOUNT: "0.15" }).usd, 8.67, "the account's Genjutsu discount lowers Light, not Seedance");

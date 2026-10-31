@@ -59,7 +59,7 @@ export interface SocialProvider {
   createProfile(title: string): Promise<{ profileKey: string; refId: string | null }>;
   deleteProfile(profileKey: string): Promise<void>;
   /** A short-lived link where the person links or unlinks their own networks. */
-  connectUrl(profileKey: string, opts?: { redirect?: string; origin?: string }): Promise<{ url: string; expiresInMinutes: number | null }>;
+  connectUrl(profileKey: string, opts?: { redirect?: string; origin?: string; only?: string[] }): Promise<{ url: string; expiresInMinutes: number | null }>;
   accounts(profileKey: string): Promise<SocialAccount[]>;
   disconnect(profileKey: string, platform: string): Promise<void>;
   publish(profileKey: string, req: PublishRequest): Promise<PublishResult>;

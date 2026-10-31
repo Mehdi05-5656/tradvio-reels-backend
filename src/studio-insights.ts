@@ -5,6 +5,7 @@
 // (data/social-playbook.ts: what platform insiders have disclosed and what large studies measured, each with its
 // source), and the Clone8 tools it can point to. Every finding has to cite their numbers; every move maps to a tool.
 // The same analysis feeds the chat (a short performance brief in the system prompt) and the suggested prompts.
+import { logClaudeCost } from "./studio-pricing.js";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLAYBOOK } from "./data/social-playbook.js";
@@ -92,6 +93,7 @@ export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, o
   });
   if (!r.ok) throw new Error(`insights_http_${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`);
   const body: any = await r.json();
+  logClaudeCost(deps.log, "overview", env.STUDIO_INSIGHT_MODEL || INSIGHT_MODEL, body?.usage);
   if (body?.stop_reason === "refusal") throw new Error("insights_refused");
   if (body?.stop_reason === "max_tokens") throw new Error("insights_cut_short");
   const raw = (body?.content ?? []).find((b: any) => b?.type === "text")?.text ?? "";

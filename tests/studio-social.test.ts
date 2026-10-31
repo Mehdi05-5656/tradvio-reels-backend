@@ -247,7 +247,7 @@ test("routes: off shows nothing; connect needs a plan, makes one profile, regist
 });
 
 test("routes: post now and scheduled with spacing; ownership, linking and the 30-day window are checked; cancel; webhook moves rows", async () => {
-  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active" }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }], webhook_registered_at: "2026-10-30T00:00:00Z" }], studio_jobs: [doneJob(), { ...doneJob(), id: "44444444-4444-4444-8444-444444444444", user_id: BOB }], studio_social_posts: [] };
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }], webhook_registered_at: "2026-10-30T00:00:00Z" }], studio_jobs: [doneJob(), { ...doneJob(), id: "44444444-4444-4444-8444-444444444444", user_id: BOB }], studio_social_posts: [] };
   const sb = fakeSb(tables), ayr = fakeAyr();
   const s = await serve(sb, ayr.fetchFn);
   const item = (n: number, job = JOB) => ({ job_id: job, output_key: `${ANN}/${JOB}/${n}.mp4` });
@@ -356,7 +356,7 @@ test("captions: frames and speech go to Claude with a JSON schema (no forced too
 });
 
 test("routes: a send the service never answers is kept as unconfirmed, never sent again; a TikTok-only delivery merges", async () => {
-  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active" }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }], webhook_hash: "x" }], studio_jobs: [doneJob()], studio_social_posts: [] };
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }], webhook_hash: "x" }], studio_jobs: [doneJob()], studio_social_posts: [] };
   const sb = fakeSb(tables);
   let down = true;
   const ayr = fakeAyr({ "POST /post": (body) => (down ? { status: 503, body: { message: "upstream Ayrshare timeout" } } : { body: { status: "success", posts: [{ status: "success", id: "post-m", postIds: body.platforms.map((p: string) => ({ platform: p, status: "success", id: p === "tiktok" ? "pending" : "y1", postUrl: p === "tiktok" ? undefined : "https://youtube.example/1" })) }] } }) });
@@ -395,7 +395,7 @@ test("routes: a send the service never answers is kept as unconfirmed, never sen
 
 test("routes: the daily allowance is counted per person by network sends", async () => {
   const outputs = Array.from({ length: 6 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
-  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active" }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }] }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }] }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
   const sb = fakeSb(tables), ayr = fakeAyr();
   const s = await serve(sb, ayr.fetchFn, { ...ENV, STUDIO_SOCIAL_DAILY_POSTS: "5" });
   const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
@@ -403,5 +403,28 @@ test("routes: the daily allowance is counted per person by network sends", async
   const over = await s.call("POST", "/api/studio/social/posts", { items: [item(3), item(4)], platforms: ["tiktok"] });
   assert.equal(over.status, 429); assert.equal(over.body.error, "daily_limit"); assert.match(over.body.detail, /1 left/);
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(3)], platforms: ["tiktok"] })).status, 201);
+  await s.close();
+});
+
+test("social accounts: the plan's allowance, relink-only linking at the limit, posting paused when over it", async () => {
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "starter", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "tiktok" }], webhook_hash: "x" }], studio_jobs: [doneJob()], studio_social_posts: [] };
+  const sb = fakeSb(tables);
+  const ayr = fakeAyr({ "GET /user": () => ({ body: { activeSocialAccounts: ["tiktok"], displayNames: [{ platform: "tiktok", username: "ann" }] } }) });
+  const s = await serve(sb, ayr.fetchFn);
+  const st = await s.call("GET", "/api/studio/social");
+  assert.deepEqual([st.body.allowance.included, st.body.allowance.extra, st.body.allowance.total, st.body.allowance.price_usd_month], [1, 0, 1, 19], "Starter: 1 account; extras $19 a month");
+  const link = await s.call("POST", "/api/studio/social/connect", { return_to: "https://app.clone8.io/#studio/publish" });
+  assert.equal(link.body.relink_only, true);
+  assert.deepEqual(ayr.calls.filter((c) => c.path === "/profiles/link-sessions").at(-1)!.body.allowedSocial, ["tiktok"], "at the limit the linking page only relinks");
+  // two linked on a one-account plan (both added in one visit to the linking page): posting waits
+  tables.studio_social_profiles[0].accounts = [{ platform: "tiktok" }, { platform: "youtube" }];
+  const over = await s.call("POST", "/api/studio/social/posts", { items: [{ job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4` }], platforms: ["tiktok"] });
+  assert.equal(over.status, 409); assert.equal(over.body.error, "over_account_limit"); assert.match(over.body.detail, /covers 1 social account and 2 are linked/);
+  // one extra account bought: posting goes through, and linking offers every network again while there is room
+  tables.studio_customers[0].social_extra = 1;
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [{ job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4` }], platforms: ["tiktok"] })).status, 201);
+  tables.studio_customers[0].social_extra = 2; tables.studio_social_profiles[0].accounts = [{ platform: "tiktok" }];
+  await s.call("POST", "/api/studio/social/connect", {});
+  assert.ok(ayr.calls.filter((c) => c.path === "/profiles/link-sessions").at(-1)!.body.allowedSocial.length > 2, "room left: every network is offered");
   await s.close();
 });

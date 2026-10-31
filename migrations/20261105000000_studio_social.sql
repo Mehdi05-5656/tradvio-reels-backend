@@ -60,3 +60,7 @@ CREATE TABLE IF NOT EXISTS public.studio_social_prefs (
 ALTER TABLE public.studio_social_prefs ENABLE ROW LEVEL SECURITY;
 
 COMMIT;
+
+-- Extra social accounts bought on top of the plan's own (Starter 1, Creator 3, Studio 10). Kept in step with the
+-- quantity of the "extra social account" item on the person's Stripe subscription.
+ALTER TABLE public.studio_customers ADD COLUMN IF NOT EXISTS social_extra integer NOT NULL DEFAULT 0 CHECK (social_extra BETWEEN 0 AND 100);

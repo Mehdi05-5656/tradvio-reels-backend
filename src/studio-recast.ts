@@ -11,8 +11,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { targetsPrompt } from "./studio-people.js";
 import { PLANS, WINDOW, billableSeconds, windowSeconds } from "./studio.js";
-import { RECAST_RESOLUTION, higgsfieldCostPerSecond, seedanceEditCostPerSecond, studioCosts } from "./studio-pricing.js";
+import { RECAST_RESOLUTION, creditsForCost, higgsfieldCostPerSecond, seedanceEditCostPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
+import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath } from "./studio-longpath.js";
+export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath };
 
 export const HF_BASE = "https://api.higgsfield.ai";
 export const MODELS = { full: "higgsfield/genjutsu/motion-transfer/v1.0", light: "higgsfield/genjutsu-light/motion-transfer/v1.0" } as const;
@@ -33,15 +35,10 @@ export function endpointFor(tool: SuiteTool, model: "full" | "light"): string {
 }
 /** What the swap model is told when the person wrote nothing. */
 export const SWAP_DEFAULT_PROMPT = "Replace the person in the video with the character in the reference image. Keep the background, camera, framing, lighting, motion and audio exactly as in the source video.";
-/** What one Genjutsu request accepts: the full model trims sources to 30 s, Light 15 s; both want one continuous shot.
- *  Longer or multi-shot Light jobs go to the long path (Seedance video edit, pieces of up to PIECE_SECONDS). */
-export const MAX_SECONDS = { full: 30, light: 15 } as const;
-export const PIECE_SECONDS = 30;
 export const LONG_ENDPOINT = "bytedance/seedance-2.5/video-edit";
 /** Added when a still of the character from an already rendered piece is sent as the last reference. */
 export const ANCHOR_PROMPT = "The last reference image is a still of this same character from another part of this video: keep the face, hair, skin, outfit and proportions identical to it, and ignore its background.";
 export const LONG_PROMPT = "Replace the person in the video with the character from the reference image, keeping their exact pose, gestures, clothing colours, lip movements and timing. Keep the room, furniture, camera framing, camera cuts, lighting, on-screen text and everything else exactly as they are.";
-export const MIN_SECONDS = 4;
 const POLL_MS = 10_000, MAX_WAIT_MS = 40 * 60_000, OUTPUT_LIMIT = 268_435_456;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -142,6 +139,28 @@ export async function sceneCuts(path: string, within: number, threshold = 0.3): 
   for (const m of text.matchAll(/pts_time:([0-9.]+)/g)) { const t = Number(m[1]); if (Number.isFinite(t) && t > 0 && t < within) out.push(Math.round(t * 100) / 100); }
   return out;
 }
+/** A video's camera changes (within the longest Light window), stored on the asset so a long swap can be priced from
+ *  its real plan before it runs. Runs in the background after an upload or an import; a failure only means the quote
+ *  falls back to the per-second price (the runner still settles on the real plan, up to what was reserved). */
+export async function detectCuts(sb: SupabaseClient, userId: string, assetId: string, deps: { sceneCuts?: RecastDeps["sceneCuts"]; log?: (l: string) => void } = {}): Promise<number[] | null> {
+  const a = await sb.from("studio_assets").select("id,object_key,kind,probe,status").eq("id", assetId).eq("user_id", userId).maybeSingle();
+  if (a.error || !a.data || a.data.kind !== "video" || a.data.status !== "ready") return null;
+  if (Array.isArray(a.data.probe?.cuts)) return a.data.probe.cuts;
+  const dir = await mkdtemp(join(tmpdir(), "studio-cuts-"));
+  try {
+    const src = await sb.storage.from("studio-uploads").download(a.data.object_key);
+    if (src.error || !src.data) return null;
+    const file = join(dir, "v.mp4");
+    await writeFile(file, Buffer.from(await src.data.arrayBuffer()));
+    const within = Math.min(LIGHT_WINDOW_MAX, Number(a.data.probe?.duration) || LIGHT_WINDOW_MAX);
+    const cuts = await (deps.sceneCuts ?? sceneCuts)(file, within);
+    const fresh = await sb.from("studio_assets").select("probe").eq("id", assetId).eq("user_id", userId).maybeSingle();
+    await sb.from("studio_assets").update({ probe: { ...(fresh.data?.probe ?? a.data.probe ?? {}), cuts, cuts_at: new Date().toISOString() } }).eq("id", assetId).eq("user_id", userId);
+    return cuts;
+  } catch (e: any) { deps.log?.(`[recast] cut detection ${assetId}: ${String(e?.message ?? e).slice(0, 160)}`); return null; }
+  finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
+}
+const LIGHT_WINDOW_MAX = 120;
 /** The opening shot: the stretch before the first cut, when that is long enough to render (4 s); else null. */
 export const openingShot = (cuts: number[], minSeconds = MIN_SECONDS) => { const first = cuts.find((t) => t >= minSeconds); return first == null ? null : Math.floor(first * 10) / 10; };
 /** The ffmpeg video filter for a source of this size: down to 720x1280 when larger, up to the renderer's pixel floor
@@ -166,26 +185,6 @@ export async function prescaleSource(source: string, target: string, maxSeconds?
   const audio = st.hasAudio ? ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"] : ["-an"];
   await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, ...cut, "-vf", vf, "-fps_mode", "cfr", "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-g", "60", ...audio, "-movflags", "+faststart", target], undefined, 240_000);
 }
-/** The pieces a long clip is rendered in: at most PIECE_SECONDS each, ending on a camera change when one falls in the
- *  last stretch of a piece, never shorter than MIN_SECONDS (a short tail is folded into the piece before it). */
-export function planPieces(window: number, cuts: number[], pieceMax = PIECE_SECONDS, min = MIN_SECONDS): Array<{ start: number; end: number }> {
-  const out: Array<{ start: number; end: number }> = [];
-  let start = 0;
-  const total = Math.round(window * 100) / 100;
-  while (start < total - 0.05) {
-    let end = Math.min(total, Math.round((start + pieceMax) * 100) / 100);
-    if (end < total) {
-      // prefer ending on a cut, as late as possible, as long as this piece and the remainder both stay renderable
-      const candidates = cuts.filter((c) => c > start + min && c <= end && total - c >= min).sort((a, b) => b - a);
-      if (candidates.length) end = Math.round(candidates[0] * 100) / 100;
-      else if (total - end < min) end = Math.round((total - min) * 100) / 100;
-    }
-    out.push({ start, end });
-    start = end;
-  }
-  if (out.length > 1 && out[out.length - 1].end - out[out.length - 1].start < min) { const tail = out.pop()!; out[out.length - 1].end = tail.end; }
-  return out;
-}
 /** The words that tell the renderer who plays whom: reference image N goes to the Nth person from the left. */
 export function castPrompt(cast: Array<{ label?: string | null }> | null | undefined): string {
   if (!Array.isArray(cast) || cast.length < 2) return "";
@@ -198,29 +197,6 @@ export function chooseEngine(tool: SuiteTool, model: "full" | "light", window: n
   if (model !== "light" || (tool !== "swap" && tool !== "recast" && tool !== "trend")) return "genjutsu";
   if (window > MAX_SECONDS.light + 0.05) return "seedance";
   return cuts.some((c) => c >= 0.5 && c < window - 0.5) ? "seedance" : "genjutsu";
-}
-/** A join inside one shot (not on a camera change) overlaps the next piece by this much and fades across it. */
-export const JOIN_OVERLAP = 0.5;
-/** How far a join inside a shot may move to find a calmer moment. */
-const CALM_SEARCH = 2;
-const r2 = (n: number) => Math.round(n * 100) / 100;
-/** Joins that fall on a camera change stay hard cuts (the clip already cuts there). Every other join moves to the
- *  calmest moment within CALM_SEARCH seconds (the least picture change, so a small jump has least to show), and the
- *  piece after it starts JOIN_OVERLAP earlier so the two can be faded into each other. */
-export function refineJoins<T extends { start: number; end: number }>(pieces: T[], cuts: number[], motion: Array<[number, number]>, max: number, overlap = JOIN_OVERLAP, search = CALM_SEARCH): Array<T & { blend: number }> {
-  const out = pieces.map((p) => ({ ...p, blend: 0 }));
-  const atCut = (t: number) => cuts.some((c) => Math.abs(c - t) <= 0.15);
-  const calm = (t: number) => { const near = motion.filter(([x]) => Math.abs(x - t) <= 0.25); return near.length ? near.reduce((n, [, v]) => n + v, 0) / near.length : Infinity; };
-  for (let i = 1; i < out.length; i++) {
-    const b = out[i].start;
-    if (atCut(b)) continue;
-    const prevStart = out[i - 1].start, nextEnd = out[i].end;
-    const fits = (t: number) => t - prevStart >= MIN_SECONDS && t - prevStart <= max && nextEnd - (t - overlap) <= max && nextEnd - t >= MIN_SECONDS && !atCut(t);
-    let best = b, score = motion.length ? calm(b) : 0;
-    if (motion.length) for (let t = b - search; t <= b + search + 1e-9; t += 0.1) { const c = r2(t); if (!fits(c)) continue; const sc = calm(c); if (sc < score - 1e-9) { best = c; score = sc; } }
-    out[i - 1].end = r2(best); out[i].start = r2(best - overlap); out[i].blend = overlap;
-  }
-  return out;
 }
 /** Frame-to-frame picture change across the first `within` seconds, as [seconds, scene score] pairs. */
 export async function motionScores(path: string, within: number): Promise<Array<[number, number]>> {
@@ -253,34 +229,6 @@ export async function joinPieces(pieces: string[], blends: number[], target: str
     acc = o;
   }
   await command("ffmpeg", ["-v", "error", "-nostdin", "-y", ...pieces.flatMap((f) => ["-i", f]), "-filter_complex", [...norm, ...steps].join(";"), "-map", `[${acc}]`, "-fps_mode", "cfr", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", target], undefined, 600_000);
-}
-/** The shots of a clip as Light pieces: one per shot (Light takes one continuous shot, at most 15 s), a long shot split
- *  evenly, a shot under 4 s marked for padding (its last frame is held, and the result cut back to the shot). */
-export function shotPieces(window: number, cuts: number[], max: number = MAX_SECONDS.light - JOIN_OVERLAP): Array<{ start: number; end: number }> {
-  const total = Math.round(window * 100) / 100;
-  const bounds = [0, ...[...new Set(cuts.map((c) => Math.round(c * 100) / 100))].filter((c) => c >= 0.5 && c <= total - 0.5).sort((a, b) => a - b), total];
-  const out: Array<{ start: number; end: number }> = [];
-  for (let i = 0; i + 1 < bounds.length; i++) {
-    const a = bounds[i], b = bounds[i + 1], n = Math.max(1, Math.ceil((b - a) / max - 1e-9));
-    for (let k = 0; k < n; k++) out.push({ start: Math.round((a + ((b - a) * k) / n) * 100) / 100, end: Math.round((a + ((b - a) * (k + 1)) / n) * 100) / 100 });
-  }
-  return out;
-}
-/** Seconds a request is billed for: its input, rounded up, never under the renderer's 4 s floor. */
-const billedSecondsOf = (p: { start: number; end: number }) => Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6);
-/** Most Light pieces one job sends at once (the platform runs 10 at a time on a funded account). */
-export const MAX_SHOT_PIECES = 12;
-/** The long path's plan, by what it costs us: every shot on Genjutsu Light, or the clip in up to 30 s Seedance pieces.
- *  Light is about $0.20 a second and Seedance 2.5 about $0.48, so Light wins unless the clip is many very short shots
- *  (each padded to 4 s) or more pieces than the platform runs together. `seedanceOnly` after Light refused the clip. */
-export function planLongPath(window: number, cuts: number[], env?: Record<string, string | undefined>, seedanceOnly = false, motion: Array<[number, number]> = []) {
-  // joins inside a shot get a calmer spot and an overlap to fade over (so pieces are planned that much shorter)
-  const seed = refineJoins(planPieces(window, cuts, PIECE_SECONDS - JOIN_OVERLAP), cuts, motion, PIECE_SECONDS);
-  const light = refineJoins(shotPieces(window, cuts), cuts, motion, MAX_SECONDS.light);
-  const seedUsd = seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceEditCostPerSecond(env);
-  const lightUsd = light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldCostPerSecond("light", env);
-  const useLight = !seedanceOnly && light.length <= MAX_SHOT_PIECES && lightUsd <= seedUsd;
-  return { engine: (useLight ? "light" : "seedance") as "light" | "seedance", pieces: useLight ? light : seed, usd: Math.round((useLight ? lightUsd : seedUsd) * 1000) / 1000, other_usd: Math.round((useLight ? seedUsd : lightUsd) * 1000) / 1000 };
 }
 /** A shot shorter than the renderer's floor, held on its last frame (sound padded with silence) to `seconds`. */
 export async function padClip(source: string, target: string, seconds: number) {
@@ -423,6 +371,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       if (!pieces.length) {
         // the plan is stored before anything is sent, so a restart sends only what is still missing
         const cuts = await (deps.sceneCuts ?? sceneCuts)(original, lightWindow).catch(() => [] as number[]);
+        // remembered on the clip, so a run again is quoted from its real plan (best effort: never stops the render)
+        if (job.asset_id) try { const ap = await sb.from("studio_assets").select("probe").eq("id", job.asset_id).eq("user_id", job.user_id).maybeSingle(); if (ap.data && !Array.isArray(ap.data.probe?.cuts)) await sb.from("studio_assets").update({ probe: { ...(ap.data.probe ?? {}), cuts, cuts_at: new Date().toISOString() } }).eq("id", job.asset_id).eq("user_id", job.user_id); } catch { /* the quote falls back to the per-second price */ }
         const motion = await (deps.motion ?? motionScores)(original, lightWindow).catch(() => [] as Array<[number, number]>);
         const plan = planLongPath(lightWindow, cuts, deps.env, job.progress?.seedance_only === true, motion);
         pieces = plan.pieces.map((p) => ({ start: p.start, end: p.end, blend: p.blend, request_id: null, input_key: null, engine: plan.engine }));
@@ -648,7 +598,15 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const cutAt = engine === "genjutsu" ? Number(job.progress?.cut_at) || null : null;
     const window = engine === "seedance" ? lightWindow : cutAt ? Math.min(cutAt, windowSeconds(job.options, MAX_SECONDS[model])) : windowSeconds(job.options, MAX_SECONDS[model]);
     const billed = Math.max(Math.ceil(seconds), billableSeconds(sourceSeconds || seconds, window));
-    const charged = Math.min(job.credits_reserved, billed * per);
+    // the long path is settled on what its pieces cost us (padding, overlaps, the renderer), at the Light tools' margin,
+    // never below the per-second price and never above what the person agreed to
+    let planCredits = 0;
+    if (engine === "seedance" && Array.isArray(job.progress?.pieces) && costs.credit_floor && costs.light_margin != null) {
+      const ps = job.progress.pieces as Array<{ start: number; end: number; engine?: string }>;
+      const usd = ps.reduce((n, p) => n + (p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6) * higgsfieldCostPerSecond("light", deps.env) : Math.ceil(p.end - p.start - 1e-6) * seedanceEditCostPerSecond(deps.env)), 0);
+      planCredits = creditsForCost(usd, costs.credit_floor, costs.light_margin);
+    }
+    const charged = Math.min(job.credits_reserved, Math.max(billed * per, planCredits));
     const pieceCount = Array.isArray(job.progress?.pieces) ? job.progress.pieces.length : 1;
     const castCount = Array.isArray(job.options?.cast) ? job.options.cast.length : 1;
     const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, engine, request_id: requestId, audio: model === "full" || engine === "seedance" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null, ...(castCount > 1 ? { cast: castCount } : {}), ...(engine === "seedance" ? { piece_engine: job.progress?.piece_engine ?? "seedance" } : {}), ...(engine === "seedance" && pieceCount > 1 ? { pieces: pieceCount, note: `Rendered in ${pieceCount} pieces at the camera changes and joined` } : {}), ...(cutAt ? { cut_at: cutAt, note: `Cut at the first shot change (${cutAt} s): the renderer takes one continuous shot` } : {}) }];

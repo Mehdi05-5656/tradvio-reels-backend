@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { accountAccess, selfAuthenticatedPost } from "../src/account-access.js";
-import { registerStudio, quote, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, studioOverview, PLANS, COSTS } from "../src/studio.js";
+import { registerStudio, quote, lightCredits, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, studioOverview, PLANS, COSTS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -81,8 +81,11 @@ test("quotes: blueprint by copies, recast by seconds, with validation", () => {
   const r = quote("recast", { character: "noah" }, video);
   assert.deepEqual([r.credits, r.options.seconds, r.options.model], [24 * COSTS.recast_second, 24, "full"], "a 23.4 s file bills 24 s at Higgsfield (container rounding)");
   assert.deepEqual([billableSeconds(4, 30), billableSeconds(3.7, 30), billableSeconds(15.27, 15), billableSeconds(30, 30), billableSeconds(0, 30)], [5, 4, 15, 30, 1]);
-  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 40 } }).credits, 41 * COSTS.recast_light_second, "light takes the whole clip up to 2 minutes (40.0 s bills 41 at the platform's rounding)");
-  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 150 } }).credits, 120 * COSTS.recast_light_second, "light caps at 2 minutes");
+  const l40 = quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 40 } });
+  assert.equal(l40.options.seconds, 41, "light takes the whole clip up to 2 minutes (40.0 s bills 41 at the platform's rounding)");
+  assert.equal(l40.credits, lightCredits(41, { probe: { duration: 40 } }, COSTS), "priced from its long-path plan");
+  assert.ok(l40.credits >= 41 * COSTS.recast_light_second, "never under the per-second price");
+  assert.equal(quote("recast", { character: "noah", model: "light" }, { kind: "video", probe: { duration: 150 } }).options.seconds, 120, "light caps at 2 minutes");
   assert.throws(() => quote("recast", {}, video), { code: "character_required" });
   assert.throws(() => quote("recast", { character: "noah" }, { kind: "video" }), { code: "asset_not_inspected" });
   assert.throws(() => quote("poster", {}, video), { code: "unknown_tool" });
@@ -119,8 +122,12 @@ test("checkout links the customer, subscription events mirror the plan, paid inv
   const grant = sb.calls.find((c: any) => c.name === "studio_grant");
   assert.deepEqual([grant.args.p_user, grant.args.p_credits, grant.args.p_ref, grant.args.p_expire_previous], [ANN, 3500, "in_1", true]);
   const upgrade = sb.calls.length;
-  await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_2", customer: "cus_1", billing_reason: "subscription_update", parent: { subscription_details: { subscription: "sub_1" } } } } });
+  await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_2", customer: "cus_1", billing_reason: "subscription_update", lines: { data: [{ amount: 2500, pricing: { price_details: { price: "price_cm" } } }] }, parent: { subscription_details: { subscription: "sub_1" } } } } });
   assert.equal(sb.calls.slice(upgrade).find((c: any) => c.name === "studio_grant").args.p_expire_previous, false, "an upgrade mid-cycle adds credits without expiring the rest");
+  // adding extra social accounts mid-period invoices only their item: no credits come with it
+  const seats = sb.calls.length;
+  assert.match(await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_seats", customer: "cus_1", billing_reason: "subscription_update", lines: { data: [{ amount: 1900, pricing: { price_details: { price: "price_seat_m" } } }] }, parent: { subscription_details: { subscription: "sub_1" } } } } }), /extra social accounts only/);
+  assert.ok(!sb.calls.slice(seats).some((c: any) => c.name === "studio_grant"), "no credits for an account add-on");
   assert.match(await applyStripeEvent(sb, stripe, { type: "customer.subscription.deleted", data: { object: sub({ status: "canceled", metadata: {} }) } }), /canceled/);
   // An invoice for a customer we have not linked yet, whose subscription names the person: linked and granted (the webhook race).
   assert.match(await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_3", customer: "cus_other", parent: { subscription_details: { subscription: "sub_1" } } } } }), /granted 3500/);
@@ -300,7 +307,7 @@ test("quotes for the Genjutsu suite: swap and trend price like recast, restyle l
   const video = { kind: "video", probe: { duration: 23.4 } };
   const swap = quote("swap", { model: "light", character: "noah", prompt: "  make it a tabby cat  " }, video);
   const lightSeconds = billableSeconds(Number(video.probe!.duration), 120);
-  assert.deepEqual([swap.credits, swap.options.seconds, swap.options.model, swap.options.prompt], [lightSeconds * COSTS.recast_light_second, lightSeconds, "light", "make it a tabby cat"]);
+  assert.deepEqual([swap.credits, swap.options.seconds, swap.options.model, swap.options.prompt], [lightCredits(lightSeconds, video, COSTS), lightSeconds, "light", "make it a tabby cat"]);
   assert.equal(quote("swap", { model: "full", character_asset_id: ASSET }, video).credits, 24 * COSTS.recast_second);
   assert.throws(() => quote("swap", { model: "full" }, video), (e: any) => e.code === "character_required");
   const style = "11111111-1111-4111-8111-111111111111";

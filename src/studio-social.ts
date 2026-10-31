@@ -5,6 +5,7 @@
 // Status flow of a post row: sending → scheduled → posted | partial | failed, or canceled. The provider's webhook moves
 // it; a loop reads back any post the webhook left behind, so a missed delivery never strands a row.
 import { createHash, timingSafeEqual } from "node:crypto";
+import { SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, MAX_SOCIAL_EXTRA } from "./studio-pricing.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftCaption, type CaptionDraft } from "./studio-captions.js";
@@ -48,6 +49,18 @@ export function webhookUrl(env: Record<string, string | undefined>): string | nu
   return base && token ? `${base}/api/studio/social/webhook?token=${encodeURIComponent(token)}` : null;
 }
 
+/** How many social accounts a person may post to: the plan's own plus the extra ones they added. */
+export type Allowance = { plan: string | null; included: number; extra: number; total: number; price_usd_month: number; interval: "month" | "year"; max_extra: number };
+export async function allowanceOf(sb: SupabaseClient, u: string): Promise<Allowance> {
+  let c = await sb.from("studio_customers").select("plan_id,status,billing_interval,social_extra").eq("user_id", u).maybeSingle();
+  if (c.error && /social_extra/.test(String(c.error.message ?? ""))) c = await sb.from("studio_customers").select("plan_id,status,billing_interval").eq("user_id", u).maybeSingle() as any;
+  if (c.error) throw c.error;
+  const d: any = c.data ?? {};
+  const live = ["active", "trialing"].includes(d.status);
+  const included = live ? SOCIAL_ACCOUNTS[d.plan_id] ?? 1 : 0, extra = live ? Math.max(0, Number(d.social_extra ?? 0)) : 0;
+  const interval = d.billing_interval === "year" ? "year" : "month";
+  return { plan: d.plan_id ?? null, included, extra, total: included + extra, price_usd_month: interval === "year" ? SOCIAL_SEAT_USD.year_per_month : SOCIAL_SEAT_USD.month, interval, max_extra: MAX_SOCIAL_EXTRA };
+}
 /** Network options the person may set, cleaned: today a YouTube title (required there) and its visibility. */
 export function cleanOptions(platforms: string[], raw: any, caption: string): Record<string, any> {
   const out: Record<string, any> = {};
@@ -98,15 +111,15 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     if (!p) return res.json({ enabled: false, connected: false, accounts: [], platforms: [] });
     try {
       const sb = sbFn();
-      const prof = await profileOf(sb, u);
-      if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered() });
+      const [prof, allowance] = await Promise.all([profileOf(sb, u), allowanceOf(sb, u)]);
+      if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered(), allowance });
       let accounts = prof.accounts ?? [], stale = false;
       try {
         accounts = await p.accounts(prof.profile_key);
         await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
       } catch (e: any) { stale = true; log(`[social] accounts read failed for ${u}: ${String(e?.message ?? e).slice(0, 160)}`); }
       if (!stale) void ensureWebhook(sb, p, u, prof.profile_key, prof.webhook_hash); // re-registers after a URL or secret change
-      res.json({ enabled: true, connected: accounts.length > 0, accounts, stale, platforms: p.offered() });
+      res.json({ enabled: true, connected: accounts.length > 0, accounts, stale, platforms: p.offered(), allowance });
     } catch (e) { fail(res, e); }
   });
 
@@ -158,8 +171,13 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const redirect = safeReturn(req.body?.return_to, env) ?? env.STUDIO_SOCIAL_RETURN_URL;
       let origin: string | undefined;
       try { origin = redirect ? new URL(redirect).origin : undefined; } catch { origin = undefined; }
-      const link = await p.connectUrl(prof!.profile_key, { redirect, origin });
-      res.json({ url: link.url, expires_in_minutes: link.expiresInMinutes });
+      // at the plan's account limit the linking page only relinks what is there (more accounts are added to the plan first)
+      const allowance = await allowanceOf(sb, u);
+      const linkedNow = (prof!.accounts ?? []).map((a) => a.platform);
+      const full = linkedNow.length >= allowance.total;
+      if (full && !linkedNow.length) throw new SocialError("account_limit", "Your plan has no social accounts yet; add one to link it", 409);
+      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, ...(full ? { only: linkedNow } : {}) });
+      res.json({ url: link.url, expires_in_minutes: link.expiresInMinutes, relink_only: full });
     } catch (e) { fail(res, e); }
     finally { release(); if (connecting.get(u) === chain) connecting.delete(u); }
   });
@@ -308,6 +326,10 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   if (pr.error) throw pr.error;
   const prof = pr.data as { profile_key: string; accounts: SocialAccount[] } | null;
   if (!prof) throw new SocialError("not_connected", "Connect your socials first", 409);
+  // more linked than the plan covers (linked several at once on the linking page): posting waits for a fix
+  const allowance = await allowanceOf(sb, u);
+  const linkedCount = (prof.accounts ?? []).length;
+  if (linkedCount > allowance.total) throw new SocialError("over_account_limit", `Your plan covers ${allowance.total} social account${allowance.total === 1 ? "" : "s"} and ${linkedCount} are linked. Add ${linkedCount - allowance.total} to your plan or unlink ${linkedCount - allowance.total === 1 ? "one" : "some"} to post.`, 409);
   const items: any[] = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
   if (!items.length) throw new SocialError("no_videos", "Pick at least one video");
   if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} videos at a time`);
@@ -413,7 +435,7 @@ export async function withPostPosters(sb: SupabaseClient, u: string, rows: Socia
 }
 
 /** What the chat and the pages need to know about a person's posting: on or off, and what is linked. */
-export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<string, string | undefined>): Promise<{ enabled: boolean; linked: string[]; quiet: boolean }> {
+export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<string, string | undefined>): Promise<{ enabled: boolean; linked: string[]; quiet: boolean; allowance?: Allowance }> {
   if (!getSocialProvider({ env })) return { enabled: false, linked: [], quiet: false };
   const [pr, pf] = await Promise.all([
     sb.from("studio_social_profiles").select("accounts").eq("user_id", u).maybeSingle(),
@@ -423,7 +445,8 @@ export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<
   // "Not now" to linking quiets the unasked offer for two weeks; three of them, for good (asking still works).
   const d = pf.data as { connect_dismissed_at: string | null; connect_dismissals: number } | null;
   const quiet = !linked.length && !!d && (d.connect_dismissals >= 3 || (!!d.connect_dismissed_at && Date.now() - Date.parse(d.connect_dismissed_at) < 14 * 86400_000));
-  return { enabled: true, linked, quiet };
+  const allowance = await allowanceOf(sb, u).catch(() => undefined);
+  return { enabled: true, linked, quiet, allowance };
 }
 
 /** Apply one status change to the matching post rows; returns how many rows moved. Canceled rows stay canceled. A

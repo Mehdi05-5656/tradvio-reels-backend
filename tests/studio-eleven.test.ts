@@ -27,7 +27,7 @@ test("audio units: characters in thousands, minutes of the source or the asked l
   assert.equal(tableUnits(tts, { text: "hi" }, null), 0.1, "a floor so tiny texts are not free");
   assert.equal(tableUnits(vc, { voice_id: VOICE }, 90), 1.5); assert.equal(tableUsd(vc, {}, 90), 0.18);
   assert.equal(tableUsd(dub, {}, 60), 0.5);
-  assert.equal(tableUnits(sfx, { text: "door slam" }, null), 1); assert.equal(tableUsd(sfx, {}, null), 0.1);
+  assert.equal(tableUnits(sfx, { text: "door slam" }, null), 1); assert.equal(tableUsd(sfx, {}, null), 0.12, "per generation, the safe reading of the price page");
   assert.equal(tableUnits(music, { prompt: "lofi", length_seconds: 120 }, null), 2); assert.equal(tableUsd(music, { prompt: "lofi", length_seconds: 120 }, null), 0.3);
   assert.equal(tableUnits(music, { prompt: "lofi" }, null), 0.5, "defaults to thirty seconds");
   assert.equal(tableUnits(stt, {}, 1800), 0.5); assert.equal(tableUsd(stt, {}, 1800), 0.11);
@@ -181,4 +181,15 @@ test("the prompt names every audio setting, so the model can ask for a 10-second
   assert.match(tts, /voice_id voice id from preview_voices, required/); assert.match(tts, /model natural\/expressive\/fast/);
   const dub = prompt.split("\n").find((l) => l.startsWith("- audio/dubbing"))!;
   assert.match(dub, /target_language en\/es\/fr/);
+});
+
+test("audio tools are priced at ElevenLabs' list with no platform discount, at the standard margin", async () => {
+  const { instrumentCredits, instrumentDiscount } = await import("../src/studio-instruments.js");
+  const { PLANS } = await import("../src/studio.js");
+  const { creditsForCost, creditValueFloor } = await import("../src/studio-pricing.js");
+  const tts = instrumentById("audio/text-to-speech", ENV)!, dub = instrumentById("audio/dubbing", ENV)!;
+  const env = { ...ENV, HIGGSFIELD_DISCOUNT: "0.5" };
+  assert.equal(instrumentDiscount(tts, env), 0, "the platform's discount is not ElevenLabs'");
+  assert.equal(instrumentCredits(0.08, PLANS, env, { inst: tts }), creditsForCost(0.08, creditValueFloor(PLANS)), "list price, 50% margin");
+  assert.equal(instrumentCredits(0.5, PLANS, env, { inst: dub, seconds: null }), creditsForCost(0.5, creditValueFloor(PLANS)), "dubbing (a video out, billed by the minute) keeps the standard margin");
 });

@@ -74,7 +74,7 @@ const report: string[] = []; const say = (ok: boolean, s: string) => report.push
 const done = { status: "done", outputs: [{ key: `${U}/${JOB}/01.mp4`, kind: "video" }, { key: `${U}/${JOB}/02.mp4`, kind: "video" }], finished_at: new Date().toISOString() };
 
 // 1. connect: five tabs at once
-{ const t: any = { studio_customers: [{ user_id: U, status: "active" }], studio_social_profiles: [] }; const s = await serve(fakeSb(t));
+{ const t: any = { studio_customers: [{ user_id: U, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [] }; const s = await serve(fakeSb(t));
   const rs = await Promise.all(Array.from({ length: 5 }, () => s.call("POST", "/api/studio/social/connect", {})));
   say(rs.every((r) => r.status === 200), `connect x5 concurrent: all answered 200 (${rs.map((r) => r.status).join(",")})`);
   say(t.studio_social_profiles.length === 1, `one stored profile (${t.studio_social_profiles.length})`);
@@ -82,7 +82,7 @@ const done = { status: "done", outputs: [{ key: `${U}/${JOB}/01.mp4`, kind: "vid
   await s.close(); }
 
 // 2. publish card double click
-{ ayr.posts = 0; const t: any = { studio_customers: [{ user_id: U, status: "active" }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_jobs: [{ id: JOB, user_id: U, ...done }], studio_social_posts: [],
+{ ayr.posts = 0; const t: any = { studio_customers: [{ user_id: U, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_jobs: [{ id: JOB, user_id: U, ...done }], studio_social_posts: [],
     studio_conversations: [{ id: CONVO, user_id: U, title: "t", status: "open", plan: null, run: null, updated_at: "2026-10-30T00:00:00Z", messages: [{ id: "m1", role: "assistant", text: "x", at: "x", publish: { id: "card-1", items: [{ job_id: JOB, output_key: `${U}/${JOB}/01.mp4` }], status: "open", linked_seen: ["tiktok"] } }] }] };
   const s = await serve(fakeSb(t));
   const rs = await Promise.all(Array.from({ length: 4 }, () => s.call("POST", `/api/studio/assistant/conversations/${CONVO}/publish/card-1`, { action: "now", platforms: ["tiktok"], caption: "x" })));
@@ -91,7 +91,7 @@ const done = { status: "done", outputs: [{ key: `${U}/${JOB}/01.mp4`, kind: "vid
 
 // 3. Publish page: 25 videos scheduled 1 h apart
 { ayr.posts = 0; const outs = Array.from({ length: 25 }, (_, i) => ({ key: `${U}/${JOB}/${i}.mp4`, kind: "video" }));
-  const t: any = { studio_customers: [{ user_id: U, status: "active" }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_jobs: [{ id: JOB, user_id: U, status: "done", outputs: outs, finished_at: new Date().toISOString() }], studio_social_posts: [] };
+  const t: any = { studio_customers: [{ user_id: U, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_jobs: [{ id: JOB, user_id: U, status: "done", outputs: outs, finished_at: new Date().toISOString() }], studio_social_posts: [] };
   const s = await serve(fakeSb(t)); const t0 = Date.now();
   const r = await s.call("POST", "/api/studio/social/posts", { items: outs.map((o) => ({ job_id: JOB, output_key: o.key })), platforms: ["tiktok"], caption: "x", schedule_at: new Date(Date.now() + 3600_000).toISOString(), spacing_minutes: 60 });
   say(r.status === 201 && r.body.posts.length === 25 && ayr.posts === 25, `25 videos scheduled in ${Date.now() - t0} ms: ${r.body?.posts?.length} rows, ${ayr.posts} sent`);
@@ -118,7 +118,7 @@ const done = { status: "done", outputs: [{ key: `${U}/${JOB}/01.mp4`, kind: "vid
 
 // 5. performance: 10 first opens at once
 { const hist0 = { n: 0 }; const f2: any = async (u: string, i: any) => { if (u.includes("/history/")) hist0.n++; return fetchFn(u, i); };
-  const t: any = { studio_customers: [{ user_id: U, status: "active" }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok", username: "ann" }] }], studio_social_posts: [], studio_perf_insights: [] };
+  const t: any = { studio_customers: [{ user_id: U, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok", username: "ann" }] }], studio_social_posts: [], studio_perf_insights: [] };
   const sb = fakeSb(t);
   const app = express(); app.use(express.json()); app.use((req: any, _r, n) => { req.auth = { user_id: U }; req.profile = { role: "user", user_id: U }; n(); }); app.use(accountAccess(() => sb));
   registerPerformance(app, () => sb, { env: ENV, fetch: f2, log: () => {} });
@@ -131,7 +131,7 @@ const done = { status: "done", outputs: [{ key: `${U}/${JOB}/01.mp4`, kind: "vid
 
 // 6. a flaky posting service: every other send gets no usable answer; then the person presses Post again on each
 { const outs = Array.from({ length: 20 }, (_, i) => ({ key: `${U}/${JOB}/f${i}.mp4`, kind: "video" }));
-  const t: any = { studio_customers: [{ user_id: U, status: "active" }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_jobs: [{ id: JOB, user_id: U, status: "done", outputs: outs, finished_at: new Date().toISOString() }], studio_social_posts: [] };
+  const t: any = { studio_customers: [{ user_id: U, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok" }] }], studio_jobs: [{ id: JOB, user_id: U, status: "done", outputs: outs, finished_at: new Date().toISOString() }], studio_social_posts: [] };
   let n = 0; const got = new Map<string, number>();
   const flaky: any = async (url: string, init: any = {}) => {
     if (url.endsWith("/post") && init.method === "POST") {
@@ -156,7 +156,7 @@ const done = { status: "done", outputs: [{ key: `${U}/${JOB}/01.mp4`, kind: "vid
 
 // 7. a slow first read of the accounts: the page answers within seconds and says it is still reading
 { const slow: any = async (u: string, i: any) => { if (u.includes("/history/")) await sleep(15_000); return fetchFn(u, i); };
-  const t: any = { studio_customers: [{ user_id: U, status: "active" }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok", username: "ann" }] }], studio_social_posts: [], studio_perf_insights: [] };
+  const t: any = { studio_customers: [{ user_id: U, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: U, profile_key: "pk", accounts: [{ platform: "tiktok", username: "ann" }] }], studio_social_posts: [], studio_perf_insights: [] };
   const sb = fakeSb(t);
   const app = express(); app.use(express.json()); app.use((req: any, _r, nx) => { req.auth = { user_id: U }; req.profile = { role: "user", user_id: U }; nx(); }); app.use(accountAccess(() => sb));
   registerPerformance(app, () => sb, { env: ENV, fetch: slow, log: () => {} });

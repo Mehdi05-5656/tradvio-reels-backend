@@ -10,6 +10,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
 import { getSocialProvider, SocialError } from "./social-provider.js";
+import { logClaudeCost } from "./studio-pricing.js";
 import { createPosts, socialSnapshot, UNCONFIRMED } from "./studio-social.js";
 import { performanceForChat } from "./studio-insights.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -17,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PLANS, quote, StudioError, fetchStyles, toolsEnabled, costsFor, publicJob, withAssetNames, withPosterUrls, downloadBase, type StudioStyle } from "./studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS, type KnowledgeUser } from "./studio-knowledge.js";
-import { quoteInstrument, instrumentById, tableUsd, instrumentCredits, InstrumentError, inputAssetIds } from "./studio-instruments.js";
+import { quoteInstrument, instrumentById, tableUsd, tableUnits, instrumentCredits, InstrumentError, inputAssetIds } from "./studio-instruments.js";
 import { trendById } from "./studio-trends.js";
 import { probeSeconds, makePoster } from "./studio-recast.js";
 import { checkUpload, checkJobRate } from "./studio-limits.js";
@@ -166,12 +167,14 @@ export const TOOLS = [
 export const MEMORY_LIMIT = 30;
 
 /** Reads Anthropic's server-sent event stream into the same shape as a plain reply, handing text deltas out as they come. */
-export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onText: (text: string) => void, signal?: AbortSignal): Promise<{ content: any[]; stop_reason: string | null }> {
+export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onText: (text: string) => void, signal?: AbortSignal): Promise<{ content: any[]; stop_reason: string | null; usage?: any }> {
   const reader = body.getReader(), dec = new TextDecoder();
   const blocks: any[] = [], partial: Record<number, string> = {};
   let buf = "", stop: string | null = null;
+  const usage: Record<string, number> = {};
   const handle = (evt: string, data: any) => {
-    if (evt === "content_block_start") {
+    if (evt === "message_start") Object.assign(usage, data.message?.usage ?? {});
+    else if (evt === "content_block_start") {
       const b = data.content_block ?? {};
       blocks[data.index] = b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: {} } : { type: "text", text: String(b.text ?? "") };
       if (b.type === "tool_use") partial[data.index] = "";
@@ -182,7 +185,7 @@ export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onTe
     } else if (evt === "content_block_stop") {
       const b = blocks[data.index];
       if (b?.type === "tool_use") { try { b.input = partial[data.index] ? JSON.parse(partial[data.index]) : {}; } catch { b.input = {}; } }
-    } else if (evt === "message_delta") stop = data.delta?.stop_reason ?? stop;
+    } else if (evt === "message_delta") { stop = data.delta?.stop_reason ?? stop; Object.assign(usage, data.usage ?? {}); }
     else if (evt === "error") throw new AssistantError("assistant_unavailable", `Claude stream: ${data.error?.message ?? "error"}`, 503);
   };
   for (;;) {
@@ -199,7 +202,7 @@ export async function readAnthropicStream(body: ReadableStream<Uint8Array>, onTe
     }
   }
   // a streamed round that is only tool calls still opens an empty text block; the API refuses it back, so it is dropped
-  return { content: blocks.filter((b) => b && !(b.type === "text" && !String(b.text).trim())), stop_reason: stop };
+  return { content: blocks.filter((b) => b && !(b.type === "text" && !String(b.text).trim())), stop_reason: stop, usage };
 }
 
 /** One Claude request. With onText the reply streams and each text delta is handed out; the result has the same shape either way. */
@@ -224,9 +227,10 @@ export async function claude(deps: AssistantDeps, body: Record<string, any>, onT
       const text = await r.text().catch(() => "");
       throw new AssistantError("assistant_unavailable", `Claude ${r.status}: ${text.slice(0, 200)}`, r.status === 429 || r.status >= 500 ? 503 : 502);
     }
-    if (!onText) return r.json();
-    if (!r.body) throw new AssistantError("assistant_unavailable", "Claude sent no stream", 503);
-    return await readAnthropicStream(r.body, onText, ctl.signal).catch((e) => { if (deps.signal?.aborted) throw aborted(); throw e instanceof AssistantError ? e : new AssistantError("assistant_unavailable", "The reply broke off", 503); });
+    const model = String(body.model ?? env.STUDIO_ASSISTANT_MODEL ?? DEFAULT_MODEL);
+    const out = !onText ? await r.json() : r.body ? await readAnthropicStream(r.body, onText, ctl.signal).catch((e) => { if (deps.signal?.aborted) throw aborted(); throw e instanceof AssistantError ? e : new AssistantError("assistant_unavailable", "The reply broke off", 503); }) : (() => { throw new AssistantError("assistant_unavailable", "Claude sent no stream", 503); })();
+    logClaudeCost(deps.log, "assistant", model, out?.usage);
+    return out;
   } finally { clearTimeout(timer); deps.signal?.removeEventListener("abort", stop); }
 }
 
@@ -347,7 +351,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
       } else {
         const usd = tableUsd(inst, o.params ?? {}, refSeconds);
         if (usd == null) { warnings.push(`Step ${i} (${inst.title}) is priced when it starts; no list price is published.`); credits = 0; }
-        else credits = instrumentCredits(usd, PLANS, ctx.env);
+        else credits = instrumentCredits(usd, PLANS, ctx.env, { inst, seconds: inst.output === "video" && !inst.pricing ? tableUnits(inst, o.params ?? {}, refSeconds) : null });
         estimate = true; o.output = inst.output; summary = inst.output === "image" ? `priced at start` : `about ${credits} credits`;
       }
       output = inst.output;
@@ -503,6 +507,7 @@ export async function importLink(sb: SupabaseClient, deps: AssistantDeps, u: str
     const name = `${title || `${label}${handle ? ` @${handle}` : platform === "youtube" ? ` ${youtubeId(url) ?? "video"}` : " video"}`}.mp4`;
     const ins = await sb.from("studio_assets").insert({ id, user_id: u, kind: "video", name, object_key: objectKey, bytes: bytes.length, status: "ready", probe: { duration: seconds || undefined, poster_key: posterKey, source_url: url, source: platform } });
     if (ins.error) throw ins.error;
+    void import("./studio-recast.js").then((m) => m.detectCuts(sb, u, id, { log: deps.log })).catch(() => undefined); // prices a long swap from its plan
     return { asset_id: id, name, kind: "video", seconds: seconds || null };
   }
   } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
@@ -596,7 +601,8 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   try {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     events?.({ type: "round" }); streamed = "";
-    const reply = await claude(deps, { system, tools: social.enabled ? TOOLS : TOOLS.filter((t) => t.name !== "offer_post"), messages }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
+    // automatic caching: the instructions, tools and the chat so far are read back at a tenth of the price on the next round
+    const reply = await claude(deps, { system, tools: social.enabled ? TOOLS : TOOLS.filter((t) => t.name !== "offer_post"), messages, cache_control: { type: "ephemeral" } }, events ? (t) => { streamed += t; events({ type: "delta", text: t }); } : undefined);
     const blocks: any[] = Array.isArray(reply?.content) ? reply.content : [];
     text = blocks.filter((b) => b.type === "text").map((b) => String(b.text)).join("\n").trim() || text;
     const uses = blocks.filter((b) => b.type === "tool_use");
