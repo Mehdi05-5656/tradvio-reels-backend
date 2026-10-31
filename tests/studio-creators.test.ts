@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
+import { issuesFor, engagementOutliers, reviewStatement, checkAccountVideos, settleReviews, stillLinked, notifyCreator } from "../src/studio-creator-checks.js";
 import { RULES, countable, hasDisclosure, inWindow, postIdOf, videoFlags, accountFlags, monthOf, nextPayout, syncAccount, closeMonths, checkBio, registerCreators, creatorTick } from "../src/studio-creators.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", BOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", JOB = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -130,11 +131,12 @@ test("creator program flow: join, enroll with the bio check, videos posted throu
     // after the window, growth is not counted
     posts[0].views = 90_000; await syncAccount(sb, deps, acc, "pk_ann", new Date(Date.parse(later) + 31 * 86_400_000));
     assert.equal(v1.views_counted, 41_000);
-    // the month closes on the 1st: Ann's is over the minimum (review); a small one carries over
+    // the month closes on the 1st: Ann's is over the minimum and every check passed (approved on its own); a small one carries over
     tables.studio_creator_earnings.push({ user_id: BOB, month, views: 5000, amount_micros: 5_000_000, carried_in_micros: 0, status: "open" });
     const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 1));
     assert.equal(await closeMonths(sb, next), 2);
-    assert.equal(tables.studio_creator_earnings.find((x) => x.user_id === ANN && x.month === month).status, "review");
+    assert.equal(tables.studio_creator_earnings.find((x) => x.user_id === ANN && x.month === month).status, "approved");
+    assert.match(tables.studio_creator_earnings.find((x) => x.user_id === ANN && x.month === month).note, /Every check passed/);
     assert.equal(tables.studio_creator_earnings.find((x) => x.user_id === BOB && x.month === month).status, "carried");
     assert.equal(tables.studio_creator_earnings.find((x) => x.user_id === BOB && x.month === monthOf(next)).carried_in_micros, 5_000_000);
     // a closed month is never written again
@@ -143,7 +145,7 @@ test("creator program flow: join, enroll with the bio check, videos posted throu
     assert.equal(ok.data.reason, "month_closed");
     // the state the page shows
     const page = (await call("GET", "/api/studio/creators")).body;
-    assert.equal(page.statements[0].status, "review"); assert.equal(page.videos.length, 2); assert.equal(page.rules.cpm_usd, 1);
+    assert.equal(page.statements[0].status, "approved"); assert.deepEqual(page.to_fix, []); assert.equal(page.videos.length, 2); assert.equal(page.rules.cpm_usd, 1);
     // leaving removes the accounts and pauses membership
     const left = (await call("POST", "/api/studio/creators/leave")).body;
     assert.equal(left.member.status, "paused"); assert.equal(left.accounts.length, 0);
@@ -171,4 +173,72 @@ test("the disclosure tag: a Clone8 video without #clone8partner is found but wai
   post.caption = "new reel #clone8partner";
   await syncAccount(sb, deps, tables.studio_creator_accounts[0], "pk_ann");
   assert.equal(v.status, "eligible"); assert.ok(!v.flags.includes("missing_tag")); assert.equal(v.views_counted, 5000);
+});
+
+
+test("checks: issues the creator can fix and ones for the owner, engagement against the creator's own norm", () => {
+  const acc = { id: "acc", platform: "tiktok", username: "ann", status: "pending_bio", flags: ["followers_jumped"] };
+  const vids = [{ id: "v1", status: "pending", proof: "none", views: 5000, caption: "x", flags: ["missing_tag"] }, { id: "v2", status: "eligible", proof: "linked", views: 300, caption: "y", flags: [] }, { id: "v3", status: "rejected", proof: "none", views: 9000, flags: ["missing_tag"] }];
+  const issues = issuesFor([acc], vids);
+  assert.deepEqual(issues.map((i) => `${i.code}:${i.who}:${i.ref}`).sort(), ["bio_missing:creator:acc", "followers_jumped:review:acc", "missing_tag:creator:v1", "not_proven:creator:v1"].sort(), "rejected videos and small unproven ones raise nothing");
+  const norm = (id: string, views: number, likes: number) => ({ id, views, likes, comments: 10 });
+  const low = engagementOutliers([norm("a", 10_000, 800), norm("b", 12_000, 900), norm("c", 9_000, 700), norm("d", 15_000, 1200), norm("e", 11_000, 850), norm("bot", 400_000, 900)]);
+  assert.deepEqual([...low], ["bot"]); assert.equal(engagementOutliers([norm("a", 10_000, 1), norm("b", 30_000, 1)]).size, 0, "too few videos to judge");
+  assert.equal(stillLinked({ platform: "tiktok", username: "Ann" }, [{ platform: "tiktok", username: "@ann" }]), true);
+  assert.equal(stillLinked({ platform: "tiktok", username: "ann" }, [{ platform: "instagram", username: "ann" }]), false);
+});
+
+test("checks: taken down early and the same video on two accounts are flagged; a statement splits clear and in question, and is approved on its own once cleared", async () => {
+  const tables = tablesFor(); const sb = fakeSb(tables);
+  const month = monthOf();
+  const day = 86_400_000, t0 = Date.now() - 5 * day;
+  tables.studio_creator_accounts.push({ id: "accA", user_id: ANN, platform: "tiktok", username: "ann", status: "active", flags: [] }, { id: "accB", user_id: ANN, platform: "instagram", username: "ann.ig", status: "active", flags: [] });
+  const v = (id: string, account: string, o: any) => ({ id, account_id: account, user_id: ANN, platform: account === "accA" ? "tiktok" : "instagram", platform_post_id: id, status: "eligible", proof: "linked", views: 100_000, likes: 8000, comments: 100, views_counted: 100_000, posted_at: new Date(t0).toISOString(), flags: [], ...o });
+  tables.studio_creator_videos.push(v("p1", "accA", { job_id: JOB, output_key: "out/1.mp4" }), v("p2", "accA", { job_id: null }), v("p3", "accB", { job_id: JOB, output_key: "out/1.mp4" }));
+  tables.studio_creator_earnings.push({ user_id: ANN, month, views: 300_000, amount_micros: 300_000_000, carried_in_micros: 0, status: "review" });
+  for (const id of ["p1", "p2", "p3"]) tables.studio_creator_earning_lines.push({ user_id: ANN, video_id: id, month, views: 100_000, amount_micros: 100_000_000 });
+  // p2 is no longer in the account's own list, which reaches back before it was posted
+  await checkAccountVideos(sb, tables.studio_creator_accounts[0], { ids: new Set(["p1"]), oldest: t0 - day });
+  const byId = (id: string) => tables.studio_creator_videos.find((x) => x.id === id);
+  assert.deepEqual(byId("p1").flags, ["same_video_twice"]); assert.deepEqual(byId("p2").flags, ["removed_early"]);
+  await checkAccountVideos(sb, tables.studio_creator_accounts[1], null);
+  assert.deepEqual(byId("p3").flags, ["same_video_twice"], "an incomplete list never says removed");
+  let r = await reviewStatement(sb, ANN, month);
+  assert.equal(r.question_micros, 300_000_000); assert.equal(r.clear_micros, 0);
+  assert.equal(await settleReviews(sb), 0);
+  assert.match(tables.studio_creator_earnings[0].note, /\$300\.00 in question/);
+  // the owner clears the twin; the video comes back up: the next check approves the statement
+  byId("p1").flags = []; byId("p3").flags = []; byId("p2").flags = [];
+  r = await reviewStatement(sb, ANN, month);
+  assert.equal(r.clear_micros, 300_000_000);
+  assert.equal(await settleReviews(sb), 1);
+  assert.equal(tables.studio_creator_earnings[0].status, "approved");
+});
+
+test("checks: the creator is told what to fix by email, once a week per issue unless the owner sends it now", async () => {
+  const tables = tablesFor(); const sb = fakeSb(tables);
+  const sent: any[] = [];
+  const fetchFn: any = async (_u: string, init: any) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ id: "m1" }), { status: 200 }); };
+  const env = { RESEND_API_KEY: "re_test", DASHBOARD_URL: "https://app.clone8.io" };
+  const issues = issuesFor([{ id: "acc", platform: "tiktok", username: "ann", status: "active", flags: ["bio_missing"] }], [{ id: "v1", status: "pending", proof: "linked", views: 50, caption: "c", flags: ["missing_tag"] }]);
+  assert.equal(await notifyCreator(sb, ANN, issues, { env, fetch: fetchFn }), true);
+  assert.equal(sent.length, 1); assert.match(sent[0].subject, /Fix 2 things/); assert.match(sent[0].text, /powered by @clone8\.io/); assert.match(sent[0].text, /#clone8partner/);
+  tables.studio_events = [{ user_id: ANN, kind: "email", name: "creator_issue_keys", props: { keys: ["bio_missing:acc", "missing_tag:v1"] }, created_at: new Date().toISOString() }];
+  assert.equal(await notifyCreator(sb, ANN, issues, { env, fetch: fetchFn }), false, "already told this week");
+  assert.equal(await notifyCreator(sb, ANN, issues, { env, fetch: fetchFn, force: true }), true);
+  assert.equal(await notifyCreator(sb, ANN, issuesFor([], [{ id: "v9", status: "eligible", proof: "linked", views: 9e5, flags: ["views_without_likes"] }]), { env, fetch: fetchFn, force: true }), false, "owner-only issues are not mailed to the creator");
+  assert.equal(sent.length, 2);
+});
+
+test("the scheduled pass: an account unlinked from Clone8 is flagged and not read; linked again, the flag goes and its videos are read", async () => {
+  const tables = tablesFor(); const sb = fakeSb(tables);
+  tables.studio_creator_members.push({ user_id: ANN, status: "active", terms_version: RULES.terms_version });
+  tables.studio_creator_accounts.push({ id: "accT", user_id: ANN, platform: "tiktok", username: "gone.account", status: "active", bio_ok: true, bio_checked_at: new Date().toISOString(), flags: [], enrolled_at: new Date(Date.now() - 86_400_000).toISOString() });
+  let reads = 0;
+  const deps: any = { log: () => {}, scrape: async () => ({ bio: "powered by @clone8.io", followers: 100 }), provider: { recentPosts: async () => { reads++; return []; } } };
+  await creatorTick(sb, deps);
+  assert.deepEqual(tables.studio_creator_accounts[0].flags, ["unlinked"]); assert.equal(reads, 0);
+  tables.studio_social_profiles[0].accounts.push({ platform: "tiktok", username: "gone.account" });
+  await creatorTick(sb, deps);
+  assert.deepEqual(tables.studio_creator_accounts[0].flags, []); assert.equal(reads, 1);
 });

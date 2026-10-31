@@ -260,7 +260,10 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
           if (e.a?.thumbnailUrl && !p.thumb_url) p.thumb_url = safeUrl(e.a.thumbnailUrl);
         }
       }
-      return posts.filter((p) => p.url);
+      const out = posts.filter((p) => p.url);
+      // "partial": Ayrshare could not read the whole list this time (a missing post then means nothing)
+      Object.defineProperty(out, "partial", { value: r.body?.status === "partial", enumerable: false });
+      return out;
     },
 
     async accountStats(profileKey, platforms): Promise<ProviderAccountStats[]> {

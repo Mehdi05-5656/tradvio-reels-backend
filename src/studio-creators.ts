@@ -16,31 +16,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSocialProvider, type ProviderPost, type SocialDeps, type SocialProvider } from "./social-provider.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
+import { checkAccountVideos, issuesFor, notifyCreator, reviewStatement, settleReviews, stillLinked } from "./studio-creator-checks.js";
 
-// Modelled on Higgsfield Earn (creators.higgsfield.ai/terms and its Platform Creator Agreement, read Oct 31 2026): organic
-// views only, a disclosure tag on every video (theirs is #higgsfieldpartner), videos kept public 90 days, one appeal per
-// rejection, clawback within 12 months when over 15% of views prove non-organic, 18+. The per-video minimum and the
-// monthly minimum payout follow comparable pay-per-view funds (AKOOL, Whop content rewards).
-export const RULES = {
-  terms_version: "2026-10-31",
-  cpm_usd: 1,
-  view_cap: 1_000_000,
-  view_window_days: 30,
-  // a video earns once it passes this many views (then every view up to the cap counts)
-  min_views: 1_000,
-  min_payout_usd: 50,
-  min_age: 18,
-  disclosure_tag: "#clone8partner",
-  keep_live_days: 90,
-  clawback_months: 12,
-  clawback_share: 0.15,
-  platforms: ["tiktok", "instagram"] as const,
-  bio_phrase: "powered by @clone8.io",
-  // the bio check accepts the handle or the domain, any case, with or without the "powered by"
-  bio_match: /@?clone8(\.io)?/i,
-  // a video's views are re-read for this long after posting (a little past the window so late counts settle)
-  sync_days: 35,
-};
+export { RULES } from "./studio-creator-rules.js";
+import { RULES } from "./studio-creator-rules.js";
 export type CreatorPlatform = (typeof RULES.platforms)[number];
 const MICROS_PER_VIEW = Math.round((RULES.cpm_usd * 1_000_000) / 1000);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -156,6 +135,10 @@ export async function syncAccount(sb: SupabaseClient, deps: Deps, account: any, 
     }
     if (account.status === "active") added += await accrueVideo(sb, row, now);
   }
+  // the checks that need the whole account: engagement against its own norm, videos taken down early, one video twice
+  const listed = posts.filter((x) => x.published_at);
+  const present = (posts as any).partial === true || !listed.length ? null : { ids: new Set(listed.map((x) => postIdOf(x.url) ?? String(x.id))), oldest: Math.min(...listed.map((x) => Date.parse(x.published_at!))) };
+  await checkAccountVideos(sb, account, present, now);
   await sb.from("studio_creator_accounts").update({ synced_at: now.toISOString(), updated_at: now.toISOString() }).eq("id", account.id);
   return { found: fresh.length, added_views: added };
 }
@@ -173,7 +156,12 @@ export async function closeMonths(sb: SupabaseClient, now: Date = new Date()): P
       const next = await sb.from("studio_creator_earnings").select("carried_in_micros,status").eq("user_id", e.user_id).eq("month", current).maybeSingle();
       if (next.data?.status === "open") await sb.from("studio_creator_earnings").update({ carried_in_micros: Number(next.data.carried_in_micros) + total, updated_at: now.toISOString() }).eq("user_id", e.user_id).eq("month", current);
       await sb.from("studio_creator_earnings").update({ status: "carried", note: `Under the $${RULES.min_payout_usd} minimum: carried into ${current.slice(0, 7)}`, updated_at: now.toISOString() }).eq("user_id", e.user_id).eq("month", e.month).eq("status", "open");
-    } else await sb.from("studio_creator_earnings").update({ status: "review", updated_at: now.toISOString() }).eq("user_id", e.user_id).eq("month", e.month).eq("status", "open");
+    } else {
+      // every check passed: approved on its own (the owner still pays and marks it paid); otherwise it waits in review
+      const r = await reviewStatement(sb, e.user_id, e.month);
+      const clean = r.question_micros === 0;
+      await sb.from("studio_creator_earnings").update({ status: clean ? "approved" : "review", note: clean ? `Every check passed (${now.toISOString().slice(0, 10)}); ready to pay` : `$${usd(r.question_micros).toFixed(2)} in question; $${usd(r.clear_micros).toFixed(2)} clear`, updated_at: now.toISOString() }).eq("user_id", e.user_id).eq("month", e.month).eq("status", "open");
+    }
     n++;
   }
   return n;
@@ -185,21 +173,36 @@ export async function creatorTick(sb: SupabaseClient, deps: Deps = {}, now: Date
   const accs = await sb.from("studio_creator_accounts").select("*").in("status", ["pending_bio", "active"]).limit(500);
   if (accs.error) throw accs.error;
   let views = 0, n = 0;
+  const people = new Set<string>();
   for (const a of (accs.data ?? []) as any[]) {
     try {
       const member = await sb.from("studio_creator_members").select("status").eq("user_id", a.user_id).maybeSingle();
       if (member.data?.status !== "active") continue;
       if (!a.bio_checked_at || now.getTime() - Date.parse(a.bio_checked_at) > 86_400_000) await checkBio(sb, deps, a);
       const fresh = await sb.from("studio_creator_accounts").select("*").eq("id", a.id).single();
-      const prof = await sb.from("studio_social_profiles").select("profile_key").eq("user_id", a.user_id).maybeSingle();
-      if (!prof.data?.profile_key) continue;
-      const r = await syncAccount(sb, deps, fresh.data ?? a, prof.data.profile_key, now);
+      const prof = await sb.from("studio_social_profiles").select("profile_key,accounts").eq("user_id", a.user_id).maybeSingle();
+      people.add(a.user_id);
+      // unlinked from Clone8: its videos cannot be read, so it is flagged (and the creator told) until linked again
+      const linked = stillLinked(fresh.data ?? a, (prof.data?.accounts ?? []) as any[]);
+      const accFlags: string[] = Array.isArray((fresh.data ?? a).flags) ? (fresh.data ?? a).flags : [];
+      if (linked === accFlags.includes("unlinked")) await sb.from("studio_creator_accounts").update({ flags: linked ? accFlags.filter((f) => f !== "unlinked") : [...accFlags, "unlinked"], updated_at: now.toISOString() }).eq("id", a.id);
+      if (!prof.data?.profile_key || !linked) continue;
+      const r = await syncAccount(sb, deps, { ...(fresh.data ?? a), flags: linked ? accFlags.filter((f) => f !== "unlinked") : accFlags }, prof.data.profile_key, now);
       views += r.added_views; n++;
     } catch (e: any) { log(`[creators] sync ${a.id}: ${String(e?.message ?? e).slice(0, 160)}`); }
+  }
+  // what each creator has to fix, by email (a week apart at most per issue)
+  for (const u of people) {
+    try {
+      const [ac, vi] = await Promise.all([sb.from("studio_creator_accounts").select("*").eq("user_id", u).neq("status", "removed"), sb.from("studio_creator_videos").select("*").eq("user_id", u).gte("posted_at", new Date(now.getTime() - RULES.keep_live_days * 86_400_000).toISOString()).limit(500)]);
+      if (await notifyCreator(sb, u, issuesFor((ac.data ?? []) as any[], (vi.data ?? []) as any[]), { env: deps.env, fetch: deps.fetch, log })) log(`[creators] told ${u} what to fix`);
+    } catch (e: any) { log(`[creators] notify ${u}: ${String(e?.message ?? e).slice(0, 120)}`); }
   }
   // closing only touches months before this one, so it is safe on every pass (and catches a missed 1st)
   const closed = await closeMonths(sb, now).catch((e) => { log(`[creators] close: ${String(e?.message ?? e).slice(0, 120)}`); return 0; });
   if (closed) log(`[creators] closed ${closed} statements`);
+  // statements waiting on an issue: approved on their own once it is cleared
+  await settleReviews(sb, now, log).catch((e) => log(`[creators] reviews: ${String(e?.message ?? e).slice(0, 120)}`));
   return { accounts: n, views };
 }
 
@@ -241,6 +244,9 @@ export async function creatorState(sb: SupabaseClient, u: string, env: Record<st
     linked,
     accounts: ((accounts.data ?? []) as any[]).map((a) => ({ id: a.id, platform: a.platform, username: a.username, status: a.status, bio_ok: a.bio_ok, bio_checked_at: a.bio_checked_at, followers: a.followers, enrolled_at: a.enrolled_at, synced_at: a.synced_at, flagged: (a.flags ?? []).length > 0 })),
     videos: ((videos.data ?? []) as any[]).map((v) => ({ id: v.id, platform: v.platform, url: v.url, caption: v.caption, thumb_url: v.thumb_url, posted_at: v.posted_at, views: Number(v.views), views_counted: Number(v.views_counted), earned_usd: usd(Number(v.views_counted) * MICROS_PER_VIEW), proof: v.proof, status: v.status, reject_reason: v.reject_reason, in_window: inWindow(v.posted_at), tagged: hasDisclosure(v.caption), below_min: Number(v.views) < RULES.min_views })),
+    // what the checks found that the creator can fix themselves (the Earn page lists it with how to fix it)
+    to_fix: issuesFor(((accounts.data ?? []) as any[]), ((videos.data ?? []) as any[]).filter((v) => v.posted_at && Date.now() - Date.parse(v.posted_at) <= RULES.keep_live_days * 86_400_000)).filter((i) => i.who === "creator").map(({ code, title, fix, target, ref, label, url }) => ({ code, title, fix, target, ref, label, url: url ?? null })),
+    under_review: issuesFor(((accounts.data ?? []) as any[]), ((videos.data ?? []) as any[])).filter((i) => i.who === "review").length,
     this_month: statements.find((s) => s.month === month) ?? { month, views: 0, amount_usd: 0, carried_in_usd: 0, total_usd: 0, status: "open", paid_at: null, note: null },
     statements,
     next_payout: nextPayout(),
@@ -412,17 +418,53 @@ export function registerCreators(app: Express, sbFn: () => SupabaseClient, deps:
         if (e.status === "paid") m.paid_usd += total; else if (e.status === "withheld") m.withheld_usd += total; else if (e.status === "review" || e.status === "approved") m.due_usd += total;
         byMonth.set(e.month, m);
       }
+      // every creator's statements that are not settled, split by the checks: clear to pay, in question, on hold
+      const r2 = (x: number) => Math.round(x * 100) / 100;
+      const totals = { paid_usd: 0, due_usd: 0, clear_usd: 0, in_question_usd: 0, on_hold_usd: 0, creators_with_issues: 0 };
+      const compliance = new Map<string, any>();
+      for (const m of (members.data ?? []) as any[]) {
+        const mine = ((earnings.data ?? []) as any[]).filter((e) => e.user_id === m.user_id);
+        let clear = 0, question = 0, onHold = 0; let issues: any[] = [];
+        const live = mine.filter((e) => ["open", "review", "approved"].includes(e.status));
+        for (const e of live) {
+          const rv = await reviewStatement(sb, m.user_id, e.month);
+          if (e.status === "approved") totals.due_usd += usd(Number(e.amount_micros) + Number(e.carried_in_micros));
+          else { clear += rv.clear_micros; question += rv.question_micros; }
+          onHold = Math.max(onHold, rv.on_hold_micros); issues = rv.issues;
+        }
+        if (!live.length) { const rv = await reviewStatement(sb, m.user_id, monthOf()); onHold = rv.on_hold_micros; issues = rv.issues; }
+        totals.paid_usd += mine.filter((e) => e.status === "paid").reduce((n, e) => n + usd(Number(e.amount_micros) + Number(e.carried_in_micros)), 0);
+        totals.clear_usd += usd(clear); totals.in_question_usd += usd(question); totals.on_hold_usd += usd(onHold);
+        if (issues.length) totals.creators_with_issues++;
+        const accs = ((accounts.data ?? []) as any[]).filter((a) => a.user_id === m.user_id);
+        compliance.set(m.user_id, { clear_usd: usd(clear), in_question_usd: usd(question), on_hold_usd: usd(onHold), issues, checked_at: accs.map((a) => a.synced_at ?? a.bio_checked_at).filter(Boolean).sort().at(-1) ?? null });
+      }
       res.json({
         rules: RULES,
+        totals: Object.fromEntries(Object.entries(totals).map(([k, v]) => [k, k === "creators_with_issues" ? v : r2(v as number)])),
         months: [...byMonth.values()].map((m) => ({ ...m, earned_usd: Math.round(m.earned_usd * 100) / 100, due_usd: Math.round(m.due_usd * 100) / 100, paid_usd: Math.round(m.paid_usd * 100) / 100, withheld_usd: Math.round(m.withheld_usd * 100) / 100 })).sort((a, b) => b.month.localeCompare(a.month)),
         creators: ((members.data ?? []) as any[]).map((m) => ({
           user_id: m.user_id, email: emails.get(m.user_id) ?? null, status: m.status, joined_at: m.created_at, payout_method: m.payout_method, payout_email: m.payout_email, legal_name: m.legal_name, country: m.country,
           accounts: ((accounts.data ?? []) as any[]).filter((a) => a.user_id === m.user_id).map((a) => ({ id: a.id, platform: a.platform, username: a.username, status: a.status, bio_ok: a.bio_ok, followers: a.followers, followers_at_enroll: a.followers_at_enroll, flags: a.flags })),
           statements: ((earnings.data ?? []) as any[]).filter((e) => e.user_id === m.user_id).map((e) => ({ month: e.month, views: Number(e.views), amount_usd: usd(Number(e.amount_micros)), total_usd: usd(Number(e.amount_micros) + Number(e.carried_in_micros)), status: e.status, paid_at: e.paid_at, payout_ref: e.payout_ref, note: e.note })),
+          compliance: compliance.get(m.user_id),
         })),
         // what needs a look: flagged videos (counting or not), then the biggest ones still waiting for proof
         review: ((flagged.data ?? []) as any[]).filter((v) => (v.flags ?? []).length > 0 || v.status === "pending").slice(0, 200).map((v) => ({ ...v, views: Number(v.views), views_counted: Number(v.views_counted), email: emails.get(v.user_id) ?? null })),
       });
+    } catch (e) { fail(res, e); }
+  });
+  // tell a creator now what they have to fix (the same email the checks send on their own, without the weekly wait)
+  app.post("/api/studio/admin/creators/:user/notify", async (req, res) => {
+    try {
+      const sb = await admin(req, res); if (!sb) return;
+      if (!UUID_RE.test(req.params.user)) throw new CreatorError("bad_request", "Which creator?");
+      const [ac, vi] = await Promise.all([sb.from("studio_creator_accounts").select("*").eq("user_id", req.params.user).neq("status", "removed"), sb.from("studio_creator_videos").select("*").eq("user_id", req.params.user).gte("posted_at", new Date(Date.now() - RULES.keep_live_days * 86_400_000).toISOString()).limit(500)]);
+      const issues = issuesFor((ac.data ?? []) as any[], (vi.data ?? []) as any[]);
+      if (!issues.some((i) => i.who === "creator")) throw new CreatorError("nothing_to_fix", "This creator has nothing to fix right now", 409);
+      const sent = await notifyCreator(sb, req.params.user, issues, { env, fetch: deps.fetch, log, force: true });
+      if (!sent) throw new CreatorError("mail_off", "Email is not set up, so nothing was sent", 503);
+      res.json({ ok: true, told: issues.filter((i) => i.who === "creator").length });
     } catch (e) { fail(res, e); }
   });
   app.post("/api/studio/admin/creators/statements", async (req, res) => {
