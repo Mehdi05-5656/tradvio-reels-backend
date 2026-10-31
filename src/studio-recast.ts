@@ -11,7 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
 import { targetsPrompt } from "./studio-people.js";
 import { PLANS, WINDOW, billableSeconds, windowSeconds } from "./studio.js";
-import { RECAST_RESOLUTION, studioCosts } from "./studio-pricing.js";
+import { RECAST_RESOLUTION, higgsfieldCostPerSecond, seedanceEditCostPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
 
 export const HF_BASE = "https://api.higgsfield.ai";
@@ -51,6 +51,9 @@ export type RecastDeps = {
   prescale?: (source: string, target: string, maxSeconds?: number, startSeconds?: number) => Promise<void>;
   /** Joins rendered pieces into one picture track (ffmpeg in production; tests inject one). */
   concat?: (pieces: string[], target: string) => Promise<void>;
+  /** Holds a too-short shot's last frame until it is `seconds` long, and cuts a rendered piece back to its shot. */
+  pad?: (source: string, target: string, seconds: number) => Promise<void>;
+  trim?: (source: string, target: string, seconds: number) => Promise<void>;
 };
 
 /** The platform console issues "id:secret" keys (sent as `Key id:secret`); the newer SDK keys are bearer tokens. */
@@ -188,6 +191,47 @@ export function chooseEngine(tool: SuiteTool, model: "full" | "light", window: n
   if (window > MAX_SECONDS.light + 0.05) return "seedance";
   return cuts.some((c) => c >= 0.5 && c < window - 0.5) ? "seedance" : "genjutsu";
 }
+/** The shots of a clip as Light pieces: one per shot (Light takes one continuous shot, at most 15 s), a long shot split
+ *  evenly, a shot under 4 s marked for padding (its last frame is held, and the result cut back to the shot). */
+export function shotPieces(window: number, cuts: number[], max: number = MAX_SECONDS.light): Array<{ start: number; end: number }> {
+  const total = Math.round(window * 100) / 100;
+  const bounds = [0, ...[...new Set(cuts.map((c) => Math.round(c * 100) / 100))].filter((c) => c >= 0.5 && c <= total - 0.5).sort((a, b) => a - b), total];
+  const out: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i + 1 < bounds.length; i++) {
+    const a = bounds[i], b = bounds[i + 1], n = Math.max(1, Math.ceil((b - a) / max - 1e-9));
+    for (let k = 0; k < n; k++) out.push({ start: Math.round((a + ((b - a) * k) / n) * 100) / 100, end: Math.round((a + ((b - a) * (k + 1)) / n) * 100) / 100 });
+  }
+  return out;
+}
+/** Seconds a request is billed for: its input, rounded up, never under the renderer's 4 s floor. */
+const billedSecondsOf = (p: { start: number; end: number }) => Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6);
+/** Most Light pieces one job sends at once (the platform runs 10 at a time on a funded account). */
+export const MAX_SHOT_PIECES = 12;
+/** The long path's plan, by what it costs us: every shot on Genjutsu Light, or the clip in up to 30 s Seedance pieces.
+ *  Light is about $0.20 a second and Seedance 2.5 about $0.48, so Light wins unless the clip is many very short shots
+ *  (each padded to 4 s) or more pieces than the platform runs together. `seedanceOnly` after Light refused the clip. */
+export function planLongPath(window: number, cuts: number[], env?: Record<string, string | undefined>, seedanceOnly = false) {
+  const seed = planPieces(window, cuts), light = shotPieces(window, cuts);
+  const seedUsd = seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceEditCostPerSecond(env);
+  const lightUsd = light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldCostPerSecond("light", env);
+  const useLight = !seedanceOnly && light.length <= MAX_SHOT_PIECES && lightUsd <= seedUsd;
+  return { engine: (useLight ? "light" : "seedance") as "light" | "seedance", pieces: useLight ? light : seed, usd: Math.round((useLight ? lightUsd : seedUsd) * 1000) / 1000, other_usd: Math.round((useLight ? seedUsd : lightUsd) * 1000) / 1000 };
+}
+/** A shot shorter than the renderer's floor, held on its last frame (sound padded with silence) to `seconds`. */
+export async function padClip(source: string, target: string, seconds: number) {
+  await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, "-vf", `tpad=stop_mode=clone:stop_duration=${seconds}`, "-af", "apad", "-t", seconds.toFixed(3), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", target], undefined, 120_000);
+}
+/** A rendered piece cut back to the length of the shot it stands for. */
+export async function trimClip(source: string, target: string, seconds: number) {
+  await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", source, "-t", seconds.toFixed(3), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", target], undefined, 120_000);
+}
+/** The words sent with a Genjutsu request: the swap prompt (or the cast / targets), the restyle note, or the cast. */
+function genjutsuPrompt(tool: SuiteTool, job: { options: any }): string | undefined {
+  const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
+  if (tool === "swap") return cast ? `${String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null);
+  if (tool === "restyle") return String(job.options?.prompt ?? "").trim() || undefined;
+  return cast ? castPrompt(cast) : undefined;
+}
 /** Rendered pieces joined into one picture track. Each piece is brought to the same size, rate and clock first (the
  *  concat filter, not the demuxer: pieces come back with differing frame rates and timebases, and the demuxer leaves
  *  gaps between them), so the result runs exactly as long as the pieces together. */
@@ -309,28 +353,44 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       // 2a. The long path: the clip in pieces of up to PIECE_SECONDS, cut at camera changes, rendered together.
       dir = dir ?? await mkdtemp(join(tmpdir(), "studio-recast-"));
       if (!original) { original = join(dir, "original.mp4"); const src = await sb.storage.from("studio-uploads").download(sourceKey!); if (src.error || !src.data) throw src.error ?? new RecastError("source_missing"); await writeFile(original, Buffer.from(await src.data.arrayBuffer())); }
-      let pieces: Array<{ start: number; end: number; request_id: string | null; input_key: string }> = Array.isArray(job.progress?.pieces) ? job.progress.pieces : [];
+      type Piece = { start: number; end: number; request_id: string | null; input_key: string | null; engine?: "light" | "seedance" };
+      let pieces: Piece[] = Array.isArray(job.progress?.pieces) ? job.progress.pieces : [];
       if (!pieces.length) {
+        // the plan is stored before anything is sent, so a restart sends only what is still missing
         const cuts = await (deps.sceneCuts ?? sceneCuts)(original, lightWindow).catch(() => [] as number[]);
-        const plan = planPieces(lightWindow, cuts);
-        await renew(sb, job, { done: 0, total: plan.length, note: plan.length > 1 ? `Preparing ${plan.length} pieces` : "Preparing your video" });
+        const plan = planLongPath(lightWindow, cuts, deps.env, job.progress?.seedance_only === true);
+        pieces = plan.pieces.map((p) => ({ start: p.start, end: p.end, request_id: null, input_key: null, engine: plan.engine }));
+        await renew(sb, job, { pieces, piece_engine: plan.engine, done: 0, total: pieces.length, note: pieces.length > 1 ? `Preparing ${pieces.length} pieces` : "Preparing your video" });
+        log(`[recast] long path plan ${JSON.stringify({ job: job.id, engine: plan.engine, pieces: pieces.length, usd: plan.usd, instead_of: plan.other_usd })}`);
+      }
+      if (pieces.some((p) => !p.request_id)) {
         const images = await characterUrls(sb, deps, job, false);
         const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
-        const prompt = cast ? `${String(job.options?.prompt ?? "").trim() || LONG_PROMPT.replace("the person in the video with the character from the reference image", "the people in the video with the characters from the reference images")} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || LONG_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null);
-        for (const [i, p] of plan.entries()) {
+        const longPrompt = cast ? `${String(job.options?.prompt ?? "").trim() || LONG_PROMPT.replace("the person in the video with the character from the reference image", "the people in the video with the characters from the reference images")} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || LONG_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null);
+        for (const [i, p] of pieces.entries()) {
+          if (p.request_id) continue;
+          const len = Math.round((p.end - p.start) * 100) / 100;
           const file = join(dir, `piece-${i + 1}.mp4`);
-          await (deps.prescale ?? prescaleSource)(original, file, Math.round((p.end - p.start) * 100) / 100, p.start);
+          await (deps.prescale ?? prescaleSource)(original, file, len, p.start);
+          // Light refuses a source under 4 s: hold the shot's last frame, and cut the result back after
+          if (p.engine === "light" && len < MIN_SECONDS) { const padded = join(dir, `piece-${i + 1}-padded.mp4`); await (deps.pad ?? padClip)(file, padded, MIN_SECONDS); await writeFile(file, await readFile(padded)); }
           const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-${i + 1}.mp4`;
           const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(file), { contentType: "video/mp4", upsert: true });
           if (put.error) throw put.error;
           const signed = await sb.storage.from("studio-outputs").createSignedUrl(inputKey, 7200);
           if (signed.error || !signed.data) throw signed.error ?? new RecastError("source_missing");
-          await renew(sb, job, { note: plan.length > 1 ? `Sending piece ${i + 1} of ${plan.length} to the renderer` : "Sending your video to the renderer" });
-          const r = await hf(deps, `/${LONG_ENDPOINT}`, { method: "POST", body: JSON.stringify({ video_url: signed.data.signedUrl, image_urls: images.slice(0, 8), prompt, resolution: RECAST_RESOLUTION, generate_audio: false }), idempotency: `${job.id}:${job.attempts}:${i + 1}` });
-          if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
-          pieces.push({ start: p.start, end: p.end, request_id: String(r.request_id), input_key: inputKey });
+          await renew(sb, job, { note: pieces.length > 1 ? `Sending piece ${i + 1} of ${pieces.length} to the renderer` : "Sending your video to the renderer" });
+          let requestId: string;
+          if (p.engine === "light") {
+            requestId = (await submitRecast(deps, { tool, model: "light", videoUrl: signed.data.signedUrl, imageUrls: images, prompt: genjutsuPrompt(tool, job), idempotencyKey: `${job.id}:${job.attempts}:${i + 1}`, resolution: RECAST_RESOLUTION })).request_id;
+          } else {
+            const r = await hf(deps, `/${LONG_ENDPOINT}`, { method: "POST", body: JSON.stringify({ video_url: signed.data.signedUrl, image_urls: images.slice(0, 8), prompt: longPrompt, resolution: RECAST_RESOLUTION, generate_audio: false }), idempotency: `${job.id}:${job.attempts}:${i + 1}` });
+            if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
+            requestId = String(r.request_id);
+          }
+          pieces[i] = { ...p, request_id: requestId, input_key: inputKey };
           await renew(sb, job, { pieces, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString() });
-          log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, engine, piece: i + 1, of: plan.length, request: r.request_id })}`);
+          log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, engine: p.engine ?? "seedance", piece: i + 1, of: pieces.length, request: requestId })}`);
         }
       }
       // wait for every piece; one refusal fails the job (the long path has no shorter fallback)
@@ -366,7 +426,10 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
         const bytes = Buffer.from(await dl.arrayBuffer());
         if (!bytes.length || bytes.length > OUTPUT_LIMIT) throw new RecastError("output_too_large");
-        const f = join(dir, `out-${i + 1}.mp4`); await writeFile(f, bytes); files.push(f);
+        const f = join(dir, `out-${i + 1}.mp4`); await writeFile(f, bytes);
+        const p = pieces[i], len = Math.round((p.end - p.start) * 100) / 100;
+        if (p.engine === "light" && len < MIN_SECONDS) { const cut = join(dir, `out-${i + 1}-cut.mp4`); await (deps.trim ?? trimClip)(f, cut, len); files.push(cut); }
+        else files.push(f);
       }
       const joined = join(dir, "joined.mp4"), out = join(dir, "out.mp4");
       if (files.length > 1) await (deps.concat ?? concatVideos)(files, joined); else await writeFile(joined, await readFile(files[0]));
@@ -393,8 +456,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           await renew(sb, job, { note: "Sending your video to the renderer", input_key: inputKey });
         } else await renew(sb, job, { done: 0, total: 1, note: "Sending the clip to the renderer" });
         const images = await characterUrls(sb, deps, job, tool === "restyle");
-        const cast = Array.isArray(job.options?.cast) && job.options.cast.length > 1 ? job.options.cast : null;
-        const prompt = tool === "swap" ? (cast ? `${String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT} ${castPrompt(cast)}` : targetsPrompt(String(job.options?.prompt ?? "").trim() || SWAP_DEFAULT_PROMPT, Array.isArray(job.options?.targets) ? job.options.targets : null)) : tool === "restyle" ? String(job.options?.prompt ?? "").trim() || undefined : cast ? castPrompt(cast) : undefined;
+        const prompt = genjutsuPrompt(tool, job);
         const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.attempts ? `${job.id}:${job.attempts}` : job.id, resolution: RECAST_RESOLUTION });
         requestId = sub.request_id;
         await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
@@ -418,7 +480,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           // to the first cut. Attempts count claims, this one included, so 1 is the first run and 2 the retry.
           if (code === "recast_failed" && job.attempts < 2) {
             if (model === "light" && (tool === "swap" || tool === "recast" || tool === "trend") && !drivingUrl) {
-              await renew(sb, job, { request_id: null, submitted_at: null, engine: "seedance", note: "The renderer gave up once; trying again on the long path" });
+              await renew(sb, job, { request_id: null, submitted_at: null, engine: "seedance", seedance_only: true, note: "The renderer gave up once; trying again on the long path" });
               throw new RecastError(code, "generation failed once, retrying on the long path", true);
             }
             let cutAt: number | null = null;
@@ -482,7 +544,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const charged = Math.min(job.credits_reserved, billed * per);
     const pieceCount = Array.isArray(job.progress?.pieces) ? job.progress.pieces.length : 1;
     const castCount = Array.isArray(job.options?.cast) ? job.options.cast.length : 1;
-    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, engine, request_id: requestId, audio: model === "full" || engine === "seedance" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null, ...(castCount > 1 ? { cast: castCount } : {}), ...(engine === "seedance" && pieceCount > 1 ? { pieces: pieceCount, note: `Rendered in ${pieceCount} pieces at the camera changes and joined` } : {}), ...(cutAt ? { cut_at: cutAt, note: `Cut at the first shot change (${cutAt} s): the renderer takes one continuous shot` } : {}) }];
+    const outputs = [{ index: 1, key, poster_key: up2.error ? undefined : key.replace(/\.mp4$/, ".jpg"), bytes: video.length, duration: Math.round(seconds * 1000) / 1000, model, tool, engine, request_id: requestId, audio: model === "full" || engine === "seedance" ? "muxed_from_source" : "native", input_key: job.progress?.input_key ?? null, ...(castCount > 1 ? { cast: castCount } : {}), ...(engine === "seedance" ? { piece_engine: job.progress?.piece_engine ?? "seedance" } : {}), ...(engine === "seedance" && pieceCount > 1 ? { pieces: pieceCount, note: `Rendered in ${pieceCount} pieces at the camera changes and joined` } : {}), ...(cutAt ? { cut_at: cutAt, note: `Cut at the first shot change (${cutAt} s): the renderer takes one continuous shot` } : {}) }];
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;

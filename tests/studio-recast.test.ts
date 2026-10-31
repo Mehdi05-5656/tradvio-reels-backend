@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
+import { higgsfieldAuth, submitRecast, pollRecast, runRecastJob, muxAudio, probeSeconds, makePoster, prescaleSource, probeDimensions, probeStream, inputScaleFilter, INPUT_MIN_PIXELS, sceneCuts, openingShot, planPieces, chooseEngine, shotPieces, planLongPath, LONG_ENDPOINT, concatVideos, castPrompt, MODELS, MAX_SECONDS, HF_BASE, endpointFor, SWAP_DEFAULT_PROMPT } from "../src/studio-recast.js";
 import { quote } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", TOKEN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PHOTO = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -278,41 +278,77 @@ test("pieces: at most 30 s each, ending on a camera change when one falls late i
   assert.equal(chooseEngine("recast", "light", 10, [0.2]), "genjutsu", "a cut in the first half second is the clip starting, not a shot change");
 });
 
-test("the long path: a 44 s multi-shot Light swap is cut into two pieces at a camera change, rendered together, joined, and given its own sound back", async () => {
+test("the long path by cost: a 44 s multi-shot Light swap renders shot by shot on Light (about $10, not $21.65 on Seedance), short shots padded and cut back", async () => {
+  const calls: any[] = [];
+  const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`;
+  const fetchFn: any = async (url: string, init: any = {}) => {
+    calls.push({ url, method: init.method ?? "GET", headers: init.headers, body: init.body ? JSON.parse(init.body) : undefined });
+    const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
+    if (init.method === "HEAD") return { ok: true, status: 200 };
+    if (url === LIGHT || url === `${HF_BASE}/${LONG_ENDPOINT}`) { const n = calls.filter((c) => c.method === "POST").length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+    const m = url.match(/\/requests\/(piece_\d+)\/status$/); if (m) return res(200, { status: "completed", video: { url: `https://cdn.example/${m[1]}.mp4` } });
+    if (url.startsWith("https://cdn.example/piece_")) return res(200, Buffer.from("video"), true);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const { writeFile: wf } = await import("node:fs/promises");
+  const prescales: any[] = [], joined: any[] = [], muxed: any[] = [], padded: number[] = [], trimmed: number[] = [];
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 43.5 }, name: "podcast.mp4" }] });
+  const d = deps(fetchFn, {
+    sceneCuts: async () => [6.9, 7.37, 9.7, 22.1],
+    prescale: async (_s: string, t: string, max?: number, start?: number) => { prescales.push([start ?? 0, max]); await wf(t, "piece"); },
+    pad: async (_s: string, t: string, secs: number) => { padded.push(secs); await wf(t, "padded"); },
+    trim: async (_s: string, t: string, secs: number) => { trimmed.push(secs); await wf(t, "trimmed"); },
+    concat: async (files: string[], t: string) => { joined.push(files.length); await wf(t, "joined"); },
+    mux: async (r: string, s: string, t: string) => { muxed.push([r.split("/").pop(), s.split("/").pop()]); await wf(t, "final"); },
+    probeSeconds: async () => 43.4,
+  });
+  const out = await runRecastJob(sb, d, job({ tool: "swap", options: { model: "light", seconds: 44, character: "noah", character_asset_id: null }, credits_reserved: 44 * 22 }));
+  assert.equal(out, "done");
+  assert.deepEqual(prescales, [[0, 6.9], [6.9, 0.47], [7.37, 2.33], [9.7, 12.4], [22.1, 10.7], [32.8, 10.7]], "one piece a shot; the 21.4 s shot split in two");
+  assert.deepEqual(padded, [4, 4], "the two shots under 4 s are held to 4 s"); assert.deepEqual(trimmed, [0.47, 2.33], "and cut back after");
+  const submits = calls.filter((c) => c.method === "POST");
+  assert.ok(submits.every((c) => c.url === LIGHT), "every piece goes to Light");
+  assert.match(submits[0].body.prompt, /Replace the person/); assert.equal(submits[0].body.resolution, "720p");
+  assert.equal(submits[0].headers["idempotency-key"], `${JOB}:1:1`); assert.equal(submits[5].headers["idempotency-key"], `${JOB}:1:6`);
+  assert.deepEqual(joined, [6]); assert.deepEqual(muxed, [["joined.mp4", "original.mp4"]], "the person's own sound goes back on the joined picture");
+  const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
+  assert.equal(done.p_outputs[0].piece_engine, "light"); assert.equal(done.p_outputs[0].pieces, 6); assert.equal(done.p_outputs[0].audio, "muxed_from_source");
+  assert.equal(done.p_credits_charged, 44 * 22, "44 s at the Light rate");
+  const plan = planLongPath(43.5, [6.9, 7.37, 9.7, 22.1], {});
+  assert.equal(plan.engine, "light"); assert.equal(plan.usd, 10); assert.equal(plan.other_usd, 21.645);
+});
+
+test("the long path by cost: many very short shots stay on Seedance, in up to 30 s pieces", async () => {
   const calls: any[] = [];
   const fetchFn: any = async (url: string, init: any = {}) => {
     calls.push({ url, method: init.method ?? "GET", headers: init.headers, body: init.body ? JSON.parse(init.body) : undefined });
     const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
     if (init.method === "HEAD") return { ok: true, status: 200 };
     if (url === `${HF_BASE}/${LONG_ENDPOINT}`) { const n = calls.filter((c) => c.url === url).length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
-    const m = url.match(/\/requests\/(piece_\d)\/status$/); if (m) return res(200, { status: "completed", video: { url: `https://cdn.example/${m[1]}.mp4` } });
-    if (url.startsWith("https://cdn.example/piece_")) return res(200, Buffer.from(`video-${url.slice(-11, -4)}`), true);
+    const m = url.match(/\/requests\/(piece_\d+)\/status$/); if (m) return res(200, { status: "completed", video: { url: `https://cdn.example/${m[1]}.mp4` } });
+    if (url.startsWith("https://cdn.example/piece_")) return res(200, Buffer.from("video"), true);
     throw new Error(`unexpected fetch ${url}`);
   };
   const { writeFile: wf } = await import("node:fs/promises");
-  const prescales: any[] = [], joined: any[] = [], muxed: any[] = [];
-  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 43.5 }, name: "podcast.mp4" }] });
-  const d = deps(fetchFn, {
-    sceneCuts: async () => [6.9, 7.37, 9.7, 22.1],
-    prescale: async (_s: string, t: string, max?: number, start?: number) => { prescales.push([start ?? 0, max]); await wf(t, "piece"); },
-    concat: async (files: string[], t: string) => { joined.push(files.length); await wf(t, "joined"); },
-    mux: async (r: string, s: string, t: string) => { muxed.push([r.split("/").pop(), s.split("/").pop()]); await wf(t, "final"); },
-    probeSeconds: async () => 43.4,
-  });
-  const out = await runRecastJob(sb, d, job({ options: { model: "light", seconds: 44, character: "noah", character_asset_id: null }, credits_reserved: 44 * 22 }));
+  const cuts = Array.from({ length: 39 }, (_, i) => i + 1); // a cut every second: 40 one-second shots
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 40 }, name: "fast.mp4" }] });
+  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => cuts, prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, concat: async (_f: string[], t: string) => { await wf(t, "j"); }, mux: async (_r: string, _s: string, t: string) => { await wf(t, "f"); }, probeSeconds: async () => 40 }), job({ options: { model: "light", seconds: 40, character: "noah", character_asset_id: null }, credits_reserved: 40 * 22 }));
   assert.equal(out, "done");
-  assert.deepEqual(prescales, [[0, 22.1], [22.1, 21.4]], "two pieces, cut at the 22.1 s camera change");
-  const submits = calls.filter((c) => c.url === `${HF_BASE}/${LONG_ENDPOINT}`);
-  assert.equal(submits.length, 2);
-  assert.equal(submits[0].body.generate_audio, false, "the renderer makes no sound of its own"); assert.equal(submits[0].body.resolution, "720p"); assert.match(submits[0].body.prompt, /Replace the person/); assert.ok(Array.isArray(submits[0].body.image_urls) && submits[0].body.image_urls.length === 1);
-  assert.equal(submits[0].headers["idempotency-key"], `${JOB}:1:1`); assert.equal(submits[1].headers["idempotency-key"], `${JOB}:1:2`);
-  assert.deepEqual(joined, [2]); assert.deepEqual(muxed, [["joined.mp4", "original.mp4"]], "the person's own sound goes back on the joined picture");
-  const done = sb.calls.find((c: any) => c.name === "studio_complete").args;
-  assert.equal(done.p_outputs[0].engine, "seedance"); assert.equal(done.p_outputs[0].pieces, 2); assert.match(done.p_outputs[0].note, /2 pieces/); assert.equal(done.p_outputs[0].audio, "muxed_from_source");
-  assert.equal(done.p_credits_charged, 44 * 22, "44 s at the Light rate");
-  const notes = sb.calls.filter((c: any) => c.name === "studio_renew").map((c: any) => c.args.p_progress.note);
-  assert.ok(notes.some((n: string) => /Preparing 2 pieces/.test(n)) && notes.some((n: string) => /Joining the pieces/.test(n)));
-  assert.equal(sb.uploads.filter((u: any) => /input-\d\.mp4$/.test(u.key)).length, 2, "each piece is staged for the renderer");
+  const submits = calls.filter((c) => c.method === "POST");
+  assert.ok(submits.length === 2 && submits.every((c) => c.url === `${HF_BASE}/${LONG_ENDPOINT}`), "two Seedance pieces");
+  assert.equal(submits[0].body.generate_audio, false); assert.equal(submits[0].body.resolution, "720p");
+  assert.equal(sb.calls.find((c: any) => c.name === "studio_complete").args.p_outputs[0].piece_engine, "seedance");
+});
+
+test("the long path: shots, costs and the Seedance-only retry", () => {
+  assert.deepEqual(shotPieces(12, []), [{ start: 0, end: 12 }]);
+  assert.deepEqual(shotPieces(31, []), [{ start: 0, end: 10.33 }, { start: 10.33, end: 20.67 }, { start: 20.67, end: 31 }], "a long shot in even parts of at most 15 s");
+  assert.deepEqual(shotPieces(10, [0.2, 5, 9.8]), [{ start: 0, end: 5 }, { start: 5, end: 10 }], "cuts at the very start or end are not shots");
+  assert.equal(planLongPath(44, [], {}).engine, "light");
+  assert.equal(planLongPath(44, [], {}, true).engine, "seedance", "after Light refused the clip, Seedance only");
+  assert.equal(planLongPath(60, Array.from({ length: 14 }, (_, i) => (i + 1) * 4), {}).engine, "seedance", "more pieces than the platform runs together");
+  const cheapSeed = planLongPath(20, [5, 10, 15], { HIGGSFIELD_SEEDANCE_DISCOUNT: "0.9" });
+  assert.equal(cheapSeed.engine, "seedance", "the cheaper one wins when the discounts change");
 });
 
 test("a Light clip refused by Genjutsu is retried on the long path instead of being cut", async () => {
@@ -322,6 +358,7 @@ test("a Light clip refused by Genjutsu is retried on the long path instead of be
   assert.equal(out, "requeued");
   const renewed = sb.calls.filter((c: any) => c.name === "studio_renew").at(-1).args.p_progress;
   assert.equal(renewed.engine, "seedance"); assert.match(renewed.note, /long path/); assert.equal(renewed.request_id, null);
+  assert.equal(renewed.seedance_only, true, "the retry does not send the same clip to Light again");
 });
 
 
@@ -371,7 +408,9 @@ test("the long path stops paying for the other pieces when one is refused", asyn
     calls.push({ url, method: init.method ?? "GET" });
     const res = (status: number, body: any) => ({ ok: status < 300, status, text: async () => JSON.stringify(body), arrayBuffer: async () => body });
     if (init.method === "HEAD") return { ok: true, status: 200 };
-    if (url === `${HF_BASE}/${LONG_ENDPOINT}`) { const n = calls.filter((c) => c.url === url).length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+    if (init.method === "POST" && (url === `${HF_BASE}/${LONG_ENDPOINT}` || /genjutsu-light\//.test(url))) { const n = calls.filter((c) => c.method === "POST").length; return res(200, { status: "queued", request_id: `piece_${n}` }); }
+    if (/\/requests\/piece_[34]\/status$/.test(url)) return res(200, { status: "in_progress" });
+    if (/\/requests\/piece_[34]\/cancel$/.test(url)) return res(200, { status: "cancelled" });
     if (url.endsWith("/requests/piece_1/status")) return res(200, { status: "in_progress" });
     if (url.endsWith("/requests/piece_2/status")) return res(200, { status: "failed", error: "Generation failed" });
     if (url.endsWith("/requests/piece_1/cancel")) return res(200, { status: "cancelled" });
@@ -383,4 +422,24 @@ test("the long path stops paying for the other pieces when one is refused", asyn
   assert.equal(out, "failed");
   assert.ok(calls.some((c) => c.method === "POST" && c.url.endsWith("/requests/piece_1/cancel")), "the piece still rendering is cancelled");
   assert.equal(sb.calls.at(-1).args.p_reason, "recast_failed");
+});
+
+test("a long-path job that stopped half way through sending sends only the pieces still missing", async () => {
+  const calls: any[] = [];
+  const LIGHT = `${HF_BASE}/${endpointFor("swap", "light")}`;
+  const fetchFn: any = async (url: string, init: any = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    const res = (status: number, body: any, raw = false) => ({ ok: status < 300, status, text: async () => (raw ? body : JSON.stringify(body)), arrayBuffer: async () => body });
+    if (init.method === "HEAD") return { ok: true, status: 200 };
+    if (url === LIGHT) return res(200, { status: "queued", request_id: "piece_new" });
+    const m = url.match(/\/requests\/(piece_\w+)\/status$/); if (m) return res(200, { status: "completed", video: { url: `https://cdn.example/${m[1]}.mp4` } });
+    if (url.startsWith("https://cdn.example/")) return res(200, Buffer.from("video"), true);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const { writeFile: wf } = await import("node:fs/promises");
+  const sb = fakeSb(job(), { assets: [{ id: ASSET, user_id: ANN, kind: "video", status: "ready", object_key: `${ANN}/${ASSET}.mp4`, probe: { duration: 30 }, name: "two.mp4" }] });
+  const half = { engine: "seedance", piece_engine: "light", submitted_at: new Date().toISOString(), pieces: [{ start: 0, end: 15, request_id: "piece_old", input_key: "k1", engine: "light" }, { start: 15, end: 30, request_id: null, input_key: null, engine: "light" }] };
+  const out = await runRecastJob(sb, deps(fetchFn, { sceneCuts: async () => [15], prescale: async (_s: string, t: string) => { await wf(t, "piece"); }, concat: async (f: string[], t: string) => { assert.equal(f.length, 2); await wf(t, "j"); }, mux: async (_r: string, _s: string, t: string) => { await wf(t, "f"); }, probeSeconds: async () => 30 }), job({ tool: "swap", attempts: 2, progress: half, options: { model: "light", seconds: 30, character: "noah", character_asset_id: null }, credits_reserved: 30 * 22 }));
+  assert.equal(out, "done");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1, "only the missing piece is sent; the first is not paid for twice");
 });

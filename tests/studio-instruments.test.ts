@@ -67,7 +67,8 @@ test("media inputs name library assets by id, single or list, and required media
 });
 
 test("the list-price table knows the published families and prices in seconds or images; credits clear the margin", () => {
-  assert.deepEqual(listPrice("bytedance/seedance-2.5/text-to-video"), { per: "second", usd: 0.206 });
+  assert.equal(listPrice("bytedance/seedance-2.5/text-to-video")!.by_resolution!["720p"], 0.401, "Seedance 2.5 by output size; 720p is its default");
+  assert.equal(listPrice("bytedance/seedance-2.5/video-edit")!.by_resolution!["720p"], 0.481, "video edit as our Oct 30 bills show it, not the $0.206 'from' price");
   assert.deepEqual(listPrice("lightricks/ltx-2.5/text-to-video/pro"), { per: "second", usd: 0.12 });
   assert.deepEqual(listPrice("recraft/v4.1/utility/text-to-image"), { per: "image", usd: 0.035 });
   assert.equal(listPrice("pixverse/v6/text-to-video"), null);
@@ -76,7 +77,8 @@ test("the list-price table knows the published families and prices in seconds or
   assert.equal(tableUnits(seedance, {}, null), 5, "the schema default");
   assert.equal(tableUnits(instrumentById("bytedance/seedance-2.5/video-edit", ENV)!, {}, 6.02), 7, "a source's seconds, rounded up with the tenth added");
   assert.equal(tableUnits(soul, { batch_size: 3 }, null), 3);
-  assert.equal(tableUsd(seedance, { duration: 10 }, null), 2.06);
+  assert.equal(Math.round(tableUsd(seedance, { duration: 10 }, null)! * 1000) / 1000, 4.01, "720p by default");
+  assert.equal(Math.round(tableUsd(seedance, { duration: 10, resolution: "480p" }, null)! * 1000) / 1000, 1.45, "480p is the page's price");
   const credits = instrumentCredits(2.06, PLANS, {});
   // margin rule: cost at most half of what the credits earn at the cheapest plan's credit value
   const floor = Math.min(...PLANS.flatMap((p) => [(p.monthly_usd * 0.971 - 0.3) / p.credits, (p.annual_usd_per_month * 0.971 - 0.3) / p.credits]));
@@ -99,7 +101,7 @@ test("a quote prices through the estimate endpoint, falls back to the table, and
   assert.ok(q.credits >= 1); assert.match(q.summary, /6 s · \d+/);
   // table fallback
   const t = await quoteInstrument({ fetch: fetchFn, env: ENV }, PLANS, { endpoint: "bytedance/seedance-2.5/text-to-video", params: { prompt: "a dog", duration: 4 } }, assets);
-  assert.equal(t.options.priced_by, "table"); assert.equal(t.options.usd, 0.824);
+  assert.equal(t.options.priced_by, "table"); assert.equal(t.options.usd, 1.604);
   // an image model's summary speaks in images
   const s = await quoteInstrument({ fetch: fetchFn, env: ENV }, PLANS, { endpoint: "higgsfield-ai/soul/v2/standard", params: { prompt: "portrait", batch_size: 4 } }, assets);
   assert.match(s.summary, /^4 images · /);

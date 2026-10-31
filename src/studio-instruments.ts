@@ -170,9 +170,19 @@ export const inputAssetIds = (inputs: Record<string, string | string[]>): string
 // margin rule. The table below is the published list price (open.higgsfield.ai, Oct 29, 2026) for when the
 // estimate is unavailable; a family absent from both cannot be quoted.
 // ---------------------------------------------------------------------------------------------------
-export type UnitPrice = { per: "second" | "image"; usd: number };
+/** `by_resolution`: what a second costs at each output size; `usd` is used when the size is not one of them. */
+export type UnitPrice = { per: "second" | "image"; usd: number; by_resolution?: Partial<Record<string, number>> };
+// Seedance bills by output size, and our Oct 30 2026 bills put Seedance 2.5 video edit at $0.481 a second at 720p (its
+// default size), 2.76 times the 480p page price. The $0.206 "from" price undercharged every 720p run by more than half.
+// 480p is the page's; 720p is measured for video edit and derived by the same ratio for the others; 1080p is 720p
+// scaled by pixels (2.25x). All unmeasured ones are marked as estimates in the code that uses them.
+const SEEDANCE_25_EDIT = { "480p": 0.174, "720p": 0.481, "1080p": 1.08 }, SEEDANCE_25_GEN = { "480p": 0.145, "720p": 0.401, "1080p": 0.9 };
+const SEEDANCE_20_REF = { "480p": 0.118, "720p": 0.326, "1080p": 0.734 }, SEEDANCE_20_GEN = { "480p": 0.099, "720p": 0.274, "1080p": 0.616 };
 export const LIST_PRICES: Record<string, UnitPrice> = {
-  "bytedance/seedance-2.5": { per: "second", usd: 0.206 }, "bytedance/seedance-2.0": { per: "second", usd: 0.141 },
+  "bytedance/seedance-2.5": { per: "second", usd: 0.401, by_resolution: SEEDANCE_25_GEN },
+  "bytedance/seedance-2.5/video-edit": { per: "second", usd: 0.481, by_resolution: SEEDANCE_25_EDIT }, "bytedance/seedance-2.5/video-extend": { per: "second", usd: 0.481, by_resolution: SEEDANCE_25_EDIT },
+  "bytedance/seedance-2.5/reference-to-video": { per: "second", usd: 0.481, by_resolution: SEEDANCE_25_EDIT },
+  "bytedance/seedance-2.0": { per: "second", usd: 0.274, by_resolution: SEEDANCE_20_GEN }, "bytedance/seedance-2.0/reference-to-video": { per: "second", usd: 0.326, by_resolution: SEEDANCE_20_REF },
   "minimax/h3": { per: "second", usd: 0.13 }, "alibaba/wan-3.0-prime": { per: "second", usd: 0.068 }, "alibaba/wan-3.0": { per: "second", usd: 0.05 },
   "higgsfield/cinema-studio": { per: "second", usd: 0.206 }, "kling-video/v3.0": { per: "second", usd: 0.084 }, "kling-video/v3.0-turbo": { per: "second", usd: 0.084 },
   "lightricks/ltx-2.5/image-to-video/fast": { per: "second", usd: 0.09 }, "lightricks/ltx-2.5/text-to-video/fast": { per: "second", usd: 0.09 },
@@ -206,7 +216,9 @@ export function tableUnits(inst: Instrument, params: Record<string, any>, source
 export function tableUsd(inst: Instrument, params: Record<string, any>, sourceSeconds: number | null): number | null {
   if (inst.pricing) return inst.pricing.usd * tableUnits(inst, params, sourceSeconds);
   const p = listPrice(apiPath(inst));
-  return p ? p.usd * tableUnits(inst, params, sourceSeconds) : null;
+  if (!p) return null;
+  const size = String(params.resolution ?? inst.schema?.properties?.resolution?.default ?? "");
+  return (p.by_resolution?.[size] ?? p.usd) * tableUnits(inst, params, sourceSeconds);
 }
 /** What a unit is called on a card: "a second", "an image", "a minute", "1,000 characters", "a sound", "an hour". */
 export function unitLabel(inst: Instrument): string {
