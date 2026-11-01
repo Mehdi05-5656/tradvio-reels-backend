@@ -184,7 +184,11 @@ function fakeSb(tables: Record<string, any[]>) {
         is(k: string, v: any) { filters.push((r) => (r[k] ?? null) === v); return q; },
         in(k: string, v: any[]) { filters.push((r) => v.includes(r[k])); return q; },
         not(k: string, _op: string, _v: any) { filters.push((r) => r[k] != null); return q; },
-        or(expr: string) { const lt = expr.match(/schedule_at\.lt\.(.+)$/)?.[1]; filters.push((r) => r.schedule_at == null || (lt ? r.schedule_at < lt : false)); return q; },
+        or(expr: string) {
+          const gte = expr.match(/schedule_at\.gte\.([^,]+),/)?.[1];
+          if (gte) { filters.push((r) => (r.schedule_at ? r.schedule_at >= gte : r.created_at >= gte)); return q; }
+          const lt = expr.match(/schedule_at\.lt\.(.+)$/)?.[1]; filters.push((r) => r.schedule_at == null || (lt ? r.schedule_at < lt : false)); return q;
+        },
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },
         insert(v: any) { pending = { op: "insert", v }; return q; },
         update(v: any) { pending = { op: "update", v }; return q; },
@@ -401,8 +405,27 @@ test("routes: the daily allowance is counted per person by network sends", async
   const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1), item(2)], platforms: ["tiktok", "youtube"] })).status, 201);
   const over = await s.call("POST", "/api/studio/social/posts", { items: [item(3), item(4)], platforms: ["tiktok"] });
-  assert.equal(over.status, 429); assert.equal(over.body.error, "daily_limit"); assert.match(over.body.detail, /1 left/);
+  assert.equal(over.status, 429); assert.equal(over.body.error, "daily_limit"); assert.match(over.body.detail, /limit of 5 posts a day on/);
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(3)], platforms: ["tiktok"] })).status, 201);
+  // the allowance counts the day a post goes out: three more, one a day from tomorrow, fit
+  const tomorrow = new Date(Date.now() + 86400_000); tomorrow.setUTCHours(12, 0, 0, 0);
+  const spread = await s.call("POST", "/api/studio/social/posts", { items: [item(4), item(5), item(6)], platforms: ["tiktok", "youtube"], schedule_at: tomorrow.toISOString(), spacing_minutes: 1440 });
+  assert.equal(spread.status, 201, JSON.stringify(spread.body));
+  await s.close();
+});
+
+test("routes: a batch of videos can carry a caption and a YouTube title each (a run of clips)", async () => {
+  const outputs = Array.from({ length: 2 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "creator", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", accounts: [{ platform: "tiktok" }, { platform: "youtube" }] }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
+  const sb = fakeSb(tables), ayr = fakeAyr();
+  const s = await serve(sb, ayr.fetchFn, ENV);
+  const r = await s.call("POST", "/api/studio/social/posts", { items: [{ job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4`, caption: "First one #a", youtube_title: "First" }, { job_id: JOB, output_key: `${ANN}/${JOB}/2.mp4`, caption: "Second one #b" }], platforms: ["tiktok", "youtube"], caption: "shared" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const sent = ayr.calls.filter((c) => c.method === "POST" && c.path === "/post").map((c) => c.body);
+  assert.deepEqual(sent.map((b) => b.post), ["First one #a", "Second one #b"]);
+  assert.equal(sent[0].youTubeOptions?.title, "First");
+  assert.equal(sent[1].youTubeOptions?.title, "Second one #b", "no title given: the caption's first line");
+  assert.deepEqual(tables.studio_social_posts.map((x) => x.caption), ["First one #a", "Second one #b"]);
   await s.close();
 });
 

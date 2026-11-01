@@ -36,6 +36,8 @@ function fakeSb(tables: Record<string, any[]>, rpc: (name: string, args: any) =>
         eq(k: string, v: any) { filters.push((r) => r[k] === v); return q; },
         neq(k: string, v: any) { filters.push((r) => r[k] !== v); return q; },
         gte(k: string, v: any) { filters.push((r) => r[k] >= v); return q; },
+        // the posting allowance asks for posts going out from a day on: scheduled ones by their time, others by creation
+        or(expr: string) { const from = expr.match(/schedule_at\.gte\.([^,]+),/)?.[1]; if (from) filters.push((r) => (r.schedule_at ? r.schedule_at >= from : r.created_at >= from)); return q; },
         in(k: string, v: any[]) { filters.push((r) => v.includes(r[k])); return q; },
         ilike(k: string, pat: string) { const re = new RegExp(`^${pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".")}$`, "i"); filters.push((r) => re.test(String(r[k] ?? ""))); return q; },
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },

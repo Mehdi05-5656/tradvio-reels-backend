@@ -344,7 +344,9 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const missing = platforms.filter((x: string) => !linked.has(x));
   if (missing.length) throw new SocialError("platform_not_linked", `Link ${missing.join(", ")} first`, 409);
   const caption = String(b.caption ?? "").slice(0, 5000);
-  const options = cleanOptions(platforms, b.options, caption);
+  // each video may bring its own caption and YouTube title (a batch of clips, each about something else)
+  const captionOf = (i: number) => (typeof items[i]?.caption === "string" ? String(items[i].caption).slice(0, 5000) : caption);
+  const optionsOf = (i: number) => cleanOptions(platforms, typeof items[i]?.youtube_title === "string" ? { youtube: { ...(b.options?.youtube ?? {}), title: items[i].youtube_title } } : b.options, captionOf(i));
   const spacing = Math.min(Math.max(Number(b.spacing_minutes ?? 0) || 0, 0), 7 * 24 * 60);
   const now = Date.now();
   const first = b.schedule_at ? new Date(String(b.schedule_at)) : null;
@@ -356,9 +358,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const recent = await sb.from("studio_social_posts").select("job_id,output_key,asset_id,platforms,status,results,error").eq("user_id", u).gte("created_at", since).limit(1000);
   if (recent.error) throw recent.error;
   const rows24 = (recent.data ?? []) as Array<Pick<SocialPostRow, "job_id" | "output_key" | "asset_id" | "platforms" | "status" | "results" | "error">>;
-  const used = rows24.reduce((n, r) => n + (r.status === "failed" && r.error !== UNCONFIRMED ? 0 : (r.platforms ?? []).length), 0);
   const cap = dailyCap(env);
-  if (used + items.length * platforms.length > cap) throw new SocialError("daily_limit", `That is over today's limit of ${cap} posts (${Math.max(0, cap - used)} left). It resets over the next 24 hours.`, 429);
   const resolved = await resolveItems(sb, u, items);
   // The same video to the same network twice in a day is refused: platforms treat it as a duplicate, and a send whose
   // outcome is unknown may already be live.
@@ -383,10 +383,26 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const plan = resolved.map((x, i) => {
     const at = first ? new Date(first.getTime() + i * spacing * 60_000) : spacing ? new Date(now + MIN_LEAD_MS + i * spacing * 60_000) : null;
     if (at && (at.getTime() > x.keptUntil || at.getTime() > latest)) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead, and a Studio video is kept 30 days`);
-    return { x, at };
+    return { x, at, caption: captionOf(i), options: optionsOf(i) };
   });
+  // The daily allowance counts posts on the day they go out (UTC), so a week of clips can be lined up in one go.
+  const DAY = 86400_000, dayOf = (ms: number) => Math.floor(ms / DAY);
+  const times = plan.map(({ at }) => at?.getTime() ?? now);
+  const fromDay = dayOf(Math.min(...times)) * DAY;
+  const out = await sb.from("studio_social_posts").select("platforms,status,error,schedule_at,created_at").eq("user_id", u).neq("status", "canceled")
+    .or(`schedule_at.gte.${new Date(fromDay).toISOString()},and(schedule_at.is.null,created_at.gte.${new Date(fromDay).toISOString()})`).limit(5000);
+  if (out.error) throw out.error;
+  const perDay = new Map<number, number>();
+  for (const r of (out.data ?? []) as any[]) {
+    if (r.status === "failed" && r.error !== UNCONFIRMED) continue;
+    const d = dayOf(Date.parse(r.schedule_at ?? r.created_at));
+    perDay.set(d, (perDay.get(d) ?? 0) + (r.platforms ?? []).length);
+  }
+  for (const t of times) perDay.set(dayOf(t), (perDay.get(dayOf(t)) ?? 0) + platforms.length);
+  const overDay = [...perDay.entries()].find(([d, c]) => c > cap && times.some((t) => dayOf(t) === d));
+  if (overDay) throw new SocialError("daily_limit", `That is over the limit of ${cap} posts a day on ${new Date(overDay[0] * DAY).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" })}. Spread the posts over more days or pick fewer accounts.`, 429);
   const made: SocialPostRow[] = [];
-  for (const { x, at } of plan) {
+  for (const { x, at, caption, options } of plan) {
     const ins = await sb.from("studio_social_posts").insert({ user_id: u, provider: p.name, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id, conversation_id: opts.conversationId ?? null, caption, platforms, options, schedule_at: at?.toISOString() ?? null, status: "sending" }).select("*").single();
     if (ins.error) {
       // the ones already sent stay sent; stop here and report what went (never fail the whole call after a send)

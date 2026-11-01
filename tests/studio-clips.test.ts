@@ -6,10 +6,12 @@ import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
+  timingFrom, remainingSeconds, etaFor, DEFAULT_TIMING,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError, downloadFormat } from "../src/studio-youtube.js";
 import { quote, PLANS } from "../src/studio.js";
+import { jobsNotice } from "../src/studio-notices.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ENV = { ANTHROPIC_API_KEY: "k", SCRAPECREATORS_API_KEY: "k", ELEVENLABS_API_KEY: "k" };
@@ -235,6 +237,49 @@ test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safe
   assert.equal(await code(quoteClips({ env: { ...ENV, ELEVENLABS_API_KEY: "" } }, PLANS, asset, {})), "clips_unavailable");
 });
 
+test("time left: learned from past runs, by video length, clip count and length, and the runs queued ahead", () => {
+  assert.deepEqual(timingFrom([]), DEFAULT_TIMING, "no runs yet: the defaults");
+  const t = timingFrom([
+    { timing: { video_s: 1000, fetch_s: 100, listen_s: 30, choose_s: 45, cut_s: 10 * 15 + 2 * 300, clips: 10, clip_s: 300 } },
+    { timing: { video_s: 2000, fetch_s: 200, listen_s: 60, choose_s: 65, cut_s: 5 * 15 + 2 * 150, clips: 5, clip_s: 150 } },
+  ]);
+  assert.equal(t.runs, 2);
+  assert.ok(Math.abs(t.fetch_per_s - 0.1) < 1e-9 && Math.abs(t.listen_per_s - 0.03) < 1e-9 && Math.abs(t.cut_per_s - 2) < 1e-9, JSON.stringify(t));
+  const job = (o: any, extra: any = {}) => ({ options: { platform: "youtube", seconds: 900, length: "standard", count: 10, ...o }, ...extra });
+  const full = remainingSeconds(job({}, { status: "queued" }), t);
+  assert.ok(full > remainingSeconds(job({ count: 3 }, { status: "queued" }), t), "more clips, longer");
+  assert.ok(remainingSeconds(job({ length: "minute" }, { status: "queued" }), t) > full, "longer clips, longer");
+  assert.ok(remainingSeconds(job({ seconds: 3600 }, { status: "queued" }), t) > full, "a longer video, longer");
+  assert.ok(remainingSeconds(job({ platform: "upload" }, { status: "queued" }), t) < full, "no download for an upload");
+  // working: what is left from where it is; a cut measured on this run once clips are made
+  const now = Date.parse("2026-11-01T01:00:00Z");
+  const cutting = job({}, { status: "running", progress: { stage: "cutting", stage_at: "2026-11-01T00:58:00Z", done: 4, total: 10, clip_at: "2026-11-01T01:00:00Z" } });
+  const left = remainingSeconds(cutting, t, now);
+  assert.ok(left >= 160 && left <= 200, `6 clips at the 30 s each measured so far: ${left}`);
+  // queued behind another run: its time left comes first
+  const queue = [{ id: "a", status: "running", options: cutting.options, progress: cutting.progress }, { id: "b", status: "queued", options: job({}).options, progress: {} }];
+  const e = etaFor({ id: "b", status: "queued", options: job({}).options }, queue as any, t, 1, now);
+  assert.equal(e.ahead, 1);
+  assert.ok(Math.abs(e.seconds - (left + full)) <= 1, `${e.seconds} vs ${left + full}`);
+  assert.equal(etaFor({ id: "a", status: "running", options: cutting.options, progress: cutting.progress }, queue as any, t, 1, now).ahead, 0);
+});
+
+test("the Clips email: how many, what was charged and what went back, the link to the run; or the one step left", () => {
+  const base = { id: "j1", tool: "clips", status: "done", credits_reserved: 125, credits_charged: 110, options: { collection_id: "col9", count: 10, source: { title: "Inside the Mind of a Master Procrastinator" } } };
+  const m = jobsNotice([{ ...base, progress: { outcome: "fewer", made_count: 7, asked: 10 } }], { DASHBOARD_URL: "https://app.clone8.io" }, U);
+  assert.equal(m.subject, 'Your 7 clips from "Inside the Mind of a Master Procrastinator" are ready');
+  assert.match(m.text, /You asked for 10; the video had 7 clips strong enough/);
+  assert.match(m.text, /Charged: 110 credits\. The other 15 credits set aside for clips not made are back/);
+  assert.match(m.text, /#studio\/clips\?id=col9/);
+  assert.match(m.text, /schedule them to your socials/);
+  const nf = jobsNotice([{ ...base, credits_charged: 15, progress: { outcome: "needs_file", total: 8 } }], {}, U);
+  assert.match(nf.subject, /^One step left/);
+  assert.match(nf.text, /picked 8 moments/);
+  const failed = jobsNotice([{ ...base, status: "failed", credits_charged: null, progress: {} }], {}, U);
+  assert.match(failed.subject, /did not finish/);
+  assert.match(failed.text, /the 125 credits it held are back/);
+});
+
 test("long sources go to Clips only: every other tool refuses them", () => {
   assert.equal(isLongSource({ bytes: 6e8, probe: { duration: 30 } }), true);
   assert.equal(isLongSource({ bytes: 1e6, probe: { duration: 601 } }), true);
@@ -323,7 +368,10 @@ test("a YouTube run: the video fetched once, every word and laugh heard, moments
   assert.equal(sb.t.studio_collections[0].status, "ready");
   assert.match(sb.t.studio_collections[0].note, /had 2 clips strong enough to post, of the 5 you asked for\. You were charged for 2 clips; the rest went back\./);
   const stages = sb.calls.filter((c: any) => c.fn === "studio_renew").map((c: any) => c.args.p_progress.stage);
-  assert.deepEqual([...new Set(stages)], ["reading", "transcribing", "choosing", "cutting"]);
+  assert.deepEqual([...new Set(stages)], ["reading", "transcribing", "choosing", "cutting", "done"]);
+  const last = sb.calls.filter((c: any) => c.fn === "studio_renew").pop().args.p_progress;
+  assert.deepEqual([last.outcome, last.made_count, last.asked, last.charged], ["fewer", 2, 5, PRICE.analysis + 2 * PRICE.per_clip], "what the email reads");
+  assert.ok(last.stage_at && last.clip_at, "each stage and clip has its clock, for the time left");
 });
 
 test("YouTube refusing our servers: chosen from its captions, only choosing is charged, the collection asks for the file; the upload then cuts them", async () => {

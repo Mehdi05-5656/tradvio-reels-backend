@@ -111,6 +111,89 @@ export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "y
 /** What a run is charged: reading once (unless it only cuts moments chosen earlier) and each clip made. */
 export const clipsCharge = (price: ClipsPrice, made: number, o: { analysis?: boolean } = {}) => (o.analysis === false ? 0 : price.analysis) + price.per_clip * Math.max(0, made);
 
+// ---------------------------------------------------------------------------------------------------
+// How long a run takes: learned from the runs before it, so the page can say "ready in about 12 minutes"
+// ---------------------------------------------------------------------------------------------------
+/** Seconds per stage, as rates: fetching and listening scale with the video's length; choosing has a fixed part plus a
+ *  part per second of video; cutting has a fixed part per clip plus a part per second of clip (framing, rendering). */
+export type ClipTiming = { fetch_per_s: number; listen_per_s: number; choose_base: number; choose_per_s: number; cut_base: number; cut_per_s: number; runs: number };
+/** Before any run is measured: the Oct 31 2026 TED run (844 s: fetched in 60 s, heard and chosen in 44 s, ~75 s a clip). */
+export const DEFAULT_TIMING: ClipTiming = { fetch_per_s: 0.08, listen_per_s: 0.025, choose_base: 25, choose_per_s: 0.02, cut_base: 15, cut_per_s: 1.6, runs: 0 };
+const median = (xs: number[]) => { const v = xs.filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : NaN; };
+/** The timing model from recorded runs (each run's own rates, the median of each); the default fills what is missing. */
+export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
+  const t = runs.map((r) => r?.timing).filter((x) => x && Number(x.video_s) > 0);
+  if (!t.length) return DEFAULT_TIMING;
+  const pick = (vals: number[], fallback: number) => { const m = median(vals); return Number.isFinite(m) ? m : fallback; };
+  const fetch = pick(t.filter((x) => x.fetch_s > 0).map((x) => x.fetch_s / x.video_s), DEFAULT_TIMING.fetch_per_s);
+  const listen = pick(t.filter((x) => x.listen_s > 0).map((x) => x.listen_s / x.video_s), DEFAULT_TIMING.listen_per_s);
+  // choosing: the fixed part stays at the default; the rest scales with the video
+  const choose = pick(t.filter((x) => x.choose_s > 0).map((x) => Math.max(0, x.choose_s - DEFAULT_TIMING.choose_base) / x.video_s), DEFAULT_TIMING.choose_per_s);
+  // cutting: per second of clip made, after each clip's fixed part
+  const cut = pick(t.filter((x) => x.cut_s > 0 && x.clip_s > 0 && x.clips > 0).map((x) => Math.max(0.3, (x.cut_s - x.clips * DEFAULT_TIMING.cut_base) / x.clip_s)), DEFAULT_TIMING.cut_per_s);
+  return { fetch_per_s: fetch, listen_per_s: listen, choose_base: DEFAULT_TIMING.choose_base, choose_per_s: choose, cut_base: DEFAULT_TIMING.cut_base, cut_per_s: cut, runs: t.length };
+}
+let timingCache: { at: number; timing: ClipTiming } | null = null;
+/** The current model: the last 30 finished runs, read at most every 10 minutes. */
+export async function clipsTiming(sb: SupabaseClient): Promise<ClipTiming> {
+  if (timingCache && Date.now() - timingCache.at < 10 * 60_000) return timingCache.timing;
+  const r = await sb.from("studio_events").select("props").eq("kind", "feature").eq("name", "clips_done").order("created_at", { ascending: false }).limit(30);
+  const timing = r.error ? DEFAULT_TIMING : timingFrom(((r.data ?? []) as any[]).map((x) => x.props ?? {}));
+  timingCache = { at: Date.now(), timing };
+  return timing;
+}
+export const resetClipsTiming = () => { timingCache = null; };
+type EtaJob = { options: any; progress?: any; status?: string };
+/** Seconds a run still needs, from where it is (a queued run needs all of it). Each stage's own clock (`stage_at`) takes
+ *  off what has already passed; a cut in progress uses the clips already made when there are some. */
+export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now()): number {
+  const o = job.options ?? {}, p = job.progress ?? {};
+  const video = Math.max(60, Number(o.seconds) || Number(o.source?.seconds) || 600);
+  const length = lengthOf(o.length);
+  const youtube = o.platform === "youtube" && !o.plan_from;
+  const planned = Math.max(1, Number(p.total) || Number(o.count ?? o.max_clips) || likelyClips(video, length));
+  const perClip = timing.cut_base + timing.cut_per_s * CLIP_LENGTHS[length].target;
+  const stages: Array<[string, number]> = [
+    ["reading", youtube ? timing.fetch_per_s * video : 3],
+    ["transcribing", o.plan_from ? 0 : timing.listen_per_s * video + 5],
+    ["choosing", o.plan_from ? 0 : timing.choose_base + timing.choose_per_s * video],
+    ["cutting", planned * perClip],
+  ];
+  if (job.status === "queued" || !p.stage) return Math.round(stages.reduce((a, [, s]) => a + s, 0));
+  const at = stages.findIndex(([name]) => name === p.stage);
+  if (at < 0) return 0;
+  const since = p.stage_at ? Math.max(0, (now - Date.parse(p.stage_at)) / 1000) : 0;
+  let left = stages.slice(at + 1).reduce((a, [, s]) => a + s, 0);
+  if (p.stage === "cutting") {
+    const done = Number(p.done) || 0, total = Number(p.total) || planned;
+    // measured on this run once a clip is made: the time per clip so far
+    const rate = done > 0 && since > 0 ? since / done : perClip;
+    left += Math.max(0, total - done) * rate - (done > 0 ? 0 : Math.min(since, perClip * 0.9));
+    if (done > 0 && p.clip_at) left -= Math.min(rate * 0.9, Math.max(0, (now - Date.parse(p.clip_at)) / 1000));
+  } else left += Math.max(stages[at][1] * 0.1, stages[at][1] - since);
+  return Math.max(10, Math.round(left));
+}
+/** Every clips run waiting or working, in the order the servers take them: running first, then queued by age. */
+export async function clipsQueue(sb: SupabaseClient): Promise<Array<{ id: string; status: string; created_at: string; options: any; progress: any }>> {
+  const r = await sb.from("studio_jobs").select("id,status,created_at,options,progress").eq("tool", "clips").in("status", ["queued", "running"]).order("created_at", { ascending: true }).limit(200);
+  if (r.error) throw r.error;
+  const rows = (r.data ?? []) as any[];
+  return [...rows.filter((x) => x.status === "running"), ...rows.filter((x) => x.status === "queued")];
+}
+/** How long until a run is done (seconds) and how many runs are ahead of it. Runs are cut one at a time per server, so
+ *  a queued run waits for the ones ahead. `servers` is how many run side by side (STUDIO_CLIPS_SERVERS, default 1). */
+export function etaFor(target: { id?: string | null; options: any; progress?: any; status?: string }, queue: Array<{ id: string; status: string; options: any; progress: any }>, timing: ClipTiming, servers = 1, now = Date.now()): { seconds: number; ahead: number } {
+  const idx = target.id ? queue.findIndex((q) => q.id === target.id) : -1;
+  const own = remainingSeconds(target, timing, now);
+  if (target.status === "running") return { seconds: own, ahead: 0 };
+  const before = idx >= 0 ? queue.slice(0, idx) : queue;
+  // with n servers the wait is roughly the work ahead shared between them; the runs already running count first
+  const wait = before.reduce((a, q) => a + remainingSeconds(q, timing, now), 0) / Math.max(1, servers);
+  const ahead = Math.max(0, before.length - (servers - 1));
+  return { seconds: Math.round((ahead > 0 ? wait : 0) + own), ahead };
+}
+export const clipsServers = (env: Record<string, string | undefined> = process.env) => Math.max(1, Math.min(10, Number(env.STUDIO_CLIPS_SERVERS) || 1));
+
 export class ClipsError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 
 // ---------------------------------------------------------------------------------------------------
@@ -830,13 +913,20 @@ export function quoteCut(plans: PlanLike[], clips: number, seconds: number, leng
 // ---------------------------------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------------------------------
-type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number };
+type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number; marks?: Record<string, number> };
 const planKey = (u: string, collectionId: string) => `${u}/clips/${collectionId}/plan.txt`;
+/** Saves where the run is. A new stage gets its own clock (`stage_at`, for the page's time left), and the moment it
+ *  started is kept on the job (`marks`) to measure this run for the next estimates. */
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
-  const r = await sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: { ...(job.progress ?? {}), ...progress } });
+  const next = { ...progress };
+  if (next.stage && next.stage !== job.progress?.stage) {
+    next.stage_at = new Date().toISOString();
+    (job.marks ??= {})[next.stage] ??= Date.now();
+  }
+  const r = await sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: { ...(job.progress ?? {}), ...next } });
   if (r.error) throw r.error;
   if (r.data !== true) throw new ClipsError("lease_lost", "lease lost");
-  job.progress = { ...(job.progress ?? {}), ...progress };
+  job.progress = { ...(job.progress ?? {}), ...next };
 }
 async function signedSource(sb: SupabaseClient, u: string, assetId: string): Promise<SourceInput> {
   const a = await sb.from("studio_assets").select("object_key,status,probe").eq("id", assetId).eq("user_id", u).maybeSingle();
@@ -971,6 +1061,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         const charged = Math.min(price.lite, job.credits_reserved);
         const note = `YouTube would not let our servers download this video. We picked ${p.moments.length} ${p.moments.length === 1 ? "moment" : "moments"}; upload the same video and we will cut them (choosing is already paid).`;
         await setCollection({ status: "needs_file", note });
+        await renew(sb, job, { stage: "done", outcome: "needs_file", total: p.moments.length, charged }).catch(() => undefined);
         const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
         if (done.error) throw done.error;
         log(`[clips] needs_file ${job.id} ${e.code}`);
@@ -992,13 +1083,15 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     };
     const queue = [...todo];
     const skipped: number[] = [];
+    const madeNow: number[] = [];
     const worker = async () => {
       while (queue.length && !full) {
         const m = queue.shift()!;
         try {
           const r = await cutOne(m);
           made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds });
-          await renew(sb, job, { done: made.length, total: p.moments.length, message: made.length < p.moments.length ? `Cutting clip ${made.length + 1} of ${p.moments.length}` : "Finishing", made });
+          madeNow.push(r.seconds);
+          await renew(sb, job, { clip_at: new Date().toISOString(), done: made.length, total: p.moments.length, message: made.length < p.moments.length ? `Cutting clip ${made.length + 1} of ${p.moments.length}` : "Finishing", made });
         } catch (e: any) {
           if (e instanceof ClipsError && (e.code === "storage_full" || e.code === "too_many_files")) { full = e; break; }
           if (e instanceof ClipsError && e.code === "lease_lost") throw e;
@@ -1018,9 +1111,15 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       : made.length < asked && !o.plan_from ? `This video had ${word(made.length)} strong enough to post, of the ${asked} you asked for. You were charged for ${word(made.length)}; the rest went back.`
       : null;
     await setCollection({ status: "ready", note });
+    // what this attempt measured, for the next estimates (a stage it did not run is left out)
+    const mk = job.marks ?? {}, end = Date.now();
+    const span = (a: string, b: string | null) => (mk[a] ? Math.round(((b && mk[b] ? mk[b] : end) - mk[a]) / 1000) : 0);
+    const timing = { video_s: Math.round(p.seconds), fetch_s: youtube && mk.reading && mk.transcribing ? span("reading", "transcribing") : 0, listen_s: span("transcribing", "choosing"), choose_s: span("choosing", "cutting"),
+      cut_s: madeNow.length ? span("cutting", null) : 0, clips: madeNow.length, clip_s: Math.round(madeNow.reduce((a, x) => a + x, 0)) };
+    await renew(sb, job, { stage: "done", outcome: made.length < asked && !o.plan_from ? "fewer" : "done", made_count: made.length, asked, charged }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
     if (done.error) throw done.error;
-    recordEvent({ user_id: u, kind: "feature", name: "clips_done", props: { job: job.id, platform: o.platform, length, clips: made.length, asked, planned: p.moments.length, minutes: Math.round(p.seconds / 60), credits: charged, reserved: job.credits_reserved } });
+    recordEvent({ user_id: u, kind: "feature", name: "clips_done", props: { job: job.id, platform: o.platform, length, clips: made.length, asked, planned: p.moments.length, minutes: Math.round(p.seconds / 60), credits: charged, reserved: job.credits_reserved, timing } });
     return "done";
   } catch (e: any) {
     const code = e instanceof ClipsError ? e.code : e instanceof LinkError ? e.code : "clips_failed";
@@ -1033,6 +1132,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     // Some clips already in the library on a final failure: charge for those, refund the rest; otherwise fail (refund all).
     if (last && made.length) {
       const charged = Math.min(job.credits_reserved, clipsCharge(priceOf(o, plans, env, plan?.seconds ?? Number(o.seconds) ?? 0), made.length, { analysis: !o.plan_from }));
+      await renew(sb, job, { stage: "done", outcome: "partial", made_count: made.length, charged }).catch(() => undefined);
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
       if (done.error) log(`[clips] could not settle ${job.id}: ${done.error.message}`);
       return "partial";

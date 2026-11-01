@@ -20,7 +20,7 @@ import { checkUnsubscribeToken } from "./studio-mail.js";
 import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
 import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
-import { ClipsError, clipsEnabled, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
+import { ClipsError, clipsEnabled, clipsQueue, clipsServers, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
 import Stripe from "stripe";
 
@@ -136,6 +136,8 @@ export function jobLabel(j: { tool: string; options?: any }): string {
   if (j.tool === "blueprint" || j.tool === "blueprint_plus") return `${names[j.tool]} · ${o.copies ?? "?"} ${o.copies === 1 ? "copy" : "copies"}`;
   if (j.tool === "instrument") { const ep = String(o.endpoint ?? ""); const fam = ep.startsWith("audio/") ? ep.slice(6).replace(/-/g, " ") : ep.split("/").slice(0, 2).pop()?.replace(/-/g, " ") ?? "model"; return `${fam.charAt(0).toUpperCase()}${fam.slice(1)}${o.units && o.output === "video" ? ` · ${Math.round(o.units)} s` : ""}`; }
   if (j.tool === "character") return o.style_name ? `Character · ${o.style_name}` : "Character";
+  if (j.tool === "clips") return `Clips · ${String(o.source?.title ?? "a long video").slice(0, 60)}`;
+  if (j.tool === "import") return "Import";
   const secs = Number(o.seconds);
   return `${names[j.tool] ?? j.tool}${o.style_name ? ` · ${o.style_name}` : o.trend_name ? ` · ${o.trend_name}` : ""}${secs > 0 ? ` · ${secs} s` : ""}`;
 }
@@ -570,6 +572,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         topup: c ? topupInfo(c, spent) : null,
         referral: await referralInfo(sb, u, (await applySignupReferral(sb, u, c)) ? { ...c, referred_by: true } : c),
         email_opt_out: !!c?.email_opt_out,
+        // where "it's ready" emails go (the page says so when a long run starts)
+        email: req.auth && "email" in req.auth ? (req.auth as any).email ?? null : null,
         // the owner's account sees the admin button; the key is absent for everyone else
         ...((await isStudioAdmin(req, sb, env)) ? { admin: true } : {}),
       });
@@ -1029,7 +1033,16 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       return q;
     }
     const asset = await loadAsset(sb, u, body?.asset_id);
-    if (String(body?.tool ?? "") === "clips") return quoteClips({ env, log }, PLANS, asset, body?.options);
+    if (String(body?.tool ?? "") === "clips") {
+      const q = await quoteClips({ env, log }, PLANS, asset, body?.options);
+      // how long it would take if started now, counting the runs already waiting (the page says "ready in about...")
+      try {
+        const [queue, timing] = await Promise.all([clipsQueue(sb), clipsTiming(sb)]);
+        const e = etaFor({ options: q.options, status: "queued" }, queue, timing, clipsServers(env));
+        q.options.eta_seconds = e.seconds; q.options.ahead = e.ahead;
+      } catch { /* no estimate rather than no quote */ }
+      return q;
+    }
     if (String(body?.tool ?? "") === "import") return quoteImport(env, PLANS, body?.options);
     return quote(String(body?.tool ?? ""), body?.options, asset, costs);
   };

@@ -40,14 +40,42 @@ export function jobNoun(job: any): string {
     case "restyle": return "styled video";
     case "trend": return "Trend video";
     case "character": return "character";
+    case "clips": { const m = Number(job.progress?.made_count ?? job.progress?.done ?? 0); return `${m || ""} ${m === 1 ? "clip" : "clips"}`.trim(); }
     case "instrument": return o.output === "image" ? "image" : o.output === "audio" ? "audio" : "video";
     default: return "result";
   }
 }
 const plural = (job: any) => (job.tool === "blueprint" || job.tool === "blueprint_plus") && copiesOf(job) !== 1;
 
+/** The email for one finished Clips run: how many clips, what was charged and what went back, a link to the run (where
+ *  they can be scheduled to the person's socials). YouTube refusing the download asks for the file instead. */
+export function clipsNotice(j: any, env: Record<string, string | undefined>, unsub: string | null): { subject: string; heading: string; paragraphs: string[]; button: { label: string; url: string }; footer: string[] } {
+  const o = j.options ?? {}, p = j.progress ?? {};
+  const title = String(o.source?.title ?? "your video").slice(0, 70);
+  const url = `${dashboard(env)}/#studio/clips${o.collection_id ? `?id=${encodeURIComponent(o.collection_id)}` : ""}`;
+  const reserved = Number(j.credits_reserved ?? 0), charged = Number(j.credits_charged ?? p.charged ?? 0);
+  const back = Math.max(0, reserved - charged);
+  const footer = ["You are getting this because you started a Clips run on Clone8 Studio. Runs keep going on our servers when you close the tab; this email tells you when yours is done."];
+  if (j.status !== "done") return { subject: `Your clips from "${title}" did not finish`, heading: "Your clips did not finish", paragraphs: [`The run on "${title}" stopped before it made any clips, so nothing was charged: the ${n(reserved)} credits it held are back on your balance.`, "You can start it again from the Clips page. If it stops again, reply to this email and we will look at it with you."], button: { label: "Open Clips", url }, footer };
+  if (p.outcome === "needs_file") return { subject: `One step left for your clips from "${title}"`, heading: "One step left", paragraphs: [`YouTube would not let our servers download "${title}". We read it anyway and picked ${n(Number(p.total) || 0)} moments.`, "Upload the same video file on the run's page and we will cut them right away. Choosing them is already paid; the clips are charged when they are cut."], button: { label: "Upload the video", url }, footer };
+  const made = Number(p.made_count ?? p.done ?? 0), asked = Number(p.asked ?? o.count ?? 0);
+  const word = (x: number) => `${n(x)} ${x === 1 ? "clip" : "clips"}`;
+  const paragraphs = [`${word(made)} from "${title}" ${made === 1 ? "is" : "are"} in your library, best first, ready for TikTok, Reels and Shorts.`];
+  if (p.outcome === "fewer" && asked > made) paragraphs.push(`You asked for ${n(asked)}; the video had ${word(made)} strong enough to post, so that is what we made.`);
+  if (p.outcome === "partial") paragraphs.push("The run stopped before it finished the rest.");
+  paragraphs.push(`Charged: ${n(charged)} credits.${back ? ` The other ${n(back)} credits set aside for clips not made are back on your balance.` : ""}`);
+  paragraphs.push("From the run's page you can post them or schedule them to your socials in one go.");
+  return { subject: `Your ${word(made)} from "${title}" ${made === 1 ? "is" : "are"} ready`, heading: `Your ${word(made)} ${made === 1 ? "is" : "are"} ready`, paragraphs, button: { label: "See your clips", url }, footer };
+}
+
 /** The email for a batch of one person's finished jobs. Exported so the words are tested. */
 export function jobsNotice(jobs: any[], env: Record<string, string | undefined>, userId?: string): { subject: string; text: string; html: string; unsubscribeUrl: string | null } {
+  if (jobs.length === 1 && jobs[0].tool === "clips") {
+    const unsub = userId ? unsubscribeUrl(userId, env) : null;
+    const m = clipsNotice(jobs[0], env, unsub);
+    const body = renderEmail({ preheader: m.paragraphs[0], heading: m.heading, paragraphs: m.paragraphs, button: m.button, footer: m.footer, unsubscribeUrl: unsub });
+    return { subject: m.subject, ...body, unsubscribeUrl: unsub };
+  }
   const done = jobs.filter((j) => j.status === "done"), failed = jobs.filter((j) => j.status !== "done");
   const library = `${dashboard(env)}/#studio/library`;
   const unsub = userId ? unsubscribeUrl(userId, env) : null;

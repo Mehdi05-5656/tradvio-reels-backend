@@ -17,7 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, creditsForCost, MARGIN_TARGET, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
-import { ClipsError, CLIP_COST, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
+import { ClipsError, CLIP_COST, clipsQueue, clipsServers, clipsTiming, etaFor, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const MAX_IMPORT_LINKS = 500;
@@ -161,8 +161,17 @@ export async function publicCollections(sb: SupabaseClient, rows: Row[]): Promis
   const ids = rows.map((r) => r.id);
   const [assets, jobs] = await Promise.all([
     sb.from("studio_assets").select("collection_id,probe,created_at").in("collection_id", ids).neq("status", "deleted").order("created_at", { ascending: true }).limit(5000),
-    sb.from("studio_jobs").select("id,status,progress").in("id", rows.map((r) => r.job_id).filter(Boolean) as string[]),
+    sb.from("studio_jobs").select("id,status,progress,options,tool,created_at").in("id", rows.map((r) => r.job_id).filter(Boolean) as string[]),
   ]);
+  // a clips run waiting or working: how long until it is done, and how many runs are ahead of it (all of everyone's)
+  const liveClips = ((jobs.data ?? []) as any[]).filter((j) => j.tool === "clips" && (j.status === "queued" || j.status === "running"));
+  const eta = new Map<string, { seconds: number; ahead: number }>();
+  if (liveClips.length) {
+    try {
+      const [queue, timing] = await Promise.all([clipsQueue(sb), clipsTiming(sb)]);
+      for (const j of liveClips) eta.set(j.id, etaFor(j, queue, timing, clipsServers()));
+    } catch { /* the page shows no estimate rather than fail */ }
+  }
   const count = new Map<string, number>(), poster = new Map<string, string>();
   for (const a of (assets.data ?? []) as any[]) {
     count.set(a.collection_id, (count.get(a.collection_id) ?? 0) + 1);
@@ -177,7 +186,7 @@ export async function publicCollections(sb: SupabaseClient, rows: Row[]): Promis
     const live = j && (j.status === "queued" || j.status === "running");
     const p = j?.progress ?? {};
     // while it runs, where it is; when it waits for the file, how many moments were picked (done 0 of total)
-    const progress = r.status === "needs_file" ? { stage: "done", done: 0, total: Number(p.total ?? 0), message: "Waiting for the file" } : r.status === "processing" || live ? { stage: j?.status === "queued" ? "queued" : String(p.stage ?? "reading"), done: Number(p.done ?? 0), total: Number(p.total ?? 0), message: String(p.message ?? (j?.status === "queued" ? "Waiting to start" : "Working")) } : null;
+    const progress = r.status === "needs_file" ? { stage: "done", done: 0, total: Number(p.total ?? 0), message: "Waiting for the file" } : r.status === "processing" || live ? { stage: j?.status === "queued" ? "queued" : String(p.stage ?? "reading"), done: Number(p.done ?? 0), total: Number(p.total ?? 0), message: String(p.message ?? (j?.status === "queued" ? "Waiting to start" : "Working")), ...(j && eta.has(j.id) ? { eta_seconds: eta.get(j.id)!.seconds, ahead: eta.get(j.id)!.ahead } : {}) } : null;
     return {
       id: r.id, name: r.name, kind: r.kind, status: r.status, note: r.note, job_id: r.job_id,
       source: { platform: r.source?.platform ?? null, url: r.source?.url ?? null, asset_id: r.source?.asset_id ?? null, title: r.source?.title ?? null, channel: r.source?.channel ?? null, seconds: r.source?.seconds ?? null, thumbnail_url: r.source?.thumbnail_url ?? null },
