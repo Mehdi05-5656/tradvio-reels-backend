@@ -40,12 +40,13 @@ export function jobNoun(job: any): string {
     case "restyle": return "styled video";
     case "trend": return "Trend video";
     case "character": return "character";
+    case "captions": { const m = Number(job.progress?.made_count ?? (Array.isArray(job.options?.items) ? job.options.items.length : 1)); return m === 1 ? "captioned video" : `${m} captioned videos`; }
     case "clips": { const m = Number(job.progress?.made_count ?? job.progress?.done ?? 0); return `${m || ""} ${m === 1 ? "clip" : "clips"}`.trim(); }
     case "instrument": return o.output === "image" ? "image" : o.output === "audio" ? "audio" : "video";
     default: return "result";
   }
 }
-const plural = (job: any) => (job.tool === "blueprint" || job.tool === "blueprint_plus") && copiesOf(job) !== 1;
+const plural = (job: any) => ((job.tool === "blueprint" || job.tool === "blueprint_plus") && copiesOf(job) !== 1) || (job.tool === "captions" && Number(job.progress?.made_count ?? 1) > 1);
 
 /** The email for one finished Clips run: how many clips, what was charged and what went back, a link to the run (where
  *  they can be scheduled to the person's socials). YouTube refusing the download asks for the file instead. */

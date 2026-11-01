@@ -18,7 +18,7 @@
 //    safety nets so a vendor price change can never sell a run at a loss.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -67,7 +67,7 @@ export function frameUsdPerSecond(env: Record<string, string | undefined> = proc
 /** The price (owner's decision, Oct 31 2026: about 2-2.5x OpusClip per video, which bills $0.10 a minute of video):
  *  reading the video by the minute, and each clip. Safety nets: never under 35% margin on reading and 50% on a clip at
  *  the cheapest credit we sell, whatever the vendors charge. */
-export const CLIP_RATES = { youtube_per_minute: 5, upload_per_minute: 2, lite_per_minute: 1, analysis_min: 10, lite_min: 5,
+export const CLIP_RATES = { youtube_per_minute: 5, upload_per_minute: 2, lite_per_minute: 1, analysis_min: 10, lite_min: 5, captions_per_clip: 3,
   per_clip: { short: 5, standard: 5, long: 8, minute: 8 } as Record<ClipLength, number> };
 export const CLIPS_SAFETY_MARGIN = { analysis: 0.35, clip: 0.5 };
 /** What the proxy charges per GB (0 without one: then YouTube refuses us and nothing is read through it). */
@@ -496,7 +496,9 @@ async function chooseWithClaude(deps: ClipsDeps, input: ChooseInput, userId?: st
 // ---------------------------------------------------------------------------------------------------
 /** What was said in a clip, by whom and when (absolute seconds), for framing on the speaker. */
 export type Speech = [start: number, end: number, speaker: string | null, text: string];
-export type Moment = { rank: number; start: number; end: number; title: string; hook: string; why: string; score: number; tags: string[]; transcript: string; speech?: Speech[] };
+export type Moment = { rank: number; start: number; end: number; title: string; hook: string; why: string; score: number; tags: string[]; transcript: string; speech?: Speech[];
+  /** every word with its time (absolute seconds), for captions; only when the words were heard (not YouTube's captions) */
+  words?: Array<[string, number, number, string | null]> };
 export function finalizeMoments(raw: RawMoment[], lines: Line[], words: TimedWord[] | null, length: ClipLength, cap: number, minScore = CLIP_LIMITS.min_score, events: AudioEvent[] = []): Moment[] {
   const len = CLIP_LENGTHS[length];
   const L = [...lines].sort((a, b) => a.i - b.i);
@@ -563,7 +565,8 @@ export function finalizeMoments(raw: RawMoment[], lines: Line[], words: TimedWor
     if (length === "minute" ? d < len.min || d > len.max + 2 : d < len.min - 3 || d > len.max + 3) continue;
     const text = L.slice(s, e + 1).map((l) => l.text).join(" ");
     const speech: Speech[] = words && L[s].w0 != null && L[e].w1 != null ? speechOf(words.slice(L[s].w0!, L[e].w1! + 1)) : L.slice(s, e + 1).map((l) => [round2(l.start), round2(l.end), l.speaker ?? null, l.text.slice(0, 200)]);
-    cand.push({ rank: 0, start: round2(t.start), end: round2(t.end), title: clean(r.title, 80) || clean(text, 60), hook: clean(r.hook, 140), why: clean(r.why, 120), score: Math.min(100, score), tags: (Array.isArray(r.tags) ? r.tags : []).map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: text.slice(0, 2000), speech });
+    cand.push({ rank: 0, start: round2(t.start), end: round2(t.end), title: clean(r.title, 80) || clean(text, 60), hook: clean(r.hook, 140), why: clean(r.why, 120), score: Math.min(100, score), tags: (Array.isArray(r.tags) ? r.tags : []).map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: text.slice(0, 2000), speech,
+      ...(words && L[s].w0 != null && L[e].w1 != null ? { words: words.slice(L[s].w0!, L[e].w1! + 1).map((x) => [x.text, round2(x.start), round2(x.end), x.speaker ?? null] as [string, number, number, string | null]) } : {}) });
   }
   cand.sort((a, b) => b.score - a.score || a.start - b.start);
   const kept: Moment[] = [];
@@ -622,7 +625,7 @@ export function ffmpeg(args: string[], o: { timeoutMs?: number; proxy?: string |
     });
   });
 }
-async function defaultExtractAudio(src: SourceInput, target: string) {
+export async function defaultExtractAudio(src: SourceInput, target: string) {
   // the sound only, mono 16 kHz at 32 kb/s: two hours is 29 MB, plenty for speech-to-text
   const args = ["-v", "error", "-nostdin", "-y", ...(src.audio ? ["-i", src.audio] : ["-i", src.video]), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", target];
   await ffmpeg(args, { timeoutMs: 40 * 60_000, proxy: src.proxy });
@@ -776,7 +779,10 @@ export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; s
 // ---------------------------------------------------------------------------------------------------
 // One clip: cut the stretch exactly, find its shots, follow the speaker, render it, store it
 // ---------------------------------------------------------------------------------------------------
-export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: string; src: SourceInput; format: ClipFormat; collectionId: string; sourceTitle: string | null; jobId: string; length?: ClipLength };
+export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: string; src: SourceInput; format: ClipFormat; collectionId: string; sourceTitle: string | null; jobId: string; length?: ClipLength;
+  /** captions burned in, in this style (the Clips page's "Captions" switch) */ captions?: any | null };
+/** One clip run and one captions run never render at once on a server (one CPU, 2 GB). */
+export const busy = { clips: false, captions: false };
 export type CutResult = { asset_id: string; bytes: number; seconds: number };
 async function probeLocal(file: string): Promise<{ w: number; h: number; fps: number | null; seconds: number }> {
   const raw = await new Promise<string>((resolve, reject) => {
@@ -818,6 +824,12 @@ async function frameClip(ctx: CutCtx, m: Moment, mezz: string, dur: number): Pro
     return [{ start: 0, end: dur, mode: "fit", x0: 0.5, x1: 0.5 }];
   }
 }
+/** The size buildClipFilter renders: 720x1280 for vertical, the source's shape up to 1280 on its long side otherwise. */
+export function outputSize(w: number, h: number, format: ClipFormat): { w: number; h: number } {
+  if (format === "vertical") return { w: 720, h: 1280 };
+  if (w >= h) { const ow = Math.min(1280, w); return { w: even(ow), h: even((h * ow) / Math.max(1, w)) }; }
+  const oh = Math.min(1280, h); return { w: even((w * oh) / Math.max(1, h)), h: even(oh) };
+}
 export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   const { sb, u, dir } = ctx;
   const mezz = join(dir, `m${m.rank}.mp4`), out = join(dir, `c${m.rank}.mp4`), still = join(dir, `p${m.rank}.jpg`);
@@ -832,7 +844,18 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   let segs: Seg[] = [{ start: 0, end: dur, mode: "crop", x0: 0.5, x1: 0.5 }];
   if (ctx.format === "vertical" && info.w / Math.max(1, info.h) > 0.75 && info.h / Math.max(1, info.w) < 1.7) segs = await frameClip(ctx, m, mezz, dur);
   // 3. the clip: framed, 720x1280 (or the original shape), loudness evened out, soft edges on the sound
-  const graph = buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
+  let graph = buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
+  // the clip's own words, from its start: kept for Captions, and burned in now when the switch is on
+  const rel = (m.words ?? []).map(([text, a, b, speaker]) => ({ text, start: Math.round((a - m.start) * 100) / 100, end: Math.round((b - m.start) * 100) / 100, speaker })).filter((w) => w.end > 0 && w.start < dur);
+  let keys: number[] = [];
+  if (ctx.captions && rel.length) {
+    const cv = await import("./studio-caption-video.js");
+    if (ctx.captions.keywords) keys = await cv.markKeywords(ctx.deps, rel, u).catch(() => []);
+    const fr = outputSize(info.w, info.h, ctx.format);
+    const assPath = join(dir, `c${m.rank}.ass`);
+    await writeFile(assPath, cv.captionAss(rel.map((w, i) => ({ ...w, key: keys.includes(i) })), ctx.captions, fr, ctx.deps.env ?? process.env));
+    graph = graph.replace(/\[v\]$/, `,${cv.assFilter(assPath, ctx.deps.env ?? process.env)}[v]`);
+  }
   const af = `afade=t=in:d=0.06,afade=t=out:st=${Math.max(0, dur - 0.25).toFixed(3)}:d=0.25`;
   // threads capped: on a 1-CPU server ffmpeg would start one per core it sees on the host, each holding frames
   // (two clips at once with uncapped threads went past 2 GB and the server was killed, Oct 31 2026)
@@ -859,6 +882,7 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
       clip: { start: m.start, end: m.end, rank: m.rank, source_title: ctx.sourceTitle, job_id: ctx.jobId, length: ctx.length ?? null } },
   });
   if (ins.error) { await sb.storage.from("studio-uploads").remove([key]).catch(() => undefined); throw ins.error; }
+  if (rel.length) await import("./studio-caption-video.js").then((cv) => cv.saveWords(sb, u, id, { words: rel.map((w) => [w.text, w.start, w.end, w.speaker ?? null] as [string, number, number, string | null]), keys, language: null, duration: round2(final.seconds || dur) })).catch(() => undefined);
   await rm(mezz, { force: true }).catch(() => undefined);
   return { asset_id: id, bytes, seconds: final.seconds || dur };
 }
@@ -907,6 +931,9 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
   // from YouTube's captions, then the person uploads the file to have them cut. The page says so before they start.
   const youtube_direct = platform !== "youtube" || !!env.STUDIO_YT_PROXY || !!env.STUDIO_YT_COOKIES;
   const price = clipsPrice(plans, { seconds, platform, length, env, download: youtube_direct });
+  // captions burned into every clip: the words are already heard, so a small add-on per clip
+  const captions = o.captions && typeof o.captions === "object" ? o.captions : null;
+  if (captions) price.per_clip += CLIP_RATES.captions_per_clip;
   const credits = youtube_direct ? clipsCharge(price, count) : price.lite;
   const what = LENGTH_WORDS[length];
   const warning = Number.isFinite(asked) && asked > cap
@@ -914,7 +941,7 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
     : count > likely
       ? `A ${minutes}-minute video usually holds about ${likely} strong ${what} ${likely === 1 ? "clip" : "clips"}. We'll make as many as it really has, up to ${count}, and you're only charged for the clips we make.`
       : null;
-  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, price, warning },
+  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, price, warning, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
     summary: `${minutes} min · up to ${count} ${count === 1 ? "clip" : "clips"}` };
 }
 /** The re-run that cuts moments already chosen, from an uploaded copy of the same video: each clip, no reading. */
@@ -1089,7 +1116,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: p.moments.length, message: `Cutting clip ${Math.min(made.length + 1, p.moments.length)} of ${p.moments.length}`, made, clip_s_total: sLeft, clip_s_left: sLeft, stage_at: new Date().toISOString() }); // a fresh clock for this attempt's cutting
     // C. Cut: one at a time (the web service has one CPU, so two at once is no faster, and two renders at once ran it out
     //    of memory).
-    const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length };
+    const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null };
     let full: ClipsError | null = null;
     const cutOne = async (m: Moment) => {
       for (let attempt = 0; ; attempt++) {
@@ -1183,18 +1210,18 @@ export function startClipsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {},
   const worker = `clips-${randomUUID()}`;
   let running = false;
   const tick = async () => {
-    if (running) return;
+    if (running || busy.captions) return;
     try {
       const sb = sbFn();
+      running = busy.clips = true;
       const r = await sb.rpc("studio_claim", { p_tool: "clips", p_worker: worker });
       if (r.error) throw r.error;
       const job = r.data as Job | null;
-      if (!job || !job.id) return;
-      running = true;
+      if (!job || !job.id) { running = busy.clips = false; return; }
       // the lease is 10 minutes; a long cut keeps it alive between clips, and this keeps it alive during one long step
       const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
-      runClipsJob(sb, { ...deps, log }, job).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); running = false; });
-    } catch (e: any) { log(`[clips] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
+      runClipsJob(sb, { ...deps, log }, job).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); running = busy.clips = false; });
+    } catch (e: any) { running = busy.clips = false; log(`[clips] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);
   setTimeout(tick, 17_000);

@@ -177,7 +177,10 @@ export async function ffmpegReport(): Promise<string> {
   const version = (await run(["-hide_banner", "-version"])).split("\n")[0]?.slice(0, 120) ?? "?";
   const protocols = await run(["-hide_banner", "-protocols"]);
   const has = (p: string) => new RegExp(`^\\s*${p}\\s*$`, "m").test(protocols.split("Output:")[0] ?? "");
-  return `${version}; https ${has("https") ? "yes" : "NO"}, tls ${has("tls") ? "yes" : "NO"}, httpproxy ${has("httpproxy") ? "yes" : "NO"}`;
+  // Captions render through libass (the "ass" filter); without it every captions job would fail at the render
+  const filters = await run(["-hide_banner", "-filters"]);
+  const ass = /^\s*\S+\s+ass\s/m.test(filters);
+  return `${version}; https ${has("https") ? "yes" : "NO"}, tls ${has("tls") ? "yes" : "NO"}, httpproxy ${has("httpproxy") ? "yes" : "NO"}, libass ${ass ? "yes" : "NO (captions cannot render)"}`;
 }
 /** One stretch of a YouTube video, cut exactly (keyframes forced at the cuts) to an H.264 + AAC MP4 at up to 1080 lines.
  *  yt-dlp fetches it itself: YouTube refuses its stream addresses when another program asks for them (seen Oct 31 2026:

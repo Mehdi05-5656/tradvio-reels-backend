@@ -20,6 +20,7 @@ import { checkUnsubscribeToken } from "./studio-mail.js";
 import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
 import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
+import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-caption-video.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsServers, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
 import Stripe from "stripe";
@@ -93,13 +94,15 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // The assistant: a Claude key and not switched off.
     assistant: !!env.ANTHROPIC_API_KEY && env.STUDIO_ASSISTANT_ENABLED !== "false",
     // Clips from long videos (Claude to choose; ScrapeCreators for YouTube, ElevenLabs for uploads) and bulk link imports.
-    clips: clipsEnabled(env), import: importEnabled(env) };
+    clips: clipsEnabled(env), import: importEnabled(env),
+    // Captions burned into a video or a whole Clips run (ElevenLabs for the words, libass for the render).
+    captions: captionsEnabled(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
 // ---------------------------------------------------------------------------------------------------
-export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import"; credits: number; options: Record<string, any>; summary: string };
+export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import" | "captions"; credits: number; options: Record<string, any>; summary: string };
 const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const characterChoice = (o: any) => {
   const cast = castChoice(o);
@@ -138,6 +141,7 @@ export function jobLabel(j: { tool: string; options?: any }): string {
   if (j.tool === "character") return o.style_name ? `Character · ${o.style_name}` : "Character";
   if (j.tool === "clips") return `Clips · ${String(o.source?.title ?? "a long video").slice(0, 60)}`;
   if (j.tool === "import") return "Import";
+  if (j.tool === "captions") { const n = Array.isArray(o.items) ? o.items.length : 1; return n === 1 ? `Captions · ${String(o.items?.[0]?.name ?? "a video").replace(/\.[a-z0-9]{2,4}$/i, "").slice(0, 60)}` : `Captions · ${n} videos`; }
   const secs = Number(o.seconds);
   return `${names[j.tool] ?? j.tool}${o.style_name ? ` · ${o.style_name}` : o.trend_name ? ` · ${o.trend_name}` : ""}${secs > 0 ? ` · ${secs} s` : ""}`;
 }
@@ -490,6 +494,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   };
   registerPlanChange(app, { sbFn, stripe, env, dashboard, requireUser, fail, log });
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
+  registerCaptions(app, { sbFn, env, requireUser, fail, log });
   // every price setting looked up once at start: a sandbox id left behind shows in the log by its setting's name
   if (deps.stripe === undefined && env === process.env && env.STRIPE_SECRET_KEY) setTimeout(() => {
     void missingPrices(stripe(), env).then((bad) => { if (bad.length) console.error(`[studio] ALERT these Stripe price settings are not prices in this Stripe account: ${bad.join(", ")}`); else log("[studio] Stripe prices: all found"); }).catch(() => undefined);
@@ -1032,6 +1037,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const q: InstrumentQuote = await quoteInstrument({ env, log }, PLANS, body?.options, resolveAssets(sb, u));
       return q;
     }
+    if (String(body?.tool ?? "") === "captions") return quoteCaptions(sb, u, env, body?.options);
     const asset = await loadAsset(sb, u, body?.asset_id);
     if (String(body?.tool ?? "") === "clips") {
       const q = await quoteClips({ env, log }, PLANS, asset, body?.options);
@@ -1060,7 +1066,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     try {
       const sb = sbFn();
       const q = await quoteFor(sb, u, req.body);
-      const asset = q.tool === "instrument" ? null : await loadAsset(sb, u, req.body?.asset_id);
+      const asset = q.tool === "instrument" || q.tool === "captions" ? null : await loadAsset(sb, u, req.body?.asset_id);
       const tools = toolsEnabled(env);
       if (!(tools as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       if ((q.tool === "recast" || q.tool === "swap" || q.tool === "trend") && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
