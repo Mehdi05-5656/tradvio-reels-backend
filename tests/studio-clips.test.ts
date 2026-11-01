@@ -240,8 +240,8 @@ test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safe
 test("time left: learned from past runs, by video length, clip count and length, and the runs queued ahead", () => {
   assert.deepEqual(timingFrom([]), DEFAULT_TIMING, "no runs yet: the defaults");
   const t = timingFrom([
-    { timing: { video_s: 1000, fetch_s: 100, listen_s: 30, choose_s: 45, cut_s: 10 * 15 + 2 * 300, clips: 10, clip_s: 300 } },
-    { timing: { video_s: 2000, fetch_s: 200, listen_s: 60, choose_s: 65, cut_s: 5 * 15 + 2 * 150, clips: 5, clip_s: 150 } },
+    { timing: { video_s: 1000, fetch_s: 100, listen_s: 30, choose_s: 45, cut_s: 10 * 5 + 2 * 300, clips: 10, clip_s: 300 } },
+    { timing: { video_s: 2000, fetch_s: 200, listen_s: 60, choose_s: 65, cut_s: 5 * 5 + 2 * 150, clips: 5, clip_s: 150 } },
   ]);
   assert.equal(t.runs, 2);
   assert.ok(Math.abs(t.fetch_per_s - 0.1) < 1e-9 && Math.abs(t.listen_per_s - 0.03) < 1e-9 && Math.abs(t.cut_per_s - 2) < 1e-9, JSON.stringify(t));
@@ -262,6 +262,13 @@ test("time left: learned from past runs, by video length, clip count and length,
   assert.equal(e.ahead, 1);
   assert.ok(Math.abs(e.seconds - (left + full)) <= 1, `${e.seconds} vs ${left + full}`);
   assert.equal(etaFor({ id: "a", status: "running", options: cutting.options, progress: cutting.progress }, queue as any, t, 1, now).ahead, 0);
+  // each clip measured on its own (a resumed run counts too): seconds per second of clip from those
+  const perClip = timingFrom([{ timing: { video_s: 844, cuts: [[40, 85], [20, 45], [30, 65]] } }]);
+  assert.ok(Math.abs(perClip.cut_per_s - 2) < 1e-9, `${perClip.cut_per_s}`);
+  // cutting with the chosen clips' lengths known: what is left is those seconds at this run's pace
+  const known = job({}, { status: "running", progress: { stage: "cutting", stage_at: "2026-11-01T00:58:00Z", done: 4, total: 10, clip_at: "2026-11-01T01:00:00Z", clip_s_total: 300, clip_s_left: 180 } });
+  const k = remainingSeconds(known, t, now);
+  assert.ok(k >= 170 && k <= 190, `180 s of clip left at 1 s per second measured (120 s for 120 s): ${k}`);
 });
 
 test("the Clips email: how many, what was charged and what went back, the link to the run; or the one step left", () => {

@@ -117,8 +117,10 @@ export const clipsCharge = (price: ClipsPrice, made: number, o: { analysis?: boo
 /** Seconds per stage, as rates: fetching and listening scale with the video's length; choosing has a fixed part plus a
  *  part per second of video; cutting has a fixed part per clip plus a part per second of clip (framing, rendering). */
 export type ClipTiming = { fetch_per_s: number; listen_per_s: number; choose_base: number; choose_per_s: number; cut_base: number; cut_per_s: number; runs: number };
-/** Before any run is measured: the Oct 31 2026 TED run (844 s: fetched in 60 s, heard and chosen in 44 s, ~75 s a clip). */
-export const DEFAULT_TIMING: ClipTiming = { fetch_per_s: 0.08, listen_per_s: 0.025, choose_base: 25, choose_per_s: 0.02, cut_base: 15, cut_per_s: 1.6, runs: 0 };
+/** Before runs are measured, the two TED runs (844 s video, Oct 31-Nov 1 2026): the download took 60 s and 177 s
+ *  through the proxy (its speed varies; kept between), hearing and choosing about 70 s, and each clip, cut one at a
+ *  time, 45-118 s: 527 s for 270 s of clips, about 1.9 s per second of clip. */
+export const DEFAULT_TIMING: ClipTiming = { fetch_per_s: 0.15, listen_per_s: 0.03, choose_base: 25, choose_per_s: 0.02, cut_base: 5, cut_per_s: 1.85, runs: 0 };
 const median = (xs: number[]) => { const v = xs.filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : NaN; };
 /** The timing model from recorded runs (each run's own rates, the median of each); the default fills what is missing. */
 export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
@@ -129,8 +131,10 @@ export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
   const listen = pick(t.filter((x) => x.listen_s > 0).map((x) => x.listen_s / x.video_s), DEFAULT_TIMING.listen_per_s);
   // choosing: the fixed part stays at the default; the rest scales with the video
   const choose = pick(t.filter((x) => x.choose_s > 0).map((x) => Math.max(0, x.choose_s - DEFAULT_TIMING.choose_base) / x.video_s), DEFAULT_TIMING.choose_per_s);
-  // cutting: per second of clip made, after each clip's fixed part
-  const cut = pick(t.filter((x) => x.cut_s > 0 && x.clip_s > 0 && x.clips > 0).map((x) => Math.max(0.3, (x.cut_s - x.clips * DEFAULT_TIMING.cut_base) / x.clip_s)), DEFAULT_TIMING.cut_per_s);
+  // cutting: per second of clip, after each clip's fixed part; each clip measured on its own when the run kept them
+  const perClip = t.flatMap((x) => (Array.isArray(x.cuts) ? x.cuts : [])).filter((c: any) => Array.isArray(c) && c[0] > 5 && c[1] > 0).map((c: number[]) => Math.max(0.3, (c[1] - DEFAULT_TIMING.cut_base) / c[0]));
+  const whole = t.filter((x) => !Array.isArray(x.cuts) && x.cut_s > 0 && x.clip_s > 0 && x.clips > 0).map((x) => Math.max(0.3, (x.cut_s - x.clips * DEFAULT_TIMING.cut_base) / x.clip_s));
+  const cut = pick([...perClip, ...whole], DEFAULT_TIMING.cut_per_s);
   return { fetch_per_s: fetch, listen_per_s: listen, choose_base: DEFAULT_TIMING.choose_base, choose_per_s: choose, cut_base: DEFAULT_TIMING.cut_base, cut_per_s: cut, runs: t.length };
 }
 let timingCache: { at: number; timing: ClipTiming } | null = null;
@@ -166,10 +170,20 @@ export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now
   let left = stages.slice(at + 1).reduce((a, [, s]) => a + s, 0);
   if (p.stage === "cutting") {
     const done = Number(p.done) || 0, total = Number(p.total) || planned;
-    // measured on this run once a clip is made: the time per clip so far
-    const rate = done > 0 && since > 0 ? since / done : perClip;
-    left += Math.max(0, total - done) * rate - (done > 0 ? 0 : Math.min(since, perClip * 0.9));
-    if (done > 0 && p.clip_at) left -= Math.min(rate * 0.9, Math.max(0, (now - Date.parse(p.clip_at)) / 1000));
+    const sLeft = Number(p.clip_s_left), sAll = Number(p.clip_s_total);
+    if (Number.isFinite(sLeft) && Number.isFinite(sAll) && sAll > 0) {
+      // the chosen clips' own lengths are known: seconds of clip still to cut, at this run's measured pace once it has one
+      const cutSoFar = sAll - sLeft;
+      const pace = cutSoFar > 0 && since > 0 ? since / cutSoFar : timing.cut_per_s + timing.cut_base / Math.max(5, sAll / Math.max(1, total));
+      left += sLeft * pace;
+      const sinceClip = p.clip_at ? (now - Date.parse(p.clip_at)) / 1000 : since;
+      left -= Math.min(Math.max(0, sinceClip), (sAll / Math.max(1, total)) * pace * 0.9);
+    } else {
+      // measured on this run once a clip is made: the time per clip so far
+      const rate = done > 0 && since > 0 ? since / done : perClip;
+      left += Math.max(0, total - done) * rate - (done > 0 ? 0 : Math.min(since, perClip * 0.9));
+      if (done > 0 && p.clip_at) left -= Math.min(rate * 0.9, Math.max(0, (now - Date.parse(p.clip_at)) / 1000));
+    }
   } else left += Math.max(stages[at][1] * 0.1, stages[at][1] - since);
   return Math.max(10, Math.round(left));
 }
@@ -913,7 +927,7 @@ export function quoteCut(plans: PlanLike[], clips: number, seconds: number, leng
 // ---------------------------------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------------------------------
-type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number; marks?: Record<string, number> };
+type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number; created_at?: string; marks?: Record<string, number> };
 const planKey = (u: string, collectionId: string) => `${u}/clips/${collectionId}/plan.txt`;
 /** Saves where the run is. A new stage gets its own clock (`stage_at`, for the page's time left), and the moment it
  *  started is kept on the job (`marks`) to measure this run for the next estimates. */
@@ -958,6 +972,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const made: Array<{ rank: number; asset_id: string; seconds: number }> = Array.isArray(job.progress?.made) ? job.progress.made : [];
   const youtube = o.platform === "youtube" && !o.plan_from;
   let ytFile: string | null = null;
+  let fetched: { s: number; bytes: number } | null = null;
+  const attemptAt = Date.now();
   const fetchYouTube = async (seconds: number) => {
     const file = join(dir!, "youtube.mp4");
     const began = Date.now();
@@ -965,6 +981,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     ytFile = file;
     // what came through the proxy, measured: the price assumes CLIP_COST.full_bytes_per_second
     const bytes = await stat(file).then((x) => x.size).catch(() => 0);
+    fetched = { s: Math.round((Date.now() - began) / 1000), bytes };
     const usd = (bytes / 1e9) * proxyUsdPerGb(env);
     log(`[clips] fetched ${JSON.stringify({ job: job.id, mb: Math.round(bytes / 1e5) / 10, seconds: Math.round((Date.now() - began) / 1000), bytes_per_video_second: seconds ? Math.round(bytes / seconds) : null, usd: Math.round(usd * 1000) / 1000 })}`);
     if (usd > 0) recordEvent({ user_id: u, kind: "vendor", name: "youtube_proxy", usd, props: { job: job.id, bytes, seconds } });
@@ -1068,7 +1085,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         return "needs_file";
       }
     } else src = await signedSource(sb, u, job.asset_id!);
-    await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: p.moments.length, message: `Cutting clip ${Math.min(made.length + 1, p.moments.length)} of ${p.moments.length}`, made });
+    let sLeft = Math.round(todo.reduce((a, m) => a + (m.end - m.start), 0));
+    await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: p.moments.length, message: `Cutting clip ${Math.min(made.length + 1, p.moments.length)} of ${p.moments.length}`, made, clip_s_total: sLeft, clip_s_left: sLeft, stage_at: new Date().toISOString() }); // a fresh clock for this attempt's cutting
     // C. Cut: one at a time (the web service has one CPU, so two at once is no faster, and two renders at once ran it out
     //    of memory).
     const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length };
@@ -1084,18 +1102,23 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const queue = [...todo];
     const skipped: number[] = [];
     const madeNow: number[] = [];
+    const clipTimes: Array<[number, number]> = [];
     const worker = async () => {
       while (queue.length && !full) {
         const m = queue.shift()!;
+        const t0 = Date.now();
         try {
           const r = await cutOne(m);
+          clipTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - t0) / 100) / 10]);
+          sLeft = Math.max(0, sLeft - Math.round(m.end - m.start));
           made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds });
           madeNow.push(r.seconds);
-          await renew(sb, job, { clip_at: new Date().toISOString(), done: made.length, total: p.moments.length, message: made.length < p.moments.length ? `Cutting clip ${made.length + 1} of ${p.moments.length}` : "Finishing", made });
+          await renew(sb, job, { clip_at: new Date().toISOString(), clip_s_left: sLeft, done: made.length, total: p.moments.length, message: made.length < p.moments.length ? `Cutting clip ${made.length + 1} of ${p.moments.length}` : "Finishing", made });
         } catch (e: any) {
           if (e instanceof ClipsError && (e.code === "storage_full" || e.code === "too_many_files")) { full = e; break; }
           if (e instanceof ClipsError && e.code === "lease_lost") throw e;
           skipped.push(m.rank);
+          sLeft = Math.max(0, sLeft - Math.round(m.end - m.start));
           log(`[clips] clip ${m.rank} of ${job.id} skipped: ${String(e?.message ?? e).slice(0, 200)}`);
         }
       }
@@ -1114,8 +1137,15 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     // what this attempt measured, for the next estimates (a stage it did not run is left out)
     const mk = job.marks ?? {}, end = Date.now();
     const span = (a: string, b: string | null) => (mk[a] ? Math.round(((b && mk[b] ? mk[b] : end) - mk[a]) / 1000) : 0);
-    const timing = { video_s: Math.round(p.seconds), fetch_s: youtube && mk.reading && mk.transcribing ? span("reading", "transcribing") : 0, listen_s: span("transcribing", "choosing"), choose_s: span("choosing", "cutting"),
-      cut_s: madeNow.length ? span("cutting", null) : 0, clips: madeNow.length, clip_s: Math.round(madeNow.reduce((a, x) => a + x, 0)) };
+    // measured directly where it can be (the download, each clip), so a resumed run counts too
+    const ff = fetched as { s: number; bytes: number } | null;
+    const timing = { video_s: Math.round(p.seconds), fetch_s: ff?.s ?? 0, fetch_mb: ff ? Math.round(ff.bytes / 1e5) / 10 : 0, fetch_mb_s: ff && ff.s ? Math.round((ff.bytes / 1e6 / ff.s) * 100) / 100 : 0,
+      listen_s: span("transcribing", "choosing"), choose_s: span("choosing", "cutting"),
+      cut_s: clipTimes.length ? Math.round(clipTimes.reduce((a, c) => a + c[1], 0)) : 0, clips: clipTimes.length, clip_s: Math.round(clipTimes.reduce((a, c) => a + c[0], 0)), cuts: clipTimes,
+      // how this attempt went against what the person was told (the quote's estimate, made when they started)
+      attempt: job.attempts ?? 1, run_s: Math.round((end - attemptAt) / 1000), eta_s: Number(o.eta_seconds) || null,
+      total_s: (job.attempts ?? 1) === 1 && job.created_at ? Math.round((end - Date.parse(job.created_at)) / 1000) : null };
+    log(`[clips] timing ${JSON.stringify({ job: job.id, length, ...timing, cuts: undefined, per_clip_s: timing.clips ? Math.round((timing.cut_s / timing.clips) * 10) / 10 : null, s_per_clip_second: timing.clip_s ? Math.round((timing.cut_s / timing.clip_s) * 100) / 100 : null, eta_off_s: timing.eta_s && timing.total_s ? timing.total_s - timing.eta_s : null })}`);
     await renew(sb, job, { stage: "done", outcome: made.length < asked && !o.plan_from ? "fewer" : "done", made_count: made.length, asked, charged }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
     if (done.error) throw done.error;
