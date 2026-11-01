@@ -395,7 +395,7 @@ export async function searchLibrary(sb: SupabaseClient, u: string, p: { query?: 
     .sort((a, b) => (Number(b.probe?.score) || 0) - (Number(a.probe?.score) || 0) || String(b.created_at).localeCompare(String(a.created_at)))
     .slice(0, 20)
     .map((a) => ({ row: a, view: { id: a.id, kind: a.kind, name: a.name, seconds: Number(a.probe?.duration) > 0 ? Math.round(Number(a.probe.duration)) : null, collection: a.collection_id ? names.get(a.collection_id) ?? null : null,
-      ...(a.probe?.title ? { title: a.probe.title, hook: a.probe.hook ?? null, score: a.probe.score ?? null } : {}), ...(a.probe?.long_source ? { long_source: true } : {}) } }));
+      ...(a.probe?.title ? { title: a.probe.title, hook: a.probe.hook ?? null, score: a.probe.score ?? null } : {}), ...(a.probe?.long_source ? { long_source: true } : {}), ...(a.probe?.captions ? { captioned: true } : {}) } }));
 }
 const idsOf = (v: unknown): string[] => {
   const ids = (Array.isArray(v) ? v : []).map(String).filter((x) => UUID_RE.test(x));

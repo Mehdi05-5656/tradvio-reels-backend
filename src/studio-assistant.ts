@@ -26,6 +26,7 @@ import { probeSeconds, makePoster } from "./studio-recast.js";
 import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { youtubeId } from "./studio-youtube.js";
 import { ClipsError, isLongSource, quoteClips } from "./studio-clips.js";
+import { CAPTION_LIMITS, captionCredits, cleanSettings, quoteCaptions } from "./studio-caption-video.js";
 import { searchLibrary } from "./studio-library.js";
 import { profileLines } from "./studio-onboarding.js";
 import type { SetupCard } from "./studio-automations.js";
@@ -110,12 +111,12 @@ export const TOOLS = [
           items: {
             type: "object", additionalProperties: false,
             properties: {
-              tool: { type: "string", enum: ["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument", "clips"] },
+              tool: { type: "string", enum: ["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument", "clips", "captions"] },
               label: { type: "string", description: "What this step does, in the person's words" },
               source: { type: ["string", "null"], description: "Video (or picture) asset id, or \"$N\". For a trend: null for a catalog trend (trend_id), or the video asset of a trend the person brought (a fetched link or an upload). Null for character and text-only instruments." },
               options: {
                 type: "object", additionalProperties: true,
-                description: "blueprint: {copies}. recast/swap: {model: light|full, character: preset id, or character_asset_id: library image id or \"$N\" of a character step; swap also takes prompt}. For several people, each with their own character, give cast instead: [{character or character_asset_id, label}] in left-to-right order, labels from choose_people. restyle: {style_name or style_id, prompt?}. trend: {trend_id (catalog) or a video source, trend_name?, model, character or character_asset_id, or cast as above}. character: {mode: human|animal, prompt}. instrument: {endpoint, params: {...}, inputs: {media_field: asset id or [ids] or \"$N\"}}. clips: {url: a YouTube link, or source = a library video of 2 minutes to 3 hours; format?: vertical|original; length?: short|standard|long|minute (minute = 61-70 s, never under a minute, for TikTok Creator Rewards); count?: how many clips, 1 to 50 (charged only for the clips made)}; a clips step makes a whole collection of clips, so no later step can use it as \"$N\": the person picks clips afterwards.",
+                description: "blueprint: {copies}. recast/swap: {model: light|full, character: preset id, or character_asset_id: library image id or \"$N\" of a character step; swap also takes prompt}. For several people, each with their own character, give cast instead: [{character or character_asset_id, label}] in left-to-right order, labels from choose_people. restyle: {style_name or style_id, prompt?}. trend: {trend_id (catalog) or a video source, trend_name?, model, character or character_asset_id, or cast as above}. character: {mode: human|animal, prompt}. instrument: {endpoint, params: {...}, inputs: {media_field: asset id or [ids] or \"$N\"}}. clips: {url: a YouTube link, or source = a library video of 2 minutes to 3 hours; format?: vertical|original; length?: short|standard|long|minute (minute = 61-70 s, never under a minute, for TikTok Creator Rewards); count?: how many clips, 1 to 50 (charged only for the clips made); language?: original (default, the video's own voice track) or an ISO code for one of YouTube's dubbed tracks; captions?: {style: {id: a caption style id}} to burn animated captions into every clip (+3 credits a clip)}; a clips step makes a whole collection of clips, so no later step can use it as \"$N\": the person picks clips afterwards. captions: {sources: [library video ids] (clips too; from search_library), style?: one of bold_pop|pill|one_word|karaoke|neon|comic|bubble|boxed|minimal|subtitle|typewriter|luxe|marker|headline (default bold_pop), keywords?: true}; source is null; captions take library videos only, never \"$N\".",
               },
             },
             required: ["tool", "label", "options"],
@@ -357,7 +358,7 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
   for (let i = 1; i <= raw.steps.length; i++) {
     const st = raw.steps[i - 1] ?? {};
     const tool = String(st.tool ?? "");
-    if (!["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument", "clips"].includes(tool)) throw new AssistantError("plan_invalid", `Step ${i}: unknown tool ${tool}`);
+    if (!["blueprint", "recast", "swap", "restyle", "trend", "character", "instrument", "clips", "captions"].includes(tool)) throw new AssistantError("plan_invalid", `Step ${i}: unknown tool ${tool}`);
     if (!ctx.tools[tool]) throw new AssistantError("plan_invalid", `Step ${i}: ${tool} is not taking jobs right now`);
     const o = st.options && typeof st.options === "object" ? { ...st.options } : {};
     const label = String(st.label ?? tool).slice(0, 120);
@@ -370,8 +371,28 @@ export async function pricePlan(ctx: Ctx, raw: any): Promise<Plan> {
         if (src.ref) throw new AssistantError("plan_invalid", `Step ${i}: clips take a library video or a YouTube link, not another step's result`);
         sourceStr = src.id; asset = ctx.assets.get(src.id!.toLowerCase());
       }
-      const q = await quoteClips({ env: ctx.env, fetch: ctx.deps.fetch, log: ctx.deps.log }, PLANS, asset ? { id: asset.id, kind: asset.kind, name: asset.name, bytes: asset.bytes, probe: asset.probe } : null, { url: o.url, format: o.format, length: o.length });
+      const q = await quoteClips({ env: ctx.env, fetch: ctx.deps.fetch, log: ctx.deps.log }, PLANS, asset ? { id: asset.id, kind: asset.kind, name: asset.name, bytes: asset.bytes, probe: asset.probe } : null, { url: o.url, format: o.format, length: o.length, count: o.count, language: o.language, captions: o.captions });
       credits = q.credits; summary = `${q.summary} (charged for the clips made)`; Object.assign(o, q.options); estimate = true;
+    } else if (tool === "captions") {
+      // library videos only (a clip is one); each priced by its length, charged per video made
+      const ids = [...new Set(((Array.isArray(o.sources) ? o.sources : o.source ? [o.source] : st.source ? [st.source] : []) as unknown[]).map((x) => String(x ?? "")))];
+      if (!ids.length) throw new AssistantError("plan_invalid", `Step ${i}: captions need at least one library video (sources)`);
+      if (ids.length > CAPTION_LIMITS.max_items) throw new AssistantError("plan_invalid", `Step ${i}: captions take up to ${CAPTION_LIMITS.max_items} videos at a time`);
+      const items = ids.map((id) => {
+        if (REF_RE.test(id)) throw new AssistantError("plan_invalid", `Step ${i}: captions take library videos, not another step's result; let the earlier step finish and caption its video from the library`);
+        const a = ctx.assets.get(id.toLowerCase());
+        if (!a) throw new AssistantError("plan_invalid", `Step ${i}: no file with id ${id} in the library`);
+        if (a.kind !== "video") throw new AssistantError("plan_invalid", `Step ${i}: "${a.name}" is a ${a.kind}; captions go on videos`);
+        const seconds = Number(a.probe?.duration) || 0;
+        if (seconds > CAPTION_LIMITS.max_seconds) throw new AssistantError("plan_invalid", `Step ${i}: "${a.name}" is over ${CAPTION_LIMITS.max_seconds / 60} minutes; make clips from it first`);
+        return { asset_id: a.id, name: a.name, seconds: Math.round(seconds * 10) / 10, credits: captionCredits(seconds), collection_id: a.collection_id ?? null, words: null };
+      });
+      const settings = cleanSettings({ style: { id: o.style ?? o.style_id ?? "bold_pop" }, keywords: o.keywords, fillers: o.fillers, censor: o.censor });
+      credits = items.reduce((n, x) => n + x.credits, 0);
+      summary = items.length === 1 ? `${settings.style.name} captions on "${items[0].name.replace(/\.[a-z0-9]{2,4}$/i, "")}"` : `${settings.style.name} captions on ${items.length} videos`;
+      Object.assign(o, { items, ...settings, seconds: Math.round(items.reduce((n, x) => n + x.seconds, 0)) });
+      delete o.sources; delete o.source; delete o.style_id;
+      estimate = false;
     } else if (tool === "character") {
       const q = quote("character", { mode: o.mode, prompt: o.prompt }, null, costs);
       credits = q.credits; summary = q.summary; Object.assign(o, q.options);
@@ -950,11 +971,15 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
           // priced again at start (the listing may have changed), into a collection made for the run
           const a = assetId ? await sb.from("studio_assets").select("id,kind,status,probe,bytes,name").eq("id", assetId).eq("user_id", convo.user_id).maybeSingle() : { data: null, error: null };
           if (a.error) throw a.error;
-          const q = await quoteClips({ env, fetch: deps.fetch, log }, PLANS, a.data ? { id: a.data.id, kind: a.data.kind, name: a.data.name, bytes: a.data.bytes, probe: a.data.probe } : null, { url: o.url, format: o.format, length: o.length });
+          const q = await quoteClips({ env, fetch: deps.fetch, log }, PLANS, a.data ? { id: a.data.id, kind: a.data.kind, name: a.data.name, bytes: a.data.bytes, probe: a.data.probe } : null, { url: o.url, format: o.format, length: o.length, count: o.count, language: o.language, captions: o.captions });
           const s = q.options.source ?? {};
           const c = await sb.from("studio_collections").insert({ user_id: convo.user_id, name: String(s.title ?? "Clips").slice(0, 100) || "Clips", kind: "clips", status: "processing", source: { ...s, format: q.options.format, length: q.options.length } }).select("id").single();
           if (c.error) throw c.error;
           credits = q.credits; options = { ...q.options, collection_id: c.data.id };
+        } else if (ps.tool === "captions") {
+          // priced again at start against the library as it is now
+          const q = await quoteCaptions(sb, convo.user_id, env, { items: o.items, style: o.style, keywords: o.keywords, fillers: o.fillers, censor: o.censor });
+          credits = q.credits; options = q.options; assetId = null;
         } else if (ps.tool !== "character") {
           const a = assetId ? await sb.from("studio_assets").select("id,kind,status,probe").eq("id", assetId).eq("user_id", convo.user_id).maybeSingle() : { data: null, error: null };
           if (a.error) throw a.error;
@@ -990,7 +1015,12 @@ export async function advanceRun(sb: SupabaseClient, deps: AssistantDeps, convo:
         const count = (id: string) => ((n.data ?? []) as any[]).filter((x) => x.collection_id === id).length;
         clipWords = ((cs.data ?? []) as any[]).map((c) => c.status === "needs_file" ? ` "${c.name}": ${c.note ?? "YouTube refused the download."} Open it on the Clips page to upload the file.` : ` ${count(c.id)} clips from "${c.name}" are in your library, best first.${c.note ? ` ${c.note}` : ""}`).join("");
       }
-      finish("done", clipWords && run.steps.length === 1 ? clipWords.trim() : `All ${run.steps.length === 1 ? "done" : `${run.steps.length} steps are done`}. The results are in the cards above and in your library.${clipWords}`);
+      // Captions steps: where the captioned videos are. Clips without captions: offer them once, in a sentence.
+      const capSteps = run.steps.filter((s) => plan.steps[s.index - 1].tool === "captions" && s.job_id);
+      const capWords = capSteps.map((s) => { const j = jobs.get(s.job_id!); const n = Number(j?.progress?.made_count ?? 0); return n ? ` ${n === 1 ? "The captioned video is" : `${n} captioned videos are`} in your library${j?.progress?.folder ? ", in their own folder" : ", next to the original"}.` : ""; }).join("");
+      const plainClips = run.steps.some((s) => plan.steps[s.index - 1].tool === "clips" && !plan.steps[s.index - 1].options?.captions);
+      const offer = plainClips && !capSteps.length ? " Want captions on them? Say \"add captions to these clips\" and pick a style." : "";
+      finish("done", clipWords && run.steps.length === 1 ? `${clipWords.trim()}${offer}` : `All ${run.steps.length === 1 ? "done" : `${run.steps.length} steps are done`}. The results are in the cards above and in your library.${clipWords}${capWords}${offer}`);
       // Finished videos: offer to post them (or, with nothing linked and no recent "not now", to link first).
       try {
         const social = await socialSnapshot(sb, convo.user_id, env);
