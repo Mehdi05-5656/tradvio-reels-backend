@@ -86,6 +86,25 @@ export async function markKeywords(deps: ClipsDeps, words: Array<{ text: string 
   }
   return [...new Set(keys)].sort((a, b) => a - b);
 }
+const FIX_SCHEMA = { type: "object", additionalProperties: false, required: ["words"], properties: { words: { type: "array", items: { type: "string" } } } };
+/** The words as they should read: spelling, names, numbers, capitalisation and punctuation fixed from context by a
+ *  small model; the same number of words back, in order, so every timing stays. A word it would not change is
+ *  returned as it was. Nothing is dropped or added. */
+export async function fixWords(deps: ClipsDeps, words: Array<{ text: string }>, language: string | null, userId?: string): Promise<string[]> {
+  const out: string[] = [];
+  for (let from = 0; from < words.length; from += 400) {
+    const part = words.slice(from, from + 400);
+    const listed = part.map((w, i) => `${i}\t${w.text}`).join("\n");
+    const r = await claudeJson(deps, {
+      model: (deps.env ?? process.env).STUDIO_CAPTION_KEY_MODEL || "claude-haiku-5-5", max_tokens: 6000, thinking: { type: "disabled" },
+      output_config: { effort: "low", format: { type: "json_schema", schema: FIX_SCHEMA } },
+      messages: [{ role: "user", content: `These are a video's spoken words from speech-to-text, one per line as "index<TAB>word"${language ? ` (language: ${language})` : ""}. Return the same words, in the same order and the same count (${part.length}), with only these fixed where the context makes it clear: misheard words, names and brands, numbers, capitalisation, and the punctuation that belongs on a word (a comma, a full stop, a question mark). Keep contractions and slang as spoken. Never merge, split, drop or add words; never translate. If a word is fine, return it unchanged.\n\n${listed}` }],
+    }, "captions_fix", userId);
+    const fixed: unknown[] = Array.isArray(r?.words) ? r.words : [];
+    for (let i = 0; i < part.length; i++) { const t = typeof fixed[i] === "string" ? String(fixed[i]).replace(/\s+/g, " ").trim().slice(0, 40) : ""; out.push(t || part[i].text); }
+  }
+  return out;
+}
 async function signedVideo(sb: SupabaseClient, u: string, assetId: string): Promise<{ src: SourceInput; asset: any }> {
   const a = await sb.from("studio_assets").select("id,kind,name,object_key,status,probe,collection_id").eq("id", assetId).eq("user_id", u).maybeSingle();
   if (a.error) throw a.error;
@@ -306,6 +325,24 @@ export function registerCaptions(app: Express, h: Pick<LibraryHelpers, "sbFn" | 
         recordEvent({ user_id: u, kind: "feature", name: "captions_words", props: { asset: assetId, words: doc.words.length, seconds: doc.duration } });
       }
       res.json({ words: docWords(doc), language: doc.language, duration: doc.duration });
+    } catch (e) { h.fail(res, e); }
+  });
+  // "Fix with AI": the words sent back corrected, same count and order (the page keeps every timing). Needs a plan; 60 a day.
+  app.post("/api/studio/captions/fix", async (req, res) => {
+    const u = h.requireUser(req, res); if (!u) return;
+    try {
+      const sb = h.sbFn();
+      if (!captionsEnabled(h.env) || !h.env.ANTHROPIC_API_KEY) throw new ClipsError("captions_unavailable", "Captions are not switched on yet", 503);
+      const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
+      if (!(c.data && (["active", "trialing"].includes(c.data.status) || c.data.owner_pass))) throw new ClipsError("subscription_required", "Captions come with a plan", 409);
+      const words = (Array.isArray(req.body?.words) ? req.body.words : []).slice(0, CAPTION_LIMITS.max_words).map((w: any) => ({ text: String(w?.text ?? w ?? "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, 40) })).filter((w: any) => w.text);
+      if (!words.length) throw new ClipsError("captions_no_speech", "Nothing to fix");
+      const since = new Date(Date.now() - 86400_000).toISOString();
+      const n = await sb.from("studio_events").select("id", { count: "exact", head: true }).eq("user_id", u).eq("name", "captions_fix").gte("created_at", since);
+      if ((n.count ?? 0) >= 60) throw new ClipsError("captions_rate_limited", "That is a lot of fixes for one day; try again tomorrow", 429);
+      const fixed = await fixWords({ ...deps, env: h.env, log: h.log }, words, typeof req.body?.language === "string" ? req.body.language.slice(0, 8) : null, u);
+      recordEvent({ user_id: u, kind: "feature", name: "captions_fix", props: { words: words.length, changed: fixed.filter((t, i) => t !== words[i].text).length } });
+      res.json({ words: fixed });
     } catch (e) { h.fail(res, e); }
   });
 }

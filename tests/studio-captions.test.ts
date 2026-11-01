@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import opentype from "opentype.js";
 import { FONTS, PRESETS, assSize, buildAss, chunkPhases, cleanStyle, layoutCaptions, prepareWords, presetById, sampleKeys, type CapWord } from "../src/caption-engine.js";
-import { captionCredits, cleanSettings, cleanWords, outputFrame, filterPath, quoteCaptions, serverMeasure, fontsDir } from "../src/studio-caption-video.js";
+import { captionCredits, cleanSettings, cleanWords, outputFrame, filterPath, quoteCaptions, serverMeasure, fontsDir, fixWords } from "../src/studio-caption-video.js";
 import { outputSize, quoteClips } from "../src/studio-clips.js";
 import { PLANS } from "../src/studio.js";
 
@@ -181,6 +181,14 @@ test("prices: a credit per 5 seconds, at least 5 a video; the output keeps its s
   assert.equal(on.credits, off.credits + 30);
   assert.equal(on.options.captions.style.id, "comic");
   assert.equal(off.options.captions, null);
+});
+
+test("fix with AI: the same count back, in order; a blank or missing answer keeps the word as heard", async () => {
+  const calls: any[] = [];
+  const fetchFn: any = async (_u: string, init: any) => { const body = JSON.parse(init.body); calls.push(body); return new Response(JSON.stringify({ model: body.model, usage: {}, content: [{ type: "text", text: JSON.stringify({ words: ["Hello", "John,", "", "fine."] }) }] }), { status: 200 }); };
+  const fixed = await fixWords({ env: { ANTHROPIC_API_KEY: "k" }, fetch: fetchFn }, [{ text: "hello" }, { text: "jon" }, { text: "its" }, { text: "fine" }, { text: "extra" }], "eng", U);
+  assert.deepEqual(fixed, ["Hello", "John,", "its", "fine.", "extra"]);
+  assert.match(calls[0].messages[0].content, /same count \(5\)/);
 });
 
 test("migration: captions jobs run in their own lane, one at a time per person", async (t) => {
