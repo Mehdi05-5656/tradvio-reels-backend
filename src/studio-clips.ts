@@ -53,9 +53,9 @@ export const CLIP_COST = {
   choose_usd_per_hour: 0.5,               // Claude Opus over the transcript and its signals, high effort; kept wide
   render_usd_per_clip: 0.004,             // web-service CPU and the stored file
   lookup_usd: 2 * OVERHEAD.scrapecreators_usd_per_call,
-  // the whole video comes through the proxy once, VP9 + Opus sound: H.264 1080p measured 73 kB/s of picture on a talk;
-  // VP9 is about a third smaller (to be confirmed by the "[clips] fetched" log line); 720p for videos over an hour
-  full_bytes_per_second: 80_000, full_bytes_per_second_long: 45_000, long_after_seconds: 3600,
+  // the whole video comes through the proxy once (the smallest 1080p version): a TED talk measured 96 kB/s in H.264 and
+  // 105 kB/s in VP9 on Render (Oct 31 2026), kept at 105; 720p for videos over an hour, about 55%
+  full_bytes_per_second: 105_000, full_bytes_per_second_long: 60_000, long_after_seconds: 3600,
   clip_bytes_per_second: 200_000,         // a short 1080p video with sound (imports): measured 133-166 kB/s, kept with margin
 };
 export const FRAME_MODEL = "claude-haiku-5-5";
@@ -692,7 +692,7 @@ async function probeLocal(file: string): Promise<{ w: number; h: number; fps: nu
   return { w: Number(v.width) || 0, h: Number(v.height) || 0, fps: d ? n / d : null, seconds: Number(j.format?.duration) || 0 };
 }
 async function sceneCutsLocal(file: string): Promise<number[]> {
-  const err = await ffmpeg(["-v", "info", "-nostdin", "-i", file, "-an", "-vf", "scale=320:-2,select='gt(scene,0.3)',showinfo", "-f", "null", "-"], { timeoutMs: 120_000 });
+  const err = await ffmpeg(["-v", "info", "-nostdin", "-threads", "2", "-i", file, "-an", "-filter_threads", "1", "-vf", "scale=320:-2,select='gt(scene,0.3)',showinfo", "-f", "null", "-"], { timeoutMs: 120_000 });
   return [...err.matchAll(/pts_time:([0-9.]+)/g)].map((m) => Number(m[1])).filter((t) => Number.isFinite(t) && t > 0);
 }
 /** The camera path for one cut stretch: its shots, a still a second, who is talking in each, the path that follows them.
@@ -707,7 +707,7 @@ async function frameClip(ctx: CutCtx, m: Moment, mezz: string, dur: number): Pro
     await Promise.all(Array.from({ length: 4 }, async () => {
       while (next < times.length) {
         const k = next++, f = join(ctx.dir, `f${m.rank}_${k}.jpg`);
-        await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", times[k].toFixed(3), "-i", mezz, "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", f], { timeoutMs: 60_000 });
+        await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", times[k].toFixed(3), "-threads", "1", "-i", mezz, "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", f], { timeoutMs: 60_000 });
         frames[k] = { t: times[k], jpg: await readFile(f) };
         await rm(f, { force: true }).catch(() => undefined);
       }
@@ -727,7 +727,7 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   const seconds = m.end - m.start;
   // 1. the stretch, cut exactly (decoded from just before it), kept near-lossless at up to 1080 lines
   await ffmpeg(["-v", "error", "-nostdin", "-y", ...inputArgs(ctx.src, m.start, seconds), "-vf", "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'",
-    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k", "-ac", "2", mezz], { timeoutMs: 8 * 60_000, proxy: ctx.src.proxy });
+    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-threads", "2", "-c:a", "aac", "-b:a", "192k", "-ac", "2", mezz], { timeoutMs: 8 * 60_000, proxy: ctx.src.proxy });
   const info = await probeLocal(mezz);
   const dur = info.seconds || seconds;
   if (ctx.length === "minute" && dur < CLIP_LENGTHS.minute.min - 0.5) throw new ClipsError("clip_too_short", `the cut came out at ${dur.toFixed(1)} s, under a minute`, 502);
@@ -737,8 +737,10 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   // 3. the clip: framed, 720x1280 (or the original shape), loudness evened out, soft edges on the sound
   const graph = buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
   const af = `afade=t=in:d=0.06,afade=t=out:st=${Math.max(0, dur - 0.25).toFixed(3)}:d=0.25`;
-  const enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart"];
-  const render = (audio: string) => ffmpeg(["-v", "error", "-nostdin", "-y", "-i", mezz, "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?", "-af", audio, ...enc, out], { timeoutMs: 8 * 60_000 });
+  // threads capped: on a 1-CPU server ffmpeg would start one per core it sees on the host, each holding frames
+  // (two clips at once with uncapped threads went past 2 GB and the server was killed, Oct 31 2026)
+  const enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-threads", "2", "-rc-lookahead", "20", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart"];
+  const render = (audio: string) => ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", "-i", mezz, "-filter_complex_threads", "1", "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?", "-af", audio, ...enc, out], { timeoutMs: 8 * 60_000 });
   await render(`loudnorm=I=-14:TP=-1.5:LRA=11,${af}`).catch(() => render(af));
   await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, dur / 3).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still], { timeoutMs: 60_000 });
   const final = await probeLocal(out);
@@ -976,7 +978,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       }
     } else src = await signedSource(sb, u, job.asset_id!);
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: p.moments.length, message: `Cutting clip ${Math.min(made.length + 1, p.moments.length)} of ${p.moments.length}`, made });
-    // C. Cut: two at a time.
+    // C. Cut: one at a time (the web service has one CPU, so two at once is no faster, and two renders at once ran it out
+    //    of memory).
     const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length };
     let full: ClipsError | null = null;
     const cutOne = async (m: Moment) => {
@@ -1004,7 +1007,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         }
       }
     };
-    await Promise.all([worker(), worker()]);
+    await worker();
     if (!made.length) throw new ClipsError(full ? (full as ClipsError).code : "clips_cut_failed", full ? (full as ClipsError).message : "None of the clips could be cut.", full ? 409 : 502, !full);
     // D. Settle on what was made: reading once, and each clip made. What was reserved for clips not made goes back.
     const charged = Math.min(job.credits_reserved, clipsCharge(price, made.length, { analysis: !o.plan_from }));

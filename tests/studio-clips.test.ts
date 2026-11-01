@@ -196,7 +196,7 @@ test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safe
   // a dearer proxy raises the price by itself instead of selling at a loss
   const dear = clipsPrice(PLANS, { seconds: 3600, platform: "youtube", length: "standard", env: { ...env, STUDIO_YT_PROXY_USD_PER_GB: "20" } });
   assert.ok(dear.analysis > 300, `${dear.analysis}`);
-  assert.match(downloadFormat(1080), /^bv\*\[height<=1080\]\[vcodec~='\^vp0\?9'\]\+ba\[acodec=opus\]/, "the smaller VP9 picture and Opus sound first: the proxy charges by the byte");
+  assert.match(downloadFormat(1080), /^bv\*\[height<=1080\]\[vcodec!\^=av01\]\+ba\[acodec=opus\]/, "no AV1; the light Opus sound first");
   assert.ok(frameUsdPerSecond({}) < frameUsdPerSecond({ STUDIO_CLIPS_FRAME_MODEL: "claude-sonnet-5-5" }), "Haiku frames by default; Sonnet costs more");
   assert.equal(clipsCharge(yt, 3, { analysis: false }), 3 * yt.per_clip, "cutting moments chosen earlier: clips only");
   assert.equal(quoteCut(PLANS, 4, 843, "standard").credits, 4 * 5);

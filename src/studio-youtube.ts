@@ -191,17 +191,18 @@ export async function youtubeSection(url: string, start: number, end: number, ta
   ], { ...o, timeoutMs: 8 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched"); }
 }
-/** The format list for a whole-video download: VP9 picture (about a third smaller than H.264 at the same size, and the
- *  proxy charges by the byte) with the ~70 kb/s Opus sound (plenty for speech and for the clips' 128 kb/s AAC), then
- *  H.264, then whatever exists, at most `h` lines. */
+/** The format list for a whole-video download, and its order: the smallest file at the largest size up to `h` lines (the
+ *  proxy charges by the byte; VP9 is not always smaller than H.264: a TED talk was 105 kB/s in VP9, 96 in H.264), never
+ *  AV1 (slow to decode on the server), with the ~70 kb/s Opus sound when there is one. */
 export const downloadFormat = (h: number) =>
-  `bv*[height<=${h}][vcodec~='^vp0?9']+ba[acodec=opus][abr<=100]/bv*[height<=${h}][vcodec~='^vp0?9']+ba/bv*[height<=${h}][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${h}]+ba/b[height<=${h}]/b`;
+  `bv*[height<=${h}][vcodec!^=av01]+ba[acodec=opus][abr<=100]/bv*[height<=${h}][vcodec!^=av01]+ba/b[height<=${h}]/b`;
+export const downloadSort = (h: number) => `res:${h},+size,+br`;
 /** The whole video, downloaded by yt-dlp's own downloader (no ffmpeg reading YouTube: through the proxy on Render every
  *  ffmpeg read of a YouTube address got 403, Oct 31 2026); at most `maxHeight` lines (1080, or 720 for long videos). */
 export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number } = {}): Promise<void> {
   const h = o.maxHeight ?? 1080;
   await runYtDlp([
-    "-f", downloadFormat(h),
+    "-f", downloadFormat(h), "-S", downloadSort(h),
     "--merge-output-format", "mp4", "--concurrent-fragments", "4", "-o", target, url,
   ], { ...o, timeoutMs: 40 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The video could not be downloaded"); }
