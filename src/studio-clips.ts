@@ -10,12 +10,12 @@
 //  - Each cut starts where a thought starts and ends where one ends, after the payoff and any laugh or applause it
 //    earned, never as the speaker carries on. The length is a goal: a great moment runs a little shorter or longer.
 //    The "1 min+" length is the exception: TikTok pays only for videos over a minute, so those never run under 61 s.
-//  - Framing: a still every second goes to a vision model with the words and speakers of that stretch; it says who is
+//  - Framing: a still every second goes to a vision model (Haiku; STUDIO_CLIPS_FRAME_MODEL) with the words and speakers; it says who is
 //    talking and where their face is. The crop follows them (a pan as they walk, a cut when another person speaks) and
 //    shows the whole picture (on a blurred fill) when nobody is there to frame: slides, a game, a wide room.
 //  - Price: reading the video (by its length) plus a price per clip, reserved for the clips asked for. A run is charged
-//    for the clips it makes; what it does not make goes back. Clips are a premium tool: 70% margin on reading, 80% on
-//    each clip, with floors, so cheap runs cannot be farmed.
+//    for the clips it makes; what it does not make goes back. About 2-2.5x OpusClip per video (CLIP_RATES), with
+//    safety nets so a vendor price change can never sell a run at a loss.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
@@ -51,19 +51,25 @@ export const isLongSource = (a: { bytes?: number | null; probe?: any } | null | 
 export const CLIP_COST = {
   transcribe_usd_per_hour: 0.22,          // ElevenLabs scribe_v1 with word times, speakers and sound events
   choose_usd_per_hour: 0.5,               // Claude Opus over the transcript and its signals, high effort; kept wide
-  frame_usd_per_second: 0.0009,           // Claude Sonnet looking at a still a second with the words (~$0.03 for 45 s)
   render_usd_per_clip: 0.004,             // web-service CPU and the stored file
   lookup_usd: 2 * OVERHEAD.scrapecreators_usd_per_call,
-  // the whole video comes through the proxy once (yt-dlp's own downloader is the one YouTube lets through):
-  // H.264 1080p with AAC measured 90 kB/s (843 s talk, 61.7 MB of picture); 720p for videos over an hour, about half
-  full_bytes_per_second: 110_000, full_bytes_per_second_long: 60_000, long_after_seconds: 3600,
+  // the whole video comes through the proxy once, VP9 + Opus sound: H.264 1080p measured 73 kB/s of picture on a talk;
+  // VP9 is about a third smaller (to be confirmed by the "[clips] fetched" log line); 720p for videos over an hour
+  full_bytes_per_second: 80_000, full_bytes_per_second_long: 45_000, long_after_seconds: 3600,
   clip_bytes_per_second: 200_000,         // a short 1080p video with sound (imports): measured 133-166 kB/s, kept with margin
 };
-/** Margins (owner's rule, Oct 31 2026: Clips earns 70-90%): reading the video at 70%, each clip at 80%. */
-export const CLIPS_MARGIN = { analysis: 0.7, clip: 0.8 };
-/** Floors (credits): whatever a run costs us, it never prices under these (an upload costs us little; it is still premium). */
-export const CLIP_FLOORS = { analysis_per_minute: 3, analysis_min: 15, lite_per_minute: 1, lite_min: 5,
-  per_clip: { short: 10, standard: 14, long: 27, minute: 21 } as Record<ClipLength, number> };
+export const FRAME_MODEL = "claude-haiku-5-5";
+/** Framing, per second of clip: one still a second plus the words to the framing model (~250 tokens a still). */
+export function frameUsdPerSecond(env: Record<string, string | undefined> = process.env): number {
+  const m = String(env.STUDIO_CLIPS_FRAME_MODEL || FRAME_MODEL);
+  return m.includes("opus") ? 0.0018 : m.includes("sonnet") ? 0.0009 : 0.0001;
+}
+/** The price (owner's decision, Oct 31 2026: about 2-2.5x OpusClip per video, which bills $0.10 a minute of video):
+ *  reading the video by the minute, and each clip. Safety nets: never under 35% margin on reading and 50% on a clip at
+ *  the cheapest credit we sell, whatever the vendors charge. */
+export const CLIP_RATES = { youtube_per_minute: 5, upload_per_minute: 2, lite_per_minute: 1, analysis_min: 10, lite_min: 5,
+  per_clip: { short: 5, standard: 5, long: 8, minute: 8 } as Record<ClipLength, number> };
+export const CLIPS_SAFETY_MARGIN = { analysis: 0.35, clip: 0.5 };
 /** What the proxy charges per GB (0 without one: then YouTube refuses us and nothing is read through it). */
 export const proxyUsdPerGb = (env: Record<string, string | undefined>) => (env.STUDIO_YT_PROXY ? (Number(env.STUDIO_YT_PROXY_USD_PER_GB) > 0 ? Number(env.STUDIO_YT_PROXY_USD_PER_GB) : 3) : 0);
 /** About how many strong clips of a length a video holds: one per 70 s of video, or per two clips' worth for long ones. */
@@ -84,7 +90,7 @@ export function analysisUsd(p: { seconds: number; platform: "youtube" | "upload"
   return usd;
 }
 /** One clip, in dollars: framing at its goal's upper end, rendering and storing. */
-export const perClipUsd = (length: ClipLength) => CLIP_COST.frame_usd_per_second * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip;
+export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env) => frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip;
 const credits = (usd: number, floor: number, margin: number) => Math.ceil(usd / ((1 - margin) * floor) - 1e-9);
 /** A run's price: `analysis` once (reading the video), `per_clip` for each clip made; `lite` is reading without the
  *  download (YouTube refused our servers: the moments are chosen from YouTube's captions and the file is asked for). */
@@ -95,10 +101,11 @@ export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "y
   const transcribe = p.platform === "upload" || !!p.env.ELEVENLABS_API_KEY;
   const usd = analysisUsd({ seconds: p.seconds, platform: p.platform, download, transcribe: transcribe && (p.platform === "upload" || download), choose: true, env: p.env });
   const lite = analysisUsd({ seconds: p.seconds, platform: p.platform, download: false, transcribe: false, choose: true, env: p.env });
+  const rate = p.platform === "youtube" && download ? CLIP_RATES.youtube_per_minute : p.platform === "youtube" ? CLIP_RATES.lite_per_minute : CLIP_RATES.upload_per_minute;
   return {
-    analysis: Math.max(credits(usd, floor, CLIPS_MARGIN.analysis), minutes * CLIP_FLOORS.analysis_per_minute, CLIP_FLOORS.analysis_min),
-    per_clip: Math.max(credits(perClipUsd(p.length), floor, CLIPS_MARGIN.clip), CLIP_FLOORS.per_clip[p.length]),
-    lite: Math.max(credits(lite, floor, CLIPS_MARGIN.analysis), minutes * CLIP_FLOORS.lite_per_minute, CLIP_FLOORS.lite_min),
+    analysis: Math.max(minutes * rate, credits(usd, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.analysis_min),
+    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env), floor, CLIPS_SAFETY_MARGIN.clip)),
+    lite: Math.max(minutes * CLIP_RATES.lite_per_minute, credits(lite, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.lite_min),
   };
 }
 /** What a run is charged: reading once (unless it only cuts moments chosen earlier) and each clip made. */
@@ -547,7 +554,7 @@ export async function readTrack(deps: ClipsDeps, input: TrackInput): Promise<Tra
   const env = deps.env ?? process.env;
   const said = input.speech.map(([a, b, who, text]) => `${a.toFixed(1)}-${b.toFixed(1)} s ${who ?? "?"}: ${text}`).join("\n").slice(0, 12_000);
   const out = await claudeJson(deps, {
-    model: env.STUDIO_CLIPS_FRAME_MODEL || "claude-sonnet-5-5", max_tokens: 8000,
+    model: env.STUDIO_CLIPS_FRAME_MODEL || FRAME_MODEL, max_tokens: 8000,
     output_config: { effort: "low", format: { type: "json_schema", schema: TRACK_SCHEMA } },
     messages: [{ role: "user", content: [
       ...input.frames.flatMap((f, k) => [{ type: "text", text: `Frame ${k + 1} at ${f.t.toFixed(1)} s:` }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.jpg.toString("base64") } }]),
@@ -861,8 +868,14 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   let ytFile: string | null = null;
   const fetchYouTube = async (seconds: number) => {
     const file = join(dir!, "youtube.mp4");
+    const began = Date.now();
     await (deps.download ?? ((x, t, h) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h })))(o.url, file, seconds > CLIP_COST.long_after_seconds ? 720 : 1080);
     ytFile = file;
+    // what came through the proxy, measured: the price assumes CLIP_COST.full_bytes_per_second
+    const bytes = await stat(file).then((x) => x.size).catch(() => 0);
+    const usd = (bytes / 1e9) * proxyUsdPerGb(env);
+    log(`[clips] fetched ${JSON.stringify({ job: job.id, mb: Math.round(bytes / 1e5) / 10, seconds: Math.round((Date.now() - began) / 1000), bytes_per_video_second: seconds ? Math.round(bytes / seconds) : null, usd: Math.round(usd * 1000) / 1000 })}`);
+    if (usd > 0) recordEvent({ user_id: u, kind: "vendor", name: "youtube_proxy", usd, props: { job: job.id, bytes, seconds } });
     return file;
   };
   try {

@@ -191,13 +191,17 @@ export async function youtubeSection(url: string, start: number, end: number, ta
   ], { ...o, timeoutMs: 8 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched"); }
 }
+/** The format list for a whole-video download: VP9 picture (about a third smaller than H.264 at the same size, and the
+ *  proxy charges by the byte) with the ~70 kb/s Opus sound (plenty for speech and for the clips' 128 kb/s AAC), then
+ *  H.264, then whatever exists, at most `h` lines. */
+export const downloadFormat = (h: number) =>
+  `bv*[height<=${h}][vcodec~='^vp0?9']+ba[acodec=opus][abr<=100]/bv*[height<=${h}][vcodec~='^vp0?9']+ba/bv*[height<=${h}][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${h}]+ba/b[height<=${h}]/b`;
 /** The whole video, downloaded by yt-dlp's own downloader (no ffmpeg reading YouTube: through the proxy on Render every
- *  ffmpeg read of a YouTube address got 403, Oct 31 2026). H.264 + AAC preferred so nothing needs converting; at most
- *  `maxHeight` lines (1080, or 720 for long videos to keep the proxy's bytes down). */
+ *  ffmpeg read of a YouTube address got 403, Oct 31 2026); at most `maxHeight` lines (1080, or 720 for long videos). */
 export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number } = {}): Promise<void> {
   const h = o.maxHeight ?? 1080;
   await runYtDlp([
-    "-f", `bv*[height<=${h}][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${h}]+ba/b[height<=${h}]/b`,
+    "-f", downloadFormat(h),
     "--merge-output-format", "mp4", "--concurrent-fragments", "4", "-o", target, url,
   ], { ...o, timeoutMs: 40 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The video could not be downloaded"); }

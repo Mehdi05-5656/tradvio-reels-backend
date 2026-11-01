@@ -5,10 +5,10 @@ import { PGlite } from "@electric-sql/pglite";
 import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
-  parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIPS_MARGIN, lengthWords,
+  parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
-import { parseStreams, LinkError } from "../src/studio-youtube.js";
+import { parseStreams, LinkError, downloadFormat } from "../src/studio-youtube.js";
 import { quote, PLANS } from "../src/studio.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -177,21 +177,29 @@ test("YouTube listing and transcript are read from ScrapeCreators' shapes", () =
   assert.doesNotMatch(msg, /0:00-1:26/, "the always-hot opening is not a signal");
 });
 
-test("prices: reading the video plus each clip, at 70% and 80% margins with floors; the count is chosen and checked", async () => {
+test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safety nets on cost; the count is chosen and checked", async () => {
   const floor = creditValueFloor(PLANS);
   const env = { ...ENV, STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "6.25" };
-  const yt = clipsPrice(PLANS, { seconds: 843, platform: "youtube", length: "standard", env });
-  const ytUsd = analysisUsd({ seconds: 843, platform: "youtube", download: true, transcribe: true, choose: true, env });
-  assert.ok(ytUsd / (yt.analysis * floor) <= 1 - CLIPS_MARGIN.analysis + 1e-9, "reading earns at least 70%");
-  assert.ok(perClipUsd("standard") / (yt.per_clip * floor) <= 1 - CLIPS_MARGIN.clip + 1e-9, "each clip earns at least 80%");
-  const up = clipsPrice(PLANS, { seconds: 843, platform: "upload", length: "standard", env });
-  assert.ok(up.analysis < yt.analysis, "an upload has no download to pay for");
-  assert.ok(up.analysis >= 15 && up.analysis >= 15 * 3, "but never prices under the floor (3 a minute)");
-  for (const l of ["short", "standard", "long", "minute"] as const) assert.ok(clipsPrice(PLANS, { seconds: 600, platform: "upload", length: l, env }).per_clip >= 10);
-  assert.ok(clipsPrice(PLANS, { seconds: 600, platform: "upload", length: "long", env }).per_clip > clipsPrice(PLANS, { seconds: 600, platform: "upload", length: "short", env }).per_clip);
-  assert.equal(clipsCharge(yt, 3), yt.analysis + 3 * yt.per_clip);
+  const yt = clipsPrice(PLANS, { seconds: 900, platform: "youtube", length: "standard", env });
+  assert.deepEqual(yt, { analysis: 75, per_clip: 5, lite: 15 }, "15 minutes of YouTube: 5 a minute, 5 a clip");
+  assert.equal(clipsCharge(yt, 10), 125);
+  const up = clipsPrice(PLANS, { seconds: 900, platform: "upload", length: "minute", env });
+  assert.deepEqual([up.analysis, up.per_clip], [30, 8], "uploads 2 a minute; 1 min+ and long clips 8 each");
+  assert.equal(clipsPrice(PLANS, { seconds: 150, platform: "upload", length: "short", env }).analysis, CLIP_RATES.analysis_min, "never under 10 to read");
+  // even on the cheapest credit we sell, a run never drops under the safety margins
+  for (const [sec, plat] of [[900, "youtube"], [3600, "youtube"], [7200, "youtube"], [3600, "upload"]] as const) {
+    const p = clipsPrice(PLANS, { seconds: sec, platform: plat, length: "standard", env });
+    const usd = analysisUsd({ seconds: sec, platform: plat, download: plat === "youtube", transcribe: true, choose: true, env });
+    assert.ok(1 - usd / (p.analysis * floor) >= CLIPS_SAFETY_MARGIN.analysis - 1e-9, `${sec} ${plat}`);
+  }
+  assert.ok(1 - perClipUsd("long", env) / (clipsPrice(PLANS, { seconds: 900, platform: "upload", length: "long", env }).per_clip * floor) >= CLIPS_SAFETY_MARGIN.clip);
+  // a dearer proxy raises the price by itself instead of selling at a loss
+  const dear = clipsPrice(PLANS, { seconds: 3600, platform: "youtube", length: "standard", env: { ...env, STUDIO_YT_PROXY_USD_PER_GB: "20" } });
+  assert.ok(dear.analysis > 300, `${dear.analysis}`);
+  assert.match(downloadFormat(1080), /^bv\*\[height<=1080\]\[vcodec~='\^vp0\?9'\]\+ba\[acodec=opus\]/, "the smaller VP9 picture and Opus sound first: the proxy charges by the byte");
+  assert.ok(frameUsdPerSecond({}) < frameUsdPerSecond({ STUDIO_CLIPS_FRAME_MODEL: "claude-sonnet-5-5" }), "Haiku frames by default; Sonnet costs more");
   assert.equal(clipsCharge(yt, 3, { analysis: false }), 3 * yt.per_clip, "cutting moments chosen earlier: clips only");
-  assert.equal(quoteCut(PLANS, 4, 843, "standard").credits, 4 * up.per_clip);
+  assert.equal(quoteCut(PLANS, 4, 843, "standard").credits, 4 * 5);
   assert.equal(likelyClips(843, "standard"), 12); assert.equal(likelyClips(843, "minute"), 6); assert.equal(likelyClips(300, "standard"), 4);
   assert.equal(countCap(300, "standard"), 9); assert.equal(countCap(4 * 3600, "short"), CLIP_LIMITS.max_clips);
 
