@@ -124,7 +124,7 @@ export function cleanWords(raw: unknown, seconds: number): CapWord[] | null {
     const text = String((w as any)?.text ?? "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, 40);
     const start = Number((w as any)?.start), end = Number((w as any)?.end);
     if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start || start < 0 || (seconds && start > seconds + 1)) continue;
-    out.push({ text, start: round2(start), end: round2(Math.min(end, seconds ? seconds + 1 : end)), speaker: (w as any)?.speaker ? String((w as any).speaker).slice(0, 20) : null, key: !!(w as any)?.key });
+    out.push({ text, start: round2(start), end: round2(Math.min(end, seconds ? seconds + 1 : end)), speaker: (w as any)?.speaker ? String((w as any).speaker).slice(0, 20) : null, key: !!(w as any)?.key, brk: !!(w as any)?.brk });
   }
   return out.sort((a, b) => a.start - b.start);
 }

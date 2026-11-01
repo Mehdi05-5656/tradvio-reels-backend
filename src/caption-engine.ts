@@ -56,13 +56,14 @@ export type CaptionStyle = {
   words: number;                // at most on screen at once
   lines: 1 | 2;
   maxWidth: number;             // fraction of the frame's width
+  x: number;                    // the block's centre, fraction of the frame's width (0.5 = middle)
   y: number;                    // the block's centre, fraction of the frame's height
   anim: Anim;
   spacing: number;              // space between words, fraction of the em
   lineGap: number;              // line step, fraction of the line box
 };
-const S = (s: Omit<CaptionStyle, "spacing" | "lineGap" | "maxWidth" | "glow" | "box" | "dim" | "keyword"> & Partial<CaptionStyle>): CaptionStyle =>
-  ({ spacing: 0.28, lineGap: 0.78, maxWidth: 0.86, glow: null, box: null, dim: null, keyword: null, ...s });
+const S = (s: Omit<CaptionStyle, "spacing" | "lineGap" | "maxWidth" | "glow" | "box" | "dim" | "keyword" | "x"> & Partial<CaptionStyle>): CaptionStyle =>
+  ({ spacing: 0.28, lineGap: 0.78, maxWidth: 0.86, glow: null, box: null, dim: null, keyword: null, x: 0.5, ...s });
 export const PRESETS: CaptionStyle[] = [
   S({ id: "bold_pop", name: "Bold Pop", font: "montserrat_black", size: 80, upper: true, color: "#FFFFFF", outline: { color: "#000000", width: 7 }, shadow: { color: "#000000", alpha: 0.55, x: 0, y: 5, blur: 8 }, active: { color: "#FFE600", scale: 1.12, box: null }, keyword: "#3DFF8B", words: 3, lines: 1, y: 0.7, anim: "pop" }),
   S({ id: "pill", name: "Pill", font: "poppins_xbold", size: 72, upper: true, color: "#FFFFFF", outline: { color: "#000000", width: 3 }, shadow: { color: "#000000", alpha: 0.45, x: 0, y: 4, blur: 8 }, active: { color: "#FFFFFF", scale: 1.06, box: { color: "#7C5CFF", radius: 18, padX: 16, padY: 6 } }, keyword: "#FFD84D", words: 3, lines: 1, y: 0.7, anim: "pop" }),
@@ -107,7 +108,7 @@ export function cleanStyle(raw: any): CaptionStyle {
     dim: r.dim === null ? null : col(r.dim, base.dim),
     box: bx ? { color: col(bx.color, "#000000")!, alpha: num(bx.alpha, 0, 1, 0.8), radius: num(bx.radius, 0, 60, 12), padX: num(bx.padX, 0, 80, 16), padY: num(bx.padY, 0, 60, 8) } : null,
     words: Math.round(num(r.words, 1, 10, base.words)), lines: num(r.lines, 1, 2, base.lines) >= 2 ? 2 : 1,
-    maxWidth: num(r.maxWidth, 0.4, 0.96, base.maxWidth), y: num(r.y, 0.08, 0.92, base.y),
+    maxWidth: num(r.maxWidth, 0.4, 0.96, base.maxWidth), x: num(r.x, 0.2, 0.8, base.x), y: num(r.y, 0.08, 0.92, base.y),
     anim: (["pop", "bounce", "slide", "reveal", "karaoke", "none"] as Anim[]).includes(r.anim) ? r.anim : base.anim,
     spacing: num(r.spacing, 0.05, 1.2, base.spacing), lineGap: num(r.lineGap, 0.5, 1.4, base.lineGap),
   };
@@ -116,7 +117,8 @@ export function cleanStyle(raw: any): CaptionStyle {
 // ---------------------------------------------------------------------------------------------------
 // Words: what is shown (filler words out, swearing masked, case)
 // ---------------------------------------------------------------------------------------------------
-export type CapWord = { text: string; start: number; end: number; speaker?: string | null; key?: boolean };
+/** `key`: emphasised (the accent colour). `brk`: the person wants a new caption to start after this word. */
+export type CapWord = { text: string; start: number; end: number; speaker?: string | null; key?: boolean; brk?: boolean };
 const FILLERS = /^(u+m+|u+h+|e+r+m+|h+m+|a+h+|m+h+m+|u+h+m+)[,.!?…]*$/i;
 const SWEARS = /^(f+u+c+k\w*|s+h+i+t\w*|b+i+t+c+h\w*|a+s+s+h+o+l+e\w*|c+u+n+t\w*|d+i+c+k\w*|p+u+s+s+y\w*|m+o+t+h+e+r+f+u+c+k\w*|b+u+l+l+s+h+i+t\w*)$/i;
 export type WordOptions = { fillers?: boolean; censor?: boolean };
@@ -129,7 +131,7 @@ export function prepareWords(words: CapWord[], o: WordOptions = {}): CapWord[] {
     if (o.fillers && FILLERS.test(text)) continue;
     const bare = text.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
     const shown = o.censor && SWEARS.test(bare) ? text.replace(bare, bare[0] + "*".repeat(Math.max(1, bare.length - 1))) : text;
-    out.push({ text: shown, start: Number(w.start), end: Number(w.end), speaker: w.speaker ?? null, key: !!w.key });
+    out.push({ text: shown, start: Number(w.start), end: Number(w.end), speaker: w.speaker ?? null, key: !!w.key, brk: !!w.brk });
   }
   return out.sort((a, b) => a.start - b.start);
 }
@@ -163,7 +165,7 @@ export function layoutCaptions(words: CapWord[], style: CaptionStyle, fr: Frame,
     let brk = false;
     if (prev) {
       const gap = w.start - prev.end;
-      if (cur.length >= style.words || gap > 0.6 || /[.?!…]["')\]]?$/.test(prev.text) || (prev.speaker && w.speaker && prev.speaker !== w.speaker) || (/[,;:]$/.test(prev.text) && cur.length >= Math.ceil(style.words / 2))) brk = true;
+      if (prev.brk || cur.length >= style.words || gap > 0.6 || /[.?!…]["')\]]?$/.test(prev.text) || (prev.speaker && w.speaker && prev.speaker !== w.speaker) || (/[,;:]$/.test(prev.text) && cur.length >= Math.ceil(style.words / 2))) brk = true;
       else if (lineW + space + ww > maxW) { if (lines < style.lines) { lines++; lineW = ww; cur.push(w); continue; } brk = true; }
     }
     if (brk) { chunks.push(cur); cur = []; lineW = 0; lines = 1; }
@@ -182,6 +184,8 @@ export function layoutCaptions(words: CapWord[], style: CaptionStyle, fr: Frame,
     ws.forEach((_, i) => { const add = rows[rows.length - 1].length ? space + widths[i] : widths[i]; if (rows[rows.length - 1].length && rw + add > maxW && rows.length < style.lines) { rows.push([i]); rw = widths[i]; } else { rows[rows.length - 1].push(i); rw += add; } });
     const rowW = rows.map((r) => r.reduce((a, i, j) => a + widths[i] + (j ? space : 0), 0));
     const fit = Math.min(1, maxW / Math.max(1, ...rowW));
+    const widest = Math.max(...rowW) * fit;
+    const cxBlock = Math.min(fr.w - widest / 2 - 8 * k, Math.max(widest / 2 + 8 * k, style.x * fr.w));
     const top = style.y * fr.h - ((rows.length - 1) * step * fit) / 2;
     const ascPx = (f.asc / f.upem) * em * fit, boxH = lineBox * fit;
     const laidLines: LaidLine[] = [];
@@ -189,8 +193,8 @@ export function layoutCaptions(words: CapWord[], style: CaptionStyle, fr: Frame,
     rows.forEach((r, li) => {
       const centreY = top + li * step * fit;
       const baseline = centreY - boxH / 2 + ascPx;
-      let x = fr.w / 2 - (rowW[li] * fit) / 2;
-      laidLines.push({ cx: fr.w / 2, width: rowW[li] * fit, baseline });
+      let x = cxBlock - (rowW[li] * fit) / 2;
+      laidLines.push({ cx: cxBlock, width: rowW[li] * fit, baseline });
       r.forEach((i, j) => {
         if (j) x += space * fit;
         const ink = measure(displayText(style, ws[i].text), f, em) * fit;

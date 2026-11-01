@@ -194,18 +194,23 @@ export async function youtubeSection(url: string, start: number, end: number, ta
   ], { ...o, timeoutMs: 8 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched"); }
 }
-/** The format list for a whole-video download, and its order: the smallest file at the largest size up to `h` lines (the
- *  proxy charges by the byte; VP9 is not always smaller than H.264: a TED talk was 105 kB/s in VP9, 96 in H.264), never
- *  AV1 (slow to decode on the server), with the ~70 kb/s Opus sound when there is one. */
-export const downloadFormat = (h: number) =>
-  `bv*[height<=${h}][vcodec!^=av01]+ba[acodec=opus][abr<=100]/bv*[height<=${h}][vcodec!^=av01]+ba/b[height<=${h}]/b`;
-export const downloadSort = (h: number) => `res:${h},+size,+br`;
+/** The format list for a whole-video download: at most `h` lines and 30 fps (a 1080p60 vlog came down at 338 kB/s and
+ *  cut twice as slowly, Nov 1 2026), never AV1 (slow to decode here), with the ~70 kb/s Opus sound when there is one.
+ *  `language`: a dubbed track to prefer (YouTube's auto-dubs), else the video's own original track (see downloadSort). */
+export const downloadFormat = (h: number, language?: string | null) => {
+  const lang = language && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(language) ? language : null;
+  const audio = lang ? `ba[language^=${lang}][acodec=opus]/ba[language^=${lang}]/ba[acodec=opus][abr<=100]/ba` : "ba[acodec=opus][abr<=100]/ba";
+  return `bv*[height<=${h}][fps<=30][vcodec!^=av01]+${audio}/bv*[height<=${h}][vcodec!^=av01]+${audio}/b[height<=${h}]/b`;
+};
+/** How yt-dlp ranks what matches: the original audio track first (lang = YouTube's own default track, never an
+ *  auto-dub: a German dub was picked once), then the size wanted, then the smaller file. */
+export const downloadSort = (h: number) => `lang,res:${h},fps:30,+size,+br`;
 /** The whole video, downloaded by yt-dlp's own downloader (no ffmpeg reading YouTube: through the proxy on Render every
  *  ffmpeg read of a YouTube address got 403, Oct 31 2026); at most `maxHeight` lines (1080, or 720 for long videos). */
-export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number } = {}): Promise<void> {
+export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; language?: string | null } = {}): Promise<void> {
   const h = o.maxHeight ?? 1080;
   await runYtDlp([
-    "-f", downloadFormat(h), "-S", downloadSort(h),
+    "-f", downloadFormat(h, o.language), "-S", downloadSort(h),
     "--merge-output-format", "mp4", "--concurrent-fragments", "4", "-o", target, url,
   ], { ...o, timeoutMs: 40 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The video could not be downloaded"); }

@@ -49,8 +49,16 @@ test("words: filler words out, swearing masked, junk dropped; edited words from 
   const ws = prepareWords([{ text: "um,", start: 0, end: 0.2 }, { text: "this", start: 0.3, end: 0.5 }, { text: "fucking", start: 0.6, end: 0.9 }, { text: "", start: 1, end: 1.2 }, { text: "works.", start: 1.3, end: 1.1 }], { fillers: true, censor: true });
   assert.deepEqual(ws.map((w) => w.text), ["this", "f******"]);
   assert.deepEqual(prepareWords([{ text: "um", start: 0, end: 0.2 }]).map((w) => w.text), ["um"], "kept unless asked");
-  const edited = cleanWords([{ text: "Hello", start: 1, end: 1.4 }, { text: "x".repeat(99), start: 0.2, end: 0.5 }, { text: "late", start: 99, end: 100 }, { text: "bad", start: 2, end: 1 }], 30)!;
+  const edited = cleanWords([{ text: "Hello", start: 1, end: 1.4, brk: true }, { text: "x".repeat(99), start: 0.2, end: 0.5 }, { text: "late", start: 99, end: 100 }, { text: "bad", start: 2, end: 1 }], 30)!;
   assert.deepEqual(edited.map((w) => w.text.length), [40, 5], "sorted, trimmed, out-of-range and backwards words dropped");
+  assert.equal(edited[1].brk, true, "a wanted line break is kept");
+  // a break the person set starts a new caption there; the block sits where they dragged it
+  const s = { ...presetById("karaoke"), x: 0.3 };
+  const broken = layoutCaptions([{ text: "one", start: 0, end: 0.3, brk: true }, { text: "two", start: 0.4, end: 0.6 }, { text: "three", start: 0.7, end: 0.9 }], s, FR, measure);
+  assert.deepEqual(broken.map((c) => c.words.map((w) => w.text)), [["one"], ["two", "three"]]);
+  assert.ok(Math.abs(broken[1].lines[0].cx - 0.3 * FR.w) < 1, `centred at x: ${broken[1].lines[0].cx}`);
+  const edge = layoutCaptions([{ text: "WWWWWWWWWWWWWWWWWW", start: 0, end: 1 }], { ...presetById("bold_pop"), x: 0.2 }, FR, measure)[0];
+  assert.ok(edge.words[0].cx - edge.words[0].width / 2 >= 0, "a block dragged to the edge stays inside the frame");
   assert.equal(cleanWords("nope", 30), null);
 });
 

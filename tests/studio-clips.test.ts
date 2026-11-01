@@ -9,7 +9,7 @@ import {
   timingFrom, remainingSeconds, etaFor, DEFAULT_TIMING,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
-import { parseStreams, LinkError, downloadFormat } from "../src/studio-youtube.js";
+import { parseStreams, LinkError, downloadFormat, downloadSort } from "../src/studio-youtube.js";
 import { quote, PLANS } from "../src/studio.js";
 import { jobsNotice } from "../src/studio-notices.js";
 
@@ -198,11 +198,14 @@ test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safe
   // a dearer proxy raises the price by itself instead of selling at a loss
   const dear = clipsPrice(PLANS, { seconds: 3600, platform: "youtube", length: "standard", env: { ...env, STUDIO_YT_PROXY_USD_PER_GB: "20" } });
   assert.ok(dear.analysis > 300, `${dear.analysis}`);
-  assert.match(downloadFormat(1080), /^bv\*\[height<=1080\]\[vcodec!\^=av01\]\+ba\[acodec=opus\]/, "no AV1; the light Opus sound first");
+  assert.match(downloadFormat(1080), /^bv\*\[height<=1080\]\[fps<=30\]\[vcodec!\^=av01\]\+ba\[acodec=opus\]/, "30 fps at most, no AV1; the light Opus sound first");
+  assert.match(downloadFormat(1080, "de"), /\+ba\[language\^=de\]\[acodec=opus\]\/ba\[language\^=de\]\//, "a wanted dub first");
+  assert.equal(downloadFormat(1080, "../x"), downloadFormat(1080), "junk is not a language");
+  assert.match(downloadSort(1080), /^lang,/, "the original audio track outranks every auto-dub");
   assert.ok(frameUsdPerSecond({}) < frameUsdPerSecond({ STUDIO_CLIPS_FRAME_MODEL: "claude-sonnet-5-5" }), "Haiku frames by default; Sonnet costs more");
   assert.equal(clipsCharge(yt, 3, { analysis: false }), 3 * yt.per_clip, "cutting moments chosen earlier: clips only");
   assert.equal(quoteCut(PLANS, 4, 843, "standard").credits, 4 * 5);
-  assert.equal(likelyClips(843, "standard"), 12); assert.equal(likelyClips(843, "minute"), 6); assert.equal(likelyClips(300, "standard"), 4);
+  assert.equal(likelyClips(843, "standard"), 8); assert.equal(likelyClips(843, "minute"), 4); assert.equal(likelyClips(300, "standard"), 3); assert.equal(likelyClips(1335, "standard"), 12);
   assert.equal(countCap(300, "standard"), 9); assert.equal(countCap(4 * 3600, "short"), CLIP_LIMITS.max_clips);
 
   const meta = async () => ({ id: "x", url: "u", title: "My podcast", channel: "Me", description: "", seconds: 3725, thumbnail_url: "https://img", chapters: [], replay: [] });
@@ -218,7 +221,9 @@ test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safe
   assert.equal(q5.options.count, 9);
   assert.match(q5.options.warning, /fits at most 9 30-second clips[^]*only charged for the clips we make/);
   const q7 = await quoteClips({ env, meta: five }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", count: 7 });
-  assert.match(q7.options.warning, /usually holds about 4 strong 30-second clips[^]*up to 7/);
+  assert.match(q7.options.warning, /usually holds about 3 strong 30-second clips[^]*up to 7/);
+  assert.equal(q7.options.language, "original");
+  assert.equal((await quoteClips({ env, meta: five }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", language: "es" })).options.language, "es");
   const qm = await quoteClips({ env, meta }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", length: "minute" });
   assert.equal(qm.options.length, "minute");
   assert.equal(qm.options.count, Math.min(likelyClips(3725, "minute"), 10), "no count asked: what the video likely holds, at most 10");

@@ -72,9 +72,10 @@ export const CLIP_RATES = { youtube_per_minute: 5, upload_per_minute: 2, lite_pe
 export const CLIPS_SAFETY_MARGIN = { analysis: 0.35, clip: 0.5 };
 /** What the proxy charges per GB (0 without one: then YouTube refuses us and nothing is read through it). */
 export const proxyUsdPerGb = (env: Record<string, string | undefined>) => (env.STUDIO_YT_PROXY ? (Number(env.STUDIO_YT_PROXY_USD_PER_GB) > 0 ? Number(env.STUDIO_YT_PROXY_USD_PER_GB) : 3) : 0);
-/** About how many strong clips of a length a video holds: one per 70 s of video, or per two clips' worth for long ones. */
+/** About how many strong clips of a length a video holds: one per ~2 minutes (a 22-minute vlog held 7, a 14-minute talk
+ *  10, Nov 1 2026), or per three clips' worth for long ones. */
 export function likelyClips(seconds: number, length: ClipLength): number {
-  return Math.max(1, Math.min(CLIP_LIMITS.max_clips, Math.round(seconds / Math.max(70, CLIP_LENGTHS[length].target * 2.2))));
+  return Math.max(1, Math.min(CLIP_LIMITS.max_clips, Math.round(seconds / Math.max(110, CLIP_LENGTHS[length].target * 3))));
 }
 /** The most clips a run will try for: one per clip-length of video (they never overlap), at most 50. */
 export function countCap(seconds: number, length: ClipLength): number {
@@ -221,7 +222,7 @@ export type ClipsDeps = {
   meta?: (url: string) => Promise<YtMeta>;
   transcript?: (url: string) => Promise<Segment[] | null>;
   /** speech-to-text: the words (with speakers), and the sounds that are not speech when the service gives them */
-  words?: (audio: Buffer) => Promise<TimedWord[] | { words: TimedWord[]; events: AudioEvent[] }>;
+  words?: (audio: Buffer) => Promise<TimedWord[] | { words: TimedWord[]; events: AudioEvent[]; language?: string | null }>;
   loudness?: (audio: string, dir: string) => Promise<number[]>;
   extractAudio?: (input: SourceInput, target: string) => Promise<void>;
   choose?: (input: ChooseInput) => Promise<RawMoment[]>;
@@ -408,7 +409,8 @@ export function windows(lines: Line[], span = 2400, overlap = 90): Line[][] {
 // Choosing: Claude reads the transcript with its signals and returns the moments that stand out
 // ---------------------------------------------------------------------------------------------------
 export type ChooseInput = { lines: Line[]; meta: { title: string | null; channel: string | null; description: string; chapters: YtMeta["chapters"]; replay: YtMeta["replay"] };
-  length: ClipLength; wanted: number; peaks?: Array<{ start: number; end: number; db: number }> };
+  length: ClipLength; wanted: number; peaks?: Array<{ start: number; end: number; db: number }>;
+  /** a second look at the stretches the first pass left out: the best of what is there, still only moments that work */ second?: boolean };
 export type RawMoment = { start_line: number; end_line: number; title: string; hook: string; why: string; score: number; tags: string[] };
 export const CHOOSE_SYSTEM = `You are the best short-form video editor alive. From a long video (a podcast, interview, talk, stream, vlog, lecture or show) you pull the moments that make a stranger stop scrolling on TikTok, Reels and Shorts. You are bold and picky: a feed is merciless, so a clip must be a highlight, never filler.
 
@@ -453,7 +455,7 @@ export function chooseMessage(input: ChooseInput): string {
     replays.length ? `Viewers replayed these stretches most (a strong signal, not a rule): ${replays.map((p) => `${mmss(p.start)}-${mmss(p.end)}`).join(", ")}` : null,
     loud.length ? `Loudest stretches against their surroundings (shouting, cheering, big reactions; a signal, not a rule): ${loud.map((p) => `${mmss(p.start)} (+${Math.round(p.db)} dB)`).join(", ")}` : null,
     `Clip length. ${lengthWords(input.length)}`,
-    `This part runs ${mmss(from)} to ${mmss(to)}. Return up to ${input.wanted} moments, only ones that truly stand out.`,
+    input.second ? `This is a second look at the stretches a first pass left out (the strongest moments are already taken). Find the next strongest ${input.wanted} moments here that still meet every rule and score 60 or more; return fewer if fewer do.` : `This part runs ${mmss(from)} to ${mmss(to)}. Return up to ${input.wanted} moments, only ones that truly stand out.`,
   ].filter(Boolean).join("\n");
   const body = input.lines.map((l) => `L${l.i} [${mmss(l.start)}]${l.speaker ? ` ${l.speaker}:` : ""} ${l.text}${(l.events ?? []).map((e) => ` [${e}]`).join("")}${(l.loud ?? 0) >= 5 ? ` ⟪+${l.loud} dB⟫` : ""}`).join("\n");
   return `${head}\n\nTranscript (Lnn [time] speaker: words):\n${body}`;
@@ -941,7 +943,8 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
     : count > likely
       ? `A ${minutes}-minute video usually holds about ${likely} strong ${what} ${likely === 1 ? "clip" : "clips"}. We'll make as many as it really has, up to ${count}, and you're only charged for the clips we make.`
       : null;
-  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, price, warning, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
+  const language = typeof o.language === "string" && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(o.language) ? o.language : "original";
+  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, price, warning, language, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
     summary: `${minutes} min · up to ${count} ${count === 1 ? "clip" : "clips"}` };
 }
 /** The re-run that cuts moments already chosen, from an uploaded copy of the same video: each clip, no reading. */
@@ -977,7 +980,7 @@ async function signedSource(sb: SupabaseClient, u: string, assetId: string): Pro
   if (s.error || !s.data?.signedUrl) throw new ClipsError("source_missing", "The video could not be read", 502, true);
   return { video: s.data.signedUrl, audio: null, proxy: null, width: Number(a.data.probe?.width) || 0, height: Number(a.data.probe?.height) || 0, fps: null };
 }
-type Plan = { moments: Moment[]; seconds: number; transcribed: boolean; title: string | null; downloaded?: boolean };
+type Plan = { moments: Moment[]; seconds: number; transcribed: boolean; title: string | null; downloaded?: boolean; language?: string | null };
 const blockedByYouTube = (e: any) => e instanceof LinkError && (e.code === "link_blocked" || e.code === "link_fetch_failed");
 /** The price a run settles on: the one quoted when it was started (kept in its options), or worked out again for a run
  *  started before prices were kept. */
@@ -1004,7 +1007,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const fetchYouTube = async (seconds: number) => {
     const file = join(dir!, "youtube.mp4");
     const began = Date.now();
-    await (deps.download ?? ((x, t, h) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h })))(o.url, file, seconds > CLIP_COST.long_after_seconds ? 720 : 1080);
+    await (deps.download ?? ((x, t, h) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language: o.language && o.language !== "original" ? String(o.language) : null })))(o.url, file, seconds > CLIP_COST.long_after_seconds ? 720 : 1080);
     ytFile = file;
     // what came through the proxy, measured: the price assumes CLIP_COST.full_bytes_per_second
     const bytes = await stat(file).then((x) => x.size).catch(() => 0);
@@ -1024,7 +1027,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     if (!plan) {
       if (o.plan_from) throw new ClipsError("clips_plan_missing", "The moments chosen earlier are gone; start a new run", 409);
       await renew(sb, job, { collection_id: collectionId, stage: "reading", done: 0, total: 0, message: "Reading the video" });
-      let lines: Line[] = [], words: TimedWord[] | null = null, events: AudioEvent[] = [], excess: number[] | null = null, transcribed = false, blocked = false;
+      let lines: Line[] = [], words: TimedWord[] | null = null, events: AudioEvent[] = [], excess: number[] | null = null, transcribed = false, blocked = false, heardLanguage: string | null = null;
       let meta: ChooseInput["meta"] = { title: o.source?.title ?? null, channel: o.source?.channel ?? null, description: "", chapters: [], replay: [] };
       let seconds = Number(o.seconds) || 0;
       // the sound: its loudness every second, then (with speech-to-text on) every word, speaker and laugh
@@ -1035,9 +1038,10 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         const rms = await (deps.loudness ?? loudnessTrack)(mp3, dir!).catch((e: any) => { log(`[clips] loudness skipped ${job.id}: ${String(e?.message ?? e).slice(0, 120)}`); return [] as number[]; });
         if (rms.length) excess = loudnessExcess(rms);
         if (!deps.words && !env.ELEVENLABS_API_KEY) return false;
-        const heard = await (deps.words ?? (async (audio) => { const r = await transcribeWords({ env, fetch: deps.fetch }, { audio, events: true }); return { words: r.words, events: r.events }; }))(await readFile(mp3));
+        const heard = await (deps.words ?? (async (audio) => { const r = await transcribeWords({ env, fetch: deps.fetch }, { audio, events: true }); return { words: r.words, events: r.events, language: r.language }; }))(await readFile(mp3));
         words = Array.isArray(heard) ? heard : heard.words;
         events = Array.isArray(heard) ? [] : heard.events ?? [];
+        heardLanguage = Array.isArray(heard) ? null : heard.language ?? null;
         transcribed = true;
         lines = linesFromWords(words);
         return true;
@@ -1084,9 +1088,20 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         }));
         picks.push(...batch.flat());
       }
-      const moments = finalizeMoments(picks, lines, words, length, cap, CLIP_LIMITS.min_score, events);
+      let moments = finalizeMoments(picks, lines, words, length, cap, CLIP_LIMITS.min_score, events);
+      // Fewer than asked: one more look at the stretches no pick covers, for the next strongest moments (still 60+).
+      if (moments.length < cap && lines.length > 40) {
+        const covered = (l: Line) => moments.some((m) => l.end > m.start - 2 && l.start < m.end + 2);
+        const rest = lines.filter((l) => !covered(l));
+        if (rest.length > 20) {
+          await renew(sb, job, { message: `Found ${moments.length}; looking for ${cap - moments.length} more` });
+          const more = (await Promise.all(windows(rest).slice(0, 3).map((w) => (deps.choose ?? ((x) => chooseWithClaude(deps, x, u)))({ lines: w, meta, length, peaks, wanted: cap - moments.length + 2, second: true })))).flat();
+          if (more.length) moments = finalizeMoments([...picks, ...more], lines, words, length, cap, CLIP_LIMITS.min_score, events);
+        }
+      }
       if (!moments.length) throw new ClipsError("clips_none_found", "No moment in this video stands out enough to be a clip", 422);
-      plan = { moments, seconds, transcribed, title: meta.title ?? o.source?.title ?? null, downloaded: !blocked };
+      plan = { moments, seconds, transcribed, title: meta.title ?? o.source?.title ?? null, downloaded: !blocked, language: heardLanguage };
+      if (heardLanguage) log(`[clips] language ${JSON.stringify({ job: job.id, heard: heardLanguage, asked: o.language ?? "original" })}`);
       const up = await sb.storage.from("studio-outputs").upload(planKey(u, collectionId), Buffer.from(JSON.stringify(plan)), { contentType: "text/plain", upsert: true });
       if (up.error) log(`[clips] plan not saved ${job.id}: ${up.error.message}`);
     }
@@ -1160,7 +1175,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       : skipped.length ? `${word(made.length)} made; ${skipped.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
       : made.length < asked && !o.plan_from ? `This video had ${word(made.length)} strong enough to post, of the ${asked} you asked for. You were charged for ${word(made.length)}; the rest went back.`
       : null;
-    await setCollection({ status: "ready", note });
+    await setCollection({ status: "ready", note, ...(p.language ? { source: { ...(o.source ?? {}), format, length, language: p.language } } : {}) });
     // what this attempt measured, for the next estimates (a stage it did not run is left out)
     const mk = job.marks ?? {}, end = Date.now();
     const span = (a: string, b: string | null) => (mk[a] ? Math.round(((b && mk[b] ? mk[b] : end) - mk[a]) / 1000) : 0);
