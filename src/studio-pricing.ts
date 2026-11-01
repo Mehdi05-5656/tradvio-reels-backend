@@ -161,7 +161,7 @@ export function packsClearFloor(plans: PlanLike[]): boolean {
  *  these itself, so they are watched, not charged. `user` is the person the call was made for, when there is one. */
 export function logClaudeCost(log: ((l: string) => void) | undefined, feature: string, model: string, usage: any, user?: string | null) {
   if (!usage) return;
-  const rates: Record<string, { input: number; output: number; cache_read: number }> = { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 } };
+  const rates: Record<string, { input: number; output: number; cache_read: number }> = { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 }, "claude-haiku-5-5": { input: 0.1, output: 0.5, cache_read: 0.01 } };
   const r = rates[model] ?? rates["claude-opus-5-5"];
   const inp = Number(usage.input_tokens ?? 0), outp = Number(usage.output_tokens ?? 0), read = Number(usage.cache_read_input_tokens ?? 0), write = Number(usage.cache_creation_input_tokens ?? 0);
   const usd = (inp * r.input + write * r.input * 1.25 + read * r.cache_read + outp * r.output) / 1e6;

@@ -17,7 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, creditsForCost, MARGIN_TARGET, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
-import { ClipsError, CLIP_COST, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
+import { ClipsError, CLIP_COST, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const MAX_IMPORT_LINKS = 500;
@@ -308,8 +308,9 @@ export function registerLibrary(app: Express, h: LibraryHelpers): void {
       const want = Number(c.source?.seconds) || Number(p.seconds) || 0, got = Number(a.data.probe?.duration) || 0;
       if (want && got && Math.abs(want - got) > Math.max(5, want * 0.02)) throw new ClipsError("source_mismatch", `That file is ${Math.round(got / 60)} min; the video was ${Math.round(want / 60)} min. Upload the same video`, 409);
       const moments: any[] = Array.isArray(p.moments) ? p.moments : [];
-      const credits = quoteCut(h.plans, moments.length, want);
-      const options = { platform: "upload", collection_id: c.id, plan_from: c.id, format: c.source?.format ?? "vertical", length: c.source?.length ?? "standard", seconds: want, via: "tool" };
+      const length = lengthOf(c.source?.length);
+      const { credits, price } = quoteCut(h.plans, moments.length, want, length);
+      const options = { platform: "upload", collection_id: c.id, plan_from: c.id, format: c.source?.format ?? "vertical", length, seconds: want, count: moments.length, price, via: "tool" };
       const r = await sb.rpc("studio_create_job", { p_user: u, p_tool: "clips", p_asset: assetId, p_options: options, p_credits: credits });
       if (r.error) throw r.error;
       await sb.from("studio_collections").update({ status: "processing", job_id: r.data.id, note: null, source: { ...(c.source ?? {}), asset_id: assetId }, updated_at: new Date().toISOString() }).eq("id", c.id);

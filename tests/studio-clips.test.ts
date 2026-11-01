@@ -3,16 +3,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import {
-  linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, planShots, quoteClips, clipsCostUsd, clipsCredits,
-  maxClipsFor, parseMeta, parseTranscript, isLongSource, runClipsJob, inputArgs, chooseMessage, CLIP_LIMITS, ClipsError, quoteCut,
+  linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
+  likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
+  parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIPS_MARGIN, lengthWords,
 } from "../src/studio-clips.js";
+import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError } from "../src/studio-youtube.js";
 import { quote, PLANS } from "../src/studio.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ENV = { ANTHROPIC_API_KEY: "k", SCRAPECREATORS_API_KEY: "k", ELEVENLABS_API_KEY: "k" };
 
-test("caption segments become short lines; timed words become sentences", () => {
+test("caption segments become short lines; timed words become sentences that know where thoughts start and end", () => {
   const segs = [
     { start: 0, end: 2.5, text: "so the thing nobody tells you" }, { start: 2, end: 4.8, text: "about pricing is this" },
     { start: 4.5, end: 7, text: "you are charging too little" }, { start: 10, end: 12, text: "and that is the problem." },
@@ -27,6 +29,26 @@ test("caption segments become short lines; timed words become sentences", () => 
   const wl = linesFromWords(words);
   assert.deepEqual(wl.map((l) => l.text), ["Pricing is really hard.", "Here's why it matters.", "Yes"]);
   assert.deepEqual([wl[1].w0, wl[1].w1], [4, 7], "lines keep their word span for exact cuts");
+  assert.deepEqual(wl.map((l) => [l.opens, l.closes]), [[true, false], [false, true], [true, true]], "a sentence followed straight on by the same speaker does not close a thought; a breath or a new speaker does");
+  assert.deepEqual(wl.map((l) => l.speaker), ["s1", "s1", "s2"]);
+});
+
+test("signals: loudness per second, the jumps over their surroundings, sounds that are not speech on their lines", () => {
+  assert.deepEqual(parseLoudness("frame:0\nlavfi.astats.Overall.RMS_level=-21.5\nframe:1\nlavfi.astats.Overall.RMS_level=-inf\n"), [-21.5, -90]);
+  const rms = Array.from({ length: 600 }, (_, i) => (i >= 300 && i < 310 ? -12 : i % 50 === 0 ? -80 : -24));
+  const ex = loudnessExcess(rms);
+  assert.equal(ex[100], 0, "ordinary speech is the baseline");
+  assert.ok(ex[305] >= 11, `the shout stands out (${ex[305]})`);
+  assert.equal(ex[50], 0, "silence is not a signal");
+  const peaks = loudPeaks(ex);
+  assert.ok(peaks.length >= 1 && peaks[0].start >= 296 && peaks[0].start <= 304, JSON.stringify(peaks[0]));
+  const lines = [{ i: 0, start: 290, end: 299, text: "and then he said" }, { i: 1, start: 300, end: 309, text: "NO WAY" }, { i: 2, start: 312, end: 320, text: "anyway" }];
+  const ann = annotateLines(lines, [{ text: "laughter", start: 309.5, end: 312 }], ex);
+  assert.deepEqual(ann.map((l) => l.events), [[], ["laughter"], []], "the laugh belongs to the line it follows");
+  assert.ok((ann[1].loud ?? 0) >= 10 && (ann[0].loud ?? 0) === 0);
+  const msg = chooseMessage({ lines: ann, meta: { title: "T", channel: null, description: "", chapters: [], replay: [] }, length: "standard", wanted: 3, peaks });
+  assert.match(msg, /L1 \[5:00\] NO WAY \[laughter\] ⟪\+\d+ dB⟫/);
+  assert.match(msg, /Loudest stretches[^\n]*5:0\d \(\+\d+ dB\)/);
 });
 
 test("windows cover the whole transcript with overlap", () => {
@@ -38,47 +60,96 @@ test("windows cover the whole transcript with overlap", () => {
   assert.ok(w[1][0].start < w[0][w[0].length - 1].end, "windows overlap so a moment on a seam is seen whole");
 });
 
-test("picks become clean clips: inside the length range, no overlaps, strong ones only, best first, on word boundaries", () => {
-  const lines = Array.from({ length: 60 }, (_, i) => ({ i, start: i * 5, end: i * 5 + 5, text: `sentence ${i}.`, w0: i * 2, w1: i * 2 + 1 }));
-  const words = Array.from({ length: 120 }, (_, k) => ({ text: `w${k}`, start: k * 2.5 + 0.2, end: k * 2.5 + 2.2, speaker: null }));
+// 60 lines 5 s apart (3 s of speech, a 2 s breath), two words each; every third line ends a thought
+const L60 = Array.from({ length: 60 }, (_, i) => ({ i, start: i * 5, end: i * 5 + 3, text: i % 3 === 2 ? `sentence ${i}.` : `words ${i}`, w0: i * 2, w1: i * 2 + 1, speaker: "s1", opens: i % 3 === 0, closes: i % 3 === 2 }));
+const W120 = Array.from({ length: 120 }, (_, k) => ({ text: `w${k}`, start: (k >> 1) * 5 + (k % 2) * 1.6, end: (k >> 1) * 5 + (k % 2) * 1.6 + 1.4, speaker: "s1" }));
+test("picks become clean clips: start and end where thoughts do, inside the length range, no overlaps, strong ones only, best first", () => {
   const raw = [
-    { start_line: 2, end_line: 7, title: "Good one", hook: "h", why: "w", score: 88, tags: ["Pricing"] },       // 30 s
-    { start_line: 4, end_line: 9, title: "Overlaps the good one", hook: "h", why: "w", score: 70, tags: [] },   // overlaps heavily
-    { start_line: 20, end_line: 21, title: "Too short, grows to fit", hook: "h", why: "w", score: 75, tags: [] }, // 10 s -> extended
-    { start_line: 30, end_line: 50, title: "Too long, trimmed", hook: "h", why: "w", score: 92, tags: [] },     // 105 s -> trimmed
+    { start_line: 3, end_line: 8, title: "Good one", hook: "h", why: "w", score: 88, tags: ["Pricing"] },     // ends on a closing line
+    { start_line: 4, end_line: 9, title: "Overlaps the good one", hook: "h", why: "w", score: 70, tags: [] },
+    { start_line: 21, end_line: 22, title: "Too short, grows to the next end", hook: "h", why: "w", score: 75, tags: [] },
+    { start_line: 30, end_line: 50, title: "Too long, cut back to an end", hook: "h", why: "w", score: 92, tags: [] },
     { start_line: 55, end_line: 58, title: "Weak", hook: "h", why: "w", score: 40, tags: [] },
     { start_line: 999, end_line: 1000, title: "Bad lines", hook: "h", why: "w", score: 95, tags: [] },
+    { start_line: 12, end_line: 16, title: "Ends mid-thought", hook: "h", why: "w", score: 80, tags: [] },  // line 16 does not close
   ];
-  const ms = finalizeMoments(raw as any, lines, words, "standard", 10);
-  assert.deepEqual(ms.map((m) => m.title), ["Too long, trimmed", "Good one", "Too short, grows to fit"]);
-  assert.deepEqual(ms.map((m) => m.rank), [1, 2, 3]);
-  for (const m of ms) { const d = m.end - m.start; assert.ok(d >= 20 && d <= 50, `${m.title}: ${d}`); }
+  const ms = finalizeMoments(raw as any, L60, W120, "standard", 10);
+  assert.deepEqual(ms.map((m) => m.title), ["Too long, cut back to an end", "Good one", "Ends mid-thought", "Too short, grows to the next end"]);
+  assert.deepEqual(ms.map((m) => m.rank), [1, 2, 3, 4]);
+  for (const m of ms) { const d = m.end - m.start; assert.ok(d >= CLIP_LENGTHS.standard.min && d <= CLIP_LENGTHS.standard.max + 1, `${m.title}: ${d}`); }
   const good = ms.find((m) => m.title === "Good one")!;
-  assert.equal(good.start, words[4].start - 0.12, "starts just before the first word");
-  assert.equal(good.end, words[15].end + 0.3, "ends just after the last word");
+  assert.equal(good.start, Math.round((W120[6].start - 0.15) * 100) / 100, "starts just before the first word");
+  assert.equal(good.end, Math.round((W120[17].end + 0.45) * 100) / 100, "ends just after the last word, before the next");
   assert.deepEqual(good.tags, ["pricing"]);
-  assert.equal(finalizeMoments(raw as any, lines, words, "standard", 1).length, 1, "the cap holds");
+  assert.ok(good.speech!.length >= 1 && good.speech![0][2] === "s1", "who says what, for framing");
+  const mid = ms.find((m) => m.title === "Ends mid-thought")!;
+  assert.equal(mid.end, Math.round((W120[35].end + 0.45) * 100) / 100, "carried on to the end of the thought (line 17), not cut as the speaker goes on");
+  const lastLine = (m: any) => L60.find((l) => Math.abs(l.end - (m.end - 0.45)) < 0.01);
+  for (const m of ms) assert.ok(lastLine(m)?.closes, `${m.title} ends where a thought ends`);
+  assert.equal(finalizeMoments(raw as any, L60, W120, "standard", 1).length, 1, "the cap holds");
 });
 
-test("framing: shots from cuts, crops for one person, blurred fill for two, the filter for each case", () => {
+test("a laugh or applause after the payoff rings out in the clip, but never into the next words", () => {
+  const raw = [{ start_line: 3, end_line: 8, title: "Joke", hook: "h", why: "w", score: 90, tags: [] }];
+  const plain = finalizeMoments(raw as any, L60, W120, "standard", 5)[0];
+  const laughing = finalizeMoments(raw as any, L60, W120, "standard", 5, 60, [{ text: "laughter", start: W120[17].end + 0.1, end: W120[17].end + 2.0 }])[0];
+  assert.ok(laughing.end > plain.end, "the laugh is kept");
+  assert.ok(laughing.end <= W120[18].start - 0.06 + 1e-9, "and stops before the next word");
+});
+
+test("the 1 min+ length never runs under 61 s: a short pick grows to the next end of a thought, or is dropped", () => {
+  const ok = finalizeMoments([{ start_line: 3, end_line: 11, title: "Story", hook: "h", why: "w", score: 85, tags: [] }] as any, L60, W120, "minute", 5);
+  assert.equal(ok.length, 1);
+  assert.ok(ok[0].end - ok[0].start >= 61, `${ok[0].end - ok[0].start}`);
+  assert.ok(ok[0].end - ok[0].start <= CLIP_LENGTHS.minute.max + 2);
+  // at the end of the video it grows at the front instead, from a line that opens a thought
+  const end = finalizeMoments([{ start_line: 54, end_line: 59, title: "Short at the end", hook: "h", why: "w", score: 85, tags: [] }] as any, L60, W120, "minute", 5);
+  assert.equal(end.length, 1);
+  assert.ok(end[0].end - end[0].start >= 61 && L60.find((l) => Math.abs(l.start - (end[0].start + 0.15)) < 0.01)?.opens);
+  // fewer than 61 s of speech to work with: dropped, never shipped under a minute
+  const none = finalizeMoments([{ start_line: 0, end_line: 8, title: "Too short", hook: "h", why: "w", score: 85, tags: [] }] as any, L60.slice(0, 11), W120.slice(0, 22), "minute", 5);
+  assert.equal(none.length, 0);
+  assert.match(lengthWords("minute"), /at least 61 seconds/);
+  assert.match(lengthWords("standard"), /Goal: 24 to 45 seconds/);
+});
+
+test("framing: the crop follows the speaker (holds, pans as they walk, cuts to the next speaker), shows the whole picture with nobody to frame", () => {
   const shots = shotsFrom([0.3, 5, 5.4, 12], 30);
   assert.deepEqual(shots.map((s) => [s.start, s.end]), [[0, 5], [5, 12], [12, 30]], "slivers under 0.8 s are folded in");
-  const plan = planShots(shots, [{ subject: "one_person", x: 0.7 }, { subject: "two_people", x: 0.5 }, { subject: "one_person", x: 0.72 }]);
-  assert.deepEqual(plan.map((p) => p.mode), ["crop", "fit", "crop"]);
-  const mixed = buildClipFilter({ w: 1920, h: 1080, format: "vertical", shots: plan, fps: 60 });
-  assert.match(mixed, /^\[0:v\]split=3/);
-  assert.match(mixed, /crop=608:1080:'if\(lt\(t,5\.000\),1040,if\(lt\(t,12\.000\),1040,1078\)\)':0/);
-  assert.match(mixed, /enable='between\(t,5\.000,11\.999\)'/);
-  assert.match(mixed, /fps=30/, "60 fps sources come down to 30");
-  const crop = buildClipFilter({ w: 1920, h: 1080, format: "vertical", shots: [{ start: 0, end: 30, mode: "crop", x: 0.5 }], fps: 30 });
-  assert.equal(crop, "[0:v]crop=608:1080:'656':0,scale=720:1280,setsar=1,format=yuv420p[v]");
-  assert.match(buildClipFilter({ w: 1280, h: 720, format: "vertical", shots: [{ start: 0, end: 9, mode: "fit", x: 0.5 }], fps: 25 }), /^\[0:v\]split=2\[a\]\[b\];.*boxblur/);
-  assert.match(buildClipFilter({ w: 1080, h: 1920, format: "vertical", shots: [], fps: 30 }), /^\[0:v\]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280/, "a vertical source is only resized");
-  assert.equal(buildClipFilter({ w: 1920, h: 1080, format: "original", shots: [], fps: 30 }), "[0:v]scale='min(1280,iw)':-2,setsar=1,format=yuv420p[v]");
-  // edges: a face at the very edge still gives a crop inside the picture
-  assert.match(buildClipFilter({ w: 1920, h: 1080, format: "vertical", shots: [{ start: 0, end: 5, mode: "crop", x: 0.99 }], fps: 30 }), /'1312'/);
+  assert.deepEqual(sampleTimes(10, [4]).slice(0, 5), [0.3, 1.3, 2.3, 3.3, 4.2], "a look every second and one just after each cut");
+  assert.ok(sampleTimes(600, []).length <= 90, "at most ~90 stills");
+  const P = (t: number, x: number) => ({ t, layout: "person" as const, x, speaker_visible: true });
+  // one shot: still at 0.30 (tiny jitter held), walks right from 3 s to 6 s, then another person at 0.8 speaks from 7.4 s
+  const path = trackPath([P(0.3, 0.3), P(1.3, 0.31), P(2.3, 0.29), P(3.3, 0.36), P(4.3, 0.42), P(5.3, 0.48), P(6.3, 0.5), P(7.3, 0.5), P(8.3, 0.8), P(9.3, 0.8)], [], 10, [7.6]);
+  assert.ok(path.every((g) => g.mode === "crop"));
+  assert.equal(path[0].x0, 0.3, "held still at first");
+  assert.ok(path.some((g) => g.x1 > g.x0 + 0.01), "pans while they walk");
+  const cutAt = path.find((g) => g.x0 === 0.8)!;
+  assert.equal(cutAt.start, 7.6, "the cut to the other person lands when their voice starts");
+  assert.ok(path.every((g, k) => k === 0 || g.start === path[k - 1].end), "no gaps");
+  // nobody to frame for a stretch: the whole picture; a one-second flicker is smoothed away
+  const N = (t: number) => ({ t, layout: "none" as const, x: 0.5, speaker_visible: false });
+  const mixed = trackPath([P(0.5, 0.6), P(1.5, 0.6), N(2.5), P(3.5, 0.6), N(4.5), N(5.5), N(6.5), N(7.5)], [], 8);
+  assert.deepEqual(mixed.map((g) => g.mode), ["crop", "fit"]);
+  assert.ok(mixed[1].start > 3.5 && mixed[1].start < 4.5);
+  const f = buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: path, fps: 60 });
+  assert.match(f, /^\[0:v\]crop=608:1080:'if\(lt\(t,/);
+  assert.match(f, /\+\d+\*\(t-\d+\.\d{3}\)\/\d+\.\d{3}/, "a pan is a straight move between two looks");
+  assert.match(f, /fps=30/, "60 fps sources come down to 30");
+  const fm = buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: mixed, fps: 30 });
+  assert.match(fm, /^\[0:v\]split=3/);
+  assert.match(fm, /boxblur/);
+  assert.match(fm, /enable='between\(t,4\.000,7\.999\)'/);
+  assert.equal(buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: [{ start: 0, end: 30, mode: "crop", x0: 0.5, x1: 0.5 }], fps: 30 }), "[0:v]crop=608:1080:'656':0,scale=720:1280,setsar=1,format=yuv420p[v]");
+  assert.match(buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: [{ start: 0, end: 5, mode: "crop", x0: 0.99, x1: 0.99 }], fps: 30 }), /'1312'/, "a face at the edge still crops inside the picture");
+  assert.match(buildClipFilter({ w: 1080, h: 1920, format: "vertical", segs: [], fps: 30 }), /^\[0:v\]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280/, "a vertical source is only resized");
+  assert.equal(buildClipFilter({ w: 1920, h: 1080, format: "original", segs: [], fps: 30 }), "[0:v]scale='min(1280,iw)':-2,setsar=1,format=yuv420p[v]");
+  // a long clip with many moves stays inside ffmpeg's nesting limit (a balanced tree of ifs)
+  const many = trackPath(Array.from({ length: 90 }, (_, k) => P(k + 0.3, k % 2 ? 0.3 : 0.7)), [], 91);
+  const fl = buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: many, fps: 30 });
+  let depth = 0, maxDepth = 0; for (const ch of fl) { if (ch === "(") maxDepth = Math.max(maxDepth, ++depth); if (ch === ")") depth--; }
+  assert.ok(many.length > 60 && maxDepth < 40, `${many.length} stretches, nesting ${maxDepth}`);
 });
-
 test("reading the source: exact seeks, YouTube's separate sound, the proxy", () => {
   const up = inputArgs({ video: "https://store/x.mp4?sig", audio: null, proxy: null, width: 0, height: 0, fps: null }, 61.5, 30);
   assert.deepEqual(up.slice(0, 2), ["-ss", "61.500"]);
@@ -106,21 +177,44 @@ test("YouTube listing and transcript are read from ScrapeCreators' shapes", () =
   assert.doesNotMatch(msg, /0:00-1:26/, "the always-hot opening is not a signal");
 });
 
-test("prices: by length and clips made; YouTube through a proxy pays for the bytes; the quote is the most a run can cost", async () => {
-  assert.equal(maxClipsFor(3600), 48); assert.equal(maxClipsFor(150), 3); assert.equal(maxClipsFor(4 * 3600), CLIP_LIMITS.max_clips);
-  const up = clipsCostUsd({ seconds: 3600, platform: "upload", clips: 30, clipSeconds: 32, transcribe: true, choose: true, env: {} });
-  assert.ok(up > 0.4 && up < 0.6, `an hour's upload with 30 clips costs about half a dollar (${up})`);
-  const ytNoProxy = clipsCostUsd({ seconds: 3600, platform: "youtube", clips: 30, clipSeconds: 32, transcribe: false, choose: true, env: {} });
-  const ytProxy = clipsCostUsd({ seconds: 3600, platform: "youtube", clips: 30, clipSeconds: 32, transcribe: false, choose: true, env: { STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "3" } });
-  assert.ok(ytProxy > ytNoProxy + 0.4, "the proxy's bytes are priced in");
-  assert.ok(clipsCredits(up, PLANS) > clipsCredits(0.01, PLANS) && clipsCredits(0.0001, PLANS) === CLIP_LIMITS.min_credits);
-  assert.ok(quoteCut(PLANS, 30, 3600) < clipsCredits(up, PLANS), "cutting moments already chosen costs less than a full run");
+test("prices: reading the video plus each clip, at 70% and 80% margins with floors; the count is chosen and checked", async () => {
+  const floor = creditValueFloor(PLANS);
+  const env = { ...ENV, STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "6.25" };
+  const yt = clipsPrice(PLANS, { seconds: 843, platform: "youtube", length: "standard", env });
+  const ytUsd = analysisUsd({ seconds: 843, platform: "youtube", download: true, transcribe: true, choose: true, env });
+  assert.ok(ytUsd / (yt.analysis * floor) <= 1 - CLIPS_MARGIN.analysis + 1e-9, "reading earns at least 70%");
+  assert.ok(perClipUsd("standard") / (yt.per_clip * floor) <= 1 - CLIPS_MARGIN.clip + 1e-9, "each clip earns at least 80%");
+  const up = clipsPrice(PLANS, { seconds: 843, platform: "upload", length: "standard", env });
+  assert.ok(up.analysis < yt.analysis, "an upload has no download to pay for");
+  assert.ok(up.analysis >= 15 && up.analysis >= 15 * 3, "but never prices under the floor (3 a minute)");
+  for (const l of ["short", "standard", "long", "minute"] as const) assert.ok(clipsPrice(PLANS, { seconds: 600, platform: "upload", length: l, env }).per_clip >= 10);
+  assert.ok(clipsPrice(PLANS, { seconds: 600, platform: "upload", length: "long", env }).per_clip > clipsPrice(PLANS, { seconds: 600, platform: "upload", length: "short", env }).per_clip);
+  assert.equal(clipsCharge(yt, 3), yt.analysis + 3 * yt.per_clip);
+  assert.equal(clipsCharge(yt, 3, { analysis: false }), 3 * yt.per_clip, "cutting moments chosen earlier: clips only");
+  assert.equal(quoteCut(PLANS, 4, 843, "standard").credits, 4 * up.per_clip);
+  assert.equal(likelyClips(843, "standard"), 12); assert.equal(likelyClips(843, "minute"), 6); assert.equal(likelyClips(300, "standard"), 4);
+  assert.equal(countCap(300, "standard"), 9); assert.equal(countCap(4 * 3600, "short"), CLIP_LIMITS.max_clips);
 
   const meta = async () => ({ id: "x", url: "u", title: "My podcast", channel: "Me", description: "", seconds: 3725, thumbnail_url: "https://img", chapters: [], replay: [] });
-  const q = await quoteClips({ env: ENV, meta }, PLANS, null, { url: "https://www.youtube.com/watch?v=L_Guz73e6fw", length: "short", format: "original" });
+  const q = await quoteClips({ env, meta }, PLANS, null, { url: "https://www.youtube.com/watch?v=L_Guz73e6fw", length: "short", format: "original", count: 12 });
   assert.equal(q.tool, "clips");
-  assert.deepEqual([q.options.platform, q.options.minutes, q.options.max_clips, q.options.length, q.options.format, q.options.source.title], ["youtube", 63, 49, "short", "original", "My podcast"]);
-  assert.match(q.summary, /63 min · up to 49 clips/);
+  assert.deepEqual([q.options.platform, q.options.minutes, q.options.count, q.options.length, q.options.format, q.options.source.title, q.options.youtube_direct], ["youtube", 63, 12, "short", "original", "My podcast", true]);
+  assert.equal(q.credits, q.options.price.analysis + 12 * q.options.price.per_clip, "reserved: reading plus every clip asked for");
+  assert.equal(q.options.warning, null);
+  assert.match(q.summary, /63 min · up to 12 clips/);
+  // five minutes, twenty clips: warned and capped, still charged only for clips made
+  const five = async () => ({ ...(await meta()), seconds: 300 });
+  const q5 = await quoteClips({ env, meta: five }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", count: 20 });
+  assert.equal(q5.options.count, 9);
+  assert.match(q5.options.warning, /fits at most 9 30-second clips[^]*only charged for the clips we make/);
+  const q7 = await quoteClips({ env, meta: five }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", count: 7 });
+  assert.match(q7.options.warning, /usually holds about 4 strong 30-second clips[^]*up to 7/);
+  const qm = await quoteClips({ env, meta }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", length: "minute" });
+  assert.equal(qm.options.length, "minute");
+  assert.equal(qm.options.count, Math.min(likelyClips(3725, "minute"), 10), "no count asked: what the video likely holds, at most 10");
+  const noProxy = await quoteClips({ env: ENV, meta }, PLANS, null, { url: "https://youtu.be/L_Guz73e6fw", count: 5 });
+  assert.equal(noProxy.options.youtube_direct, false);
+  assert.equal(noProxy.credits, noProxy.options.price.lite, "without our proxy only choosing is reserved; the cut is paid when the file comes");
   const asset = { id: "a1", kind: "video", name: "Episode 12.mp4", bytes: 2e9, probe: { duration: 1800 } };
   const qa = await quoteClips({ env: ENV }, PLANS, asset, {});
   assert.deepEqual([qa.options.platform, qa.options.source.title, qa.options.format, qa.options.length], ["upload", "Episode 12", "vertical", "standard"]);
@@ -184,84 +278,98 @@ function fakeSb() {
   };
   return sb;
 }
-const JOB = (o: any, extra: any = {}) => ({ id: "job1", user_id: U, lease_token: "tok", asset_id: null, credits_reserved: 400, progress: {}, attempts: 1, options: { collection_id: "col1", length: "standard", format: "vertical", ...o }, ...extra });
+const PRICE = { analysis: 100, per_clip: 14, lite: 12 };
+const JOB = (o: any, extra: any = {}) => ({ id: "job1", user_id: U, lease_token: "tok", asset_id: null, credits_reserved: 400, progress: {}, attempts: 1, options: { collection_id: "col1", length: "standard", format: "vertical", price: PRICE, count: 5, ...o }, ...extra });
 const segs = Array.from({ length: 400 }, (_, k) => ({ start: k * 3, end: k * 3 + 3, text: `words ${k} here` }));
+// 900 words, two seconds apart, a sentence every 9 words (a line of ~17.5 s that closes a thought)
+const WORDS = Array.from({ length: 900 }, (_, k) => ({ text: k % 9 === 8 ? `w${k}.` : `w${k}`, start: k * 2, end: k * 2 + 1.5, speaker: k < 450 ? "s1" : "s2" }));
 const choose = async () => [
-  { start_line: 10, end_line: 20, title: "First", hook: "h", why: "w", score: 90, tags: [] },
-  { start_line: 60, end_line: 70, title: "Second", hook: "h", why: "w", score: 80, tags: [] },
+  { start_line: 10, end_line: 11, title: "First", hook: "h", why: "w", score: 90, tags: [] },
+  { start_line: 60, end_line: 61, title: "Second", hook: "h", why: "w", score: 80, tags: [] },
 ];
+const writeStub = async (_a: any, target: string) => { const { writeFile } = await import("node:fs/promises"); await writeFile(target, Buffer.from("mp3")); };
+const META = async () => ({ id: "x", url: "u", title: "Show", channel: "C", description: "", seconds: 1800, thumbnail_url: null, chapters: [], replay: [{ start: 400, end: 430, score: 0.9 }] });
 
-test("a YouTube run: transcript in, moments chosen and saved, two clips cut into the collection, charged for what was made", async () => {
+test("a YouTube run: the video fetched once, every word and laugh heard, moments chosen with the signals, cut from the file, charged for what was made", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
-  const cut: any[] = [], got: any[] = [];
-  const deps: any = { env: ENV, plans: PLANS, log: () => {},
-    meta: async () => ({ id: "x", url: "u", title: "Show", channel: "C", description: "", seconds: 1200, thumbnail_url: null, chapters: [], replay: [] }),
-    transcript: async () => segs, choose,
+  const cut: any[] = [], got: any[] = [], seen: any[] = [];
+  const deps: any = { env: ENV, plans: PLANS, log: () => {}, meta: META,
+    transcript: async () => { throw new Error("captions are not needed when the sound is heard"); },
     download: async (url: string, target: string, h: number) => { got.push([url, h]); const { writeFile } = await import("node:fs/promises"); await writeFile(target, "mp4"); },
-    cut: async (ctx: any, m: any) => { cut.push([m.rank, ctx.src.video, ctx.collectionId]); sb.t.studio_assets.push({ id: `clip${m.rank}`, collection_id: ctx.collectionId }); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
-  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1200 }) as any), "done");
-  assert.deepEqual(cut.map((c) => c[0]).sort(), [1, 2]);
+    extractAudio: async (src: any, target: string) => { assert.ok(String(src.video).endsWith("youtube.mp4"), "the sound comes from the fetched file"); await writeStub(src, target); },
+    loudness: async () => Array.from({ length: 1800 }, (_, i) => (i >= 180 && i < 200 ? -10 : -24)),
+    words: async () => ({ words: WORDS, events: [{ text: "laughter", start: 210, end: 213 }] }),
+    choose: async (x: any) => { seen.push(x); return choose(); },
+    cut: async (ctx: any, m: any) => { cut.push([m.rank, ctx.src.video, ctx.collectionId, ctx.length, m.speech?.length]); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
   assert.deepEqual(got, [["https://www.youtube.com/watch?v=L_Guz73e6fw", 1080]], "the whole video is fetched once (1080 lines under an hour)");
-  assert.ok(cut.every((c) => String(c[1]).endsWith("youtube.mp4") && c[2] === "col1"), "every clip is cut from that local file");
+  assert.deepEqual(cut.map((c) => c[0]).sort(), [1, 2]);
+  assert.ok(cut.every((c) => String(c[1]).endsWith("youtube.mp4") && c[2] === "col1" && c[3] === "standard" && c[4] > 0), "cut from that file, with who-says-what for framing");
+  const x = seen[0];
+  assert.ok(x.lines.some((l: any) => (l.events ?? []).includes("laughter")), "the laugh reaches the chooser");
+  assert.ok(x.peaks.length >= 1 && x.peaks[0].start >= 176 && x.peaks[0].start <= 196, "so do the loud stretches");
+  assert.ok(x.wanted >= 5, "asked for at least the clips wanted");
   assert.ok(sb.files.has(`studio-outputs/${U}/clips/col1/plan.txt`), "the chosen moments are saved, so a retry or an upload can reuse them");
   const done = sb.calls.find((c: any) => c.fn === "studio_complete");
-  assert.ok(done.args.p_credits_charged >= CLIP_LIMITS.min_credits && done.args.p_credits_charged <= 400);
+  assert.equal(done.args.p_credits_charged, PRICE.analysis + 2 * PRICE.per_clip, "reading once plus the two clips made; the three not made went back");
   assert.equal(sb.t.studio_collections[0].status, "ready");
+  assert.match(sb.t.studio_collections[0].note, /had 2 clips strong enough to post, of the 5 you asked for\. You were charged for 2 clips; the rest went back\./);
   const stages = sb.calls.filter((c: any) => c.fn === "studio_renew").map((c: any) => c.args.p_progress.stage);
-  assert.deepEqual([...new Set(stages)], ["reading", "choosing", "cutting"]);
+  assert.deepEqual([...new Set(stages)], ["reading", "transcribing", "choosing", "cutting"]);
 });
 
-test("YouTube refusing our servers: the moments are kept, only choosing is charged, the collection asks for the file; the upload then cuts them", async () => {
+test("YouTube refusing our servers: chosen from its captions, only choosing is charged, the collection asks for the file; the upload then cuts them", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
-  const deps: any = { env: ENV, plans: PLANS, log: () => {},
-    meta: async () => ({ id: "x", url: "u", title: "Show", channel: "C", description: "", seconds: 1200, thumbnail_url: null, chapters: [], replay: [] }),
+  const deps: any = { env: ENV, plans: PLANS, log: () => {}, meta: META,
     transcript: async () => segs, choose,
     download: async () => { throw new LinkError("link_blocked", "YouTube refused"); },
+    extractAudio: async () => { throw new Error("nothing to listen to"); },
     cut: async () => { throw new Error("must not cut"); } };
-  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1200 }) as any), "needs_file");
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "needs_file");
   assert.equal(sb.t.studio_collections[0].status, "needs_file");
   assert.match(sb.t.studio_collections[0].note, /picked 2 moments/);
-  const charged = sb.calls.find((c: any) => c.fn === "studio_complete").args.p_credits_charged;
-  assert.ok(charged >= 1 && charged < 20, `choosing only (${charged})`);
-  // the upload: a new run that reads the saved moments and cuts from the file
-  sb.t.studio_assets.push({ id: "upl", user_id: U, object_key: `${U}/upl.mp4`, status: "ready", probe: { duration: 1200 } });
+  assert.equal(sb.calls.find((c: any) => c.fn === "studio_complete").args.p_credits_charged, PRICE.lite, "choosing only");
+  // the upload: a new run that reads the saved moments and cuts from the file, charged per clip
+  sb.t.studio_assets.push({ id: "upl", user_id: U, object_key: `${U}/upl.mp4`, status: "ready", probe: { duration: 1800 } });
   const seen: string[] = [];
   const deps2: any = { ...deps, choose: async () => { throw new Error("must not choose again"); }, cut: async (ctx: any, m: any) => { seen.push(ctx.src.video); return { asset_id: `c${m.rank}`, bytes: 1, seconds: 30 }; } };
   sb.calls.length = 0;
-  assert.equal(await runClipsJob(sb, deps2, JOB({ platform: "upload", plan_from: "col1", seconds: 1200 }, { id: "job2", asset_id: "upl", credits_reserved: quoteCut(PLANS, 2, 1200) }) as any), "done");
+  const q = quoteCut(PLANS, 2, 1800, "standard");
+  assert.equal(await runClipsJob(sb, deps2, JOB({ platform: "upload", plan_from: "col1", seconds: 1800, price: q.price, count: 2 }, { id: "job2", asset_id: "upl", credits_reserved: q.credits }) as any), "done");
   assert.equal(seen.length, 2);
-  assert.ok(seen.every((s) => s.startsWith("https://signed/")), "cut from the uploaded file");
+  assert.ok(seen.every((x) => x.startsWith("https://signed/")), "cut from the uploaded file");
+  assert.equal(sb.calls.find((c: any) => c.fn === "studio_complete").args.p_credits_charged, q.credits);
 });
 
-test("an upload run transcribes the sound with word times, skips a clip that fails, and stops cleanly when storage is full", async () => {
+test("an upload run transcribes with word times, skips a clip that fails, stops cleanly when storage is full, and charges only for what it made", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
   sb.t.studio_assets.push({ id: "src", user_id: U, object_key: `${U}/src.mp4`, status: "ready", probe: { duration: 1800 } });
-  const words = Array.from({ length: 900 }, (_, k) => ({ text: k % 9 === 8 ? `w${k}.` : `w${k}`, start: k * 2, end: k * 2 + 1.5, speaker: "s1" }));
-  let n = 0;
-  const deps: any = { env: ENV, plans: PLANS, log: () => {},
-    extractAudio: async (_src: any, target: string) => { const { writeFile } = await import("node:fs/promises"); await writeFile(target, Buffer.from("mp3")); },
-    words: async (audio: Buffer) => { assert.equal(audio.toString(), "mp3"); return words; },
+  const deps: any = { env: ENV, plans: PLANS, log: () => {}, extractAudio: writeStub, loudness: async () => [],
+    words: async (audio: Buffer) => { assert.equal(audio.toString(), "mp3"); return WORDS; },
     choose: async () => [
       { start_line: 2, end_line: 3, title: "A", hook: "h", why: "w", score: 95, tags: [] },
       { start_line: 20, end_line: 21, title: "B", hook: "h", why: "w", score: 85, tags: [] },
       { start_line: 40, end_line: 41, title: "C", hook: "h", why: "w", score: 75, tags: [] },
     ],
-    cut: async (_ctx: any, m: any) => { n++; if (m.rank === 2) throw new ClipsError("clip_media_failed", "broken", 502, true); if (m.rank === 3) throw new ClipsError("storage_full", "Your plan stores up to 10 GB", 409); return { asset_id: `c${m.rank}`, bytes: 1, seconds: 30 }; } };
-  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "upload", seconds: 1800 }, { asset_id: "src" }) as any), "done");
-  assert.match(sb.t.studio_collections[0].note, /1 of 3 clips made: Your plan stores up to 10 GB/);
+    cut: async (_ctx: any, m: any) => { if (m.rank === 2) throw new ClipsError("clip_media_failed", "broken", 502, true); if (m.rank === 3) throw new ClipsError("storage_full", "Your plan stores up to 10 GB", 409); return { asset_id: `c${m.rank}`, bytes: 1, seconds: 30 }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "upload", seconds: 1800, count: 3 }, { asset_id: "src" }) as any), "done");
+  assert.match(sb.t.studio_collections[0].note, /1 of 3 clips made: Your plan stores up to 10 GB\. You were charged for the 1 clip made; the rest went back\./);
   assert.equal(sb.t.studio_collections[0].status, "ready");
+  assert.equal(sb.calls.find((c: any) => c.fn === "studio_complete").args.p_credits_charged, PRICE.analysis + PRICE.per_clip);
 });
 
 test("nothing worth clipping, or no speech: the run fails and every credit is refunded", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
-  const deps: any = { env: ENV, plans: PLANS, log: () => {},
-    meta: async () => ({ id: "x", url: "u", title: "Show", channel: "C", description: "", seconds: 1200, thumbnail_url: null, chapters: [], replay: [] }),
+  const deps: any = { env: ENV, plans: PLANS, log: () => {}, meta: META,
+    download: async () => { throw new LinkError("link_blocked", "no"); },
     transcript: async () => segs, choose: async () => [{ start_line: 1, end_line: 9, title: "meh", hook: "h", why: "w", score: 30, tags: [] }] };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://youtu.be/L_Guz73e6fw" }) as any), "clips_none_found");
   const fail = sb.calls.find((c: any) => c.fn === "studio_fail");
   assert.deepEqual(Object.keys(fail.args).sort(), ["p_job", "p_reason", "p_retry", "p_token"], "the database function's own parameter names (a wrong one fails silently and the job runs forever)");
   assert.deepEqual([fail.args.p_reason, fail.args.p_retry], ["clips_none_found", false]);
   assert.equal(sb.t.studio_collections[0].status, "failed");
+  assert.equal(sb.t.studio_collections[0].note, "No moment in this video stands out enough to be a clip.");
+  assert.equal(sb.calls.filter((c: any) => c.fn === "studio_complete").length, 0, "nothing charged");
 });
 
 // ---------------------------------------------------------------------------------------------------

@@ -123,12 +123,14 @@ export async function transcribe(deps: InstrumentDeps, p: { audio: Buffer; langu
 /** Speech to text with a time for every word, for cutting clips on word boundaries. `audio` is any format the service reads
  *  (Clips sends a small mono MP3). Long recordings take a while: up to 20 minutes are allowed. */
 export type TimedWord = { text: string; start: number; end: number; speaker: string | null };
-export async function transcribeWords(deps: InstrumentDeps, p: { audio: Buffer; filename?: string; type?: string; language?: string | null }): Promise<{ words: TimedWord[]; language: string | null }> {
+/** A sound that is not speech, as the service hears it: "(laughter)", "(applause)", "(audience cheering)". */
+export type AudioEvent = { text: string; start: number; end: number };
+export async function transcribeWords(deps: InstrumentDeps, p: { audio: Buffer; filename?: string; type?: string; language?: string | null; events?: boolean }): Promise<{ words: TimedWord[]; events: AudioEvent[]; language: string | null }> {
   const form = new FormData();
   form.set("file", new Blob([new Uint8Array(p.audio)], { type: p.type ?? "audio/mpeg" }), p.filename ?? "source.mp3");
   form.set("model_id", "scribe_v1");
   form.set("diarize", "true");
-  form.set("tag_audio_events", "false");
+  form.set("tag_audio_events", p.events ? "true" : "false");
   form.set("timestamps_granularity", "word");
   if (p.language) form.set("language_code", p.language);
   const r = await eleven(deps, "/v1/speech-to-text", { method: "POST", body: form, timeoutMs: 20 * 60_000 });
@@ -137,7 +139,11 @@ export async function transcribeWords(deps: InstrumentDeps, p: { audio: Buffer; 
   const words: TimedWord[] = (Array.isArray(body?.words) ? body.words : [])
     .filter((w: any) => w && w.type === "word" && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && String(w.text ?? "").trim())
     .map((w: any) => ({ text: String(w.text).trim(), start: Number(w.start), end: Number(w.end), speaker: w.speaker_id ? String(w.speaker_id) : null }));
-  return { words, language: body?.language_code ?? null };
+  const events: AudioEvent[] = (Array.isArray(body?.words) ? body.words : [])
+    .filter((w: any) => w && w.type === "audio_event" && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && String(w.text ?? "").trim())
+    .map((w: any) => ({ text: String(w.text).replace(/[()\[\]]/g, "").trim().toLowerCase().slice(0, 40), start: Number(w.start), end: Number(w.end) }))
+    .filter((e: AudioEvent) => e.text);
+  return { words, events, language: body?.language_code ?? null };
 }
 export async function dubVideo(deps: InstrumentDeps, p: { video: Buffer; target_language: string; num_speakers?: number; sleep?: (ms: number) => Promise<void>; onPoll?: (status: string) => Promise<void> }): Promise<Buffer> {
   const form = new FormData();
