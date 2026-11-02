@@ -880,7 +880,8 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   // the clip's own words, from its start: kept for Captions, and burned in now when the switch is on
   const rel = (m.words ?? []).map(([text, a, b, speaker]) => ({ text, start: Math.round((a - m.start) * 100) / 100, end: Math.round((b - m.start) * 100) / 100, speaker })).filter((w) => w.end > 0 && w.start < dur);
   let keys: number[] = [];
-  if (ctx.captions && rel.length) {
+  const burned = !!ctx.captions && rel.length > 0;
+  if (burned) {
     const cv = await import("./studio-caption-video.js");
     if (ctx.captions.keywords) keys = await cv.markKeywords(ctx.deps, rel, u).catch(() => []);
     const fr = outputSize(info.w, info.h, ctx.format);
@@ -911,7 +912,9 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
     id, user_id: u, kind: "video", name, object_key: key, bytes, status: "ready", collection_id: ctx.collectionId,
     probe: { duration: round2(final.seconds || dur), width: final.w, height: final.h, poster_key: pu.error ? undefined : posterKey, cuts, cuts_at: new Date().toISOString(),
       source: "clips", title: m.title, hook: m.hook, why: m.why, score: m.score, tags: m.tags, transcript: m.transcript,
-      clip: { start: m.start, end: m.end, rank: m.rank, source_title: ctx.sourceTitle, job_id: ctx.jobId, length: ctx.length ?? null } },
+      clip: { start: m.start, end: m.end, rank: m.rank, source_title: ctx.sourceTitle, job_id: ctx.jobId, length: ctx.length ?? null },
+      // captions burned in by the switch: marked like a Captions copy, so the library, Publish and the run page know
+      ...(burned ? { captions: { style: ctx.captions!.style.id, from: "clips", job_id: ctx.jobId } } : {}) },
   });
   if (ins.error) { await sb.storage.from("studio-uploads").remove([key]).catch(() => undefined); throw ins.error; }
   if (rel.length) await import("./studio-caption-video.js").then((cv) => cv.saveWords(sb, u, id, { words: rel.map((w) => [w.text, w.start, w.end, w.speaker ?? null] as [string, number, number, string | null]), keys, language: null, duration: round2(final.seconds || dur) })).catch(() => undefined);
