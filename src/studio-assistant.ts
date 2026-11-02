@@ -28,7 +28,7 @@ import { youtubeId } from "./studio-youtube.js";
 import { ClipsError, isLongSource, quoteClips } from "./studio-clips.js";
 import { CAPTION_LIMITS, captionCredits, cleanSettings, quoteCaptions } from "./studio-caption-video.js";
 import { searchLibrary, quoteImport } from "./studio-library.js";
-import { listProfilePage } from "./studio-profile-import.js";
+import { listProfilePage, profileOfPost } from "./studio-profile-import.js";
 import { profileLines } from "./studio-onboarding.js";
 import type { SetupCard } from "./studio-automations.js";
 
@@ -798,8 +798,9 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
           const envNow = deps.env ?? process.env;
           if (!(toolsEnabled(envNow) as any).import) throw new AssistantError("plan_invalid", "Import is not switched on yet");
           const urls = (Array.isArray(use.input?.urls) ? use.input.urls : []).map(String).slice(0, 100);
-          const q = quoteImport(envNow, PLANS, { links: urls, name: typeof use.input?.name === "string" ? use.input.name : undefined });
-          const col = await sb.from("studio_collections").insert({ user_id: convo.user_id, name: q.options.name ?? "Account", kind: "import", status: "processing", source: { platform: "profile", via: "chat" } }).select("id").single();
+          const first = urls[0] ? (() => { try { return profileOfPost(urls[0]); } catch { return null; } })() : null;
+          const q = quoteImport(envNow, PLANS, { links: urls, name: typeof use.input?.name === "string" ? use.input.name : first ? `@${first.handle}` : undefined, account: first });
+          const col = await sb.from("studio_collections").insert({ user_id: convo.user_id, name: q.options.name ?? "Account", kind: "import", status: "processing", source: q.options.account ? { platform: "profile", network: q.options.account.platform, handle: q.options.account.handle, url: q.options.account.url, via: "chat" } : { platform: "profile", via: "chat" } }).select("id").single();
           if (col.error) throw col.error;
           const r = await sb.rpc("studio_create_job", { p_user: convo.user_id, p_tool: "import", p_asset: null, p_options: { ...q.options, collection_id: col.data.id, via: "chat", conversation_id: convo.id }, p_credits: q.credits });
           if (r.error) { await sb.from("studio_collections").delete().eq("id", col.data.id).eq("user_id", convo.user_id); throw new AssistantError(/insufficient_credits/.test(String(r.error.message ?? r.error)) ? "insufficient_credits" : "plan_invalid", String(r.error.message ?? r.error).slice(0, 200)); }

@@ -1085,7 +1085,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         } else {
           const s = q.options.source ?? {};
           const name = q.tool === "clips" ? String(s.title ?? "Clips").slice(0, 100) || "Clips" : String(q.options.name ?? `Import ${new Date().toISOString().slice(0, 10)}`).slice(0, 100);
-          const source = q.tool === "clips" ? { ...s, format: q.options.format, length: q.options.length } : { platform: req.body?.options?.platform === "sheet" ? "sheet" : "links" };
+          const acct = q.tool === "import" ? q.options.account : null;
+          const source = q.tool === "clips" ? { ...s, format: q.options.format, length: q.options.length } : acct ? { platform: "profile", network: acct.platform, handle: acct.handle, url: acct.url } : { platform: req.body?.options?.platform === "sheet" ? "sheet" : "links" };
           const c = await sb.from("studio_collections").insert({ user_id: u, name, kind: q.tool === "clips" ? "clips" : "import", status: "processing", source }).select("id").single();
           if (c.error) throw c.error;
           collectionId = c.data.id; madeCollection = true;

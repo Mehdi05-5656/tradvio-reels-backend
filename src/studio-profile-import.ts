@@ -44,6 +44,11 @@ export function profileRef(raw: string): ProfileRef {
   throw new ClipsError("profile_link_invalid", "Paste a TikTok or Instagram profile link", 400);
 }
 
+/** The account a post link belongs to, when the link carries it (TikTok does; Instagram post links do not). */
+export function profileOfPost(url: string): { platform: ProfilePlatform; handle: string } | null {
+  const m = String(url).match(/tiktok\.com\/@([A-Za-z0-9._]{1,30})\/video\//i);
+  return m ? { platform: "tiktok", handle: m[1].toLowerCase() } : null;
+}
 const n = (v: unknown): number | null => (v === null || v === undefined || v === "" ? null : Number.isFinite(Number(v)) ? Number(v) : null);
 const iso = (v: unknown): string | null => { const x = Number(v); return Number.isFinite(x) && x > 0 ? new Date((x < 1e12 ? x * 1000 : x)).toISOString() : null; };
 const firstUrl = (...cands: unknown[]): string | null => { for (const c of cands) { if (typeof c === "string" && /^https?:\/\//.test(c)) return c; if (Array.isArray(c) && typeof c[0] === "string" && /^https?:\/\//.test(c[0])) return c[0]; } return null; };

@@ -51,3 +51,14 @@ test("listing a page: the right endpoint per platform, counted per day, a privat
   await assert.rejects(listProfilePage(sb, deps, "u1", { url: "https://www.tiktok.com/@core_live" }), (e: any) => e.code === "profile_rate_limited");
   await assert.rejects(listProfilePage(sb, { env: {}, fetch: f }, "u1", { url: "https://www.tiktok.com/@core_live" }), (e: any) => e.code === "import_unavailable");
 });
+
+test("an import quoted from an account keeps the account as its source; a post link names its TikTok account", async () => {
+  const { quoteImport } = await import("../src/studio-library.js");
+  const { profileOfPost } = await import("../src/studio-profile-import.js");
+  const PLANS = [{ id: "starter", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000 }];
+  const q = quoteImport({ SCRAPECREATORS_API_KEY: "k" }, PLANS as any, { links: ["https://www.tiktok.com/@Core_Live/video/7301000000001"], account: { platform: "tiktok", handle: "Core_Live" } });
+  assert.deepEqual(q.options.account, { platform: "tiktok", handle: "core_live", url: "https://www.tiktok.com/@core_live" });
+  assert.equal(quoteImport({}, PLANS as any, { links: ["https://www.instagram.com/reel/Cx1_reel/"], account: { platform: "x", handle: "no" } }).options.account, null);
+  assert.deepEqual(profileOfPost("https://www.tiktok.com/@core_live/video/7301000000001"), { platform: "tiktok", handle: "core_live" });
+  assert.equal(profileOfPost("https://www.instagram.com/reel/Cx1_reel/"), null);
+});

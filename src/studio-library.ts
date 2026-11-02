@@ -80,7 +80,10 @@ export function quoteImport(env: Record<string, string | undefined>, plans: Plan
   for (const l of links) { counts[l.kind]++; credits += linkCredits(l.kind, env, plans); }
   const name = typeof o.name === "string" && o.name.trim() ? o.name.trim().slice(0, 100) : null;
   const collection_id = UUID_RE.test(String(o.collection_id ?? "")) ? String(o.collection_id) : null;
-  return { tool: "import", credits, options: { links, rejected: rejected.slice(0, 200), counts, name, collection_id }, summary: `${links.length} ${links.length === 1 ? "link" : "links"}` };
+  // the account the links were listed from (Import from an account): kept on the collection as its source
+  const a = o.account && typeof o.account === "object" ? o.account : null;
+  const account = a && (a.platform === "tiktok" || a.platform === "instagram") && /^[a-z0-9._]{1,30}$/i.test(String(a.handle ?? "")) ? { platform: a.platform, handle: String(a.handle).toLowerCase(), url: a.platform === "tiktok" ? `https://www.tiktok.com/@${String(a.handle).toLowerCase()}` : `https://www.instagram.com/${String(a.handle).toLowerCase()}/` } : null;
+  return { tool: "import", credits, options: { links, rejected: rejected.slice(0, 200), counts, name, collection_id, account }, summary: `${links.length} ${links.length === 1 ? "link" : "links"}` };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -160,10 +163,15 @@ type Row = { id: string; user_id: string; name: string; kind: string; status: st
 export async function publicCollections(sb: SupabaseClient, rows: Row[]): Promise<any[]> {
   if (!rows.length) return [];
   const ids = rows.map((r) => r.id);
-  const [assets, jobs] = await Promise.all([
+  const importIds = rows.filter((r) => r.kind === "import").map((r) => r.id);
+  const [assets, jobs, spent] = await Promise.all([
     sb.from("studio_assets").select("collection_id,probe,created_at").in("collection_id", ids).neq("status", "deleted").order("created_at", { ascending: true }).limit(5000),
     sb.from("studio_jobs").select("id,status,progress,options,tool,created_at").in("id", rows.map((r) => r.job_id).filter(Boolean) as string[]),
+    // what every import into an import collection has cost so far (an account card shows it)
+    importIds.length ? sb.from("studio_jobs").select("options,credits_charged,credits_reserved,status").eq("tool", "import").in("options->>collection_id", importIds).limit(2000) : Promise.resolve({ data: [] as any[] }),
   ]);
+  const credits = new Map<string, number>();
+  for (const j of ((spent as any).data ?? []) as any[]) { const cid = j.options?.collection_id; if (!cid) continue; credits.set(cid, (credits.get(cid) ?? 0) + Number(j.status === "done" || j.status === "failed" || j.status === "canceled" ? j.credits_charged ?? 0 : j.credits_reserved ?? 0)); }
   // a clips run waiting or working: how long until it is done, and how many runs are ahead of it (all of everyone's)
   const liveClips = ((jobs.data ?? []) as any[]).filter((j) => j.tool === "clips" && (j.status === "queued" || j.status === "running"));
   const eta = new Map<string, { seconds: number; ahead: number }>();
@@ -190,8 +198,8 @@ export async function publicCollections(sb: SupabaseClient, rows: Row[]): Promis
     const progress = r.status === "needs_file" ? { stage: "done", done: 0, total: Number(p.total ?? 0), message: "Waiting for the file" } : r.status === "processing" || live ? { stage: j?.status === "queued" ? "queued" : String(p.stage ?? "reading"), done: Number(p.done ?? 0), total: Number(p.total ?? 0), message: String(p.message ?? (j?.status === "queued" ? "Waiting to start" : "Working")), ...(j && eta.has(j.id) ? { eta_seconds: eta.get(j.id)!.seconds, ahead: eta.get(j.id)!.ahead } : {}) } : null;
     return {
       id: r.id, name: r.name, kind: r.kind, status: r.status, note: r.note, job_id: r.job_id,
-      source: { platform: r.source?.platform ?? null, url: r.source?.url ?? null, asset_id: r.source?.asset_id ?? null, title: r.source?.title ?? null, channel: r.source?.channel ?? null, seconds: r.source?.seconds ?? null, thumbnail_url: r.source?.thumbnail_url ?? null },
-      asset_count: count.get(r.id) ?? 0,
+      source: { platform: r.source?.platform ?? null, url: r.source?.url ?? null, asset_id: r.source?.asset_id ?? null, title: r.source?.title ?? null, channel: r.source?.channel ?? null, seconds: r.source?.seconds ?? null, thumbnail_url: r.source?.thumbnail_url ?? null, handle: r.source?.handle ?? null, network: r.source?.network ?? null },
+      asset_count: count.get(r.id) ?? 0, credits_used: r.kind === "import" ? credits.get(r.id) ?? 0 : null,
       poster_url: (poster.has(r.id) ? urls.get(poster.get(r.id)!) : null) ?? r.source?.thumbnail_url ?? null,
       progress, created_at: r.created_at, updated_at: r.updated_at,
     };
