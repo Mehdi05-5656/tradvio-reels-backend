@@ -70,6 +70,11 @@ test("the list-price table knows the published families and prices in seconds or
   assert.equal(listPrice("bytedance/seedance-2.5/text-to-video")!.by_resolution!["720p"], 0.463, "Seedance 2.5 by output size; 720p is its default");
   assert.equal(listPrice("bytedance/seedance-2.5/video-edit")!.by_resolution!["720p"], 0.463, "video edit at its 720p list price (our Oct 30 bills match), not the $0.206 'from' price");
   assert.deepEqual(listPrice("lightricks/ltx-2.5/text-to-video/pro"), { per: "second", usd: 0.12 });
+  assert.equal(listPrice("kling-video/o3/video-edit")!.by_mode!.std, 0.14, "Kling edit is priced by mode (provisional, Nov 2 2026)");
+  const klingEdit = allInstruments().find((m) => apiPath(m) === "kling-video/o3/video-edit")!;
+  assert.equal(tableUsd(klingEdit, { mode: "std" }, 14.9), 0.14 * 15, "a 14.9 s source bills as 15 s at the std rate");
+  assert.equal(tableUsd(klingEdit, { mode: "pro" }, 9.9), 0.18 * 10, "pro mode has its own rate");
+  assert.equal(tableUsd(klingEdit, {}, 9.9), 0.18 * 10, "no mode given: the schema default (pro)");
   assert.deepEqual(listPrice("recraft/v4.1/utility/text-to-image"), { per: "image", usd: 0.035 });
   assert.equal(listPrice("pixverse/v6/text-to-video"), null);
   const seedance = instrumentById("bytedance/seedance-2.5/text-to-video", ENV)!, soul = instrumentById("higgsfield-ai/soul/v2/standard", ENV)!;

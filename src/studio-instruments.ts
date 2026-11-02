@@ -171,7 +171,7 @@ export const inputAssetIds = (inputs: Record<string, string | string[]>): string
 // estimate is unavailable; a family absent from both cannot be quoted.
 // ---------------------------------------------------------------------------------------------------
 /** `by_resolution`: what a second costs at each output size; `usd` is used when the size is not one of them. */
-export type UnitPrice = { per: "second" | "image"; usd: number; by_resolution?: Partial<Record<string, number>> };
+export type UnitPrice = { per: "second" | "image"; usd: number; by_resolution?: Partial<Record<string, number>>; by_mode?: Partial<Record<string, number>> };
 // Seedance bills by output size. Seedance 2.5 at 720p (its default) lists at $0.4622 a second and 1080p at $1.137
 // (open.higgsfield.ai, Oct 30 2026; our Oct 30 bills match); the $0.206 "from" price undercharged every 720p run by more
 // than half. Video edit / reference: 480p from the pricing page; text/image-to-video 480p from the page, 720p and 1080p
@@ -185,6 +185,11 @@ export const LIST_PRICES: Record<string, UnitPrice> = {
   "bytedance/seedance-2.0": { per: "second", usd: 0.264, by_resolution: SEEDANCE_20_GEN }, "bytedance/seedance-2.0/reference-to-video": { per: "second", usd: 0.314, by_resolution: SEEDANCE_20_REF },
   "minimax/h3": { per: "second", usd: 0.13 }, "alibaba/wan-3.0-prime": { per: "second", usd: 0.068 }, "alibaba/wan-3.0": { per: "second", usd: 0.05 },
   "higgsfield/cinema-studio": { per: "second", usd: 0.206 }, "kling-video/v3.0": { per: "second", usd: 0.084 }, "kling-video/v3.0-turbo": { per: "second", usd: 0.084 },
+  // Kling video edit (O3: a 3 to 15.5 s source; Omni: 3 to 10 s). Provisional, Nov 2 2026: the platform refuses to
+  // estimate these, and the app's credit prices put std at a fifth of Genjutsu ($0.681/s) and pro at a quarter; set on
+  // the high side of that until the console's price is read. By mode, not resolution.
+  "kling-video/o3/video-edit": { per: "second", usd: 0.18, by_mode: { std: 0.14, pro: 0.18, "4k": 0.36 } },
+  "kling-video/omni/video-edit": { per: "second", usd: 0.18, by_mode: { std: 0.14, pro: 0.18 } },
   "lightricks/ltx-2.5/image-to-video/fast": { per: "second", usd: 0.09 }, "lightricks/ltx-2.5/text-to-video/fast": { per: "second", usd: 0.09 },
   "lightricks/ltx-2.5/image-to-video/pro": { per: "second", usd: 0.12 }, "lightricks/ltx-2.5/text-to-video/pro": { per: "second", usd: 0.12 },
   "xai/grok-imagine-video": { per: "second", usd: 0.08 }, "wan/v2.7": { per: "second", usd: 0.1 },
@@ -218,7 +223,8 @@ export function tableUsd(inst: Instrument, params: Record<string, any>, sourceSe
   const p = listPrice(apiPath(inst));
   if (!p) return null;
   const size = String(params.resolution ?? inst.schema?.properties?.resolution?.default ?? "");
-  return (p.by_resolution?.[size] ?? p.usd) * tableUnits(inst, params, sourceSeconds);
+  const mode = String(params.mode ?? inst.schema?.properties?.mode?.default ?? "");
+  return (p.by_mode?.[mode] ?? p.by_resolution?.[size] ?? p.usd) * tableUnits(inst, params, sourceSeconds);
 }
 /** What a unit is called on a card: "a second", "an image", "a minute", "1,000 characters", "a sound", "an hour". */
 export function unitLabel(inst: Instrument): string {
@@ -247,7 +253,7 @@ async function hf(deps: InstrumentDeps, path: string, init: RequestInit & { idem
 export async function estimateUsd(deps: InstrumentDeps, endpoint: string, body: Record<string, any>): Promise<number | null> {
   try {
     const r = await hf(deps, `/estimate/${endpoint}`, { method: "POST", body: JSON.stringify(body) });
-    if (r.status !== 200) return null;
+    if (r.status !== 200) { deps.log?.(`[instrument] estimate refused ${JSON.stringify({ endpoint, status: r.status, body: JSON.stringify(r.body ?? null).slice(0, 200) })}`); return null; }
     const usd = Number(r.body?.usd ?? r.body?.cost?.usd);
     return Number.isFinite(usd) && usd >= 0 ? usd : null;
   } catch (e) { if (e instanceof RecastError && (e.code === "recast_auth" || e.code === "recast_balance" || e.code === "recast_not_configured")) throw e; return null; }
