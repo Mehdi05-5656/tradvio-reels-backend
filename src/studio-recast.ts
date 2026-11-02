@@ -13,8 +13,8 @@ import { targetsPrompt } from "./studio-people.js";
 import { PLANS, WINDOW, billableSeconds, quote, windowSeconds } from "./studio.js";
 import { PREMIUM_MARGIN, RECAST_RESOLUTION, creditsForCost, higgsfieldCostPerSecond, higgsfieldListPerSecond, seedanceEditCostPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
-import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath } from "./studio-longpath.js";
-export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, planPieces, refineJoins, shotPieces, planLongPath };
+import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, ANCHOR_SECONDS, planPieces, refineJoins, shotPieces, planLongPath, planAnchor, anchorMode, lightPieceMax } from "./studio-longpath.js";
+export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, ANCHOR_SECONDS, planPieces, refineJoins, shotPieces, planLongPath, planAnchor, anchorMode, lightPieceMax };
 
 export const HF_BASE = "https://api.higgsfield.ai";
 export const MODELS = { full: "higgsfield/genjutsu/motion-transfer/v1.0", light: "higgsfield/genjutsu-light/motion-transfer/v1.0" } as const;
@@ -40,6 +40,11 @@ export const LONG_ENDPOINT = "bytedance/seedance-2.5/video-edit";
 export const ANCHOR_PROMPT = "The last reference image is a still of this same character from another part of this video: keep the face, hair, skin, outfit and proportions identical to it, and ignore its background.";
 export const LONG_PROMPT = "Replace the person in the video with the character from the reference image, keeping their exact pose, gestures, clothing colours, lip movements and timing. Keep the room, furniture, camera framing, camera cuts, lighting, on-screen text and everything else exactly as they are.";
 const POLL_MS = 10_000, MAX_WAIT_MS = 40 * 60_000, OUTPUT_LIMIT = 268_435_456;
+/** How long one job may wait on the renderer (STUDIO_RECAST_MAX_WAIT_MIN, at least 5; 40 minutes unless set). */
+function maxWaitMs(env?: Record<string, string | undefined>): number {
+  const m = Number(env?.STUDIO_RECAST_MAX_WAIT_MIN ?? process.env.STUDIO_RECAST_MAX_WAIT_MIN);
+  return Number.isFinite(m) && m >= 5 ? m * 60_000 : MAX_WAIT_MS;
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type RecastDeps = {
@@ -387,6 +392,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     // as pending when it is sent (Higgsfield's estimate, else our rate table) and booked to spend_usd when it completes,
     // at the charge the status reports when it reports one. A piece we cancel while it renders is booked too (it may be
     // billed). spend_usd is therefore what we were charged, as closely as the API lets us know it.
+    const maxWait = maxWaitMs(deps.env);
     const holdSpend = (requestId: string, usd: number, priced: "estimate" | "table") => ({ pending_spend: { ...(job.progress?.pending_spend ?? {}), [requestId]: { usd: Math.round(usd * 10000) / 10000, priced } } });
     const bookSpend = (requestId: string | null | undefined, raw?: any) => {
       const pending = { ...(job.progress?.pending_spend ?? {}) } as Record<string, { usd: number; priced: string }>;
@@ -513,36 +519,79 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           await renew(sb, job, { pieces, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString(), ...holdSpend(requestId, estimate ?? tableUsd, estimate != null ? "estimate" : "table") });
           log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, engine: p.engine ?? "seedance", piece: i + 1, of: pieces.length, request: requestId, anchored: extra.length > 0 })}`);
         };
-        // One character for the whole video: the longest piece renders first, a still of the character from it goes to
-        // every other piece as an extra reference, so the look holds from piece to piece (off with STUDIO_RECAST_ANCHOR=off;
-        // not with several people, where each reference already stands for one person).
-        const anchorOn = pieces.length > 1 && !cast && (deps.env?.STUDIO_RECAST_ANCHOR ?? process.env.STUDIO_RECAST_ANCHOR) !== "off";
+        // One character for the whole video: a still of the character from one render goes to every piece as an extra
+        // reference, so the look holds from piece to piece. `longest` takes it from the longest piece, which the others
+        // wait for; `short` (the default since Nov 2 2026) takes it from a piece near the 4 s floor, or from a dedicated
+        // 4 s render of the longest piece's middle, so every piece is sent at once and the job takes about as long as its
+        // longest piece. Off with STUDIO_RECAST_ANCHOR=off, and never with several people (each reference is one person).
+        const anchor = pieces.length > 1 && !cast ? planAnchor(pieces, anchorMode(deps.env)) : null;
         let anchorKey: string | null = job.progress?.anchor_key ?? null;
-        if (anchorOn && !anchorKey) {
-          const ai = pieces.reduce((bi, p, i, all) => (p.end - p.start > all[bi].end - all[bi].start ? i : bi), 0);
-          if (!pieces[ai].request_id) await submitPiece(ai, []);
+        if (anchor && !anchorKey) {
+          let anchorRequest: string, mid: number;
+          const window = "start" in anchor ? anchor : null; // a dedicated render's window of the source
+          if (!window) {
+            const ai = anchor.piece;
+            if (!pieces[ai].request_id) await submitPiece(ai, []);
+            anchorRequest = pieces[ai].request_id!; mid = (pieces[ai].end - pieces[ai].start) / 2;
+          } else {
+            // remembered on the job, so a restart polls the same render instead of paying for another
+            anchorRequest = String(job.progress?.anchor_request ?? "");
+            if (!anchorRequest) {
+              const file = join(dir!, "anchor-input.mp4");
+              await (deps.prescale ?? prescaleSource)(original!, file, ANCHOR_SECONDS, window.start);
+              const inputKey = `${job.user_id}/${job.id}/${job.lease_token}/input-anchor.mp4`;
+              const put = await sb.storage.from("studio-outputs").upload(inputKey, await readFile(file), { contentType: "video/mp4", upsert: true });
+              if (put.error) throw put.error;
+              const signed = await sb.storage.from("studio-outputs").createSignedUrl(inputKey, 7200);
+              if (signed.error || !signed.data) throw signed.error ?? new RecastError("source_missing");
+              await renew(sb, job, { note: "Sending your video to the renderer" });
+              // on the pieces' own renderer, so the still looks the way the pieces will
+              const anchorEngine: "light" | "seedance" = pieces[0]?.engine === "light" ? "light" : "seedance";
+              let estimate: number | null;
+              if (anchorEngine === "light") {
+                const sub = await submitRecast(deps, { tool, model: "light", videoUrl: signed.data.signedUrl, imageUrls: images.slice(0, 8), prompt: genjutsuPrompt(tool, job), idempotencyKey: `${job.id}:${job.attempts}:anchor`, resolution: RECAST_RESOLUTION });
+                anchorRequest = sub.request_id; estimate = sub.estimate_usd;
+              } else {
+                const body = { video_url: signed.data.signedUrl, image_urls: images.slice(0, 8), prompt: longPrompt, resolution: RECAST_RESOLUTION, generate_audio: false };
+                estimate = await estimateRequestUsd(deps, LONG_ENDPOINT, body);
+                const r = await hf(deps, `/${LONG_ENDPOINT}`, { method: "POST", body: JSON.stringify(body), idempotency: `${job.id}:${job.attempts}:anchor` });
+                if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
+                anchorRequest = String(r.request_id);
+              }
+              const tableUsd = ANCHOR_SECONDS * (anchorEngine === "light" ? higgsfieldCostPerSecond("light", deps.env) : seedanceEditCostPerSecond(deps.env));
+              await renew(sb, job, { anchor_request: anchorRequest, anchor_seconds: ANCHOR_SECONDS, anchor_engine: anchorEngine, submitted_at: job.progress?.submitted_at ?? new Date(now()).toISOString(), ...holdSpend(anchorRequest, estimate ?? tableUsd, estimate != null ? "estimate" : "table") });
+              log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, engine: anchorEngine, piece: "anchor", start: window.start, seconds: ANCHOR_SECONDS, request: anchorRequest })}`);
+            }
+            mid = ANCHOR_SECONDS / 2;
+          }
+          // a dedicated anchor that the renderer dropped is sent again on the next attempt, like a piece
+          const resendAnchor = async (why: "busy" | "no_reason"): Promise<never> => {
+            if (anchor.piece != null) await resendPiece(anchor.piece, why);
+            await renew(sb, job, { anchor_request: null, note: why === "busy" ? "The renderer was busy; sending it again" : "One part did not render; sending it again", resent: (Number(job.progress?.resent) || 0) + 1 });
+            throw new RecastError("recast_failed", why === "busy" ? "the character still timed out or the renderer was busy; sending it again" : "the character still failed without a reason; sending it again", true);
+          };
           const t0 = now();
           let videoUrl: string | null = null;
           while (!videoUrl) {
-            if (now() - t0 > MAX_WAIT_MS) throw new RecastError("recast_timeout");
+            if (now() - t0 > maxWait) throw new RecastError("recast_timeout");
             let st: { status: string; videoUrl: string | null; raw: any };
-            try { st = await pollRecast(deps, pieces[ai].request_id!); }
+            try { st = await pollRecast(deps, anchorRequest); }
             catch (e: any) { if (e instanceof RecastError && e.retry) { await sleep(POLL_MS); continue; } throw e; }
-            if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); videoUrl = st.videoUrl; if (job.progress?.pending_spend?.[pieces[ai].request_id!]) await renew(sb, job, bookSpend(pieces[ai].request_id, st.raw)); break; }
+            if (st.status === "completed") { if (!st.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url"); videoUrl = st.videoUrl; if (job.progress?.pending_spend?.[anchorRequest]) await renew(sb, job, bookSpend(anchorRequest, st.raw)); break; }
             if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
-              log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: ai + 1, request: pieces[ai].request_id, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
-              if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendPiece(ai);
-              if (st.status === "failed" && job.attempts < 3 && isGenericFailure(st.raw)) await resendPiece(ai, "no_reason");
+              log(`[recast] ${st.status} ${JSON.stringify({ job: job.id, piece: anchor.piece != null ? anchor.piece + 1 : "anchor", request: anchorRequest, detail: JSON.stringify(st.raw).slice(0, 300) })}`);
+              if (st.status === "failed" && job.attempts < 3 && isTransientFailure(st.raw)) await resendAnchor("busy");
+              if (st.status === "failed" && job.attempts < 3 && isGenericFailure(st.raw)) await resendAnchor("no_reason");
               throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled");
             }
-            await renew(sb, job, { note: "Rendering your video: the first part sets the character for the rest" });
+            await renew(sb, job, { note: anchor.piece != null ? "Rendering your video: the first part sets the character for the rest" : "Rendering your video: a short first part sets the character for the rest" });
             await sleep(POLL_MS);
           }
           const dl = await (deps.fetch ?? fetch)(videoUrl, { signal: AbortSignal.timeout(300_000) });
           if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
           const av = join(dir!, "anchor.mp4"), still = join(dir!, "anchor.jpg");
           await writeFile(av, Buffer.from(await dl.arrayBuffer()));
-          await (deps.frame ?? extractFrame)(av, still, (pieces[ai].end - pieces[ai].start) / 2);
+          await (deps.frame ?? extractFrame)(av, still, mid);
           const key = `${job.user_id}/${job.id}/${job.lease_token}/anchor.jpg`;
           const up = await sb.storage.from("studio-outputs").upload(key, await readFile(still), { contentType: "image/jpeg", upsert: true });
           if (up.error) throw up.error;
@@ -557,7 +606,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       const started = Date.parse(job.progress?.submitted_at ?? "") || now();
       const urls: Array<string | null> = pieces.map(() => null);
       for (;;) {
-        if (now() - started > MAX_WAIT_MS) throw new RecastError("recast_timeout");
+        if (now() - started > maxWait) throw new RecastError("recast_timeout");
         let pending = 0;
         for (const [i, p] of pieces.entries()) {
           if (urls[i]) continue;
@@ -582,7 +631,8 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           pending++;
         }
         const done = urls.filter(Boolean).length;
-        await renew(sb, job, { done, total: pieces.length, note: ({ recast: "Rendering your recast", swap: "Rendering your swap", trend: "Rendering your trend" } as Record<string, string>)[tool] ?? "Rendering your video" }); // one video to the person, however many pieces
+        const noteBase = ({ recast: "Rendering your recast", swap: "Rendering your swap", trend: "Rendering your trend" } as Record<string, string>)[tool] ?? "Rendering your video";
+        await renew(sb, job, { done, total: pieces.length, note: pieces.length > 1 ? `${noteBase}: ${done} of ${pieces.length} parts done` : noteBase }); // one video to the person, however many pieces
         if (!pending) break;
         await sleep(POLL_MS);
       }
@@ -638,7 +688,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       const started = Date.parse(job.progress?.submitted_at ?? "") || now();
       let result: { status: string; videoUrl: string | null; raw: any } | null = null;
       for (;;) {
-        if (now() - started > MAX_WAIT_MS) throw new RecastError("recast_timeout");
+        if (now() - started > maxWait) throw new RecastError("recast_timeout");
         let st: { status: string; videoUrl: string | null; raw: any };
         try { st = await pollRecast(deps, requestId); }
         catch (e: any) { if (e instanceof RecastError && e.retry) { await renew(sb, job, { note: "Waiting for the renderer" }); await sleep(POLL_MS); continue; } throw e; }
@@ -729,7 +779,9 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     let planCredits = 0;
     if (engine === "seedance" && Array.isArray(job.progress?.pieces) && costs.credit_floor && costs.light_margin != null) {
       const ps = job.progress.pieces as Array<{ start: number; end: number; engine?: string }>;
-      const usd = ps.reduce((n, p) => n + (p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6) * higgsfieldListPerSecond("light") : Math.ceil(p.end - p.start - 1e-6) * seedanceListPerSecond()), 0);
+      const anchorSeconds = Number(job.progress?.anchor_seconds) || 0; // a dedicated anchor render, when one was needed
+      const anchorList = job.progress?.anchor_engine === "seedance" ? seedanceListPerSecond() : higgsfieldListPerSecond("light");
+      const usd = ps.reduce((n, p) => n + (p.engine === "light" ? Math.ceil(Math.max(MIN_SECONDS, p.end - p.start) - 1e-6) * higgsfieldListPerSecond("light") : Math.ceil(p.end - p.start - 1e-6) * seedanceListPerSecond()), 0) + anchorSeconds * anchorList;
       planCredits = creditsForCost(usd, costs.credit_floor, costs.light_margin);
     }
     const charged = Math.min(job.credits_reserved, Math.max(billed * per, planCredits));

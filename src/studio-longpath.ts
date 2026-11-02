@@ -55,6 +55,39 @@ export function refineJoins<T extends { start: number; end: number }>(pieces: T[
   return out;
 }
 
+/** The still that keeps one character alike from piece to piece (the "anchor"): `off`; `longest`, a frame of the longest
+ *  piece's own render, which every other piece waits for (how it worked until Nov 2 2026); `short`, the default since,
+ *  a frame of a short render, so every piece is sent at once and the job takes about as long as its longest piece. */
+export type AnchorMode = "off" | "longest" | "short";
+export function anchorMode(env?: Record<string, string | undefined>): AnchorMode {
+  const v = String(env?.STUDIO_RECAST_ANCHOR ?? process.env.STUDIO_RECAST_ANCHOR ?? "short").trim().toLowerCase();
+  return v === "off" || v === "longest" ? v : "short";
+}
+/** A dedicated anchor render is this long (Light's floor), cut from the middle of the longest piece. */
+export const ANCHOR_SECONDS = MIN_SECONDS;
+/** A piece this short (and not under the floor) is the anchor itself: its render is both the still and part of the video. */
+const ANCHOR_PIECE_MAX = ANCHOR_SECONDS + 1.5;
+export type AnchorPlan = { piece: number } | { piece: null; start: number; end: number };
+/** Which render the anchor still comes from: one of the pieces (by index) or a dedicated window of the source. */
+export function planAnchor(pieces: Array<{ start: number; end: number }>, mode: AnchorMode): AnchorPlan | null {
+  if (mode === "off" || pieces.length < 2) return null;
+  const len = (p: { start: number; end: number }) => p.end - p.start;
+  const longest = pieces.reduce((bi, p, i, all) => (len(p) > len(all[bi]) ? i : bi), 0);
+  if (mode === "longest") return { piece: longest };
+  let best = -1;
+  for (const [i, p] of pieces.entries()) if (len(p) >= MIN_SECONDS - 1e-6 && len(p) <= ANCHOR_PIECE_MAX + 1e-6 && (best < 0 || len(p) < len(pieces[best]))) best = i;
+  if (best >= 0) return { piece: best };
+  const L = pieces[longest], mid = (L.start + L.end) / 2;
+  const start = r2(Math.max(L.start, Math.min(L.end - ANCHOR_SECONDS, mid - ANCHOR_SECONDS / 2)));
+  return { piece: null, start, end: r2(start + ANCHOR_SECONDS) };
+}
+/** The longest Light piece sent (STUDIO_LIGHT_PIECE_SECONDS, 6 to 15; 15 unless set): a job takes about as long as its
+ *  longest piece renders (about a minute a second), so shorter pieces finish sooner, with more joins to fade over. */
+export function lightPieceMax(env?: Record<string, string | undefined>): number {
+  const n = Number(env?.STUDIO_LIGHT_PIECE_SECONDS ?? process.env.STUDIO_LIGHT_PIECE_SECONDS);
+  return Number.isFinite(n) && n > 0 ? Math.min(MAX_SECONDS.light, Math.max(MIN_SECONDS + 2, n)) : MAX_SECONDS.light;
+}
+
 /** The shots of a clip as Light pieces: one per shot (Light takes one continuous shot, at most 15 s), a long shot split
  *  evenly, a shot under 4 s marked for padding (its last frame is held, and the result cut back to the shot). */
 export function shotPieces(window: number, cuts: number[], max: number = MAX_SECONDS.light - JOIN_OVERLAP): Array<{ start: number; end: number }> {
@@ -77,11 +110,17 @@ export const MAX_SHOT_PIECES = 12;
 export function planLongPath(window: number, cuts: number[], env?: Record<string, string | undefined>, seedanceOnly = false, motion: Array<[number, number]> = []) {
   // joins inside a shot get a calmer spot and an overlap to fade over (so pieces are planned that much shorter)
   const seed = refineJoins(planPieces(window, cuts, PIECE_SECONDS - JOIN_OVERLAP), cuts, motion, PIECE_SECONDS);
-  const light = refineJoins(shotPieces(window, cuts), cuts, motion, MAX_SECONDS.light);
-  const seedUsd = seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceEditCostPerSecond(env);
-  const lightUsd = light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldCostPerSecond("light", env);
+  const lightMax = lightPieceMax(env);
+  const light = refineJoins(shotPieces(window, cuts, lightMax - JOIN_OVERLAP), cuts, motion, lightMax);
+  // a dedicated anchor render (when no piece is short enough to serve) is a few seconds more on the route's own renderer
+  const mode = anchorMode(env);
+  const anchorOf = (pieces: Array<{ start: number; end: number }>, cost: number, list: number) => { const a = planAnchor(pieces, mode); const extra = a && a.piece == null ? ANCHOR_SECONDS : 0; return { anchor: a, usd: extra * cost, list: extra * list }; };
+  const seedAnchor = anchorOf(seed, seedanceEditCostPerSecond(env), seedanceListPerSecond()), lightAnchor = anchorOf(light, higgsfieldCostPerSecond("light", env), higgsfieldListPerSecond("light"));
+  const seedUsd = seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceEditCostPerSecond(env) + seedAnchor.usd;
+  const lightUsd = light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldCostPerSecond("light", env) + lightAnchor.usd;
   const useLight = !seedanceOnly && light.length <= MAX_SHOT_PIECES && lightUsd <= seedUsd;
   // list_usd: the same plan at list prices, which is what a person is charged on (a discount is our margin)
-  const listUsd = useLight ? light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldListPerSecond("light") : seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceListPerSecond();
-  return { engine: (useLight ? "light" : "seedance") as "light" | "seedance", pieces: useLight ? light : seed, usd: Math.round((useLight ? lightUsd : seedUsd) * 1000) / 1000, other_usd: Math.round((useLight ? seedUsd : lightUsd) * 1000) / 1000, list_usd: Math.round(listUsd * 1000) / 1000 };
+  const listUsd = useLight ? light.reduce((n, p) => n + billedSecondsOf(p), 0) * higgsfieldListPerSecond("light") + lightAnchor.list : seed.reduce((n, p) => n + Math.ceil(p.end - p.start - 1e-6), 0) * seedanceListPerSecond() + seedAnchor.list;
+  const chosen = useLight ? lightAnchor : seedAnchor;
+  return { engine: (useLight ? "light" : "seedance") as "light" | "seedance", pieces: useLight ? light : seed, usd: Math.round((useLight ? lightUsd : seedUsd) * 1000) / 1000, other_usd: Math.round((useLight ? seedUsd : lightUsd) * 1000) / 1000, list_usd: Math.round(listUsd * 1000) / 1000, anchor: chosen.anchor, anchor_usd: Math.round(chosen.usd * 1000) / 1000 };
 }
