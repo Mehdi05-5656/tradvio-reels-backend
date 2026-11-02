@@ -175,6 +175,7 @@ export function layoutCaptions(words: CapWord[], style: CaptionStyle, fr: Frame,
   if (cur.length) chunks.push(cur);
   // 2. each chunk laid out
   const out: LaidChunk[] = [];
+  let prevEnd = 0;
   for (let c = 0; c < chunks.length; c++) {
     const ws = chunks[c], next = chunks[c + 1];
     const widths = ws.map(widthOf);
@@ -202,8 +203,13 @@ export function layoutCaptions(words: CapWord[], style: CaptionStyle, fr: Frame,
         x += widths[i] * fit;
       });
     });
-    const start = Math.max(0, ws[0].start - 0.04);
-    const end = Math.max(start + 0.3, Math.min(next ? next[0].start - 0.04 : Infinity, ws[ws.length - 1].end + 0.45));
+    // on screen from just before its first word until just before the next caption's first word, or a short hold after
+    // its last word. It stays up at least 0.3 s, but never past the moment the next caption appears: two captions are
+    // never on screen at once (the old one used to linger under the new one in fast speech).
+    const start = Math.max(0, ws[0].start - 0.04, prevEnd);
+    const nextAt = next ? Math.max(0, next[0].start - 0.04) : Infinity;
+    const end = Math.max(start + 0.05, Math.min(nextAt, Math.max(start + 0.3, ws[ws.length - 1].end + 0.45)));
+    prevEnd = end;
     laid.forEach((w, i) => { w.activeEnd = i + 1 < laid.length ? Math.max(w.start + 0.08, laid[i + 1].start) : end; });
     out.push({ start, end, words: laid, lines: laidLines, fit });
   }
@@ -247,7 +253,9 @@ export function chunkPhases(ch: LaidChunk, style: CaptionStyle, keywordsOn: bool
     const showFrom = reveal ? Math.max(ch.start, w.start - 0.02) : ch.start;
     const aStart = Math.max(showFrom, w.start), aEnd = Math.min(ch.end, w.activeEnd);
     const first = (start: number) => start <= showFrom + 1e-6;
-    if (aStart > showFrom + 0.01) out.push({ word: i, start: showFrom, end: aStart, color: baseColor(w, false), active: false, pill: false, keys: enter, rise });
+    // a word said after its caption has to leave (two words with the same start time across a break) waits, dim, only
+    // until the caption ends: no phase outlasts its caption
+    if (aStart > showFrom + 0.01 && ch.end > showFrom + 0.01) out.push({ word: i, start: showFrom, end: Math.min(aStart, ch.end), color: baseColor(w, false), active: false, pill: false, keys: enter, rise });
     if (aEnd > aStart + 0.01) out.push({ word: i, start: aStart, end: aEnd, color: activeColor(w), active: true, pill: !!style.active.box, keys: first(aStart) ? mergeKeys(enter, act) : act, rise: first(aStart) ? rise : null });
     if (ch.end > Math.max(aEnd, showFrom) + 0.01) out.push({ word: i, start: Math.max(aEnd, showFrom), end: ch.end, color: baseColor(w, true), active: false, pill: false, keys: first(Math.max(aEnd, showFrom)) ? enter : [{ t: 0, s: 1, a: 1 }], rise: first(Math.max(aEnd, showFrom)) ? rise : null });
   });

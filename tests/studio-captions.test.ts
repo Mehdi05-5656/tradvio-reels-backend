@@ -212,3 +212,23 @@ test("migration: captions jobs run in their own lane, one at a time per person",
   await assert.rejects(rpc("studio_create_job", [U, "captions", null, {}, 12]), /too_many_jobs/, "one captions run at a time");
   assert.equal((await rpc("studio_create_job", [U, "clips", null, {}, 50])).tool, "clips", "clips has its own lane");
 });
+
+test("captions never overlap: in fast speech the old caption is gone before the next one shows, in every style", async () => {
+  const { PRESETS, layoutCaptions, buildAss, prepareWords } = await import("../src/caption-engine.js");
+  const { serverMeasure } = await import("../src/studio-caption-video.js");
+  const measure = serverMeasure({ STUDIO_CAPTION_FONTS: "assets/caption-fonts" } as any);
+  const fr = { w: 720, h: 1280 };
+  // 6 words a second, some shorter than the old 0.3 s minimum apart, sentence ends and a repeated start time
+  const words: any[] = [];
+  let t = 0.3;
+  for (let i = 0; i < 120; i++) { words.push({ text: `word${i}${i % 9 === 8 ? "." : ""}`, start: +t.toFixed(2), end: +(t + 0.12).toFixed(2) }); t += i % 13 === 12 ? 0 : 0.16; }
+  const T = (s: string) => { const [h, m, x] = s.split(":"); return +h * 3600 + +m * 60 + +x; };
+  for (const style of PRESETS) {
+    const laid = layoutCaptions(prepareWords(words, { fillers: true }), style, fr, measure);
+    for (let i = 0; i + 1 < laid.length; i++) assert.ok(laid[i].end <= laid[i + 1].start + 1e-9, `${style.id}: caption ${i} ends ${laid[i].end} after the next starts ${laid[i + 1].start}`);
+    for (const c of laid) assert.ok(c.end > c.start, `${style.id}: every caption shows`);
+    // and in what libass draws: no event of one caption lasts past the first event of the next
+    const spans = laid.map((c) => { const ev = buildAss([c], style, fr, true).split("\n").filter((l: string) => l.startsWith("Dialogue:")).map((l: string) => l.split(",")); return { a: Math.min(...ev.map((p: string[]) => T(p[1]))), b: Math.max(...ev.map((p: string[]) => T(p[2]))) }; });
+    for (let i = 0; i + 1 < spans.length; i++) assert.ok(spans[i].b <= spans[i + 1].a + 1e-9, `${style.id}: ASS overlap at caption ${i}`);
+  }
+});
