@@ -112,7 +112,7 @@ test("the system prompt teaches the tools, prices, library and rules, and never 
   assert.ok(!p.includes("sk-test") && !p.includes("id:secret"));
   assert.match(p, /never say an id, a vendor or a provider/);
   assert.ok(PRESET_CHARACTERS.every((c) => p.includes(c.name)));
-  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,search_library,fetch_link,request_video,choose_people,choose_characters,preview_voices,preview_characters,offer_post,save_automation,remember");
+  assert.equal(TOOLS.map((t) => t.name).join(","), "propose_plan,search_library,fetch_link,list_account,import_account_posts,request_video,choose_people,choose_characters,preview_voices,preview_characters,offer_post,save_automation,remember");
 });
 
 test("plans are priced step by step: concrete sources through the Studio quote, chained steps estimated and flagged", async () => {
@@ -1025,4 +1025,28 @@ test("saving a chat never undoes a card press made meanwhile, and keeps the mess
   // a card only moves forward: an open stored card does not reopen one this save closed
   const back = mergeMessages([{ ...stored[1], publish: card("open") }], [{ ...stored[1], publish: card("ignored") }]);
   assert.equal(back[0].publish!.status, "ignored");
+});
+
+test("an account: list_account returns its videos most viewed first; import_account_posts refuses without the person's rights word, then starts one import job", async () => {
+  const tables = baseTables(); const sb = fakeSb(tables, rpcs(tables));
+  const { fetchFn, asked } = fakeClaude([
+    toolReply("list_account", { url: "https://www.tiktok.com/@core_live" }),
+    toolReply("import_account_posts", { urls: ["https://www.tiktok.com/@core_live/video/7301000000002"], rights_confirmed: false }),
+    toolReply("import_account_posts", { urls: ["https://www.tiktok.com/@core_live/video/7301000000002", "https://www.tiktok.com/@core_live/video/7301000000001"], name: "@core_live", rights_confirmed: true }),
+    textReply("Two videos are on their way into @core_live."),
+  ], (url) => (url.includes("/v3/tiktok/profile/videos") ? { has_more: false, aweme_list: [
+    { aweme_id: "7301000000001", desc: "quiet one", create_time: 1761000000, statistics: { play_count: 100, digg_count: 3 }, video: { duration: 20000 } },
+    { aweme_id: "7301000000002", desc: "the hit", create_time: 1761000100, statistics: { play_count: 900, digg_count: 80 }, video: { duration: 30000 } },
+  ] } : {}));
+  const c = convo(); tables.studio_conversations.push(c);
+  const out = await runTurn(sb, deps(fetchFn), c, { text: "bring in the best videos from tiktok.com/@core_live", attachments: [], links: [] });
+  const r1 = JSON.parse(asked[1].messages[2].content[0].content);
+  assert.equal(r1.ok, true); assert.equal(r1.account, "@core_live on tiktok"); assert.equal(r1.posts[0].views, 900); assert.equal(r1.posts[0].seconds, 30); assert.equal(r1.more, null);
+  const r2 = JSON.parse(asked[2].messages[4].content[0].content);
+  assert.equal(r2.ok, false); assert.equal(r2.error, "rights_required");
+  const r3 = JSON.parse(asked[3].messages[6].content[0].content);
+  assert.equal(r3.ok, true); assert.equal(r3.videos, 2); assert.ok(r3.credits > 0);
+  const jobs = sb.calls.filter((x: any) => x.name === "studio_create_job");
+  assert.equal(jobs.length, 1); assert.equal(jobs[0].args.p_tool, "import"); assert.equal(jobs[0].args.p_options.links.length, 2); assert.equal(jobs[0].args.p_options.via, "chat");
+  assert.match(out.messages[out.messages.length - 1].text ?? "", /on their way/);
 });

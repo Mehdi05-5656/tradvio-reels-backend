@@ -27,7 +27,8 @@ import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { youtubeId } from "./studio-youtube.js";
 import { ClipsError, isLongSource, quoteClips } from "./studio-clips.js";
 import { CAPTION_LIMITS, captionCredits, cleanSettings, quoteCaptions } from "./studio-caption-video.js";
-import { searchLibrary } from "./studio-library.js";
+import { searchLibrary, quoteImport } from "./studio-library.js";
+import { listProfilePage } from "./studio-profile-import.js";
 import { profileLines } from "./studio-onboarding.js";
 import type { SetupCard } from "./studio-automations.js";
 
@@ -139,6 +140,16 @@ export const TOOLS = [
     name: "fetch_link",
     description: "Fetch a TikTok, Instagram or YouTube (video or Short) link into the person's library so it can be used as a source. Returns the new asset (id, name, seconds). If it fails with link_blocked, YouTube refused our servers: ask for the file.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
+  },
+  {
+    name: "list_account",
+    description: "List a public TikTok or Instagram account's videos (tiktok.com/@name or instagram.com/name) with views, likes, date and length, most viewed first, one page at a time; pass the returned `more` cursor for older posts. Use it when the person wants videos from an account rather than one link. Listing is free. Importing is a separate step (import_account_posts) that needs the person's word that they own the account, manage it, or have the creator's permission.",
+    input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" }, cursor: { type: "string", description: "The `more` value from the last page" } }, required: ["url"] },
+  },
+  {
+    name: "import_account_posts",
+    description: "Start importing chosen posts from a listed account into the library as an import collection (one job; each video priced like a pasted link, failures refunded). Call it only after the person has said, in their own words, that they own the account, manage it, or have the creator's permission; then pass rights_confirmed true. Never pass it true on your own. Returns the job, the collection and the credits reserved.",
+    input_schema: { type: "object", additionalProperties: false, properties: { urls: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" }, description: "Post links from list_account" }, name: { type: "string", description: "Collection name; default @handle" }, rights_confirmed: { type: "boolean" } }, required: ["urls", "rights_confirmed"] },
   },
   {
     name: "request_video",
@@ -688,6 +699,8 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
       try {
         if (use.name === "propose_plan") events?.({ type: "status", text: "Pricing the plan" });
         else if (use.name === "fetch_link") events?.({ type: "status", text: "Fetching the link" });
+        else if (use.name === "list_account") events?.({ type: "status", text: "Reading the account" });
+        else if (use.name === "import_account_posts") events?.({ type: "status", text: "Starting the import" });
         else if (use.name === "remember") events?.({ type: "status", text: "Saving a note" });
         else if (use.name === "preview_characters") events?.({ type: "status", text: "Preparing options" });
         else if (use.name === "choose_people") events?.({ type: "status", text: "Finding the faces" });
@@ -776,6 +789,22 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
           ctx.assets.set(a.asset_id, { id: a.asset_id, kind: "video", name: a.name, probe: { duration: a.seconds }, object_key: `${convo.user_id}/${a.asset_id}.mp4` });
           user.attachments = [...(user.attachments ?? []), a];
           result = { ok: true, asset: a };
+        } else if (use.name === "list_account") {
+          const page = await listProfilePage(sb, { env: deps.env, fetch: deps.fetch, log: deps.log }, convo.user_id, { url: use.input?.url, cursor: use.input?.cursor });
+          const posts = [...page.posts].sort((a, b) => (b.views ?? -1) - (a.views ?? -1)).map((p) => ({ url: p.url, caption: p.caption ? p.caption.slice(0, 80) : null, views: p.views, likes: p.likes, posted: p.posted_at ? p.posted_at.slice(0, 10) : null, seconds: p.seconds }));
+          result = { ok: true, account: `@${page.profile.handle} on ${page.profile.platform}`, posts, more: page.next, note: "Before importing, the person must say they own this account, manage it, or have the creator's permission." };
+        } else if (use.name === "import_account_posts") {
+          if (use.input?.rights_confirmed !== true) throw new AssistantError("rights_required", "Ask the person to confirm, in their own words, that they own this account, manage it, or have the creator's permission to use these videos; import only after that");
+          const envNow = deps.env ?? process.env;
+          if (!(toolsEnabled(envNow) as any).import) throw new AssistantError("plan_invalid", "Import is not switched on yet");
+          const urls = (Array.isArray(use.input?.urls) ? use.input.urls : []).map(String).slice(0, 100);
+          const q = quoteImport(envNow, PLANS, { links: urls, name: typeof use.input?.name === "string" ? use.input.name : undefined });
+          const col = await sb.from("studio_collections").insert({ user_id: convo.user_id, name: q.options.name ?? "Account", kind: "import", status: "processing", source: { platform: "profile", via: "chat" } }).select("id").single();
+          if (col.error) throw col.error;
+          const r = await sb.rpc("studio_create_job", { p_user: convo.user_id, p_tool: "import", p_asset: null, p_options: { ...q.options, collection_id: col.data.id, via: "chat", conversation_id: convo.id }, p_credits: q.credits });
+          if (r.error) { await sb.from("studio_collections").delete().eq("id", col.data.id).eq("user_id", convo.user_id); throw new AssistantError(/insufficient_credits/.test(String(r.error.message ?? r.error)) ? "insufficient_credits" : "plan_invalid", String(r.error.message ?? r.error).slice(0, 200)); }
+          await sb.from("studio_collections").update({ job_id: r.data.id, updated_at: new Date().toISOString() }).eq("id", col.data.id);
+          result = { ok: true, job_id: r.data.id, collection_id: col.data.id, videos: q.options.links.length, left_out: q.options.rejected, credits: q.credits, note: "The import runs in the background; the videos appear in the library collection as they land and can then go into any tool." };
         } else result = { ok: false, error: "unknown_tool" };
       } catch (e: any) {
         const code = e instanceof AssistantError || e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError ? e.code : "tool_failed";
