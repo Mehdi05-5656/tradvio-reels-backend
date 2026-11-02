@@ -17,6 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, creditsForCost, MARGIN_TARGET, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
+import { listProfilePage } from "./studio-profile-import.js";
 import { ClipsError, CLIP_COST, clipsQueue, clipsCapacity, clipsTiming, etaFor, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -366,6 +367,12 @@ export function registerLibrary(app: Express, h: LibraryHelpers): void {
   app.post("/api/studio/imports/sheet", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     try { res.json(await readSheet(String(req.body?.url ?? ""))); } catch (e) { fail(res, e); }
+  });
+  // one page of a public TikTok or Instagram account's videos, to pick from before an import (studio-profile-import.ts)
+  app.post("/api/studio/imports/profile", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    res.setHeader("Cache-Control", "private, no-store");
+    try { res.json(await listProfilePage(sbFn(), { env: h.env, log: h.log }, u, { url: req.body?.url, cursor: req.body?.cursor })); } catch (e) { fail(res, e); }
   });
 }
 /** The assistant's library search: words in a name, a clip's title, hook or transcript; optionally one collection

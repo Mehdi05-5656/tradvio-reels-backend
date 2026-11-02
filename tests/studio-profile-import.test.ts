@@ -1,0 +1,53 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { profileRef, tiktokPosts, instagramPosts, listProfilePage, PROFILE_LIMITS } from "../src/studio-profile-import.js";
+
+test("profile links: TikTok and Instagram profiles in their forms; posts and other sites are refused with a reason", () => {
+  assert.deepEqual(profileRef("https://www.tiktok.com/@Stable.Ronaldo"), { platform: "tiktok", handle: "stable.ronaldo", url: "https://www.tiktok.com/@stable.ronaldo" });
+  assert.deepEqual(profileRef("tiktok.com/@core_live?lang=en"), { platform: "tiktok", handle: "core_live", url: "https://www.tiktok.com/@core_live" });
+  assert.deepEqual(profileRef("https://instagram.com/tradvio/"), { platform: "instagram", handle: "tradvio", url: "https://www.instagram.com/tradvio/" });
+  assert.deepEqual(profileRef("https://www.instagram.com/tradvio/reels/").handle, "tradvio");
+  const code = (s: string) => { try { profileRef(s); return "ok"; } catch (e: any) { return e.code; } };
+  assert.equal(code("https://www.tiktok.com/@x/video/7301000000001"), "profile_link_invalid");
+  assert.equal(code("https://www.instagram.com/reel/Cxyz123/"), "profile_link_invalid");
+  assert.equal(code("https://youtube.com/@tradvio"), "profile_link_invalid");
+  assert.equal(code("not a link"), "profile_link_invalid");
+});
+
+test("TikTok and Instagram pages become posts with their numbers; photos and carousels are left out", () => {
+  const tt = tiktokPosts({ has_more: true, max_cursor: "171", aweme_list: [
+    { aweme_id: "7301000000001", desc: "Japan day 1", create_time: 1761000000, is_top: 1, statistics: { play_count: 120000, digg_count: 9000, comment_count: 120, share_count: 300 }, video: { duration: 27340, cover: { url_list: ["https://p16.tiktokcdn.com/c.jpg"] } } },
+    { aweme_id: "7302", desc: "photo", image_post_info: { images: [] }, statistics: {} },
+    { aweme_id: "bad" },
+  ] }, "core_live");
+  assert.equal(tt.next, "171");
+  assert.equal(tt.posts.length, 1);
+  assert.deepEqual(tt.posts[0], { id: "7301000000001", url: "https://www.tiktok.com/@core_live/video/7301000000001", caption: "Japan day 1", posted_at: "2025-10-20T22:40:00.000Z", views: 120000, likes: 9000, comments: 120, shares: 300, seconds: 27.3, thumbnail_url: "https://p16.tiktokcdn.com/c.jpg", pinned: true });
+  const ig = instagramPosts({ more_available: true, next_max_id: "abc", items: [
+    { code: "Cx1_reel", media_type: 2, product_type: "clips", taken_at: 1761000000, caption: { text: "a reel" }, ig_play_count: 5000, like_count: 400, comment_count: 12, video_duration: 18.6, image_versions2: { candidates: [{ url: "https://scontent.cdninstagram.com/t.jpg" }] } },
+    { code: "Cx2_photo", media_type: 1, taken_at: 1761000001, like_count: 10 },
+    { code: "Cx3_carousel", media_type: 8, taken_at: 1761000002 },
+  ] });
+  assert.equal(ig.next, "abc");
+  assert.equal(ig.posts.length, 1);
+  assert.equal(ig.posts[0].url, "https://www.instagram.com/reel/Cx1_reel/");
+  assert.equal(ig.posts[0].views, 5000); assert.equal(ig.posts[0].seconds, 18.6); assert.equal(ig.posts[0].thumbnail_url, "https://scontent.cdninstagram.com/t.jpg");
+});
+
+test("listing a page: the right endpoint per platform, counted per day, a private or empty account says so", async () => {
+  const calls: string[] = [];
+  let count = 0;
+  const sb: any = { from: () => ({ select: () => ({ eq: () => ({ eq: () => ({ gte: async () => ({ count }) }) }) }) }) };
+  const f = (async (url: string) => { calls.push(url); return { ok: true, status: 200, json: async () => (url.includes("tiktok") ? { aweme_list: [{ aweme_id: "7301000000001", statistics: {}, video: {} }], has_more: false } : { items: [], more_available: false, user: { is_private: true } }) }; }) as any;
+  const deps = { env: { SCRAPECREATORS_API_KEY: "k" }, fetch: f };
+  const page = await listProfilePage(sb, deps, "u1", { url: "https://www.tiktok.com/@core_live" });
+  assert.equal(page.profile.handle, "core_live"); assert.equal(page.posts.length, 1); assert.equal(page.next, null);
+  assert.match(calls[0], /\/v3\/tiktok\/profile\/videos\?handle=core_live$/);
+  await listProfilePage(sb, deps, "u1", { url: "https://www.tiktok.com/@core_live", cursor: "171" }).catch(() => undefined);
+  assert.match(calls[1], /max_cursor=171$/);
+  await assert.rejects(listProfilePage(sb, deps, "u1", { url: "https://instagram.com/someone" }), (e: any) => e.code === "profile_private");
+  assert.match(calls[2], /\/v2\/instagram\/user\/posts\?handle=someone$/);
+  count = PROFILE_LIMITS.pages_per_day;
+  await assert.rejects(listProfilePage(sb, deps, "u1", { url: "https://www.tiktok.com/@core_live" }), (e: any) => e.code === "profile_rate_limited");
+  await assert.rejects(listProfilePage(sb, { env: {}, fetch: f }, "u1", { url: "https://www.tiktok.com/@core_live" }), (e: any) => e.code === "import_unavailable");
+});
