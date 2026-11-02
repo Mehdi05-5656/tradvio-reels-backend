@@ -17,7 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, creditsForCost, MARGIN_TARGET, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
-import { ClipsError, CLIP_COST, clipsQueue, clipsServers, clipsTiming, etaFor, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
+import { ClipsError, CLIP_COST, clipsQueue, clipsCapacity, clipsTiming, etaFor, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const MAX_IMPORT_LINKS = 500;
@@ -169,7 +169,7 @@ export async function publicCollections(sb: SupabaseClient, rows: Row[]): Promis
   if (liveClips.length) {
     try {
       const [queue, timing] = await Promise.all([clipsQueue(sb), clipsTiming(sb)]);
-      for (const j of liveClips) eta.set(j.id, etaFor(j, queue, timing, clipsServers()));
+      for (const j of liveClips) eta.set(j.id, etaFor(j, queue, timing, clipsCapacity()));
     } catch { /* the page shows no estimate rather than fail */ }
   }
   const count = new Map<string, number>(), poster = new Map<string, string>();

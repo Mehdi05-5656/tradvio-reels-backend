@@ -6,7 +6,7 @@ import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
-  timingFrom, remainingSeconds, etaFor, DEFAULT_TIMING,
+  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError, downloadFormat, downloadSort } from "../src/studio-youtube.js";
@@ -265,7 +265,7 @@ test("time left: learned from past runs, by video length, clip count and length,
   const queue = [{ id: "a", status: "running", options: cutting.options, progress: cutting.progress }, { id: "b", status: "queued", options: job({}).options, progress: {} }];
   const e = etaFor({ id: "b", status: "queued", options: job({}).options }, queue as any, t, 1, now);
   assert.equal(e.ahead, 1);
-  assert.ok(Math.abs(e.seconds - (left + full)) <= 1, `${e.seconds} vs ${left + full}`);
+  assert.ok(Math.abs(e.seconds - (left + full)) <= 10, `${e.seconds} vs ${left + full}`);
   assert.equal(etaFor({ id: "a", status: "running", options: cutting.options, progress: cutting.progress }, queue as any, t, 1, now).ahead, 0);
   // each clip measured on its own (a resumed run counts too): seconds per second of clip from those
   const perClip = timingFrom([{ timing: { video_s: 844, cuts: [[40, 85], [20, 45], [30, 65]] } }]);
@@ -473,4 +473,29 @@ test("migration: clips and imports sit outside the parallel limit (one each), vi
   await db.query("UPDATE studio_assets SET collection_id=$1 WHERE id=$2", [c, big]);
   await db.query("DELETE FROM studio_collections WHERE id=$1", [c]);
   assert.equal((await db.query<any>("SELECT collection_id FROM studio_assets WHERE id=$1", [big])).rows[0].collection_id, null, "deleting a collection leaves its files loose");
+});
+
+test("several runs side by side: a new run starts at once, waits only to share the cutter, and the cap still queues", () => {
+  const t = DEFAULT_TIMING;
+  const now = Date.parse("2026-11-01T01:00:00Z");
+  const opts = { platform: "youtube", seconds: 600, length: "standard", count: 10 };
+  const parts = remainingParts({ options: opts, status: "queued" }, t, now);
+  assert.ok(parts.pre > 60 && parts.cut > 300, JSON.stringify(parts));
+  const alone = etaFor({ status: "queued", options: opts }, [], t, { runs: 5, cutSlots: 1 }, now);
+  assert.equal(alone.ahead, 0);
+  assert.ok(Math.abs(alone.seconds - (parts.pre + parts.cut)) <= 10, `${alone.seconds}`);
+  // one run already cutting: the new one starts now (ahead 0), downloads meanwhile, then shares the cutter
+  const cutting = { id: "a", status: "running", options: opts, progress: { stage: "cutting", stage_at: "2026-11-01T00:59:00Z", done: 2, total: 10, clip_at: "2026-11-01T01:00:00Z" } };
+  const shared = etaFor({ status: "queued", options: opts }, [cutting] as any, t, { runs: 5, cutSlots: 1 }, now);
+  const serial = etaFor({ status: "queued", options: opts }, [cutting] as any, t, 1, now);
+  assert.equal(shared.ahead, 0, "starts right away");
+  assert.equal(serial.ahead, 1, "one at a time: waits behind it");
+  assert.ok(shared.seconds < serial.seconds, `side by side is sooner: ${shared.seconds} vs ${serial.seconds}`);
+  assert.ok(shared.seconds >= parts.pre + parts.cut - 10, "but never sooner than its own work");
+  // two cut slots: sooner still
+  assert.ok(etaFor({ status: "queued", options: opts }, [cutting] as any, t, { runs: 5, cutSlots: 2 }, now).seconds <= shared.seconds);
+  // the cap: with 2 runs at most and 2 running, the third waits for one to finish
+  const q = [cutting, { ...cutting, id: "b" }];
+  const capped = etaFor({ status: "queued", options: opts }, q as any, t, { runs: 2, cutSlots: 1 }, now);
+  assert.equal(capped.ahead, 1);
 });

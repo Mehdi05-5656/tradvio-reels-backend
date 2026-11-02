@@ -21,7 +21,7 @@ import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding
 import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-caption-video.js";
-import { ClipsError, clipsEnabled, clipsQueue, clipsServers, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
+import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
 import Stripe from "stripe";
 
@@ -1044,7 +1044,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // how long it would take if started now, counting the runs already waiting (the page says "ready in about...")
       try {
         const [queue, timing] = await Promise.all([clipsQueue(sb), clipsTiming(sb)]);
-        const e = etaFor({ options: q.options, status: "queued" }, queue, timing, clipsServers(env));
+        const e = etaFor({ options: q.options, status: "queued" }, queue, timing, clipsCapacity(env));
         q.options.eta_seconds = e.seconds; q.options.ahead = e.ahead;
       } catch { /* no estimate rather than no quote */ }
       return q;

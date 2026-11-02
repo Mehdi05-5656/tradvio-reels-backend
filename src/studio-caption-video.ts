@@ -16,6 +16,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import opentype from "opentype.js";
 import { buildAss, cleanStyle, FONTS, layoutCaptions, prepareWords, type CapWord, type CaptionStyle, type FontInfo, type Frame } from "./caption-engine.js";
 import { claudeJson, ClipsError, defaultExtractAudio, ffmpeg, inputArgs, busy, type ClipsDeps, type SourceInput } from "./studio-clips.js";
+import { capacity, cutGate, roomForAnother } from "./studio-capacity.js";
 import { transcribeWords } from "./studio-eleven.js";
 import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
@@ -225,8 +226,10 @@ export async function runCaptionsJob(sb: SupabaseClient, deps: ClipsDeps, job: J
         const fr = outputFrame(Number(asset.probe?.width) || src.width, Number(asset.probe?.height) || src.height);
         const ass = join(dir, `${it.asset_id}.ass`), out = join(dir, `${it.asset_id}.mp4`), still = join(dir, `${it.asset_id}.jpg`);
         await writeFile(ass, captionAss(words, settings, fr, env));
-        await ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", ...inputArgs(src, null, null), "-filter_threads", "1", "-vf", `scale=${fr.w}:${fr.h},setsar=1,${assFilter(ass, env)},format=yuv420p`,
-          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2", "-rc-lookahead", "20", "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", out], { timeoutMs: 20 * 60_000 });
+        // through the server's cutter, shared with Clips: one render per CPU at a time
+        let waited = false;
+        await cutGate(env).run(async () => { if (waited) await renew({ message: items.length > 1 ? `Captioning ${made.length + 1} of ${items.length}` : 'Captioning' }); return ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", ...inputArgs(src, null, null), "-filter_threads", "1", "-vf", `scale=${fr.w}:${fr.h},setsar=1,${assFilter(ass, env)},format=yuv420p`,
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2", "-rc-lookahead", "20", "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", out], { timeoutMs: 20 * 60_000 }); }, () => { waited = true; return renew({ message: items.length > 1 ? `Video ${made.length + 1} of ${items.length} · next in line for the cutter` : 'Next in line for the cutter' }).then(() => undefined); });
         const seconds = Number(asset.probe?.duration) || 0;
         await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, seconds / 3 || 0).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still], { timeoutMs: 60_000 });
         const bytes = (await stat(out)).size;
@@ -278,24 +281,35 @@ export async function runCaptionsJob(sb: SupabaseClient, deps: ClipsDeps, job: J
   } finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 
-/** One captions run at a time per server, never while a clips run is cutting (one CPU, 2 GB). */
+/** Several captions runs at once (capacity().captionsRuns): hearing the words happens elsewhere, and each render goes
+ *  through the server's cutter, shared with Clips. So a captions job waits for one clip at most, never a whole run. */
 export function startCaptionsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {}, intervalMs = 8_000): NodeJS.Timeout | null {
   const env = deps.env ?? process.env;
   if (!captionsEnabled(env)) return null;
   const log = deps.log ?? ((l: string) => console.log(l));
   const worker = `captions-${randomUUID()}`;
+  const active = new Set<string>();
+  let claiming = false;
   const tick = async () => {
-    if (busy.captions || busy.clips) return;
+    if (claiming) return;
+    claiming = true;
     try {
       const sb = sbFn();
-      busy.captions = true;
-      const r = await sb.rpc("studio_claim", { p_tool: "captions", p_worker: worker });
-      if (r.error) throw r.error;
-      const job = r.data as Job | null;
-      if (!job || !job.id) { busy.captions = false; return; }
-      const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
-      runCaptionsJob(sb, { ...deps, log }, job).then((s) => log(`[captions] ${s} ${job.id}`)).catch((e) => log(`[captions] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); busy.captions = false; });
-    } catch (e: any) { busy.captions = false; log(`[captions] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
+      // one new run per tick at most: the next tick's memory reading then includes the run just started
+      if (active.size < capacity(env).captionsRuns) {
+        const room = await (deps.room ?? roomForAnother)(env);
+        if (!room.ok) return;
+        const r = await sb.rpc("studio_claim", { p_tool: "captions", p_worker: worker });
+        if (r.error) throw r.error;
+        const job = r.data as Job | null;
+        if (!job || !job.id) return;
+        active.add(job.id); busy.captions = true;
+        const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
+        runCaptionsJob(sb, { ...deps, log }, job).then((s) => log(`[captions] ${s} ${job.id}`)).catch((e) => log(`[captions] crashed ${job.id} ${e?.message ?? e}`))
+          .finally(() => { clearInterval(keep); active.delete(job.id); busy.captions = active.size > 0; });
+      }
+    } catch (e: any) { log(`[captions] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
+    finally { claiming = false; }
   };
   const t = setInterval(tick, intervalMs);
   setTimeout(tick, 23_000);

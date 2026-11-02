@@ -19,6 +19,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { capacity, cutGate, roomForAnother, type Capacity } from "./studio-capacity.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -195,19 +196,46 @@ export async function clipsQueue(sb: SupabaseClient): Promise<Array<{ id: string
   const rows = (r.data ?? []) as any[];
   return [...rows.filter((x) => x.status === "running"), ...rows.filter((x) => x.status === "queued")];
 }
-/** How long until a run is done (seconds) and how many runs are ahead of it. Runs are cut one at a time per server, so
- *  a queued run waits for the ones ahead. `servers` is how many run side by side (STUDIO_CLIPS_SERVERS, default 1). */
-export function etaFor(target: { id?: string | null; options: any; progress?: any; status?: string }, queue: Array<{ id: string; status: string; options: any; progress: any }>, timing: ClipTiming, servers = 1, now = Date.now()): { seconds: number; ahead: number } {
-  const idx = target.id ? queue.findIndex((q) => q.id === target.id) : -1;
-  const own = remainingSeconds(target, timing, now);
-  if (target.status === "running") return { seconds: own, ahead: 0 };
-  const before = idx >= 0 ? queue.slice(0, idx) : queue;
-  // with n servers the wait is roughly the work ahead shared between them; the runs already running count first
-  const wait = before.reduce((a, q) => a + remainingSeconds(q, timing, now), 0) / Math.max(1, servers);
-  const ahead = Math.max(0, before.length - (servers - 1));
-  return { seconds: Math.round((ahead > 0 ? wait : 0) + own), ahead };
+/** What a run still needs before its cut (fetch, listen, choose: other servers' time, side by side with other runs)
+ *  and of cutting (the shared cutter's time). */
+export function remainingParts(job: EtaJob, timing: ClipTiming, now = Date.now()): { pre: number; cut: number } {
+  const total = remainingSeconds(job, timing, now), p = job.progress ?? {};
+  if (job.status !== "queued" && p.stage === "cutting") return { pre: 0, cut: total };
+  const o = job.options ?? {};
+  const video = Math.max(60, Number(o.seconds) || Number(o.source?.seconds) || 600), length = lengthOf(o.length);
+  const planned = Math.max(1, Number(p.total) || Number(o.count ?? o.max_clips) || likelyClips(video, length));
+  const cut = Math.min(total, planned * (timing.cut_base + timing.cut_per_s * CLIP_LENGTHS[length].target));
+  return { pre: Math.max(0, total - cut), cut };
 }
-export const clipsServers = (env: Record<string, string | undefined> = process.env) => Math.max(1, Math.min(10, Number(env.STUDIO_CLIPS_SERVERS) || 1));
+/** How long until a run is done (seconds) and how many runs it waits behind before it can start. Up to `cap.runs`
+ *  runs are active at once (their fetching and choosing side by side); their cutting shares `cap.cutSlots` slots in
+ *  turn. Worked out by stepping the queue forward in time. A number is read as that many servers (runs and slots). */
+export function etaFor(target: { id?: string | null; options: any; progress?: any; status?: string }, queue: Array<{ id: string; status: string; options: any; progress: any }>, timing: ClipTiming, cap: Pick<Capacity, "runs" | "cutSlots"> | number = 1, now = Date.now()): { seconds: number; ahead: number } {
+  const c = typeof cap === "number" ? { runs: Math.max(1, cap), cutSlots: Math.max(1, cap) } : cap;
+  const list = queue.map((q) => ({ id: q.id, running: q.status === "running", ...remainingParts(q, timing, now) }));
+  let ti = target.id ? list.findIndex((x) => x.id === target.id) : -1;
+  if (ti < 0) { list.push({ id: "(new run)", running: target.status === "running", ...remainingParts({ ...target, status: target.status ?? "queued" }, timing, now) }); ti = list.length - 1; }
+  const runningNow = list.filter((x) => x.running).length;
+  const waiting = list.map((_, i) => i).filter((i) => !list[i].running);
+  const pos = waiting.indexOf(ti);
+  const ahead = pos < 0 ? 0 : Math.max(0, pos - Math.max(0, c.runs - runningNow) + 1);
+  let active = list.map((_, i) => i).filter((i) => list[i].running);
+  let qi = 0, t = 0;
+  const total = list.reduce((a, x) => a + x.pre + x.cut, 0);
+  const dt = Math.max(5, total / 4000);
+  while (t < 48 * 3600) {
+    while (active.length < c.runs && qi < waiting.length) active.push(waiting[qi++]);
+    const cutters = active.filter((i) => list[i].pre <= 0 && list[i].cut > 0);
+    const share = cutters.length ? Math.min(1, c.cutSlots / cutters.length) : 0;
+    for (const i of active) { const j = list[i]; if (j.pre > 0) j.pre -= dt; else j.cut -= dt * share; }
+    t += dt;
+    if (list[ti].pre <= 0 && list[ti].cut <= 0) return { seconds: Math.round(t), ahead };
+    active = active.filter((i) => list[i].pre > 0 || list[i].cut > 0);
+  }
+  return { seconds: Math.round(t), ahead };
+}
+/** How many runs this deployment takes on at once and how many cut at once (studio-capacity). */
+export const clipsCapacity = (env: Record<string, string | undefined> = process.env) => { const c = capacity(env); return { runs: c.runs, cutSlots: c.cutSlots }; };
 
 export class ClipsError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 
@@ -229,6 +257,8 @@ export type ClipsDeps = {
   cut?: (ctx: CutCtx, m: Moment) => Promise<CutResult>;
   frame?: (input: TrackInput) => Promise<TrackRead[]>;
   download?: (url: string, target: string, maxHeight: number) => Promise<void>;
+  /** whether this server can take on another run now (studio-capacity roomForAnother) */
+  room?: (env: Record<string, string | undefined>) => Promise<{ ok: boolean; why?: string }>;
   ytAudio?: (url: string, target: string) => Promise<void>;
 };
 const metaCache = new Map<string, { at: number; meta: YtMeta }>();
@@ -1129,8 +1159,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     } else src = await signedSource(sb, u, job.asset_id!);
     let sLeft = Math.round(todo.reduce((a, m) => a + (m.end - m.start), 0));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: p.moments.length, message: `Cutting clip ${Math.min(made.length + 1, p.moments.length)} of ${p.moments.length}`, made, clip_s_total: sLeft, clip_s_left: sLeft, stage_at: new Date().toISOString() }); // a fresh clock for this attempt's cutting
-    // C. Cut: one at a time (the web service has one CPU, so two at once is no faster, and two renders at once ran it out
-    //    of memory).
+    // C. Cut: each clip through the server's cutter (cutGate), which several runs share clip by clip, first come first
+    //    served. Two renders at once on one CPU are no faster, and ran it out of memory (Oct 31 2026).
     const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null };
     let full: ClipsError | null = null;
     const cutOne = async (m: Moment) => {
@@ -1148,10 +1178,17 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const worker = async () => {
       while (queue.length && !full) {
         const m = queue.shift()!;
-        const t0 = Date.now();
         try {
-          const r = await cutOne(m);
-          clipTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - t0) / 100) / 10]);
+          const n = Math.min(made.length + 1, p.moments.length);
+          let waited = false;
+          const r = await cutGate(env).run(async () => {
+            if (waited) await renew(sb, job, { message: `Cutting clip ${n} of ${p.moments.length}` });
+            // timed inside the cutter: waiting for a turn is not cutting, and must not slow the next estimates
+            const t0 = Date.now();
+            const res = await cutOne(m);
+            clipTimes.push([Math.round(res.seconds * 10) / 10, Math.round((Date.now() - t0) / 100) / 10]);
+            return res;
+          }, () => { waited = true; return renew(sb, job, { message: `Clip ${n} of ${p.moments.length} · next in line for the cutter` }); });
           sLeft = Math.max(0, sLeft - Math.round(m.end - m.start));
           made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds });
           madeNow.push(r.seconds);
@@ -1223,20 +1260,33 @@ export function startClipsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {},
   if (!clipsEnabled(env)) return null;
   const log = deps.log ?? ((l: string) => console.log(l));
   const worker = `clips-${randomUUID()}`;
-  let running = false;
+  // several runs at once (capacity().runs); their cutting shares the cutter (cutGate), so the CPU is never asked for
+  // more than it has. A new run is only taken on while memory and disk have room.
+  const active = new Set<string>();
+  let claiming = false, lastHeld = 0;
   const tick = async () => {
-    if (running || busy.captions) return;
+    if (claiming) return;
+    claiming = true;
     try {
       const sb = sbFn();
-      running = busy.clips = true;
-      const r = await sb.rpc("studio_claim", { p_tool: "clips", p_worker: worker });
-      if (r.error) throw r.error;
-      const job = r.data as Job | null;
-      if (!job || !job.id) { running = busy.clips = false; return; }
-      // the lease is 10 minutes; a long cut keeps it alive between clips, and this keeps it alive during one long step
-      const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
-      runClipsJob(sb, { ...deps, log }, job).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); running = busy.clips = false; });
-    } catch (e: any) { running = busy.clips = false; log(`[clips] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
+      // one new run per tick at most: the next tick's memory reading then includes the run just started
+      if (active.size < capacity(env).runs) {
+        const room = await (deps.room ?? roomForAnother)(env);
+        if (!room.ok) { if (Date.now() - lastHeld > 5 * 60_000) { lastHeld = Date.now(); log(`[clips] holding new runs: ${room.why} (${active.size} running)`); } return; }
+        const r = await sb.rpc("studio_claim", { p_tool: "clips", p_worker: worker });
+        if (r.error) throw r.error;
+        const job = r.data as Job | null;
+        if (!job || !job.id) return;
+        active.add(job.id); busy.clips = true;
+        log(`[clips] started ${job.id} (${active.size} running)`);
+        // the lease is 10 minutes; a long cut keeps it alive between clips, and this keeps it alive during one long
+        // step or while the run waits its turn at the cutter
+        const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
+        runClipsJob(sb, { ...deps, log }, job).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`))
+          .finally(() => { clearInterval(keep); active.delete(job.id); busy.clips = active.size > 0; });
+      }
+    } catch (e: any) { log(`[clips] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
+    finally { claiming = false; }
   };
   const t = setInterval(tick, intervalMs);
   setTimeout(tick, 17_000);
