@@ -11,7 +11,7 @@ test("traits outside the vocabulary are dropped; the prompt reads as one full-bo
   assert.equal(p.mode, "human");
   assert.equal(p.prompt, "Photorealistic full-body studio portrait of a adult Black man, muscular build, mullet blonde hair, deep skin, dressed in streetwear clothing, a striking look with one feature pushed past believable, played straight, gold chain, fully clothed, standing facing the camera in a deadpan editorial fashion-campaign portrait, full body visible from head to shoes, plain white seamless studio backdrop, direct on-camera flash, hyper-detailed skin and fabric, sharp focus, no text");
   const a = influencerPrompt({ type: "cat", style: "business", hairstyle: "mohawk" });
-  assert.equal(a.mode, "animal"); assert.match(a.prompt, /^Photorealistic full-body studio portrait of a cat character with a real cat head on a human body standing upright like a person, with mohawk, dressed in business clothing, fully clothed, standing facing/);
+  assert.equal(a.mode, "animal"); assert.match(a.prompt, /^Photorealistic full-body studio portrait of a cat character with a real cat head on a human body standing upright like a person, with mohawk, dressed in business clothing, a living animal photographed, never a costume, mask, puppet or suit, fully clothed, standing facing/);
   assert.match(influencerPrompt({}, "").prompt, /^Photorealistic full-body studio portrait of a person, fully clothed, standing facing the camera in a deadpan editorial/);
   assert.equal(influencerName({ type: "bold", build: "muscular", gender: "man", hairstyle: "mullet" }), "bold muscular man mullet");
   assert.equal(influencerName({ type: "cat" }), "cat"); assert.equal(influencerName({}), "person");

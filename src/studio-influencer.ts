@@ -19,7 +19,10 @@ export const INFLUENCER_FEATURES = ["broad shoulders", "long limbs", "short legs
 export type TraitKey = keyof typeof INFLUENCER_TRAITS;
 export type Traits = Partial<Record<TraitKey, string>> & { features?: string[] };
 export const ANIMAL_TYPES = new Set(["insect", "frog", "cat", "dog", "rodent", "bird"]);
-const ANIMAL_WORDS: Record<string, string> = { insect: "an insect character with a praying mantis head on a human body", frog: "a frog character with a frog head on a human body", cat: "a cat character with a real cat head on a human body", dog: "a dog character with a real pug head on a human body", rodent: "a capybara character with a real capybara head on a human body", bird: "a bird character with a real penguin head on a human body" };
+// A real animal, not a costume: "head on a human body" came back as a mask and a onesie for the mantis and the frog
+// (Nov 2 2026), while the cat, the pug and the penguin, described as real animals, came out right.
+const ANIMAL_WORDS: Record<string, string> = { insect: "a real praying mantis, life-size, with genuine chitin, compound eyes and antennae, standing upright on two legs like a person", frog: "a real tree frog, life-size, with genuine glossy amphibian skin and big gold eyes, standing upright on two legs like a person", cat: "a cat character with a real cat head on a human body", dog: "a dog character with a real pug head on a human body", rodent: "a capybara character with a real capybara head on a human body", bird: "a bird character with a real penguin head on a human body" };
+const ANIMAL_LOCK = "a living animal photographed, never a costume, mask, puppet or suit";
 // The look the type sets. These portraits are a genre: a deadpan fashion-campaign still, one odd thing pushed just past
 // believable, played completely straight. The type decides how far.
 const TYPE_WORDS: Record<string, string> = { average: "an ordinary person with one quietly odd detail, played straight", bold: "a striking look with one feature pushed past believable, played straight", extreme: "a caricature made real: exaggerated features and surreal proportions, completely deadpan" };
@@ -49,10 +52,11 @@ export function influencerPrompt(traits: Traits, extra = "", photo = false): { p
   const hair = [t.hairstyle, t.hair_color ? `${t.hair_color} hair` : null].filter(Boolean).join(" ");
   const parts: string[] = [];
   if (animal) {
-    parts.push(`Photorealistic full-body studio portrait of ${ANIMAL_WORDS[t.type!]} standing upright like a person`);
+    parts.push(`Photorealistic full-body studio portrait of ${ANIMAL_WORDS[t.type!]}${/standing upright/.test(ANIMAL_WORDS[t.type!]) ? "" : " standing upright like a person"}`);
     if (t.build) parts.push(`${t.build} build`);
     if (hair) parts.push(`with ${hair}`);
     if (t.style) parts.push(`dressed in ${t.style} clothing`);
+    parts.push(ANIMAL_LOCK);
   } else {
     // with a photo, the person is the one in it: the words describe the styling, never another face or skin
     const who = photo ? "the person in the reference image, with exactly their face and identity" : [t.age, t.ethnicity, t.gender ?? "person"].filter(Boolean).join(" ");
