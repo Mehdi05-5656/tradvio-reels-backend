@@ -22,6 +22,7 @@ import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-caption-video.js";
 import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.js";
+import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
 import Stripe from "stripe";
@@ -247,11 +248,18 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
   }
   if (tool === "character") {
     // Character: a reusable character image from a prompt (human or animal), saved to the library for Recast, Swap and Trend.
+    // Soul draws one portrait or a set of four; four options let the person pick a face before anything else runs.
+    const count = Number(o.count) === 4 ? 4 : 1;
+    // An AI influencer is the same job built from traits: the prompt is composed here, never taken from the client.
+    if (o.traits && typeof o.traits === "object") {
+      const traits = cleanTraits(o.traits);
+      if (!Object.keys(traits).length) throw new StudioError("traits_required", "Pick at least one trait");
+      const built = influencerPrompt(traits, typeof o.prompt === "string" ? o.prompt : "");
+      return { tool, credits: count * costs.character_image, options: { mode: built.mode, prompt: built.prompt, count, kind: "influencer", traits, name: influencerName(traits) }, summary: `${count} ${count === 1 ? "image" : "images"} × ${costs.character_image}` };
+    }
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
     if (prompt.length < 3) throw new StudioError("prompt_required", "Describe the character");
     const mode = o.mode === "animal" ? "animal" : "human";
-    // Soul draws one portrait or a set of four; four options let the person pick a face before anything else runs.
-    const count = Number(o.count) === 4 ? 4 : 1;
     return { tool, credits: count * costs.character_image, options: { mode, prompt, count }, summary: `${count} ${count === 1 ? "image" : "images"} × ${costs.character_image}` };
   }
   throw new StudioError("unknown_tool", "Unknown tool");

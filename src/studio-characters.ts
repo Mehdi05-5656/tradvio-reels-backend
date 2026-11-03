@@ -31,6 +31,8 @@ type Job = { id: string; user_id: string; lease_token: string; options: any; cre
 
 /** The portrait prompt: the person's words, framed so the result works as a Genjutsu reference (one subject, facing the camera). */
 export function characterPrompt(options: any): string {
+  // an AI influencer arrives with its prompt already composed from its traits (studio-influencer.ts), framed and all
+  if (options?.kind === "influencer" && typeof options.prompt === "string" && options.prompt.trim()) return options.prompt.trim().slice(0, 900);
   const desc = String(options?.prompt ?? "").trim().slice(0, 600);
   return options?.mode === "animal"
     ? `Photorealistic portrait of ${desc}, sitting upright facing the camera like a person, full upper body visible, soft studio light, plain neutral background, sharp detail, no text`
