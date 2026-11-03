@@ -7,20 +7,25 @@ export const INFLUENCER_TRAITS = {
   type: ["average", "bold", "extreme", "insect", "frog", "cat", "dog", "rodent", "bird"],
   gender: ["woman", "man", "non-binary", "androgynous"],
   build: ["slim", "athletic", "average", "muscular", "ultra muscular", "heavy", "petite", "tall"],
-  hairstyle: ["buzz cut", "bob", "pixie", "long straight", "long wavy", "curly", "afro", "braids", "locs", "mullet", "bowl cut", "slicked back", "ponytail", "bald", "mohawk", "shaved sides"],
-  hair_color: ["black", "dark brown", "brown", "blonde", "platinum", "red", "auburn", "grey", "white", "pink", "blue", "green", "purple"],
-  style: ["streetwear", "business", "athleisure", "vintage", "goth", "techwear", "cottagecore", "glam"],
+  hairstyle: ["buzz cut", "bob", "pixie", "long straight", "long wavy", "curly", "afro", "braids", "locs", "mullet", "bowl cut", "mushroom cut", "beehive", "soft-serve swirl", "hair horns", "pigtails", "tight perm", "slicked back", "ponytail", "bald", "mohawk", "shaved sides"],
+  hair_color: ["black", "dark brown", "brown", "blonde", "platinum", "red", "ginger", "auburn", "grey", "white", "pink", "lilac", "blue", "green", "purple"],
+  style: ["streetwear", "business", "athleisure", "vintage", "retro", "y2k", "theatre", "goth", "techwear", "cottagecore", "glam"],
   ethnicity: ["East Asian", "South Asian", "Black", "White", "Latino", "Middle Eastern"],
-  age: ["young adult", "adult", "mature"],
+  age: ["young adult", "adult", "mature", "senior"],
   skin: ["very light", "light", "light-medium", "medium", "medium-tan", "tan", "deep", "very deep"],
 } as const;
-/** Details that can be stacked (any number of them). */
-export const INFLUENCER_FEATURES = ["broad shoulders", "long limbs", "freckles", "round glasses", "sunglasses", "full beard", "moustache", "stubble", "tattoos", "gold chain", "piercings", "big ears", "gap teeth", "strong jaw", "dimples", "scar", "headphones", "cap"] as const;
+/** Details that can be stacked (up to six): the face, the body, the extras. The odd ones are what make a character. */
+export const INFLUENCER_FEATURES = ["broad shoulders", "long limbs", "short legs", "tiny waist", "egg body", "long neck", "freckles", "heavy eye bags", "high cheekbones", "jug ears", "big ears", "gap teeth", "buck teeth", "potato nose", "button nose", "tiny pursed mouth", "wide mouth", "unibrow", "no brows", "bleached brows", "strong jaw", "weak chin", "dimples", "scar", "full beard", "curled moustache", "moustache", "stubble", "goatee", "round glasses", "sunglasses", "braces", "gold grill", "piercings", "tattoos", "gold chain", "headphones", "cap", "nose tape"] as const;
 export type TraitKey = keyof typeof INFLUENCER_TRAITS;
 export type Traits = Partial<Record<TraitKey, string>> & { features?: string[] };
 export const ANIMAL_TYPES = new Set(["insect", "frog", "cat", "dog", "rodent", "bird"]);
-const ANIMAL_WORDS: Record<string, string> = { insect: "an insect character (a praying mantis or beetle)", frog: "a frog character", cat: "a cat character", dog: "a dog character (a pug or bulldog)", rodent: "a rodent character (a capybara or hamster)", bird: "a bird character (a penguin or parrot)" };
-const TYPE_WORDS: Record<string, string> = { average: "a natural, everyday look", bold: "a striking, confident look with strong features", extreme: "an exaggerated, unforgettable look with surreal styling and proportions" };
+const ANIMAL_WORDS: Record<string, string> = { insect: "an insect character with a praying mantis head on a human body", frog: "a frog character with a frog head on a human body", cat: "a cat character with a real cat head on a human body", dog: "a dog character with a real pug head on a human body", rodent: "a capybara character with a real capybara head on a human body", bird: "a bird character with a real penguin head on a human body" };
+// The look the type sets. These portraits are a genre: a deadpan fashion-campaign still, one odd thing pushed just past
+// believable, played completely straight. The type decides how far.
+const TYPE_WORDS: Record<string, string> = { average: "an ordinary person with one quietly odd detail, played straight", bold: "a striking look with one feature pushed past believable, played straight", extreme: "a caricature made real: exaggerated features and surreal proportions, completely deadpan" };
+/** The frame every influencer portrait is shot in (the whole genre lives in this sentence). */
+// "fully clothed" is load-bearing: without it Soul undresses every muscular or heavy build (seen Nov 2 2026).
+const FRAME = "fully clothed, standing facing the camera in a deadpan editorial fashion-campaign portrait, full body visible from head to shoes, plain white seamless studio backdrop, direct on-camera flash, hyper-detailed skin and fabric, sharp focus, no text";
 
 /** Only values from the vocabulary survive; anything else is dropped. */
 export function cleanTraits(raw: any): Traits {
@@ -60,7 +65,7 @@ export function influencerPrompt(traits: Traits, extra = "", photo = false): { p
   }
   if (t.features?.length) parts.push(t.features.join(", "));
   if (words) parts.push(words);
-  parts.push("standing facing the camera, full body visible from head to shoes, plain white studio background, soft even light, sharp detail, no text");
+  parts.push(FRAME);
   return { prompt: parts.join(", "), mode: animal ? "animal" : "human" };
 }
 /** With a photo, the influencer is drawn by an image-edit model from it (the reference image carries the identity;
