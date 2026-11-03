@@ -133,4 +133,9 @@ test("the quote reads the stored plan and refuses another reference or a missing
   await assert.rejects(quoteKage(sb, ANN, ENV, PLANS, { plan_key: planKey(ANN, "p1") }, { id: HERO, kind: "image" }), (e: any) => e.code === "kage_reference_mismatch");
   await assert.rejects(quoteKage(sb, ANN, ENV, PLANS, { plan_key: planKey("someone-else", "p1") }, { id: REF, kind: "video" }), (e: any) => e.code === "kage_plan_missing");
   await assert.rejects(quoteKage(sb, ANN, { ...ENV, STUDIO_KAGE_ENABLED: "false" }, PLANS, {}, null), (e: any) => e.code === "kage_unavailable");
+  // a plan made from one of our gallery presets: no library reference, the preset named instead
+  const sbp = fakeSb({ v: 1, reference_asset_id: null, reference_id: "pitch-15", hero_asset_ids: [HERO], brief: null, analysis, plan, created_at: new Date().toISOString() });
+  const qp = await quoteKage(sbp, ANN, ENV, PLANS, { plan_key: planKey(ANN, "p2") }, null);
+  assert.equal(qp.options.reference_id, "pitch-15"); assert.equal(qp.options.reference_asset_id, null);
+  await assert.rejects(quoteKage(sbp, ANN, ENV, PLANS, { plan_key: planKey(ANN, "p2") }, { id: REF, kind: "video" }), (e: any) => e.code === "kage_reference_mismatch", "a preset plan does not take a library video as its asset");
 });

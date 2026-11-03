@@ -16,6 +16,7 @@ import { hf, outputUrls, listPrice, instrumentDiscount, type InstrumentDeps } fr
 import { claudeJson, type ClipsDeps } from "./studio-clips.js";
 import { PREMIUM_MARGIN, creditsForCost, studioCosts, type PlanLike } from "./studio-pricing.js";
 import type { LibraryHelpers } from "./studio-library.js";
+import { KAGE_REFERENCES, kageReferenceById, kageReferencePosterUrl, kageReferenceVideoUrl } from "./studio-kage-references.js";
 
 export class KageError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 
@@ -188,7 +189,8 @@ export function kageCredits(listUsd: number, env: Record<string, string | undefi
 // ---------------------------------------------------------------------------------------------------
 // Stored plans (the free step), the quote and the job
 // ---------------------------------------------------------------------------------------------------
-export type StoredPlan = { v: 1; reference_asset_id: string; hero_asset_ids: string[]; brief: string | null; analysis: Analysis; plan: Plan; created_at: string };
+/** The reference is the person's own video (reference_asset_id) or one of our presets (reference_id); never both. */
+export type StoredPlan = { v: 1; reference_asset_id: string | null; reference_id?: string | null; hero_asset_ids: string[]; brief: string | null; analysis: Analysis; plan: Plan; created_at: string };
 export const planKey = (u: string, id: string) => `${u}/kage/plans/${id}.json`;
 export async function readPlan(sb: SupabaseClient, u: string, key: string): Promise<StoredPlan | null> {
   if (!key.startsWith(`${u}/kage/plans/`)) return null;
@@ -202,10 +204,10 @@ export async function quoteKage(sb: SupabaseClient, u: string, env: Record<strin
   const key = String(options?.plan_key ?? "");
   const stored = key ? await readPlan(sb, u, key) : null;
   if (!stored) throw new KageError("kage_plan_missing", "Plan the remix first", 404);
-  if (!asset || asset.id !== stored.reference_asset_id) throw new KageError("kage_reference_mismatch", "That plan was made for another reference", 409);
+  if (stored.reference_id ? !!asset || !kageReferenceById(stored.reference_id) : !asset || asset.id !== stored.reference_asset_id) throw new KageError("kage_reference_mismatch", "That plan was made for another reference", 409);
   const cost = kagePlanCost(stored.plan, stored.analysis, env);
   const credits = kageCredits(cost.list_usd, env, plans);
-  return { tool: "kage", credits, options: { plan_key: key, reference_asset_id: stored.reference_asset_id, hero_asset_ids: stored.hero_asset_ids, concept: stored.plan.concept, shots: stored.plan.shots.length, seconds: stored.analysis.seconds, ...cost },
+  return { tool: "kage", credits, options: { plan_key: key, reference_asset_id: stored.reference_asset_id, reference_id: stored.reference_id ?? null, hero_asset_ids: stored.hero_asset_ids, concept: stored.plan.concept, shots: stored.plan.shots.length, seconds: stored.analysis.seconds, ...cost },
     summary: `${stored.plan.shots.length} shots · ${Math.round(stored.analysis.seconds)} s` };
 }
 
@@ -390,9 +392,19 @@ export async function runKageJob(sb: SupabaseClient, deps: KageDeps, job: Job): 
     const joined = join(dir, "joined.mp4"), out = join(dir, "out.mp4"), still0 = join(dir, "out.jpg");
     if (files.length > 1) await (deps.concat ?? concatVideos)(files, joined); else await writeFile(joined, await readFile(files[0]));
     if (plan.keep_music) {
-      const refRow = await sb.from("studio_assets").select("object_key").eq("id", stored.reference_asset_id).eq("user_id", job.user_id).maybeSingle();
-      const ref = refRow.data?.object_key ? await sb.storage.from("studio-uploads").download(refRow.data.object_key) : null;
-      if (ref && !ref.error && ref.data) { const rf = join(dir, "reference.mp4"); await writeFile(rf, Buffer.from(await ref.data.arrayBuffer())); await (deps.mux ?? muxAudio)(joined, rf, out); }
+      // the reference's sound: from the person's upload, or from our preset's clip
+      let bytes: Buffer | null = null;
+      const preset = stored.reference_id ? kageReferenceById(stored.reference_id) : null;
+      if (preset) {
+        const base = env.STUDIO_PRESET_BASE ?? env.DASHBOARD_URL ?? "https://app.clone8.io";
+        const dl = await (deps.fetch ?? fetch)(kageReferenceVideoUrl(base, preset), { signal: AbortSignal.timeout(120_000) }).catch(() => null);
+        if (dl?.ok) bytes = Buffer.from(await dl.arrayBuffer());
+      } else if (stored.reference_asset_id) {
+        const refRow = await sb.from("studio_assets").select("object_key").eq("id", stored.reference_asset_id).eq("user_id", job.user_id).maybeSingle();
+        const ref = refRow.data?.object_key ? await sb.storage.from("studio-uploads").download(refRow.data.object_key) : null;
+        if (ref && !ref.error && ref.data) bytes = Buffer.from(await ref.data.arrayBuffer());
+      }
+      if (bytes) { const rf = join(dir, "reference.mp4"); await writeFile(rf, bytes); await (deps.mux ?? muxAudio)(joined, rf, out); }
       else await writeFile(out, await readFile(joined));
     } else await writeFile(out, await readFile(joined));
     const video = await readFile(out);
@@ -448,8 +460,14 @@ export function startKageLoop(sbFn: () => SupabaseClient, deps: KageDeps = {}, i
 // Routes: the free plan
 // ---------------------------------------------------------------------------------------------------
 export function registerKage(app: Express, h: Pick<LibraryHelpers, "sbFn" | "env" | "requireUser" | "fail" | "log">, deps: KageDeps = {}): void {
+  // Our reference presets for the gallery, with their clip and poster addresses.
+  app.get("/api/studio/kage/references", (_req, res) => {
+    res.setHeader("Cache-Control", "private, max-age=300");
+    const base = h.env.STUDIO_PRESET_BASE ?? h.env.DASHBOARD_URL ?? "https://app.clone8.io";
+    res.json({ references: KAGE_REFERENCES.map((r) => ({ id: r.id, name: r.name, lede: r.lede, seconds: r.seconds, tags: r.tags, video_url: kageReferenceVideoUrl(base, r), poster_url: kageReferencePosterUrl(base, r) })) });
+  });
   // The plan: the reference read and Claude's shot list, stored so the quote and the job price and render exactly it.
-  // Free, counted per day. The person confirms they own the reference or have permission for it.
+  // Free, counted per day. With their own video the person confirms they own it or have permission; a preset is ours.
   app.post("/api/studio/kage/plan", async (req, res) => {
     const u = h.requireUser(req, res); if (!u) return;
     const sb = h.sbFn();
@@ -457,35 +475,44 @@ export function registerKage(app: Express, h: Pick<LibraryHelpers, "sbFn" | "env
     try {
       if (!kageEnabled(h.env)) throw new KageError("kage_unavailable", "Kage is not switched on yet", 503);
       const b = req.body ?? {};
-      if (b.rights !== true) throw new KageError("rights_required", "Confirm you own the reference, manage its account, or have the creator's permission");
-      const refId = String(b.reference_asset_id ?? "");
+      const preset = b.reference_id != null ? kageReferenceById(String(b.reference_id)) : null;
+      if (b.reference_id != null && !preset) throw new KageError("kage_no_reference", "That reference is not in the gallery", 404);
+      if (!preset && b.rights !== true) throw new KageError("rights_required", "Confirm you own the reference, manage its account, or have the creator's permission");
+      const refId = preset ? "" : String(b.reference_asset_id ?? "");
       const heroIds: string[] = [...new Set<string>((Array.isArray(b.hero_asset_ids) ? b.hero_asset_ids : []).map((x: any) => String(x)))].filter((x) => /^[0-9a-f-]{36}$/i.test(x));
-      if (!/^[0-9a-f-]{36}$/i.test(refId)) throw new KageError("kage_no_reference", "Pick a reference video");
+      if (!preset && !/^[0-9a-f-]{36}$/i.test(refId)) throw new KageError("kage_no_reference", "Pick a reference video");
       if (!heroIds.length || heroIds.length > KAGE_LIMITS.hero_photos) throw new KageError("kage_no_hero", `Add 1 to ${KAGE_LIMITS.hero_photos} photos of your hero`);
       const since = new Date(Date.now() - 86_400_000).toISOString();
       const used = await sb.from("studio_events").select("id", { count: "exact", head: true }).eq("user_id", u).eq("name", "kage_plan").gte("created_at", since);
       if (!used.error && (used.count ?? 0) >= KAGE_LIMITS.plans_per_day) throw new KageError("kage_rate_limited", "That is a lot of plans for one day; come back tomorrow", 429);
-      const rows = await sb.from("studio_assets").select("id,kind,name,object_key,status,probe").eq("user_id", u).in("id", [refId, ...heroIds]);
+      const rows = await sb.from("studio_assets").select("id,kind,name,object_key,status,probe").eq("user_id", u).in("id", [...(refId ? [refId] : []), ...heroIds]);
       if (rows.error) throw rows.error;
-      const ref = (rows.data ?? []).find((x: any) => x.id === refId);
-      if (!ref || ref.status !== "ready" || ref.kind !== "video") throw new KageError("video_not_found", "That reference is not in your library", 404);
-      if (Number(ref.probe?.duration) > KAGE_LIMITS.max_seconds * 2) throw new KageError("kage_reference_long", `Kage reads up to ${KAGE_LIMITS.max_seconds} seconds; make a clip of the part you want first`);
+      const ref = refId ? (rows.data ?? []).find((x: any) => x.id === refId) : null;
+      if (!preset && (!ref || ref.status !== "ready" || ref.kind !== "video")) throw new KageError("video_not_found", "That reference is not in your library", 404);
+      if (ref && Number(ref.probe?.duration) > KAGE_LIMITS.max_seconds * 2) throw new KageError("kage_reference_long", `Kage reads up to ${KAGE_LIMITS.max_seconds} seconds; make a clip of the part you want first`);
       const heroes = heroIds.map((id) => { const x = (rows.data ?? []).find((r: any) => r.id === id); if (!x || x.status !== "ready" || x.kind !== "image") throw new KageError("kage_hero_missing", "One of the hero photos is not in your library", 404); return x; });
       dir = await mkdtemp(join(tmpdir(), "c8-kage-plan-"));
-      const d = await sb.storage.from("studio-uploads").download(ref.object_key);
-      if (d.error || !d.data) throw new KageError("source_missing", "The reference could not be read", 502, true);
       const file = join(dir, "ref.mp4");
-      await writeFile(file, Buffer.from(await d.data.arrayBuffer()));
+      if (preset) {
+        const base = h.env.STUDIO_PRESET_BASE ?? h.env.DASHBOARD_URL ?? "https://app.clone8.io";
+        const dl = await (deps.fetch ?? fetch)(kageReferenceVideoUrl(base, preset), { signal: AbortSignal.timeout(120_000) }).catch(() => null);
+        if (!dl?.ok) throw new KageError("source_missing", "The reference could not be read", 502, true);
+        await writeFile(file, Buffer.from(await dl.arrayBuffer()));
+      } else {
+        const d = await sb.storage.from("studio-uploads").download(ref!.object_key);
+        if (d.error || !d.data) throw new KageError("source_missing", "The reference could not be read", 502, true);
+        await writeFile(file, Buffer.from(await d.data.arrayBuffer()));
+      }
       const heroImages: Array<{ data: string; media_type: string }> = [];
       for (const x of heroes) { const hd = await sb.storage.from("studio-uploads").download(x.object_key); if (hd.error || !hd.data) throw new KageError("kage_hero_missing", "A hero photo could not be read", 502, true); const buf = Buffer.from(await hd.data.arrayBuffer()); heroImages.push({ data: buf.toString("base64"), media_type: mediaTypeOf(buf) }); }
       const { analysis, frames } = await analyzeReference(file, { ...deps, env: h.env });
       const brief = typeof b.brief === "string" && b.brief.trim() ? b.brief.trim().slice(0, 600) : null;
       const plan = await planRemix({ ...deps, env: h.env, log: h.log }, analysis, frames, heroImages, brief, u);
       const id = randomUUID(), key = planKey(u, id);
-      const stored: StoredPlan = { v: 1, reference_asset_id: refId, hero_asset_ids: heroIds, brief, analysis, plan, created_at: new Date().toISOString() };
+      const stored: StoredPlan = { v: 1, reference_asset_id: preset ? null : refId, reference_id: preset?.id ?? null, hero_asset_ids: heroIds, brief, analysis, plan, created_at: new Date().toISOString() };
       const up = await sb.storage.from("studio-outputs").upload(key, Buffer.from(JSON.stringify(stored)), { contentType: "application/json", upsert: false });
       if (up.error) throw up.error;
-      await sb.from("studio_events").insert({ user_id: u, kind: "kage", name: "kage_plan", usd: 0, props: { reference: refId, shots: plan.shots.length } }).then(() => undefined, () => undefined);
+      await sb.from("studio_events").insert({ user_id: u, kind: "kage", name: "kage_plan", usd: 0, props: { reference: preset?.id ?? refId, shots: plan.shots.length } }).then(() => undefined, () => undefined);
       const cost = kagePlanCost(plan, analysis, h.env);
       res.json({ plan_key: key, analysis: { seconds: analysis.seconds, width: analysis.width, height: analysis.height, shots: analysis.shots, motion: analysis.motion }, plan, ...cost });
     } catch (e) { h.fail(res, e); }
