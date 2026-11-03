@@ -1,0 +1,42 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { KageMotionError, kageMotionCostUsd, kageMotionCredits, parseKageMotionOptions, quoteKageMotion } from "../src/studio-kage-motion.ts";
+
+const PLANS = [{ id: "starter", monthly_usd: 19, annual_usd_per_month: 15, credits: 1000 }, { id: "creator", monthly_usd: 49, annual_usd_per_month: 39, credits: 3000 }];
+const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
+const fakeSb = (rows: any[]) => ({ from: () => ({ select: () => ({ eq: () => ({ in: async () => ({ data: rows, error: null }) }) }) }) }) as any;
+
+test("brief is required, trimmed and bounded; defaults fill the rest", () => {
+  assert.throws(() => parseKageMotionOptions({ brief: "short" }), KageMotionError);
+  assert.throws(() => parseKageMotionOptions({ brief: "x".repeat(1300) }), KageMotionError);
+  const o = parseKageMotionOptions({ brief: "  A launch film   for our new app  " });
+  assert.equal(o.brief, "A launch film for our new app");
+  assert.deepEqual([o.look, o.seconds, o.style, o.voice, o.images.length], ["auto", 16, "narrator", "naomi", 0]);
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", seconds: 40, look: "neon", style: "creator", voice: "other" }).seconds, 20);
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", look: "nope" }).look, "auto");
+});
+
+test("images need valid ids and confirmed rights; duplicates collapse; kinds default to photo", () => {
+  assert.throws(() => parseKageMotionOptions({ brief: "A launch film for our app", images: [{ asset_id: "x" }], rights_confirmed: true }), /not in your library/);
+  assert.throws(() => parseKageMotionOptions({ brief: "A launch film for our app", images: [{ asset_id: A }] }), /permission/);
+  const o = parseKageMotionOptions({ brief: "A launch film for our app", images: [{ asset_id: A, kind: "logo", note: "our mark" }, { asset_id: A }, { asset_id: B, kind: "weird" }], rights_confirmed: true });
+  assert.deepEqual(o.images.map((i) => [i.asset_id, i.kind, i.note]), [[A, "logo", "our mark"], [B, "photo", null]]);
+  assert.throws(() => parseKageMotionOptions({ brief: "A launch film for our app", images: Array.from({ length: 7 }, (_, i) => ({ asset_id: `${i}1111111-1111-4111-8111-111111111111` })), rights_confirmed: true }), /Up to 6/);
+});
+
+test("the quote is off unless switched on, checks ownership and kind, and prices from cost at the margin", async () => {
+  await assert.rejects(quoteKageMotion(fakeSb([]), "u", {}, PLANS, { brief: "A launch film for our app" }), /not switched on/);
+  const env = { STUDIO_KAGE_MOTION_ENABLED: "true" };
+  const q = await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", look: "paper" });
+  assert.equal(q.tool, "kage_motion");
+  assert.ok(q.credits > 0 && Number.isInteger(q.credits));
+  assert.match(q.summary, /16 s film · paper look · narrated by Naomi/);
+  assert.equal(q.options.cost_usd, 4.5);
+  await assert.rejects(quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /not in your library/);
+  await assert.rejects(quoteKageMotion(fakeSb([{ id: A, kind: "video", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /takes pictures/);
+  const ok = await quoteKageMotion(fakeSb([{ id: A, kind: "image", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A, kind: "product" }], rights_confirmed: true });
+  assert.match(ok.summary, /1 image/);
+  const dearer = kageMotionCredits({ ...env, KAGE_MOTION_COST_USD: "9" }, PLANS);
+  assert.ok(dearer > q.credits);
+  assert.equal(kageMotionCostUsd({ KAGE_MOTION_COST_USD: "-1" }), 4.5);
+});
