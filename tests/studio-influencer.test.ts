@@ -26,5 +26,11 @@ test("the character quote takes traits: the prompt is composed server side and t
   assert.match(q.options.prompt, /^Photorealistic full-body studio portrait of a woman, pink hair, an exaggerated, unforgettable look with surreal styling and proportions, with a tiny hat, standing/);
   assert.equal(characterPrompt(q.options), q.options.prompt, "the runner sends the composed prompt as it is");
   assert.throws(() => quote("character", { traits: { type: "nope" } }, null, costs), (e: any) => e.code === "traits_required");
+  // with the person's photo as the job's asset: one portrait from the image-edit model, the identity from the photo
+  const ph = quote("character", { traits: { type: "bold", build: "ultra muscular", features: ["broad shoulders", "gold chain", "nope"] }, count: 4 }, { id: "a1", kind: "image" } as any, costs);
+  assert.equal(ph.options.count, 1); assert.equal(ph.credits, 10); assert.equal(ph.options.photo_asset_id, "a1"); assert.deepEqual(ph.options.traits.features, ["broad shoulders", "gold chain"]);
+  assert.match(ph.options.prompt, /^Photorealistic full-body studio portrait of the person in the reference image, with exactly their face and identity, ultra muscular build, a striking, confident look with strong features, broad shoulders, gold chain, standing/);
+  assert.equal(quote("character", { traits: {} }, { id: "a1", kind: "image" } as any, costs).options.count, 1, "a photo alone is enough");
+  assert.equal(quote("character", { traits: { type: "bold" }, count: 4 }, { id: "v1", kind: "video" } as any, costs).options.photo_asset_id, undefined, "a video is not a photo");
   assert.match(characterPrompt({ mode: "human", prompt: "a woman in a red coat" }), /^Photorealistic portrait of a woman in a red coat, facing the camera/, "a described character is framed as before");
 });

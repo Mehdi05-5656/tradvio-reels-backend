@@ -11,6 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLANS } from "./studio.js";
 import { studioCosts } from "./studio-pricing.js";
 import { higgsfieldAuth, RecastError, HF_BASE } from "./studio-recast.js";
+import { PHOTO_ENDPOINT } from "./studio-influencer.js";
 
 export const SOUL_ENDPOINT = "higgsfield-ai/soul/standard";
 const POLL_MS = 5_000, MAX_WAIT_MS = 10 * 60_000, IMAGE_LIMIT = 33_554_432;
@@ -59,6 +60,13 @@ export async function submitCharacter(deps: CharacterDeps, p: { prompt: string; 
   if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
   return { request_id: String(r.request_id) };
 }
+/** An influencer drawn from the person's photo: the image-edit model takes the photo as its reference and the composed
+ *  prompt as the styling, one portrait at a time. */
+export async function submitFromPhoto(deps: CharacterDeps, p: { prompt: string; photoUrl: string; idempotencyKey: string }) {
+  const r = await hf(deps, `/${PHOTO_ENDPOINT}`, { method: "POST", body: JSON.stringify({ prompt: p.prompt, image_urls: [p.photoUrl], quality: "high", resolution: "2k", aspect_ratio: "3:4", enhance_prompt: false }), idempotency: p.idempotencyKey });
+  if (!r?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
+  return { request_id: String(r.request_id) };
+}
 export async function pollCharacter(deps: CharacterDeps, requestId: string): Promise<{ status: string; imageUrl: string | null; imageUrls: string[]; raw: any }> {
   const r = await hf(deps, `/requests/${encodeURIComponent(requestId)}/status`, { method: "GET" });
   const status = String(r?.status ?? "unknown").toLowerCase();
@@ -85,7 +93,16 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
     let requestId: string | null = job.progress?.request_id ?? null;
     if (!requestId) {
       await renew(sb, job, { done: 0, total: 1, note: "Describing your character to the renderer" });
-      const sub = await submitCharacter(deps, { prompt: characterPrompt(job.options), idempotencyKey: job.id, count: Number(job.options?.count) === 4 ? 4 : 1 });
+      const photoId = typeof job.options?.photo_asset_id === "string" ? job.options.photo_asset_id : null;
+      let sub: { request_id: string };
+      if (photoId) {
+        const a = await sb.from("studio_assets").select("object_key,kind,status").eq("id", photoId).eq("user_id", job.user_id).maybeSingle();
+        if (a.error) throw a.error;
+        if (!a.data || a.data.status !== "ready" || a.data.kind !== "image") throw new RecastError("source_missing");
+        const s = await sb.storage.from("studio-uploads").createSignedUrl(a.data.object_key, 7200);
+        if (s.error || !s.data) throw s.error ?? new RecastError("source_missing");
+        sub = await submitFromPhoto(deps, { prompt: characterPrompt(job.options), photoUrl: s.data.signedUrl, idempotencyKey: job.id });
+      } else sub = await submitCharacter(deps, { prompt: characterPrompt(job.options), idempotencyKey: job.id, count: Number(job.options?.count) === 4 ? 4 : 1 });
       requestId = sub.request_id;
       await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "Drawing your character" });
       log(`[character] submitted ${JSON.stringify({ job: job.id, request: requestId })}`);

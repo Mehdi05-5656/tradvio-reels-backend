@@ -253,9 +253,12 @@ export function quote(tool: string, options: any, asset: { kind: string; probe?:
     // An AI influencer is the same job built from traits: the prompt is composed here, never taken from the client.
     if (o.traits && typeof o.traits === "object") {
       const traits = cleanTraits(o.traits);
-      if (!Object.keys(traits).length) throw new StudioError("traits_required", "Pick at least one trait");
-      const built = influencerPrompt(traits, typeof o.prompt === "string" ? o.prompt : "");
-      return { tool, credits: count * costs.character_image, options: { mode: built.mode, prompt: built.prompt, count, kind: "influencer", traits, name: influencerName(traits) }, summary: `${count} ${count === 1 ? "image" : "images"} × ${costs.character_image}` };
+      // the person's own photo (the job's asset) carries the identity; the image-edit model draws one portrait from it
+      const photo = asset && asset.kind === "image" ? String((asset as any).id ?? "") : "";
+      if (!Object.keys(traits).length && !photo) throw new StudioError("traits_required", "Pick at least one trait");
+      const n = photo ? 1 : count;
+      const built = influencerPrompt(traits, typeof o.prompt === "string" ? o.prompt : "", !!photo);
+      return { tool, credits: n * costs.character_image, options: { mode: built.mode, prompt: built.prompt, count: n, kind: "influencer", traits, name: influencerName(traits), ...(photo ? { photo_asset_id: photo } : {}) }, summary: `${n} ${n === 1 ? "image" : "images"} × ${costs.character_image}` };
     }
     const prompt = typeof o.prompt === "string" ? o.prompt.trim().slice(0, 600) : "";
     if (prompt.length < 3) throw new StudioError("prompt_required", "Describe the character");
