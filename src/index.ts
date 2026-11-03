@@ -32,6 +32,7 @@ import { startCharacterLoop } from "./studio-characters.js";
 import { startInstrumentLoop } from "./studio-instruments.js";
 import { startClipsLoop } from "./studio-clips.js";
 import { startCaptionsLoop } from "./studio-caption-video.js";
+import { startKageLoop } from "./studio-kage.js";
 import { startImportLoop } from "./studio-library.js";
 import { PLANS } from "./studio.js";
 import { registerAssistant, startAssistantLoop } from "./studio-assistant.js";
@@ -114,6 +115,7 @@ async function main() {
   startInstrumentLoop(getSb); // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
   startClipsLoop(getSb, { plans: PLANS });
   startCaptionsLoop(getSb); // captions burned into videos; one at a time, never while clips are cutting
+  startKageLoop(getSb); // Kage remixes (Claude plans, the platform renders every shot at once); off until STUDIO_KAGE_ENABLED=true
   void import("./studio-youtube.js").then((m) => m.ffmpegReport()).then((r) => console.log(`[clips] ffmpeg: ${r}`)).catch(() => undefined); // Clips from long videos, one run at a time; needs ANTHROPIC_API_KEY plus ScrapeCreators or ElevenLabs
   startImportLoop(getSb, { plans: PLANS }); // bulk link imports into the library; needs SCRAPECREATORS_API_KEY
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
