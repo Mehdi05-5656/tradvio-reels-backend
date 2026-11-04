@@ -1315,7 +1315,7 @@ function clientProbe(p: any): Record<string, number> {
 /** The file name a saved copy gets: the upload's name without its extension, tidied, plus the tool. */
 export function downloadBase(assetName: string | null | undefined, tool: string): string {
   const stem = String(assetName ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  const word = ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render" } as Record<string, string>)[tool] ?? "copy";
+  const word = ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render", kage_motion: "kage", captions: "captions" } as Record<string, string>)[tool] ?? "copy";
   return `${stem || "clone8"}-${word}`;
 }
 

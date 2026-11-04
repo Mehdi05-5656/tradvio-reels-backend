@@ -17,8 +17,11 @@ export const KAGE_MOTION_STYLES = ["narrator", "creator"] as const;
 export const KAGE_MOTION_VOICES = ["naomi", "male"] as const; // naomi: KAGE_VOICE_ID on the worker; male: KAGE_VOICE_ID_MALE
 /** The name a person sees for each narrator. Jesse is the default: the only voice set up on the worker so far. */
 export const KAGE_MOTION_VOICE_NAMES: Record<(typeof KAGE_MOTION_VOICES)[number], string> = { naomi: "Naomi", male: "Jesse" };
-export const KAGE_MOTION_IMAGE_KINDS = ["product", "logo", "screenshot", "photo"] as const;
-export const KAGE_MOTION_LIMITS = { briefMin: 10, briefMax: 1200, secondsMin: 12, secondsMax: 20, secondsDefault: 16, images: 6, noteMax: 120 };
+/** What each piece of material is: pictures are logo, product, screenshot or photo; a video clip is footage, product
+ *  or screenshot (a screen recording). */
+export const KAGE_MOTION_IMAGE_KINDS = ["product", "logo", "screenshot", "photo", "footage"] as const;
+/** images: pictures and clips together; clips: of those, video clips (each is rendered playing, which costs render time). */
+export const KAGE_MOTION_LIMITS = { briefMin: 10, briefMax: 1200, secondsMin: 12, secondsMax: 20, secondsDefault: 16, images: 6, clips: 3, noteMax: 120 };
 
 /** Our cost for one film, in USD: Claude writing the script and authoring the film over several look-and-fix rounds
  *  (the bulk), the narration, and the render. Measured runs set the default; KAGE_MOTION_COST_USD overrides it. */
@@ -33,7 +36,8 @@ export function kageMotionCredits(env: Record<string, string | undefined>, plans
   return Math.max(1, costs.credit_floor ? creditsForCost(usd, costs.credit_floor, MARGIN_TARGET) : Math.ceil(usd * 100));
 }
 
-export type KageMotionImage = { asset_id: string; kind: (typeof KAGE_MOTION_IMAGE_KINDS)[number]; note: string | null };
+/** One piece of the person's material; `start` (seconds) is where a clip is taken from (the worker uses up to 12 s). */
+export type KageMotionImage = { asset_id: string; kind: (typeof KAGE_MOTION_IMAGE_KINDS)[number]; note: string | null; start?: number };
 export type KageMotionOptions = { brief: string; look: (typeof KAGE_MOTION_LOOKS)[number]; seconds: number; style: (typeof KAGE_MOTION_STYLES)[number]; voice: (typeof KAGE_MOTION_VOICES)[number]; images: KageMotionImage[]; rights_confirmed: boolean };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -47,40 +51,50 @@ export function parseKageMotionOptions(raw: any): KageMotionOptions {
   const s = Number(raw?.seconds);
   const seconds = Number.isFinite(s) ? Math.round(Math.min(KAGE_MOTION_LIMITS.secondsMax, Math.max(KAGE_MOTION_LIMITS.secondsMin, s))) : KAGE_MOTION_LIMITS.secondsDefault;
   const list = Array.isArray(raw?.images) ? raw.images : [];
-  if (list.length > KAGE_MOTION_LIMITS.images) throw new KageMotionError("kage_motion_images", `Up to ${KAGE_MOTION_LIMITS.images} images`);
+  if (list.length > KAGE_MOTION_LIMITS.images) throw new KageMotionError("kage_motion_images", `Up to ${KAGE_MOTION_LIMITS.images} pictures or clips`);
   const images: KageMotionImage[] = [];
   const seen = new Set<string>();
   for (const it of list) {
     const id = String(it?.asset_id ?? "");
-    if (!UUID_RE.test(id)) throw new KageMotionError("kage_motion_images", "One of the images is not in your library");
+    if (!UUID_RE.test(id)) throw new KageMotionError("kage_motion_images", "One of the pictures or clips is not in your library");
     if (seen.has(id.toLowerCase())) continue;
     seen.add(id.toLowerCase());
     const note = String(it?.note ?? "").replace(/\s+/g, " ").trim().slice(0, KAGE_MOTION_LIMITS.noteMax);
-    images.push({ asset_id: id, kind: pick(KAGE_MOTION_IMAGE_KINDS, it?.kind, "photo"), note: note || null });
+    const start = Number(it?.start);
+    images.push({ asset_id: id, kind: pick(KAGE_MOTION_IMAGE_KINDS, it?.kind, "photo"), note: note || null, ...(Number.isFinite(start) && start > 0 ? { start: Math.round(Math.min(start, 36_000) * 10) / 10 } : {}) });
   }
   const rights = raw?.rights_confirmed === true;
-  if (images.length && !rights) throw new KageMotionError("kage_motion_rights", "Confirm you own these images or have permission to use them", 400);
+  if (images.length && !rights) throw new KageMotionError("kage_motion_rights", "Confirm you own these pictures and clips or have permission to use them", 400);
   return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: pick(KAGE_MOTION_STYLES, raw?.style, "narrator"), voice: pick(KAGE_MOTION_VOICES, raw?.voice, "male"), images, rights_confirmed: rights };
 }
+
+const materialLine = (pictures: number, clips: number) => [pictures ? `${pictures} picture${pictures > 1 ? "s" : ""}` : "", clips ? `${clips} clip${clips > 1 ? "s" : ""}` : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
 
 export type KageMotionQuote = { tool: "kage_motion"; credits: number; options: KageMotionOptions & { cost_usd: number }; summary: string };
 
 export async function quoteKageMotion(sb: SupabaseClient, u: string, env: Record<string, string | undefined>, plans: PlanLike[], raw: any): Promise<KageMotionQuote> {
   if (!kageMotionEnabled(env)) throw new KageMotionError("kage_motion_unavailable", "Kage Motion is not switched on yet", 503);
   const options = parseKageMotionOptions(raw);
+  let clips = 0;
   if (options.images.length) {
     const ids = options.images.map((i) => i.asset_id);
-    const r = await sb.from("studio_assets").select("id,kind,status").eq("user_id", u).in("id", ids);
+    const r = await sb.from("studio_assets").select("id,kind,status,probe").eq("user_id", u).in("id", ids);
     if (r.error) throw r.error;
     const rows = new Map((r.data ?? []).map((a: any) => [String(a.id).toLowerCase(), a]));
-    for (const id of ids) {
-      const a: any = rows.get(id.toLowerCase());
-      if (!a) throw new KageMotionError("kage_motion_images", "One of the images is not in your library", 404);
-      if (a.kind !== "image") throw new KageMotionError("kage_motion_images", "Kage Motion takes pictures; use a still from that video instead");
-      if (a.status && a.status !== "ready") throw new KageMotionError("kage_motion_images", "One of the images is still uploading");
+    for (const it of options.images) {
+      const a: any = rows.get(it.asset_id.toLowerCase());
+      if (!a) throw new KageMotionError("kage_motion_images", "One of the pictures or clips is not in your library", 404);
+      if (a.kind !== "image" && a.kind !== "video") throw new KageMotionError("kage_motion_images", "Kage takes pictures and video clips");
+      if (a.status && a.status !== "ready") throw new KageMotionError("kage_motion_images", "One of the pictures or clips is still uploading");
+      if (a.kind === "video") {
+        clips++;
+        const dur = Number(a.probe?.duration);
+        if (it.start && Number.isFinite(dur) && dur > 0 && it.start >= dur) throw new KageMotionError("kage_motion_images", "A clip's start time is past its end");
+      } else delete it.start;
     }
+    if (clips > KAGE_MOTION_LIMITS.clips) throw new KageMotionError("kage_motion_images", `Up to ${KAGE_MOTION_LIMITS.clips} video clips per film`);
   }
   const credits = kageMotionCredits(env, plans);
   const look = options.look === "auto" ? "a look chosen for the brief" : `${options.look} look`;
-  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.seconds} s film · ${look} · narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}${options.images.length ? ` · ${options.images.length} image${options.images.length > 1 ? "s" : ""}` : ""}` };
+  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.seconds} s film · ${look} · narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}${materialLine(options.images.length - clips, clips)}` };
 }

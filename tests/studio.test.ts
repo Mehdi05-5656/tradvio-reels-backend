@@ -250,6 +250,7 @@ test("download names come from the upload's name and the tool", () => {
   assert.equal(downloadBase("v12044gd0000davhid7og65ts4lhv3b0.MP4", "blueprint"), "v12044gd0000davhid7og65ts4lhv3b0-copy");
   assert.equal(downloadBase("My clip (final) v2.mov", "blueprint"), "My-clip-final-v2-copy");
   assert.equal(downloadBase(null, "recast"), "clone8-recast");
+  assert.equal(downloadBase(null, "kage_motion"), "clone8-kage", "a Kage film is named as one");
   assert.equal(downloadBase("../../etc/passwd", "blueprint"), "etc-passwd-copy");
 });
 

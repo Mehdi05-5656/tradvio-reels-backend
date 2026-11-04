@@ -38,10 +38,24 @@ test("the quote is off unless switched on, checks ownership and kind, and prices
   assert.match(qn.summary, /narrated by Naomi/);
   assert.equal(q.options.cost_usd, 4.5);
   await assert.rejects(quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /not in your library/);
-  await assert.rejects(quoteKageMotion(fakeSb([{ id: A, kind: "video", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /takes pictures/);
-  const ok = await quoteKageMotion(fakeSb([{ id: A, kind: "image", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A, kind: "product" }], rights_confirmed: true });
-  assert.match(ok.summary, /1 image/);
+  await assert.rejects(quoteKageMotion(fakeSb([{ id: A, kind: "audio", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /pictures and video clips/);
+  const ok = await quoteKageMotion(fakeSb([{ id: A, kind: "image", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A, kind: "product", start: 4 }], rights_confirmed: true });
+  assert.match(ok.summary, /· 1 picture$/);
+  assert.equal(ok.options.images[0].start, undefined, "a picture has no start time");
   const dearer = kageMotionCredits({ ...env, KAGE_MOTION_COST_USD: "9" }, PLANS);
   assert.ok(dearer > q.credits);
   assert.equal(kageMotionCostUsd({ KAGE_MOTION_COST_USD: "-1" }), 4.5);
+});
+
+test("video clips: taken as footage, product or screen recordings, up to 3, with a start inside the clip", async () => {
+  const env = { STUDIO_KAGE_MOTION_ENABLED: "true" };
+  const C = "33333333-3333-4333-8333-333333333333", D = "44444444-4444-4444-8444-444444444444";
+  const rows = [{ id: A, kind: "image", status: "ready" }, { id: B, kind: "video", status: "ready", probe: { duration: 30 } }, { id: C, kind: "video", status: "ready", probe: { duration: 8 } }];
+  const q = await quoteKageMotion(fakeSb(rows), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A, kind: "logo" }, { asset_id: B, kind: "footage", start: 12.34 }, { asset_id: C, kind: "screenshot" }], rights_confirmed: true });
+  assert.match(q.summary, /· 1 picture · 2 clips$/);
+  assert.deepEqual(q.options.images.map((i) => [i.kind, i.start]), [["logo", undefined], ["footage", 12.3], ["screenshot", undefined]]);
+  await assert.rejects(quoteKageMotion(fakeSb(rows), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: C, kind: "footage", start: 9 }], rights_confirmed: true }), /past its end/);
+  const many = [B, C, D, "55555555-5555-4555-8555-555555555555"].map((id) => ({ id, kind: "video", status: "ready" }));
+  await assert.rejects(quoteKageMotion(fakeSb(many), "u", env, PLANS, { brief: "A launch film for our app", images: many.map((m) => ({ asset_id: m.id, kind: "footage" })), rights_confirmed: true }), /Up to 3 video clips/);
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", images: [{ asset_id: B, kind: "footage" }], rights_confirmed: true }).images[0].kind, "footage");
 });
