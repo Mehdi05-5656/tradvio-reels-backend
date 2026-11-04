@@ -2,7 +2,7 @@
 // The backend only quotes and queues: it validates the brief, checks that any images belong to the person (and that they
 // have the rights to use them), prices the film from its real cost at the house margin, and hands the options to
 // studio_create_job with tool 'kage_motion'. The film itself is made by the kage-motion worker (a separate Render
-// service) that claims 'kage_motion' jobs: script → Naomi's voice → author loop → render → studio-outputs.
+// service) that claims 'kage_motion' jobs: script → the narrator's voice → author loop → render → studio-outputs.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { MARGIN_TARGET, creditsForCost, studioCosts, type PlanLike } from "./studio-pricing.js";
 
@@ -13,10 +13,14 @@ export class KageMotionError extends Error {
 export const kageMotionEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_KAGE_MOTION_ENABLED === "true";
 
 export const KAGE_MOTION_LOOKS = ["auto", "swiss", "brutalist", "neon", "paper", "editorial"] as const;
-export const KAGE_MOTION_STYLES = ["narrator", "creator"] as const;
-export const KAGE_MOTION_VOICES = ["naomi", "male"] as const; // naomi: KAGE_VOICE_ID on the worker; male: KAGE_VOICE_ID_MALE
-/** The name a person sees for each narrator. Jesse is the default: the only voice set up on the worker so far. */
-export const KAGE_MOTION_VOICE_NAMES: Record<(typeof KAGE_MOTION_VOICES)[number], string> = { naomi: "Naomi", male: "Jesse" };
+/** One Kage (Nov 4 2026): every new film is kinetic (type acted out word by word, with cinematic shots of the
+ *  person's material). "narrator" and "creator" from older pages are still accepted and become kinetic. */
+export const KAGE_MOTION_STYLES = ["kinetic", "narrator", "creator"] as const;
+/** male: Jesse (KAGE_VOICE_ID_MALE on the worker); jessica and henry: pinned ElevenLabs ids in the worker's catalog
+ *  (they must be in the account's My Voices); naomi: KAGE_VOICE_ID on the worker (not set up yet, so the page hides her). */
+export const KAGE_MOTION_VOICES = ["male", "jessica", "henry", "naomi"] as const;
+/** The name a person sees for each narrator. Jesse is the default. */
+export const KAGE_MOTION_VOICE_NAMES: Record<(typeof KAGE_MOTION_VOICES)[number], string> = { male: "Jesse", jessica: "Jessica", henry: "Henry", naomi: "Naomi" };
 /** What each piece of material is: pictures are logo, product, screenshot or photo; a video clip is footage, product
  *  or screenshot (a screen recording). */
 export const KAGE_MOTION_IMAGE_KINDS = ["product", "logo", "screenshot", "photo", "footage"] as const;
@@ -65,7 +69,7 @@ export function parseKageMotionOptions(raw: any): KageMotionOptions {
   }
   const rights = raw?.rights_confirmed === true;
   if (images.length && !rights) throw new KageMotionError("kage_motion_rights", "Confirm you own these pictures and clips or have permission to use them", 400);
-  return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: pick(KAGE_MOTION_STYLES, raw?.style, "narrator"), voice: pick(KAGE_MOTION_VOICES, raw?.voice, "male"), images, rights_confirmed: rights };
+  return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: "kinetic", voice: pick(KAGE_MOTION_VOICES, raw?.voice, "male"), images, rights_confirmed: rights };
 }
 
 const materialLine = (pictures: number, clips: number) => [pictures ? `${pictures} picture${pictures > 1 ? "s" : ""}` : "", clips ? `${clips} clip${clips > 1 ? "s" : ""}` : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
