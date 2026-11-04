@@ -334,11 +334,34 @@ const toStatus = (s: string) => (STATUS_OK.has(s) ? s : s === "incomplete_expire
 
 type StripeLike = {
   checkout: { sessions: { create: (p: any) => Promise<{ url: string | null; id: string }> } };
+  /** optional in tests: without it a checkout falls back to customer_email (Stripe creates the customer on payment) */
+  customers?: { create: (p: any, o?: { idempotencyKey?: string }) => Promise<{ id: string }> };
   billingPortal: { sessions: { create: (p: any) => Promise<{ url: string }> } };
   subscriptions: { retrieve: (id: string) => Promise<any>; update?: (id: string, p: any) => Promise<any> };
 } & StripeTopUp & {
   webhooks: { constructEvent: (raw: string, sig: string, secret: string) => any };
 };
+
+/**
+ * The person's Stripe customer, made before any checkout so they are on the books in Stripe (with their email and
+ * user id) the moment they go to pay, abandoned or not, and so every checkout, top-up and pack is on the one customer.
+ * The id is kept on studio_customers. Creation is idempotent per user (Stripe's idempotency key), so a write that
+ * fails between Stripe and the row never leaves a second customer behind. Null when the Stripe client cannot create
+ * customers (tests) or the person has no email.
+ */
+async function ensureStripeCustomer(sb: SupabaseClient, stripe: StripeLike, userId: string, email: string | undefined, log: (s: string) => void): Promise<string | null> {
+  const have = await sb.from("studio_customers").select("stripe_customer_id").eq("user_id", userId).maybeSingle();
+  if (have.error) throw have.error;
+  if (have.data?.stripe_customer_id) return have.data.stripe_customer_id;
+  if (!stripe.customers?.create || !email) return null;
+  const c = await stripe.customers.create({ email, metadata: { user_id: userId } }, { idempotencyKey: `studio-customer-${userId}` });
+  // the row exists from sign-up; written in place (an insert only if it is somehow missing)
+  const w = await sb.from("studio_customers").update({ stripe_customer_id: c.id, updated_at: new Date().toISOString() }).eq("user_id", userId).select("user_id");
+  if (w.error) throw w.error;
+  if (!w.data?.length) { const ins = await sb.from("studio_customers").insert({ user_id: userId, stripe_customer_id: c.id }); if (ins.error) throw ins.error; }
+  log(`[studio] customer ${JSON.stringify({ user: userId, customer: c.id })}`);
+  return c.id;
+}
 
 async function userForCustomer(sb: SupabaseClient, customerId: string | null): Promise<string | null> {
   if (!customerId) return null;
@@ -644,11 +667,13 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // a real subscription changes plan in place (POST /api/studio/billing/change); a second one is never started
       if ((cust.data?.status === "active" || cust.data?.status === "trialing") && cust.data?.stripe_subscription_id) return res.status(409).json({ error: "already_subscribed", detail: "Change plans from the plan page" });
       const email = req.auth && "email" in req.auth ? req.auth.email : undefined;
+      // the person is a Stripe customer from the moment they go to pay (abandoned checkouts included)
+      const customer = await ensureStripeCustomer(sb, stripe(), u, email, log);
       const session = await stripe().checkout.sessions.create({
         mode: "subscription",
         line_items: [{ price, quantity: 1 }],
         // Subscription mode always creates a customer; customer_creation is only valid in payment mode.
-        ...(cust.data?.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email }),
+        ...(customer ? { customer } : { customer_email: email }),
         client_reference_id: u,
         metadata: { user_id: u, plan_id: plan.id, interval },
         subscription_data: { metadata: { user_id: u, plan_id: plan.id } },
@@ -709,11 +734,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       if (!cust.data || !["active", "trialing"].includes(cust.data.status)) return res.status(409).json({ error: "subscription_required", detail: "Credits are spent with a plan; pick a plan first" });
       const credits = topupCredits(usd, cust.data.plan_id);
       const email = req.auth && "email" in req.auth ? (req.auth as any).email : undefined;
+      const customer = await ensureStripeCustomer(sb, stripe(), u, email, log);
       const back = typeof req.body?.return_hash === "string" && /^#studio\/[a-z-]+$/.test(req.body.return_hash) ? req.body.return_hash : "#studio/account";
       const session = await stripe().checkout.sessions.create({
         mode: "payment",
         line_items: [{ quantity: 1, price_data: { currency: "usd", unit_amount: usd * 100, product_data: { name: `Clone8 credits: ${new Intl.NumberFormat("en-US").format(credits)}`, description: "Added on top of your plan; they carry over at renewal." } } }],
-        ...(cust.data.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email, customer_creation: "always" }),
+        ...(customer ? { customer } : { customer_email: email, customer_creation: "always" }),
         payment_intent_data: { setup_future_usage: "off_session", metadata: { user_id: u, topup: "1" } },
         client_reference_id: u,
         metadata: { user_id: u, topup: "1", usd: String(usd), credits: String(credits) },
@@ -762,10 +788,11 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // Credits are spendable only with an active plan; a pack bought without one would sit unusable.
       if (!cust.data || !["active", "trialing"].includes(cust.data.status)) return res.status(409).json({ error: "subscription_required" });
       const email = req.auth && "email" in req.auth ? (req.auth as any).email : undefined;
+      const customer = await ensureStripeCustomer(sb, stripe(), u, email, log);
       const session = await stripe().checkout.sessions.create({
         mode: "payment",
         line_items: [{ price, quantity: 1 }],
-        ...(cust.data.stripe_customer_id ? { customer: cust.data.stripe_customer_id } : { customer_email: email, customer_creation: "always" }),
+        ...(customer ? { customer } : { customer_email: email, customer_creation: "always" }),
         client_reference_id: u,
         metadata: { user_id: u, pack: pack.id, credits: String(pack.credits) },
         success_url: `${dashboard()}/#studio/account?pack=success`,

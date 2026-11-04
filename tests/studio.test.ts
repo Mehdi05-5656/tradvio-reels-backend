@@ -201,7 +201,19 @@ test("routes: gate, plans, checkout, webhook idempotency, jobs and assets", asyn
   stripe.created.splice(1);
   tables.studio_customers[0].stripe_customer_id = null;
   await s.call("POST", "/api/studio/checkout", { plan: "starter" }, { "x-test-user": ANN });
-  assert.deepEqual([stripe.created[1].customer, stripe.created[1].customer_email, "customer_creation" in stripe.created[1]], [undefined, "ann@synthetic.invalid", false], "a first-time buyer is identified by email only");
+  assert.deepEqual([stripe.created[1].customer, stripe.created[1].customer_email, "customer_creation" in stripe.created[1]], [undefined, "ann@synthetic.invalid", false], "without a customers API (this fake) a first-time buyer is identified by email only");
+  // with the customers API (production): the person becomes a Stripe customer before the checkout opens, once, with
+  // their email and user id, kept on the row; every later checkout is on that customer
+  const made: any[] = [];
+  (stripe as any).customers = { create: async (p: any, o: any) => { made.push({ p, o }); return { id: "cus_new" }; } };
+  tables.studio_customers[0].stripe_customer_id = null;
+  await s.call("POST", "/api/studio/checkout", { plan: "starter" }, { "x-test-user": ANN });
+  assert.deepEqual([made.length, made[0].p.email, made[0].p.metadata.user_id, made[0].o.idempotencyKey], [1, "ann@synthetic.invalid", ANN, `studio-customer-${ANN}`], "the customer is made with the email, the user id and an idempotency key");
+  assert.deepEqual([stripe.created.at(-1).customer, "customer_email" in stripe.created.at(-1)], ["cus_new", false], "the checkout opens on that customer");
+  assert.equal(tables.studio_customers[0].stripe_customer_id, "cus_new", "the id is kept on the row");
+  await s.call("POST", "/api/studio/checkout", { plan: "starter" }, { "x-test-user": ANN });
+  assert.equal(made.length, 1, "a second checkout reuses the customer");
+  delete (stripe as any).customers;
   tables.studio_customers[0].stripe_customer_id = "cus_1";
   assert.equal((await s.call("POST", "/api/studio/checkout", { plan: "gold" }, { "x-test-user": ANN })).body.error, "unknown_plan");
   assert.equal((await s.call("POST", "/api/studio/portal", {}, { "x-test-user": ANN })).body.url, "https://billing.stripe.com/cus_1");
