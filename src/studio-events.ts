@@ -3,6 +3,7 @@
 // Rows are buffered and written every few seconds in one insert. Recording never throws and never slows a request:
 // before the migration, or if a write fails, the rows are dropped with one log line.
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { phCapture } from "./posthog.js";
 
 export type EventKind = "claude" | "vendor" | "page" | "checkout" | "email" | "feature";
 export type StudioEvent = { user_id?: string | null; kind: EventKind; name: string; usd?: number | null; props?: Record<string, any> };
@@ -21,6 +22,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Record one event. Synchronous and safe to call anywhere. */
 export function recordEvent(e: StudioEvent) {
+  // product events (not internal costs, vendor calls, emails or page views) also go to PostHog when it is configured
+  if (e?.name && (e.kind === "checkout" || e.kind === "feature")) phCapture(e.user_id ?? null, e.kind === "checkout" ? "checkout_started" : e.name, { ...(e.props ?? {}), ...(e.kind === "checkout" ? { product: e.name, usd: e.usd ?? undefined } : {}) });
   if (!sink || !e?.kind || !e.name) return;
   if (buffer.length >= MAX_BUFFER) return;
   const usd = e.usd != null && Number.isFinite(Number(e.usd)) ? Math.round(Number(e.usd) * 1e6) / 1e6 : null;

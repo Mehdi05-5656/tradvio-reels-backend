@@ -16,6 +16,7 @@ import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio
 import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
 import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
+import { phCapture } from "./posthog.js";
 import { checkUnsubscribeToken } from "./studio-mail.js";
 import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
 import { recordEvent, recordPageViews } from "./studio-events.js";
@@ -874,6 +875,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         const hint = o.metadata?.user_id ?? o.client_reference_id;
         const who = typeof hint === "string" && UUID_RE.test(hint) ? hint : await userForCustomer(sb, customer).catch(() => null);
         void sendReceipt(sb, who, receipt, { env, log });
+        phCapture(who, "purchase", { amount_usd: receipt.amount_cents / 100, currency: receipt.currency, items: receipt.items.length, credits: receipt.credits ?? undefined, kind: event.type === "invoice.paid" ? "plan" : "one_off" });
       }
     } catch (e) { if (!res.headersSent) fail(res, e); }
   });
@@ -1132,6 +1134,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       if (r.error) { await dropCollection(); throw r.error; }
       if (collectionId) await sb.from("studio_collections").update({ job_id: r.data.id, status: "processing", note: null, updated_at: new Date().toISOString() }).eq("id", collectionId);
       log(`[studio] job ${JSON.stringify({ user: u, tool: q.tool, credits: q.credits, job: r.data?.id })}`);
+      phCapture(u, "job_started", { tool: q.tool, credits: q.credits });
       res.status(201).json({ job: r.data, quote: q, ...(collectionId ? { collection_id: collectionId } : {}) });
       void maybeAutoTopUp(sb, stripeOrNull(), u, log, "after a job").catch(() => undefined);
     } catch (e) { fail(res, e); }
