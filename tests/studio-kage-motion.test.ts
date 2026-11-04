@@ -19,6 +19,9 @@ test("brief is required, trimmed and bounded; defaults fill the rest", () => {
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "naomi" }).voice, "naomi");
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "jessica" }).voice, "jessica");
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "henry" }).voice, "henry");
+  assert.equal(o.aspect, "16:9", "widescreen by default (the reference films' shape)");
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", aspect: "9:16" }).aspect, "9:16");
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", aspect: "4:3" }).aspect, "16:9", "an unknown shape falls back to widescreen");
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", look: "nope" }).look, "auto");
 });
 
@@ -36,7 +39,7 @@ test("the quote is off unless switched on, checks ownership and kind, and prices
   const q = await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", look: "paper" });
   assert.equal(q.tool, "kage_motion");
   assert.ok(q.credits > 0 && Number.isInteger(q.credits));
-  assert.match(q.summary, /16 s film · paper look · narrated by Jesse/);
+  assert.match(q.summary, /16 s film · widescreen 16:9 · paper look · narrated by Jesse/);
   const qn = await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", voice: "naomi" });
   assert.match(qn.summary, /narrated by Naomi/);
   for (const [voice, name] of [["jessica", "Jessica"], ["henry", "Henry"]]) assert.match((await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", voice })).summary, new RegExp(`narrated by ${name}`));
