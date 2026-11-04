@@ -15,6 +15,8 @@ export const kageMotionEnabled = (env: Record<string, string | undefined> = proc
 export const KAGE_MOTION_LOOKS = ["auto", "swiss", "brutalist", "neon", "paper", "editorial"] as const;
 export const KAGE_MOTION_STYLES = ["narrator", "creator"] as const;
 export const KAGE_MOTION_VOICES = ["naomi", "male"] as const; // naomi: KAGE_VOICE_ID on the worker; male: KAGE_VOICE_ID_MALE
+/** The name a person sees for each narrator. Jesse is the default: the only voice set up on the worker so far. */
+export const KAGE_MOTION_VOICE_NAMES: Record<(typeof KAGE_MOTION_VOICES)[number], string> = { naomi: "Naomi", male: "Jesse" };
 export const KAGE_MOTION_IMAGE_KINDS = ["product", "logo", "screenshot", "photo"] as const;
 export const KAGE_MOTION_LIMITS = { briefMin: 10, briefMax: 1200, secondsMin: 12, secondsMax: 20, secondsDefault: 16, images: 6, noteMax: 120 };
 
@@ -58,7 +60,7 @@ export function parseKageMotionOptions(raw: any): KageMotionOptions {
   }
   const rights = raw?.rights_confirmed === true;
   if (images.length && !rights) throw new KageMotionError("kage_motion_rights", "Confirm you own these images or have permission to use them", 400);
-  return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: pick(KAGE_MOTION_STYLES, raw?.style, "narrator"), voice: pick(KAGE_MOTION_VOICES, raw?.voice, "naomi"), images, rights_confirmed: rights };
+  return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: pick(KAGE_MOTION_STYLES, raw?.style, "narrator"), voice: pick(KAGE_MOTION_VOICES, raw?.voice, "male"), images, rights_confirmed: rights };
 }
 
 export type KageMotionQuote = { tool: "kage_motion"; credits: number; options: KageMotionOptions & { cost_usd: number }; summary: string };
@@ -80,5 +82,5 @@ export async function quoteKageMotion(sb: SupabaseClient, u: string, env: Record
   }
   const credits = kageMotionCredits(env, plans);
   const look = options.look === "auto" ? "a look chosen for the brief" : `${options.look} look`;
-  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.seconds} s film · ${look} · narrated by Naomi${options.images.length ? ` · ${options.images.length} image${options.images.length > 1 ? "s" : ""}` : ""}` };
+  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.seconds} s film · ${look} · narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}${options.images.length ? ` · ${options.images.length} image${options.images.length > 1 ? "s" : ""}` : ""}` };
 }

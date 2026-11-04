@@ -11,10 +11,11 @@ test("brief is required, trimmed and bounded; defaults fill the rest", () => {
   assert.throws(() => parseKageMotionOptions({ brief: "x".repeat(1300) }), KageMotionError);
   const o = parseKageMotionOptions({ brief: "  A launch film   for our new app  " });
   assert.equal(o.brief, "A launch film for our new app");
-  assert.deepEqual([o.look, o.seconds, o.style, o.voice, o.images.length], ["auto", 16, "narrator", "naomi", 0]);
+  assert.deepEqual([o.look, o.seconds, o.style, o.voice, o.images.length], ["auto", 16, "narrator", "male", 0]);
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", seconds: 40, look: "neon", style: "creator", voice: "other" }).seconds, 20);
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "male" }).voice, "male");
-  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "other" }).voice, "naomi");
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "other" }).voice, "male");
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", voice: "naomi" }).voice, "naomi");
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", look: "nope" }).look, "auto");
 });
 
@@ -32,7 +33,9 @@ test("the quote is off unless switched on, checks ownership and kind, and prices
   const q = await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", look: "paper" });
   assert.equal(q.tool, "kage_motion");
   assert.ok(q.credits > 0 && Number.isInteger(q.credits));
-  assert.match(q.summary, /16 s film · paper look · narrated by Naomi/);
+  assert.match(q.summary, /16 s film · paper look · narrated by Jesse/);
+  const qn = await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", voice: "naomi" });
+  assert.match(qn.summary, /narrated by Naomi/);
   assert.equal(q.options.cost_usd, 4.5);
   await assert.rejects(quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /not in your library/);
   await assert.rejects(quoteKageMotion(fakeSb([{ id: A, kind: "video", status: "ready" }]), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }], rights_confirmed: true }), /takes pictures/);
