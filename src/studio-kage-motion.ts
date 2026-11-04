@@ -14,7 +14,7 @@ export const kageMotionEnabled = (env: Record<string, string | undefined> = proc
 
 export const KAGE_MOTION_LOOKS = ["auto", "swiss", "brutalist", "neon", "paper", "editorial"] as const;
 export const KAGE_MOTION_STYLES = ["narrator", "creator"] as const;
-export const KAGE_MOTION_VOICES = ["naomi"] as const;
+export const KAGE_MOTION_VOICES = ["naomi", "male"] as const; // naomi: KAGE_VOICE_ID on the worker; male: KAGE_VOICE_ID_MALE
 export const KAGE_MOTION_IMAGE_KINDS = ["product", "logo", "screenshot", "photo"] as const;
 export const KAGE_MOTION_LIMITS = { briefMin: 10, briefMax: 1200, secondsMin: 12, secondsMax: 20, secondsDefault: 16, images: 6, noteMax: 120 };
 
