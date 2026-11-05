@@ -16,14 +16,15 @@ export const KAGE_MOTION_LOOKS = ["auto", "swiss", "brutalist", "neon", "paper",
 /** One Kage (Nov 4 2026): every new film is kinetic (type acted out word by word, with cinematic shots of the
  *  person's material). "narrator" and "creator" from older pages are still accepted and become kinetic. */
 export const KAGE_MOTION_STYLES = ["kinetic", "narrator", "creator"] as const;
-/** male: Jesse (KAGE_VOICE_ID_MALE on the worker); jessica and henry: pinned ElevenLabs ids in the worker's catalog
+/** katana: the owner's own narrator, the default since Nov 5 2026 (shown as "Kage"); male: Jesse (KAGE_VOICE_ID_MALE on
+ *  the worker); jessica and henry: pinned ElevenLabs ids in the worker's catalog
  *  (they must be in the account's My Voices); naomi: KAGE_VOICE_ID on the worker (not set up yet, so the page hides her). */
-export const KAGE_MOTION_VOICES = ["male", "jessica", "henry", "naomi"] as const;
+export const KAGE_MOTION_VOICES = ["katana", "male", "jessica", "henry", "naomi"] as const;
 /** The film's frame: 16:9 landscape (1920×1080, the shape of the reference films; the default) or 9:16 vertical
  *  (1080×1920, for Reels, TikTok and Shorts). */
 export const KAGE_MOTION_ASPECTS = ["16:9", "9:16"] as const;
-/** The name a person sees for each narrator. Jesse is the default. */
-export const KAGE_MOTION_VOICE_NAMES: Record<(typeof KAGE_MOTION_VOICES)[number], string> = { male: "Jesse", jessica: "Jessica", henry: "Henry", naomi: "Naomi" };
+/** The name a person sees for each narrator. Kage (katana) is the default. */
+export const KAGE_MOTION_VOICE_NAMES: Record<(typeof KAGE_MOTION_VOICES)[number], string> = { katana: "Kage", male: "Jesse", jessica: "Jessica", henry: "Henry", naomi: "Naomi" };
 /** What each piece of material is: pictures are logo, product, screenshot or photo; a video clip is footage, product
  *  or screenshot (a screen recording). */
 export const KAGE_MOTION_IMAGE_KINDS = ["product", "logo", "screenshot", "photo", "footage"] as const;
@@ -72,7 +73,7 @@ export function parseKageMotionOptions(raw: any): KageMotionOptions {
   }
   const rights = raw?.rights_confirmed === true;
   if (images.length && !rights) throw new KageMotionError("kage_motion_rights", "Confirm you own these pictures and clips or have permission to use them", 400);
-  return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: "kinetic", voice: pick(KAGE_MOTION_VOICES, raw?.voice, "male"), aspect: pick(KAGE_MOTION_ASPECTS, raw?.aspect, "16:9"), images, rights_confirmed: rights };
+  return { brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: "kinetic", voice: pick(KAGE_MOTION_VOICES, raw?.voice, "katana"), aspect: pick(KAGE_MOTION_ASPECTS, raw?.aspect, "16:9"), images, rights_confirmed: rights };
 }
 
 const materialLine = (pictures: number, clips: number) => [pictures ? `${pictures} picture${pictures > 1 ? "s" : ""}` : "", clips ? `${clips} clip${clips > 1 ? "s" : ""}` : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
