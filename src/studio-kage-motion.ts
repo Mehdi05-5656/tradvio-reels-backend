@@ -80,9 +80,14 @@ const materialLine = (pictures: number, clips: number) => [pictures ? `${picture
 
 export type KageMotionQuote = { tool: "kage_motion"; credits: number; options: KageMotionOptions & { cost_usd: number }; summary: string };
 
+/** The person's own material (logo, product shots, screens, clips) in Kage films: paused since Nov 5 2026 (the owner:
+ *  films are made from the brief alone, like the reference); KAGE_MOTION_MATERIAL=on brings it back. Off, any
+ *  pictures or clips sent are dropped before anything is checked or charged. */
+export const kageMotionMaterialOn = (env: Record<string, string | undefined>) => env.KAGE_MOTION_MATERIAL === "on";
+
 export async function quoteKageMotion(sb: SupabaseClient, u: string, env: Record<string, string | undefined>, plans: PlanLike[], raw: any): Promise<KageMotionQuote> {
   if (!kageMotionEnabled(env)) throw new KageMotionError("kage_motion_unavailable", "Kage Motion is not switched on yet", 503);
-  const options = parseKageMotionOptions(raw);
+  const options = parseKageMotionOptions(kageMotionMaterialOn(env) ? raw : { ...raw, images: [], rights_confirmed: false });
   let clips = 0;
   if (options.images.length) {
     const ids = options.images.map((i) => i.asset_id);

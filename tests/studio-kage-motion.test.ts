@@ -36,7 +36,12 @@ test("images need valid ids and confirmed rights; duplicates collapse; kinds def
 
 test("the quote is off unless switched on, checks ownership and kind, and prices from cost at the margin", async () => {
   await assert.rejects(quoteKageMotion(fakeSb([]), "u", {}, PLANS, { brief: "A launch film for our app" }), /not switched on/);
-  const env = { STUDIO_KAGE_MOTION_ENABLED: "true" };
+  const env = { STUDIO_KAGE_MOTION_ENABLED: "true", KAGE_MOTION_MATERIAL: "on" };
+  // material paused (the default): pictures and clips are dropped before anything is checked, no rights needed
+  const off = await quoteKageMotion(fakeSb([]), "u", { STUDIO_KAGE_MOTION_ENABLED: "true" }, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A }] });
+  assert.equal(off.options.images.length, 0);
+  assert.equal(off.options.rights_confirmed, false);
+  assert.doesNotMatch(off.summary, /picture|clip/);
   const q = await quoteKageMotion(fakeSb([]), "u", env, PLANS, { brief: "A launch film for our app", look: "paper" });
   assert.equal(q.tool, "kage_motion");
   assert.ok(q.credits > 0 && Number.isInteger(q.credits));
@@ -56,7 +61,7 @@ test("the quote is off unless switched on, checks ownership and kind, and prices
 });
 
 test("video clips: taken as footage, product or screen recordings, up to 3, with a start inside the clip", async () => {
-  const env = { STUDIO_KAGE_MOTION_ENABLED: "true" };
+  const env = { STUDIO_KAGE_MOTION_ENABLED: "true", KAGE_MOTION_MATERIAL: "on" };
   const C = "33333333-3333-4333-8333-333333333333", D = "44444444-4444-4444-8444-444444444444";
   const rows = [{ id: A, kind: "image", status: "ready" }, { id: B, kind: "video", status: "ready", probe: { duration: 30 } }, { id: C, kind: "video", status: "ready", probe: { duration: 8 } }];
   const q = await quoteKageMotion(fakeSb(rows), "u", env, PLANS, { brief: "A launch film for our app", images: [{ asset_id: A, kind: "logo" }, { asset_id: B, kind: "footage", start: 12.34 }, { asset_id: C, kind: "screenshot" }], rights_confirmed: true });
