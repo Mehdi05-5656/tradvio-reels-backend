@@ -114,5 +114,5 @@ export async function quoteKageMotion(sb: SupabaseClient, u: string, env: Record
   }
   const credits = kageMotionCredits(env, plans);
   const look = options.look === "auto" ? "a look chosen for the brief" : `${options.look} look`;
-  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.preset ? `${kagePresetById(options.preset)?.name} · ` : ""}${options.variant ? `variant ${options.variant + 1} · ` : ""}${options.seconds} s film · ${options.aspect === "9:16" ? "vertical 9:16" : "widescreen 16:9"} · ${look} · narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}${materialLine(options.images.length - clips, clips)}` };
+  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.preset ? `${kagePresetById(options.preset)?.name} · ` : ""}${options.variant ? `variant ${options.variant + 1} · ` : ""}${options.seconds} s film · ${options.aspect === "9:16" ? "vertical 9:16" : "widescreen 16:9"} · ${look} · ${options.preset && kagePresetById(options.preset)?.sound === "music" ? "set to music, no narrator" : `narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}`}${materialLine(options.images.length - clips, clips)}` };
 }

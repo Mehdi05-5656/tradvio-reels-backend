@@ -92,3 +92,9 @@ test("the presets the picker shows match the worker's ids", () => {
   for (const id of ["brutal-promo", "the-bet", "product-drop", "landing-hero", "tiktok-hook", "luxe-editorial", "stat-attack", "app-walkthrough"]) assert.ok(ids.includes(id), id);
   for (const p of KAGE_PRESETS) assert.ok(KAGE_PRESET_CATEGORIES.some((c) => c.id === p.category), `${p.id} category`);
 });
+
+test("a music-only template says so in the quote", async () => {
+  const q = await quoteKageMotion(fakeSb([]), A, { STUDIO_KAGE_MOTION_ENABLED: "true" }, PLANS, { brief: "Northline heavyweight hoodie, 480 gsm brushed cotton, $120", preset: "landing-hero" });
+  assert.match(q.summary, /set to music, no narrator/);
+  assert.match(q.summary, /^Landing hero/);
+});
