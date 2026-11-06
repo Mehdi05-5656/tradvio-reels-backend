@@ -23,7 +23,7 @@ import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-caption-video.js";
 import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.js";
-import { KageMotionError, kageMotionEnabled, quoteKageMotion } from "./studio-kage-motion.js";
+import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
 import { StoryError, storiesEnabled, quoteStory } from "./studio-stories.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
@@ -561,7 +561,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   // Kage's templates (studio-kage-presets.ts): what the picker shows; previews are films Kage made itself
   app.get("/api/studio/kage-motion/presets", (_req, res) => {
     res.setHeader("Cache-Control", "private, max-age=300");
-    res.json({ categories: KAGE_PRESET_CATEGORIES, presets: KAGE_PRESETS, max_variants: KAGE_MAX_VARIANTS });
+    res.json({ categories: KAGE_PRESET_CATEGORIES, presets: KAGE_PRESETS, max_variants: KAGE_MAX_VARIANTS, material: kageMotionMaterialOn(env) });
   });
 
   app.get("/api/studio/trends", (_req, res) => {
