@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { KageMotionError, kageMotionCostUsd, kageMotionCredits, parseKageMotionOptions, quoteKageMotion } from "../src/studio-kage-motion.ts";
+import { KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "../src/studio-kage-presets.ts";
 
 const PLANS = [{ id: "starter", monthly_usd: 19, annual_usd_per_month: 15, credits: 1000 }, { id: "creator", monthly_usd: 49, annual_usd_per_month: 39, credits: 3000 }];
 const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
@@ -71,4 +72,23 @@ test("video clips: taken as footage, product or screen recordings, up to 3, with
   const many = [B, C, D, "55555555-5555-4555-8555-555555555555"].map((id) => ({ id, kind: "video", status: "ready" }));
   await assert.rejects(quoteKageMotion(fakeSb(many), "u", env, PLANS, { brief: "A launch film for our app", images: many.map((m) => ({ asset_id: m.id, kind: "footage" })), rights_confirmed: true }), /Up to 3 video clips/);
   assert.equal(parseKageMotionOptions({ brief: "A launch film for our app", images: [{ asset_id: B, kind: "footage" }], rights_confirmed: true }).images[0].kind, "footage");
+});
+
+test("a preset and a variant ride along; an unknown preset is refused", () => {
+  const o = parseKageMotionOptions({ brief: "A launch film for a hoodie made of heavyweight cotton", preset: "landing-hero", variant: 2 });
+  assert.equal(o.preset, "landing-hero");
+  assert.equal(o.variant, 2);
+  const plain = parseKageMotionOptions({ brief: "A launch film for a hoodie made of heavyweight cotton" });
+  assert.equal(plain.preset, undefined);
+  assert.equal(plain.variant, undefined);
+  assert.throws(() => parseKageMotionOptions({ brief: "A launch film for a hoodie made of heavyweight cotton", preset: "nope" }), /template/);
+  assert.equal(parseKageMotionOptions({ brief: "A launch film for a hoodie made of heavyweight cotton", variant: 9 }).variant, undefined);
+});
+
+test("the presets the picker shows match the worker's ids", () => {
+  const ids = KAGE_PRESETS.map((p) => p.id);
+  assert.equal(new Set(ids).size, ids.length);
+  // the worker's catalogue (kage-motion/src/kit/presets.ts) has the same ids
+  for (const id of ["brutal-promo", "the-bet", "product-drop", "landing-hero", "tiktok-hook", "luxe-editorial", "stat-attack", "app-walkthrough"]) assert.ok(ids.includes(id), id);
+  for (const p of KAGE_PRESETS) assert.ok(KAGE_PRESET_CATEGORIES.some((c) => c.id === p.category), `${p.id} category`);
 });
