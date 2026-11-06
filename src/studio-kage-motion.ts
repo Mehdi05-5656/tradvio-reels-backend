@@ -47,7 +47,7 @@ export function kageMotionCredits(env: Record<string, string | undefined>, plans
 
 /** One piece of the person's material; `start` (seconds) is where a clip is taken from (the worker uses up to 12 s). */
 export type KageMotionImage = { asset_id: string; kind: (typeof KAGE_MOTION_IMAGE_KINDS)[number]; note: string | null; start?: number };
-export type KageMotionOptions = { brief: string; look: (typeof KAGE_MOTION_LOOKS)[number]; seconds: number; style: (typeof KAGE_MOTION_STYLES)[number]; voice: (typeof KAGE_MOTION_VOICES)[number]; aspect: (typeof KAGE_MOTION_ASPECTS)[number]; images: KageMotionImage[]; rights_confirmed: boolean; /** a preset id (studio-kage-presets.ts) */ preset?: string; /** which variant of a set (its angle) */ variant?: number };
+export type KageMotionOptions = { brief: string; look: (typeof KAGE_MOTION_LOOKS)[number]; seconds: number; style: (typeof KAGE_MOTION_STYLES)[number]; voice: (typeof KAGE_MOTION_VOICES)[number]; aspect: (typeof KAGE_MOTION_ASPECTS)[number]; images: KageMotionImage[]; rights_confirmed: boolean; /** a preset id (studio-kage-presets.ts) */ preset?: string; /** which variant of a set (its angle) */ variant?: number; /** a reference video in the person's library: the film is made in its language */ reference?: string };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const pick = <T extends readonly string[]>(xs: T, v: unknown, d: T[number]): T[number] => (xs as readonly string[]).includes(String(v ?? "")) ? (String(v) as T[number]) : d;
@@ -76,9 +76,11 @@ export function parseKageMotionOptions(raw: any): KageMotionOptions {
   if (images.length && !rights) throw new KageMotionError("kage_motion_rights", "Confirm you own these pictures and clips or have permission to use them", 400);
   const preset = raw?.preset == null || raw?.preset === "" ? undefined : kagePresetById(raw.preset)?.id;
   if (raw?.preset && !preset) throw new KageMotionError("kage_motion_preset", "That template is not available");
+  const ref = raw?.reference == null || raw?.reference === "" ? undefined : String(raw.reference);
+  if (ref && !UUID_RE.test(ref)) throw new KageMotionError("kage_motion_reference", "The reference video is not in your library");
   const v = Number(raw?.variant);
   const variant = Number.isInteger(v) && v > 0 && v < 5 ? v : undefined;
-  return { ...(preset ? { preset } : {}), ...(variant ? { variant } : {}), brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: "kinetic", voice: pick(KAGE_MOTION_VOICES, raw?.voice, "katana"), aspect: pick(KAGE_MOTION_ASPECTS, raw?.aspect, "16:9"), images, rights_confirmed: rights };
+  return { ...(ref ? { reference: ref } : preset ? { preset } : {}), ...(variant ? { variant } : {}), brief, look: pick(KAGE_MOTION_LOOKS, raw?.look, "auto"), seconds, style: "kinetic", voice: pick(KAGE_MOTION_VOICES, raw?.voice, "katana"), aspect: pick(KAGE_MOTION_ASPECTS, raw?.aspect, "16:9"), images, rights_confirmed: rights };
 }
 
 const materialLine = (pictures: number, clips: number) => [pictures ? `${pictures} picture${pictures > 1 ? "s" : ""}` : "", clips ? `${clips} clip${clips > 1 ? "s" : ""}` : ""].filter(Boolean).map((x) => ` · ${x}`).join("");
@@ -112,7 +114,15 @@ export async function quoteKageMotion(sb: SupabaseClient, u: string, env: Record
     }
     if (clips > KAGE_MOTION_LIMITS.clips) throw new KageMotionError("kage_motion_images", `Up to ${KAGE_MOTION_LIMITS.clips} video clips per film`);
   }
+  if (options.reference) {
+    const r = await sb.from("studio_assets").select("id,kind,status").eq("user_id", u).in("id", [options.reference]);
+    if (r.error) throw r.error;
+    const a: any = (r.data ?? [])[0];
+    if (!a) throw new KageMotionError("kage_motion_reference", "The reference video is not in your library", 404);
+    if (a.kind !== "video") throw new KageMotionError("kage_motion_reference", "The reference must be a video");
+    if (a.status && a.status !== "ready") throw new KageMotionError("kage_motion_reference", "The reference video is still uploading");
+  }
   const credits = kageMotionCredits(env, plans);
   const look = options.look === "auto" ? "a look chosen for the brief" : `${options.look} look`;
-  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.preset ? `${kagePresetById(options.preset)?.name} · ` : ""}${options.variant ? `variant ${options.variant + 1} · ` : ""}${options.seconds} s film · ${options.aspect === "9:16" ? "vertical 9:16" : "widescreen 16:9"} · ${look} · ${options.preset && kagePresetById(options.preset)?.sound === "music" ? "set to music, no narrator" : `narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}`}${materialLine(options.images.length - clips, clips)}` };
+  return { tool: "kage_motion", credits, options: { ...options, cost_usd: kageMotionCostUsd(env) }, summary: `${options.reference ? "In the style of your video · " : options.preset ? `${kagePresetById(options.preset)?.name} · ` : ""}${options.variant ? `variant ${options.variant + 1} · ` : ""}${options.seconds} s film · ${options.aspect === "9:16" ? "vertical 9:16" : "widescreen 16:9"} · ${look} · ${options.preset && kagePresetById(options.preset)?.sound === "music" ? "set to music, no narrator" : `narrated by ${KAGE_MOTION_VOICE_NAMES[options.voice]}`}${materialLine(options.images.length - clips, clips)}` };
 }

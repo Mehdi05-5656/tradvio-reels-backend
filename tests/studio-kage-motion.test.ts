@@ -98,3 +98,12 @@ test("a music-only template says so in the quote", async () => {
   assert.match(q.summary, /set to music, no narrator/);
   assert.match(q.summary, /^Landing hero/);
 });
+
+test("a reference video replaces the template and is checked in the library", async () => {
+  const o = parseKageMotionOptions({ brief: "A launch film for a hoodie made of heavyweight cotton", preset: "landing-hero", reference: A });
+  assert.equal(o.reference, A); assert.equal(o.preset, undefined, "the reference stands in for the template");
+  assert.throws(() => parseKageMotionOptions({ brief: "A launch film for a hoodie made of heavyweight cotton", reference: "nope" }), /library/);
+  const q = await quoteKageMotion(fakeSb([{ id: A, kind: "video", status: "ready" }]), A, { STUDIO_KAGE_MOTION_ENABLED: "true" }, PLANS, { brief: "A launch film for a hoodie made of heavyweight cotton", reference: A });
+  assert.match(q.summary, /^In the style of your video/);
+  await assert.rejects(quoteKageMotion(fakeSb([{ id: A, kind: "image", status: "ready" }]), A, { STUDIO_KAGE_MOTION_ENABLED: "true" }, PLANS, { brief: "A launch film for a hoodie made of heavyweight cotton", reference: A }), /must be a video/);
+});
