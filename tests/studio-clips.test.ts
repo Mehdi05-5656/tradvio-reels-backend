@@ -579,3 +579,18 @@ test("the reading is reserved at the busy-video rate and settled at the video's 
   // size unknown: what was reserved
   assert.equal(settledAnalysis(PLANS as any, busy, { seconds: 1348, length: "standard", env, videoBytes: 0 }), busy.analysis);
 });
+
+test("a video whose best is 720 lines is kept for both a vertical (1080) and an original-shape (720) run", async () => {
+  const { mkdtemp } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const cacheDir = await mkdtemp(join(tmpdir(), "clips-cache-test-"));
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" }, { id: "col2", user_id: U, status: "processing" });
+  let downloads = 0;
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_CACHE_GB: "6" }, cacheDir, plans: PLANS, log: () => {}, meta: META, lines: async () => 720,
+    download: async (_u: string, target: string) => { downloads++; const { writeFile } = await import("node:fs/promises"); await writeFile(target, "mp4 bytes"); },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }),
+    choose, cut: async (_c: any, m: any) => ({ asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }) };
+  const url = "https://www.youtube.com/watch?v=uGjFDMPN3g0";
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800, format: "vertical" }) as any), "done");
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800, format: "original", collection_id: "col2" }, { id: "job2" }) as any), "done");
+  assert.equal(downloads, 1);
+});

@@ -267,6 +267,8 @@ export type ClipsDeps = {
   cut?: (ctx: CutCtx, m: Moment) => Promise<CutResult>;
   frame?: (input: TrackInput) => Promise<TrackRead[]>;
   download?: (url: string, target: string, maxHeight: number, signal?: AbortSignal) => Promise<void>;
+  /** the height in lines of a local video file (ffprobe) */
+  lines?: (file: string) => Promise<number>;
   /** where downloaded YouTube videos are kept for reuse (default: a folder in the temp directory) */
   cacheDir?: string;
   /** whether this server can take on another run now (studio-capacity roomForAnother) */
@@ -1133,6 +1135,10 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         throw e;
       }
       if (key) await keepVideo(cdir, key, file, env).catch((e: any) => log(`[clips] not kept ${job.id}: ${String(e?.message ?? e).slice(0, 120)}`));
+      // a 1080 request that came back at 720 lines or fewer is the video's best: it is also what a 720 request gets
+      // (Nov 7 2026: an "original" run of a 720p video downloaded the same 211 MB again under the other name)
+      if (key && height > 720) { const lines = await (deps.lines ?? (async (f: string) => (await probeLocal(f)).h))(file).catch(() => 0); const low = videoCacheKey(o.url, 720, language);
+        if (lines > 0 && lines <= 720 && low) await keepVideo(cdir, low, file, env).catch(() => undefined); }
       return file;
     })();
     if (key) inFlight.set(key, run);
