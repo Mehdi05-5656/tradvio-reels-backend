@@ -1107,7 +1107,7 @@ export async function hydrateJobs(sb: SupabaseClient, u: string, ids: string[]) 
     const posters = j.outputs.map((o: any) => o.poster_key).filter(Boolean);
     const signed = posters.length ? await sb.storage.from("studio-outputs").createSignedUrls(posters, 900) : { data: [], error: null };
     const urls = new Map(((signed.data ?? []) as any[]).map((s) => [s.path, s.signedUrl]));
-    const base = downloadBase(j.asset_name, j.tool);
+    const base = downloadBase(j.asset_name, j.tool, j);
     const files = await Promise.all(j.outputs.map((o: any, i: number) => sb.storage.from("studio-outputs").createSignedUrl(o.key, 900, { download: `${base}-${String(o.index ?? i + 1).padStart(2, "0")}.${String(o.key).split(".").pop()}` })));
     j.outputs = j.outputs.map((o: any, i: number) => ({ ...o, url: files[i].data?.signedUrl ?? null, poster_url: o.poster_key ? urls.get(o.poster_key) ?? null : null }));
   }

@@ -1215,7 +1215,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         if (signed.error) throw signed.error;
         const urls = new Map((signed.data ?? []).map((s: any) => [s.path, s.signedUrl]));
         // Each video is signed on its own so the browser saves it under a readable name.
-        const base = downloadBase(job.asset_name, job.tool);
+        const base = downloadBase(job.asset_name, job.tool, job);
         const videos = await Promise.all(job.outputs.map((o: any, i: number) => sb.storage.from("studio-outputs").createSignedUrl(o.key, 900, { download: `${base}-${String(o.index ?? i + 1).padStart(2, "0")}.${String(o.key).split(".").pop() || "mp4"}` })));
         job.outputs = job.outputs.map((o: any, i: number) => ({ ...o, url: videos[i].data?.signedUrl ?? null, poster_url: o.poster_key ? urls.get(o.poster_key) ?? null : null }));
       }
@@ -1352,9 +1352,12 @@ function clientProbe(p: any): Record<string, number> {
 }
 
 /** The file name a saved copy gets: the upload's name without its extension, tidied, plus the tool. */
-export function downloadBase(assetName: string | null | undefined, tool: string): string {
-  const stem = String(assetName ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  const word = ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render", kage_motion: "kage", captions: "captions" } as Record<string, string>)[tool] ?? "copy";
+export function downloadBase(assetName: string | null | undefined, tool: string, job?: { options?: any; outputs?: any[] }): string {
+  // a story is named after its title ("Folding-Paper-42-Times-story"), not "clone8-kage"
+  const story = job?.options?.style === "story" || !!job?.options?.story;
+  const name = story ? String(job?.outputs?.[0]?.title ?? "") || assetName : assetName;
+  const stem = String(name ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  const word = story ? "story" : ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render", kage_motion: "kage", captions: "captions" } as Record<string, string>)[tool] ?? "copy";
   return `${stem || "clone8"}-${word}`;
 }
 
