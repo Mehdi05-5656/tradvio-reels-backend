@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
-  likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
+  likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, settledAnalysis, clipsPrice, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
   timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING,
 } from "../src/studio-clips.js";
@@ -184,8 +184,10 @@ test("prices: reading by the minute plus each clip (about 2-2.5x OpusClip), safe
   const floor = creditValueFloor(PLANS);
   const env = { ...ENV, STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "6.25" };
   const yt = clipsPrice(PLANS, { seconds: 900, platform: "youtube", length: "standard", env });
-  assert.deepEqual(yt, { analysis: 75, per_clip: 5, lite: 15 }, "15 minutes of YouTube: 5 a minute, 5 a clip");
-  assert.equal(clipsCharge(yt, 10), 125);
+  // (reserved at the busy-video download rate, Nov 7 2026; a talk settles at its 5 a minute: see the settlement test)
+  assert.deepEqual(yt, { analysis: 131, per_clip: 5, lite: 15 }, "15 minutes of YouTube reserved at the busy rate, 5 a clip");
+  assert.equal(settledAnalysis(PLANS, yt, { seconds: 900, length: "standard", env, videoBytes: 900 * 105_000 }), 75, "a talk settles at 5 a minute");
+  assert.equal(clipsCharge(yt, 10), 181);
   const up = clipsPrice(PLANS, { seconds: 900, platform: "upload", length: "minute", env });
   assert.deepEqual([up.analysis, up.per_clip], [30, 8], "uploads 2 a minute; 1 min+ and long clips 8 each");
   assert.equal(clipsPrice(PLANS, { seconds: 150, platform: "upload", length: "short", env }).analysis, CLIP_RATES.analysis_min, "never under 10 to read");
@@ -563,4 +565,17 @@ test("kept videos: fresh ones are found, the oldest go when over budget or a day
   assert.ok(left.includes("c.mp4"), "the one just kept stays");
   assert.ok(!left.includes("old.mp4"), "the day-old one is gone");
   assert.ok(left.length <= 2, `trimmed to the budget: ${left}`);
+});
+
+test("the reading is reserved at the busy-video rate and settled at the video's real size, never above what was reserved", () => {
+  const env = { ...ENV, STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "6.25" };
+  const busy = clipsPrice(PLANS as any, { seconds: 1348, platform: "youtube", length: "standard", env });
+  const talk = clipsPrice(PLANS as any, { seconds: 844, platform: "youtube", length: "standard", env });
+  // a 14-min talk at 105 kB/s: charged about what it was before the busy rate (its minutes, not its bytes)
+  const t = settledAnalysis(PLANS as any, talk, { seconds: 844, length: "standard", env, videoBytes: 844 * 105_000 });
+  assert.ok(t < talk.analysis, `${t} < ${talk.analysis}`);
+  // a 22-min busy video at 222 kB/s: pays at most what was reserved
+  assert.equal(settledAnalysis(PLANS as any, busy, { seconds: 1348, length: "standard", env, videoBytes: 1348 * 222_461 }), busy.analysis);
+  // size unknown: what was reserved
+  assert.equal(settledAnalysis(PLANS as any, busy, { seconds: 1348, length: "standard", env, videoBytes: 0 }), busy.analysis);
 });

@@ -54,9 +54,11 @@ export const CLIP_COST = {
   choose_usd_per_hour: 0.5,               // Claude Opus over the transcript and its signals, high effort; kept wide
   render_usd_per_clip: 0.004,             // web-service CPU and the stored file
   lookup_usd: 2 * OVERHEAD.scrapecreators_usd_per_call,
-  // the whole video comes through the proxy once (the smallest 1080p version): a TED talk measured 96 kB/s in H.264 and
-  // 105 kB/s in VP9 on Render (Oct 31 2026), kept at 105; 720p for videos over an hour, about 55%
-  full_bytes_per_second: 105_000, full_bytes_per_second_long: 60_000, long_after_seconds: 3600,
+  // the whole video comes through the proxy once (the smallest 1080p version). Measured on live runs Nov 1-7 2026: talks
+  // 103-105 kB/s, vlogs and busy videos 134-222 kB/s (a 22-min MrBeast video 222, which left an 8% margin at the old
+  // 105); 720p over an hour 89 kB/s (a 2.4 h stream; the old figure was 60). Priced at the busy end, so a busy video
+  // keeps the margin; a talk is still priced by its minutes (the per-minute rate is higher than its bytes)
+  full_bytes_per_second: 210_000, full_bytes_per_second_long: 95_000, long_after_seconds: 3600,
   clip_bytes_per_second: 200_000,         // a short 1080p video with sound (imports): measured 133-166 kB/s, kept with margin
 };
 export const FRAME_MODEL = "claude-haiku-5-5";
@@ -83,12 +85,12 @@ export function countCap(seconds: number, length: ClipLength): number {
   return Math.max(1, Math.min(CLIP_LIMITS.max_clips, Math.floor(seconds / CLIP_LENGTHS[length].target)));
 }
 /** Reading the video, in dollars: the download through the proxy (YouTube), speech-to-text, the choosing. */
-export function analysisUsd(p: { seconds: number; platform: "youtube" | "upload"; download: boolean; transcribe: boolean; choose: boolean; env: Record<string, string | undefined> }): number {
+export function analysisUsd(p: { seconds: number; platform: "youtube" | "upload"; download: boolean; transcribe: boolean; choose: boolean; env: Record<string, string | undefined>; bytesPerSecond?: number }): number {
   const hours = p.seconds / 3600;
   let usd = 0;
   if (p.choose) usd += hours * CLIP_COST.choose_usd_per_hour;
   if (p.transcribe) usd += hours * CLIP_COST.transcribe_usd_per_hour;
-  if (p.platform === "youtube") usd += CLIP_COST.lookup_usd + (p.download ? (p.seconds * (p.seconds > CLIP_COST.long_after_seconds ? CLIP_COST.full_bytes_per_second_long : CLIP_COST.full_bytes_per_second) / 1e9) * proxyUsdPerGb(p.env) : 0);
+  if (p.platform === "youtube") usd += CLIP_COST.lookup_usd + (p.download ? (p.seconds * (p.bytesPerSecond ?? (p.seconds > CLIP_COST.long_after_seconds ? CLIP_COST.full_bytes_per_second_long : CLIP_COST.full_bytes_per_second)) / 1e9) * proxyUsdPerGb(p.env) : 0);
   return usd;
 }
 /** One clip, in dollars: framing at its goal's upper end, rendering and storing. */
@@ -97,11 +99,11 @@ const credits = (usd: number, floor: number, margin: number) => Math.ceil(usd / 
 /** A run's price: `analysis` once (reading the video), `per_clip` for each clip made; `lite` is reading without the
  *  download (YouTube refused our servers: the moments are chosen from YouTube's captions and the file is asked for). */
 export type ClipsPrice = { analysis: number; per_clip: number; lite: number };
-export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "youtube" | "upload"; length: ClipLength; env: Record<string, string | undefined>; download?: boolean }): ClipsPrice {
+export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "youtube" | "upload"; length: ClipLength; env: Record<string, string | undefined>; download?: boolean; bytesPerSecond?: number }): ClipsPrice {
   const floor = creditValueFloor(plans), minutes = Math.max(1, Math.ceil(p.seconds / 60));
   const download = p.platform === "youtube" && p.download !== false;
   const transcribe = p.platform === "upload" || !!p.env.ELEVENLABS_API_KEY;
-  const usd = analysisUsd({ seconds: p.seconds, platform: p.platform, download, transcribe: transcribe && (p.platform === "upload" || download), choose: true, env: p.env });
+  const usd = analysisUsd({ seconds: p.seconds, platform: p.platform, download, transcribe: transcribe && (p.platform === "upload" || download), choose: true, env: p.env, bytesPerSecond: p.bytesPerSecond });
   const lite = analysisUsd({ seconds: p.seconds, platform: p.platform, download: false, transcribe: false, choose: true, env: p.env });
   const rate = p.platform === "youtube" && download ? CLIP_RATES.youtube_per_minute : p.platform === "youtube" ? CLIP_RATES.lite_per_minute : CLIP_RATES.upload_per_minute;
   return {
@@ -109,6 +111,14 @@ export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "y
     per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env), floor, CLIPS_SAFETY_MARGIN.clip)),
     lite: Math.max(minutes * CLIP_RATES.lite_per_minute, credits(lite, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.lite_min),
   };
+}
+/** Reading a YouTube video, settled on its real size: the quote reserves at the busy-video rate (CLIP_COST), and when the
+ *  run settles the reading is charged for the bytes the video really has, never more than was reserved (a talk at
+ *  ~105 kB/s pays what it always did; a busy video at ~220 kB/s pays its cost). */
+export function settledAnalysis(plans: PlanLike[], price: ClipsPrice, p: { seconds: number; length: ClipLength; env: Record<string, string | undefined>; videoBytes: number }): number {
+  if (!(p.videoBytes > 0) || !(p.seconds > 0)) return price.analysis;
+  const real = clipsPrice(plans, { seconds: p.seconds, platform: "youtube", length: p.length, env: p.env, bytesPerSecond: p.videoBytes / p.seconds }).analysis;
+  return Math.min(price.analysis, real);
 }
 /** What a run is charged: reading once (unless it only cuts moments chosen earlier) and each clip made. */
 export const clipsCharge = (price: ClipsPrice, made: number, o: { analysis?: boolean } = {}) => (o.analysis === false ? 0 : price.analysis) + price.per_clip * Math.max(0, made);
@@ -1301,8 +1311,10 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     };
     await worker();
     if (!made.length) throw new ClipsError(full ? (full as ClipsError).code : "clips_cut_failed", full ? (full as ClipsError).message : "None of the clips could be cut.", full ? 409 : 502, !full);
-    // D. Settle on what was made: reading once, and each clip made. What was reserved for clips not made goes back.
-    const charged = Math.min(job.credits_reserved, clipsCharge(price, made.length, { analysis: !o.plan_from }));
+    // D. Settle on what was made: reading once (at the video's real size), and each clip made. What was reserved for
+    //    clips not made, or for a bigger video than this one, goes back.
+    const settled = youtube && ytFile && plans.length ? { ...price, analysis: settledAnalysis(plans, price, { seconds: p.seconds, length, env, videoBytes: await stat(ytFile).then((x) => x.size).catch(() => 0) }) } : price;
+    const charged = Math.min(job.credits_reserved, clipsCharge(settled, made.length, { analysis: !o.plan_from }));
     const asked = Number(o.count ?? o.max_clips) || p.moments.length;
     const word = (n: number) => `${n} ${n === 1 ? "clip" : "clips"}`;
     const note = full ? `${made.length} of ${p.moments.length} clips made: ${(full as ClipsError).message}. You were charged for the ${word(made.length)} made; the rest went back.`
