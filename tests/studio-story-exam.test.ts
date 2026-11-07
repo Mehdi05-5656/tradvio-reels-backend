@@ -31,8 +31,13 @@ test("story exam: only the Studio admin may start or read a run; a second run is
     const post = (who: string) => fetch(`http://127.0.0.1:${port}/api/studio/admin/story-exam`, { method: "POST", headers: { "content-type": "application/json", "x-who": who }, body: "{}" });
     assert.equal((await post("someone")).status, 404, "not the admin: nothing there");
     const ok = await post("admin"); assert.equal(ok.status, 200); const body: any = await ok.json();
-    assert.match(body.run, /^exam-/); assert.equal(body.topics.length, 8);
+    assert.match(body.run, /^exam-/); assert.equal(body.topics.length, 8); assert.equal(body.mode, "full"); assert.equal(body.jobs.length, 3, "three lanes start at once");
     assert.equal(calls[0].fn, "studio_create_job"); assert.equal(calls[0].args.p_user, "u-admin"); assert.equal(calls[0].args.p_options.exam.index, 0); assert.equal(calls[0].args.p_options.story.topic, EXAM_TOPICS[0]);
+    assert.deepEqual(calls.map((c) => c.args.p_options.story.topic), [EXAM_TOPICS[0], EXAM_TOPICS[1], EXAM_TOPICS[2]]); assert.equal(calls[2].args.p_options.exam.lanes, 3);
+    assert.ok(!calls[0].args.p_options.story.stage, "a full exam makes the films");
+    calls.length = 0;
+    const quick = await fetch(`http://127.0.0.1:${port}/api/studio/admin/story-exam`, { method: "POST", headers: { "content-type": "application/json", "x-who": "admin" }, body: JSON.stringify({ mode: "quick", lanes: 4 }) });
+    assert.equal(quick.status, 200); assert.equal(calls.length, 4); assert.equal(calls[0].args.p_options.story.stage, "animatic", "a quick exam stops at the animatic"); assert.equal(calls[0].args.p_options.exam.mode, "quick");
     going = [{ id: "j", options: { exam: { run: "exam-old" } } }];
     const busy = await post("admin"); assert.equal(busy.status, 409); assert.equal(((await busy.json()) as any).run, "exam-old");
   } finally { srv.close(); }

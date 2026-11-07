@@ -57,13 +57,21 @@ export function registerStoryExam(app: Express, sbFn: () => SupabaseClient, deps
       if (going.error) throw going.error;
       if (going.data?.length && req.body?.force !== true) return res.status(409).json({ error: "exam_running", run: going.data[0].options?.exam?.run ?? null });
       const topics = Array.isArray(req.body?.topics) && req.body.topics.length ? req.body.topics.map((t: unknown) => String(t).slice(0, 200)).slice(0, 12) : [...EXAM_TOPICS];
-      const q = quoteStory(env, deps.plans, { topic: topics[0], seconds: Number(req.body?.seconds) || 65 });
+      // quick: written and checked on the animatic only (minutes); full: made and rendered (no remake at the gate)
+      const mode = req.body?.mode === "quick" ? "quick" : "full";
+      const lanes = Math.max(1, Math.min(4, Math.round(Number(req.body?.lanes) || 3)));
+      const q = quoteStory(env, deps.plans, { topic: topics[0], seconds: Number(req.body?.seconds) || 65, ...(mode === "quick" ? { stage: "script" } : {}) });
       const run = examRunId();
-      const options = { ...q.options, via: "admin", exam: { run, index: 0, topics } };
-      const r = await sb.rpc("studio_create_job", { p_user: user, p_tool: "kage_motion", p_asset: null, p_options: options, p_credits: q.credits });
-      if (r.error) throw r.error;
-      console.log(`[exam] ${run} started: ${topics.length} films, ${q.credits} credits each`);
-      res.json({ run, topics, credits_per_film: q.credits, job: (r.data as any)?.id ?? r.data });
+      const jobs: string[] = [];
+      for (let i = 0; i < Math.min(lanes, topics.length); i++) {
+        const story = { ...q.options.story, topic: topics[i], ...(mode === "quick" ? { stage: "animatic" } : {}) };
+        const options = { ...q.options, brief: topics[i], story, via: "admin", exam: { run, index: i, topics, lanes, mode } };
+        const r = await sb.rpc("studio_create_job", { p_user: user, p_tool: "kage_motion", p_asset: null, p_options: options, p_credits: q.credits });
+        if (r.error) throw r.error;
+        jobs.push(String((r.data as any)?.id ?? r.data));
+      }
+      console.log(`[exam] ${run} started: ${mode}, ${topics.length} films in ${lanes} lanes, ${q.credits} credits each`);
+      res.json({ run, mode, lanes, topics, credits_per_film: q.credits, jobs });
     } catch (e: any) {
       console.log(`[exam] ${String(e?.message ?? e).slice(0, 200)}`);
       res.status(e?.code === "story_off" ? 403 : 500).json({ error: e?.code ?? "exam_failed" });
