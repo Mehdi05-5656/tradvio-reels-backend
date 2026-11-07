@@ -567,6 +567,27 @@ test("kept videos: fresh ones are found, the oldest go when over budget or a day
   assert.ok(left.length <= 2, `trimmed to the budget: ${left}`);
 });
 
+test("kept videos respect the server's 2 GB temp cap: a quarter of it at most, nothing bigger than the budget, trimmed while the temp folder is over 60 %", async () => {
+  const { mkdtemp, writeFile, utimes, readdir } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const { cacheBudget, tmpLimit, tmpUsed } = await import("../src/studio-clips.js");
+  assert.equal(tmpLimit({}), 2e9); assert.equal(cacheBudget({}), 0.5e9, "0.5 GB by default");
+  assert.equal(cacheBudget({ STUDIO_CLIPS_CACHE_GB: "6" }), 0.5e9, "never more than a quarter of the 2 GB cap (Nov 7 2026 eviction)");
+  assert.equal(cacheBudget({ STUDIO_CLIPS_CACHE_GB: "0" }), 0);
+  const dir = await mkdtemp(join(tmpdir(), "clips-cache-test-")); const now = Date.now();
+  const big = join(dir, "..", `big-${now}.mp4`); await writeFile(big, Buffer.alloc(2000));
+  assert.equal(await keepVideo(dir, "big", big, { STUDIO_CLIPS_CACHE_GB: String(1000 / 1e9) }, async () => 0, now), false, "bigger than the budget: not kept");
+  assert.ok(!(await readdir(dir)).includes("big.mp4"));
+  for (const [n, ageH] of [["a", 3], ["b", 2]] as const) { const f = join(dir, `${n}.mp4`); await writeFile(f, Buffer.alloc(100)); await utimes(f, new Date(now - ageH * 3600_000), new Date(now - ageH * 3600_000)); }
+  const src = join(dir, "..", `new2-${now}.mp4`); await writeFile(src, Buffer.alloc(100));
+  // the temp folder is over 60 % of its cap: the older kept videos go, the new one stays
+  let fill = 1.5e9; const used = async () => { const u = fill; fill -= 0.4e9; return u; };
+  assert.equal(await keepVideo(dir, "c", src, {}, used, now), true);
+  const left = (await readdir(dir)).sort();
+  assert.ok(left.includes("c.mp4")); assert.ok(!left.includes("a.mp4"), `the oldest went: ${left}`);
+  // the measure counts a hard-linked file once
+  const u = await tmpUsed(dir); assert.ok(u >= 100 && u < 1e6, `${u}`);
+});
+
 test("the reading is reserved at the busy-video rate and settled at the video's real size, never above what was reserved", () => {
   const env = { ...ENV, STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "6.25" };
   const busy = clipsPrice(PLANS as any, { seconds: 1348, platform: "youtube", length: "standard", env });

@@ -46,6 +46,7 @@ import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
 import { initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
+import { registerStoryExam } from "./studio-story-exam.js";
 import compression from "compression";
 import WebSocket from "ws";
 if (typeof (globalThis as any).WebSocket === "undefined") (globalThis as any).WebSocket = WebSocket;
@@ -101,6 +102,7 @@ async function main() {
   initEvents(getSb); // the Studio admin panel's event record (studio_events): costs, checkouts, emails, page views
   registerStudio(app, getSb);
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
+  registerStoryExam(app, getSb, { plans: PLANS }); // the Stories practice exam (admin only; STORY_MASTER_PLAN.md phase 0)
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
   registerSocial(app, getSb); // Studio self-serve posting to the person's own socials; off until STUDIO_SOCIAL_ENABLED=true. Not Publer.

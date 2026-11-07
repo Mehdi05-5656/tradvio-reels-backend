@@ -19,7 +19,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { capacity, cutGate, freeDisk, roomForAnother, type Capacity } from "./studio-capacity.js";
+import { capacity, cutGate, roomForAnother, type Capacity } from "./studio-capacity.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -1016,36 +1016,56 @@ type Job = { id: string; user_id: string; tool?: string; lease_token: string; as
 // was still downloading) and again in a second run 2.5 hours later. So a finished download is kept on this server for a
 // day, under a size budget: a retry, a second attempt or a new run of the same video (same lines, same sound track) links
 // to it instead of paying again, and two runs that want the same video at the same time share one download.
-export const VIDEO_CACHE = { hours: 24, gb: 6 };
+// The kept videos live in the temp folder, which Render caps at 2 GB per instance (STUDIO_TMP_LIMIT_GB): going over it
+// evicts the whole server (Nov 7 2026, 22:30 UTC: two kept copies of a 211 MB video plus a 2.6 h download in progress
+// went over, and the backend restarted). The disk's free space does not show that cap, so the budget is set against it:
+// at most a quarter of the cap (default 0.5 GB), never a video bigger than that, trimmed oldest first, and trimmed
+// further while the temp folder holds more than 60 % of the cap.
+export const VIDEO_CACHE = { hours: 24, gb: 0.5, tmpGb: 2 };
 const inFlight = new Map<string, Promise<string>>();
 export const videoCacheKey = (url: string, height: number, language: string | null) => { const id = youtubeId(url); return id ? `${id}-${height}-${language ?? "orig"}` : null; };
 export function cacheDirOf(deps: ClipsDeps): string { return deps.cacheDir ?? join(tmpdir(), "clone8-clips-cache"); }
-/** The size budget in bytes (STUDIO_CLIPS_CACHE_GB; 0 turns the reuse off). */
-export const cacheBudget = (env: Record<string, string | undefined>) => { const v = env.STUDIO_CLIPS_CACHE_GB; return (v !== undefined && v !== "" && Number(v) >= 0 ? Number(v) : VIDEO_CACHE.gb) * 1e9; };
+/** The temp folder's cap in bytes (Render's 2 GB, STUDIO_TMP_LIMIT_GB). */
+export const tmpLimit = (env: Record<string, string | undefined>) => (Number(env.STUDIO_TMP_LIMIT_GB) > 0 ? Number(env.STUDIO_TMP_LIMIT_GB) : VIDEO_CACHE.tmpGb) * 1e9;
+/** The size budget in bytes (STUDIO_CLIPS_CACHE_GB, at most a quarter of the temp cap; 0 turns the reuse off). */
+export const cacheBudget = (env: Record<string, string | undefined>) => { const v = env.STUDIO_CLIPS_CACHE_GB; const asked = (v !== undefined && v !== "" && Number(v) >= 0 ? Number(v) : VIDEO_CACHE.gb) * 1e9; return Math.min(asked, tmpLimit(env) / 4); };
+/** What the temp folder holds, in bytes (a hard-linked file counted once). */
+export async function tmpUsed(root = tmpdir()): Promise<number> {
+  const seen = new Set<string>(); let total = 0;
+  const walk = async (d: string, depth: number) => {
+    if (depth > 6) return;
+    const names = await readdir(d).catch(() => [] as string[]);
+    for (const n of names) { const p = join(d, n); const s = await stat(p).catch(() => null); if (!s) continue;
+      if (s.isDirectory()) await walk(p, depth + 1); else if (s.isFile()) { const id = `${s.dev}:${s.ino}`; if (!seen.has(id)) { seen.add(id); total += s.size; } } }
+  };
+  await walk(root, 0); return total;
+}
 /** The kept file for a key, if it is still fresh (its time is renewed when used, so a video in use is never the oldest). */
 export async function cachedVideo(dir: string, key: string, now = Date.now()): Promise<string | null> {
   const f = join(dir, `${key}.mp4`);
   try { const s = await stat(f); if (s.size > 0 && now - s.mtimeMs < VIDEO_CACHE.hours * 3600_000) { await utimes(f, new Date(now), new Date(now)).catch(() => undefined); return f; } } catch { /* not kept */ }
   return null;
 }
-/** Keeps a finished download (a hard link: no copy), then trims the oldest until the folder fits the budget and the disk
- *  keeps its floor free; anything older than a day goes. */
-export async function keepVideo(dir: string, key: string, file: string, env: Record<string, string | undefined>, disk: () => Promise<number | null> = () => freeDisk(dir), now = Date.now()): Promise<void> {
+/** Keeps a finished download (a hard link: no copy) when it fits the budget, then trims the oldest until the kept videos
+ *  fit it and the temp folder holds at most 60 % of its cap; anything older than a day goes. Returns whether it kept it. */
+export async function keepVideo(dir: string, key: string, file: string, env: Record<string, string | undefined>, used: () => Promise<number | null> = () => tmpUsed(), now = Date.now()): Promise<boolean> {
+  const budget = cacheBudget(env), size = (await stat(file)).size;
+  if (!(budget > 0) || size > budget) return false; // (a video bigger than the whole budget is never kept)
   await mkdir(dir, { recursive: true });
   const f = join(dir, `${key}.mp4`);
   await rm(f, { force: true }); await link(file, f);
-  const budget = cacheBudget(env);
-  const floor = capacity(env).diskFloorGb * 1e9;
+  const ceiling = tmpLimit(env) * 0.6;
   const files = (await Promise.all((await readdir(dir)).filter((n) => n.endsWith(".mp4")).map(async (n) => { const p = join(dir, n); const s = await stat(p).catch(() => null); return s ? { p, size: s.size, at: s.mtimeMs } : null; }))).filter(Boolean) as Array<{ p: string; size: number; at: number }>;
   files.sort((a, b) => a.at - b.at);
   let total = files.reduce((n, x) => n + x.size, 0);
   for (const x of files) {
-    const free = await disk();
+    const u = await used();
     const old = now - x.at > VIDEO_CACHE.hours * 3600_000;
-    if (!old && total <= budget && (free == null || free >= floor)) break;
-    if (x.p === f && !old) continue; // never the one just kept
+    if (!old && total <= budget && (u == null || u <= ceiling)) break;
+    if (x.p === f && !old) continue; // never the one just kept (it shares its space with the run's own copy)
     await rm(x.p, { force: true }); total -= x.size;
   }
+  return true;
 }
 /** What a video sounded like (speech-to-text with speakers and laughs, and its loudness), kept a week in storage by
  *  video and sound track: a second run of the same video does not pay to download and transcribe it again. */
