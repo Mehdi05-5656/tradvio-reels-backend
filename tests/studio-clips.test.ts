@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
-  likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
+  likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
   timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING,
 } from "../src/studio-clips.js";
@@ -14,7 +14,8 @@ import { quote, PLANS } from "../src/studio.js";
 import { jobsNotice } from "../src/studio-notices.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const ENV = { ANTHROPIC_API_KEY: "k", SCRAPECREATORS_API_KEY: "k", ELEVENLABS_API_KEY: "k" };
+// (the kept-videos folder is off here: each test fetches for itself; the reuse has its own tests below)
+const ENV = { ANTHROPIC_API_KEY: "k", SCRAPECREATORS_API_KEY: "k", ELEVENLABS_API_KEY: "k", STUDIO_CLIPS_CACHE_GB: "0" };
 
 test("caption segments become short lines; timed words become sentences that know where thoughts start and end", () => {
   const segs = [
@@ -498,4 +499,68 @@ test("several runs side by side: a new run starts at once, waits only to share t
   const q = [cutting, { ...cutting, id: "b" }];
   const capped = etaFor({ status: "queued", options: opts }, q as any, t, { runs: 2, cutSlots: 1 }, now);
   assert.equal(capped.ahead, 1);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Reuse (Nov 7 2026: one person's 2.4 h video came through the proxy twice in one run and again in a second run)
+// ---------------------------------------------------------------------------------------------------
+test("a video already fetched is reused: a second run of the same video downloads nothing and transcribes nothing", async () => {
+  const { mkdtemp } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const cacheDir = await mkdtemp(join(tmpdir(), "clips-cache-test-"));
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" }, { id: "col2", user_id: U, status: "processing" });
+  let downloads = 0, heard = 0;
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_CACHE_GB: "6" }, cacheDir, plans: PLANS, log: () => {}, meta: META,
+    download: async (_u: string, target: string) => { downloads++; const { writeFile } = await import("node:fs/promises"); await writeFile(target, "mp4 bytes"); },
+    extractAudio: writeStub, loudness: async () => [], words: async () => { heard++; return { words: WORDS, events: [] }; },
+    choose, cut: async (_c: any, m: any) => ({ asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }) };
+  const url = "https://www.youtube.com/watch?v=uQlACpbi4WM";
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800 }) as any), "done");
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://youtu.be/uQlACpbi4WM", seconds: 1800, collection_id: "col2" }, { id: "job2" }) as any), "done");
+  assert.equal(downloads, 1, "fetched through the proxy once");
+  assert.equal(heard, 1, "heard once");
+  assert.ok(sb.files.has(`studio-outputs/${heardKey(url, "original")}`), "what it sounded like is kept for a week");
+  const proxy = sb.calls.length; void proxy;
+  assert.equal(sb.t.studio_collections.find((c: any) => c.id === "col2").status, "ready");
+});
+
+test("two runs wanting the same video at once share one download", async () => {
+  const { mkdtemp } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const cacheDir = await mkdtemp(join(tmpdir(), "clips-cache-test-"));
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" }, { id: "col2", user_id: U, status: "processing" });
+  let downloads = 0;
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_CACHE_GB: "6" }, cacheDir, plans: PLANS, log: () => {}, meta: META,
+    download: async (_u: string, target: string) => { downloads++; await new Promise((r) => setTimeout(r, 50)); const { writeFile } = await import("node:fs/promises"); await writeFile(target, "mp4 bytes"); },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }),
+    choose, cut: async (_c: any, m: any) => ({ asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }) };
+  const url = "https://www.youtube.com/watch?v=_c2e1NcI3Sc";
+  const [a, b] = await Promise.all([runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800 }) as any), runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800, collection_id: "col2" }, { id: "job2" }) as any)]);
+  assert.deepEqual([a, b], ["done", "done"]);
+  assert.equal(downloads, 1);
+});
+
+test("a run whose lease went to another attempt stops its download and leaves quietly; the bytes it carried are counted", async () => {
+  const { LinkError } = await import("../src/studio-youtube.js");
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const lost = new AbortController(); const events: any[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_YT_PROXY: "http://p", STUDIO_YT_PROXY_USD_PER_GB: "6" }, plans: PLANS, log: () => {}, meta: META,
+    download: async (_u: string, target: string, _h: number, signal?: AbortSignal) => { const { writeFile } = await import("node:fs/promises"); await writeFile(target + ".part", Buffer.alloc(1000)); lost.abort(); assert.ok(signal?.aborted, "the run's signal reaches the download"); throw new LinkError("link_stopped", "stopped"); },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose };
+  const ev = await import("../src/studio-events.js"); void ev; void events;
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }, { signal: lost.signal }) as any), "lease_lost");
+  assert.equal(sb.t.studio_collections[0].status, "processing", "the collection is left to the attempt that has the lease");
+  assert.ok(!sb.calls.some((c: any) => c.fn === "studio_fail" || c.fn === "studio_complete"), "nothing settled by the stopped attempt");
+});
+
+test("kept videos: fresh ones are found, the oldest go when over budget or a day old, never the one just kept", async () => {
+  const { mkdtemp, writeFile, utimes, readdir } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "clips-cache-test-")); const now = Date.now();
+  for (const [n, ageH] of [["old", 30], ["a", 3], ["b", 2]] as const) { const f = join(dir, `${n}.mp4`); await writeFile(f, Buffer.alloc(400)); await utimes(f, new Date(now - ageH * 3600_000), new Date(now - ageH * 3600_000)); }
+  assert.equal(await cachedVideo(dir, "old", now), null, "a day old: not reused");
+  assert.ok(await cachedVideo(dir, "a", now));
+  const src = join(dir, "..", `new-${now}.mp4`); await writeFile(src, Buffer.alloc(400));
+  await keepVideo(dir, "c", src, { STUDIO_CLIPS_CACHE_GB: String(900 / 1e9) }, async () => null, now);
+  const left = (await readdir(dir)).sort();
+  assert.ok(left.includes("c.mp4"), "the one just kept stays");
+  assert.ok(!left.includes("old.mp4"), "the day-old one is gone");
+  assert.ok(left.length <= 2, `trimmed to the budget: ${left}`);
 });

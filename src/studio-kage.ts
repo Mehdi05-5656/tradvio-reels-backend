@@ -447,7 +447,7 @@ export function startKageLoop(sbFn: () => SupabaseClient, deps: KageDeps = {}, i
       const job = r.data as Job | null;
       if (!job || !job.id) return;
       running++;
-      const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
+      const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); /* (sent only when then-ed: a bare void never went out until Nov 7 2026) */ }, 4 * 60_000);
       runKageJob(sb, { ...deps, log }, job).then((s) => log(`[kage] ${s} ${job.id}`)).catch((e) => log(`[kage] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); running--; });
     } catch (e: any) { log(`[kage] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };

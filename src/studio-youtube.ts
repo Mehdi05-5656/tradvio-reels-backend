@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 export const YT_DLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 export type DownloadOpts = { maxBytes: number; maxSeconds: number; timeoutMs?: number; fetch?: typeof fetch; env?: Record<string, string | undefined> };
-export class LinkError extends Error { constructor(public code: "link_blocked" | "link_no_media" | "link_too_large" | "link_too_long" | "link_fetch_failed", message: string) { super(message); } }
+export class LinkError extends Error { constructor(public code: "link_blocked" | "link_no_media" | "link_too_large" | "link_too_long" | "link_fetch_failed" | "link_stopped", message: string) { super(message); } }
 
 /** The file name of the standalone build for this machine. */
 export function ytDlpAsset(os = platform(), cpu = arch()): string {
@@ -141,7 +141,7 @@ export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env
 }
 
 /** yt-dlp run with our usual settings (proxy, cookies, Node for YouTube's challenges); its complaint becomes a LinkError. */
-async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number }): Promise<string> {
+async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number; signal?: AbortSignal }): Promise<string> {
   const bin = await ensureYtDlp(o);
   const env = o.env ?? process.env;
   const cookies = await cookiesFile(env);
@@ -155,12 +155,15 @@ async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<
   ];
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(bin, full, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "", killed = false;
+    let stdout = "", stderr = "", killed = false, stopped = false;
     const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, o.timeoutMs ?? 8 * 60_000);
+    // the run that asked for it is gone (its lease went to another attempt): stop paying for the download now
+    const stop = () => { stopped = true; child.kill("SIGKILL"); };
+    if (o.signal?.aborted) stop(); else o.signal?.addEventListener("abort", stop, { once: true });
     child.stdout.on("data", (b) => { stdout += b.toString(); if (stdout.length > 65536) stdout = stdout.slice(-65536); });
     child.stderr.on("data", (b) => { stderr += b.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
-    child.on("close", (code) => { clearTimeout(timer); if (killed) reject(new LinkError("link_fetch_failed", "YouTube took too long to send the video")); else resolve({ code, stdout, stderr }); });
+    child.on("close", (code) => { clearTimeout(timer); o.signal?.removeEventListener("abort", stop); if (stopped) reject(new LinkError("link_stopped", "The download was stopped")); else if (killed) reject(new LinkError("link_fetch_failed", "YouTube took too long to send the video")); else resolve({ code, stdout, stderr }); });
   });
   if (out.code !== 0) {
     const said = redactProxy(`${out.stderr}\n${out.stdout}`).split("\n").filter((l) => l.trim() && !/^\[(download|youtube|info|hlsnative)\]/.test(l)).slice(-12).join(" | ");
@@ -207,7 +210,7 @@ export const downloadFormat = (h: number, language?: string | null) => {
 export const downloadSort = (h: number) => `lang,res:${h},fps:30,+size,+br`;
 /** The whole video, downloaded by yt-dlp's own downloader (no ffmpeg reading YouTube: through the proxy on Render every
  *  ffmpeg read of a YouTube address got 403, Oct 31 2026); at most `maxHeight` lines (1080, or 720 for long videos). */
-export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; language?: string | null } = {}): Promise<void> {
+export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; language?: string | null; signal?: AbortSignal } = {}): Promise<void> {
   const h = o.maxHeight ?? 1080;
   await runYtDlp([
     "-f", downloadFormat(h, o.language), "-S", downloadSort(h),

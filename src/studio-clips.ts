@@ -18,8 +18,8 @@
 //    safety nets so a vendor price change can never sell a run at a loss.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { capacity, cutGate, roomForAnother, type Capacity } from "./studio-capacity.js";
+import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { capacity, cutGate, freeDisk, roomForAnother, type Capacity } from "./studio-capacity.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -256,7 +256,9 @@ export type ClipsDeps = {
   choose?: (input: ChooseInput) => Promise<RawMoment[]>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<CutResult>;
   frame?: (input: TrackInput) => Promise<TrackRead[]>;
-  download?: (url: string, target: string, maxHeight: number) => Promise<void>;
+  download?: (url: string, target: string, maxHeight: number, signal?: AbortSignal) => Promise<void>;
+  /** where downloaded YouTube videos are kept for reuse (default: a folder in the temp directory) */
+  cacheDir?: string;
   /** whether this server can take on another run now (studio-capacity roomForAnother) */
   room?: (env: Record<string, string | undefined>) => Promise<{ ok: boolean; why?: string }>;
   ytAudio?: (url: string, target: string) => Promise<void>;
@@ -990,7 +992,67 @@ export function quoteCut(plans: PlanLike[], clips: number, seconds: number, leng
 // ---------------------------------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------------------------------
-type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number; created_at?: string; marks?: Record<string, number> };
+type Job = { id: string; user_id: string; tool?: string; lease_token: string; asset_id: string | null; options: any; credits_reserved: number; progress: any; attempts: number; created_at?: string; marks?: Record<string, number>;
+  /** fires when this run's lease is gone (another attempt has it): its download stops at once */
+  signal?: AbortSignal };
+
+// ---------------------------------------------------------------------------------------------------
+// Downloaded YouTube videos, kept for reuse
+// ---------------------------------------------------------------------------------------------------
+// A download through the proxy is most of a YouTube run's cost (about $6 per GB: a 2.4 h video is 761 MB, $4.76). Live
+// on Nov 6 2026 one person's run fetched the same 2.4 h video twice in one run (a second attempt started while the first
+// was still downloading) and again in a second run 2.5 hours later. So a finished download is kept on this server for a
+// day, under a size budget: a retry, a second attempt or a new run of the same video (same lines, same sound track) links
+// to it instead of paying again, and two runs that want the same video at the same time share one download.
+export const VIDEO_CACHE = { hours: 24, gb: 6 };
+const inFlight = new Map<string, Promise<string>>();
+export const videoCacheKey = (url: string, height: number, language: string | null) => { const id = youtubeId(url); return id ? `${id}-${height}-${language ?? "orig"}` : null; };
+export function cacheDirOf(deps: ClipsDeps): string { return deps.cacheDir ?? join(tmpdir(), "clone8-clips-cache"); }
+/** The size budget in bytes (STUDIO_CLIPS_CACHE_GB; 0 turns the reuse off). */
+export const cacheBudget = (env: Record<string, string | undefined>) => { const v = env.STUDIO_CLIPS_CACHE_GB; return (v !== undefined && v !== "" && Number(v) >= 0 ? Number(v) : VIDEO_CACHE.gb) * 1e9; };
+/** The kept file for a key, if it is still fresh (its time is renewed when used, so a video in use is never the oldest). */
+export async function cachedVideo(dir: string, key: string, now = Date.now()): Promise<string | null> {
+  const f = join(dir, `${key}.mp4`);
+  try { const s = await stat(f); if (s.size > 0 && now - s.mtimeMs < VIDEO_CACHE.hours * 3600_000) { await utimes(f, new Date(now), new Date(now)).catch(() => undefined); return f; } } catch { /* not kept */ }
+  return null;
+}
+/** Keeps a finished download (a hard link: no copy), then trims the oldest until the folder fits the budget and the disk
+ *  keeps its floor free; anything older than a day goes. */
+export async function keepVideo(dir: string, key: string, file: string, env: Record<string, string | undefined>, disk: () => Promise<number | null> = () => freeDisk(dir), now = Date.now()): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const f = join(dir, `${key}.mp4`);
+  await rm(f, { force: true }); await link(file, f);
+  const budget = cacheBudget(env);
+  const floor = capacity(env).diskFloorGb * 1e9;
+  const files = (await Promise.all((await readdir(dir)).filter((n) => n.endsWith(".mp4")).map(async (n) => { const p = join(dir, n); const s = await stat(p).catch(() => null); return s ? { p, size: s.size, at: s.mtimeMs } : null; }))).filter(Boolean) as Array<{ p: string; size: number; at: number }>;
+  files.sort((a, b) => a.at - b.at);
+  let total = files.reduce((n, x) => n + x.size, 0);
+  for (const x of files) {
+    const free = await disk();
+    const old = now - x.at > VIDEO_CACHE.hours * 3600_000;
+    if (!old && total <= budget && (free == null || free >= floor)) break;
+    if (x.p === f && !old) continue; // never the one just kept
+    await rm(x.p, { force: true }); total -= x.size;
+  }
+}
+/** What a video sounded like (speech-to-text with speakers and laughs, and its loudness), kept a week in storage by
+ *  video and sound track: a second run of the same video does not pay to download and transcribe it again. */
+export const HEARD_DAYS = 7;
+export const heardKey = (url: string, language: unknown) => { const id = youtubeId(url); return id ? `cache/youtube/${id}-${language && language !== "original" ? String(language).replace(/[^A-Za-z-]/g, "") : "orig"}.json` : null; };
+type Heard = { words: TimedWord[]; events: AudioEvent[]; language: string | null; excess: number[] | null };
+export async function loadHeard(sb: SupabaseClient, key: string, now = Date.now()): Promise<Heard | null> {
+  const r = await sb.storage.from("studio-outputs").download(key).catch(() => null);
+  if (!r || r.error || !r.data) return null;
+  try { const j = JSON.parse(Buffer.from(await r.data.arrayBuffer()).toString("utf8")); if (!Array.isArray(j.words) || !j.words.length || now - Number(j.at) > HEARD_DAYS * 86400_000) return null; return { words: j.words, events: Array.isArray(j.events) ? j.events : [], language: j.language ?? null, excess: Array.isArray(j.excess) ? j.excess : null }; } catch { return null; }
+}
+export async function saveHeard(sb: SupabaseClient, key: string, h: Heard): Promise<void> {
+  const up = await sb.storage.from("studio-outputs").upload(key, Buffer.from(JSON.stringify({ at: Date.now(), ...h })), { contentType: "text/plain", upsert: true });
+  if (up.error) throw up.error;
+}
+/** What sits in the run's folder from a download that did not finish (yt-dlp's parts), in bytes: the proxy carried it. */
+async function partialBytes(dir: string): Promise<number> {
+  try { const names = (await readdir(dir)).filter((n) => n.startsWith("youtube")); let n = 0; for (const x of names) n += (await stat(join(dir, x)).catch(() => ({ size: 0 }))).size; return n; } catch { return 0; }
+}
 const planKey = (u: string, collectionId: string) => `${u}/clips/${collectionId}/plan.txt`;
 /** Saves where the run is. A new stage gets its own clock (`stage_at`, for the page's time left), and the moment it
  *  started is kept on the job (`marks`) to measure this run for the next estimates. */
@@ -1039,8 +1101,32 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const attemptAt = Date.now();
   const fetchYouTube = async (seconds: number) => {
     const file = join(dir!, "youtube.mp4");
+    // (clips in the video's own shape come out at most 1280 wide, so 720 lines carry every pixel they keep: about half
+    // the bytes of 1080; vertical clips crop a third of the width, so they need the 1080 lines under an hour)
+    const height = seconds > CLIP_COST.long_after_seconds || format === "original" ? 720 : 1080;
+    const language = o.language && o.language !== "original" ? String(o.language) : null;
+    const key = cacheBudget(env) > 0 ? videoCacheKey(o.url, height, language) : null, cdir = cacheDirOf(deps);
+    // kept from an earlier run or attempt on this server: linked, nothing comes through the proxy
+    const reuse = async (): Promise<boolean> => { const kept = key ? await cachedVideo(cdir, key) : null; if (!kept) return false; await rm(file, { force: true }); await link(kept, file); return true; };
+    if (await reuse()) { ytFile = file; fetched = { s: 0, bytes: 0 }; log(`[clips] reused ${JSON.stringify({ job: job.id, key })}`); return file; }
+    // another run on this server is fetching the same video right now: wait for it instead of fetching it twice
+    const other = key ? inFlight.get(key) : undefined;
+    if (other) { log(`[clips] waiting for the download another run started ${JSON.stringify({ job: job.id, key })}`); await other.catch(() => undefined); if (await reuse()) { ytFile = file; fetched = { s: 0, bytes: 0 }; return file; } }
     const began = Date.now();
-    await (deps.download ?? ((x, t, h) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language: o.language && o.language !== "original" ? String(o.language) : null })))(o.url, file, seconds > CLIP_COST.long_after_seconds ? 720 : 1080);
+    const run = (async () => {
+      try { await (deps.download ?? ((x, t, h, sig) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language, signal: sig })))(o.url, file, height, job.signal); }
+      catch (e) {
+        // a download that stopped part way still came through the proxy (and was not counted before Nov 7 2026)
+        const part = await partialBytes(dir!);
+        const usd = (part / 1e9) * proxyUsdPerGb(env);
+        if (usd > 0) recordEvent({ user_id: u, kind: "vendor", name: "youtube_proxy", usd, props: { job: job.id, bytes: part, seconds, partial: true } });
+        throw e;
+      }
+      if (key) await keepVideo(cdir, key, file, env).catch((e: any) => log(`[clips] not kept ${job.id}: ${String(e?.message ?? e).slice(0, 120)}`));
+      return file;
+    })();
+    if (key) inFlight.set(key, run);
+    try { await run; } finally { if (key && inFlight.get(key) === run) inFlight.delete(key); }
     ytFile = file;
     // what came through the proxy, measured: the price assumes CLIP_COST.full_bytes_per_second
     const bytes = await stat(file).then((x) => x.size).catch(() => 0);
@@ -1085,10 +1171,18 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         seconds = m.seconds ?? seconds;
         // the whole video first: its sound is heard properly (every word, who says it, the laughs), and the clips are cut from it
         let heard = false;
-        try {
+        // heard before (the same video and sound track, in the last week): its words, speakers, laughs and loudness are
+        // reused, and the video is only fetched (or reused) for cutting
+        const hkey = heardKey(o.url, o.language);
+        const kept = hkey ? await loadHeard(sb, hkey) : null;
+        if (kept) {
+          words = kept.words; events = kept.events; heardLanguage = kept.language; excess = kept.excess; transcribed = true; lines = linesFromWords(kept.words); heard = true;
+          log(`[clips] heard before ${JSON.stringify({ job: job.id, key: hkey })}`);
+        } else try {
           await renew(sb, job, { message: "Fetching the video" });
           await fetchYouTube(seconds);
           heard = await listen({ video: ytFile!, audio: null, proxy: null, width: 0, height: 0, fps: null });
+          if (heard && hkey && words) await saveHeard(sb, hkey, { words, events, language: heardLanguage, excess }).catch((e: any) => log(`[clips] heard not kept ${job.id}: ${String(e?.message ?? e).slice(0, 120)}`));
         } catch (e: any) {
           if (!blockedByYouTube(e)) throw e;
           blocked = true;
@@ -1235,7 +1329,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     return "done";
   } catch (e: any) {
     const code = e instanceof ClipsError ? e.code : e instanceof LinkError ? e.code : "clips_failed";
-    if (code === "lease_lost") return "lease_lost";
+    // (a download stopped because the lease went to another attempt: that attempt carries on; this one leaves quietly)
+    if (code === "lease_lost" || code === "link_stopped" || job.signal?.aborted) return "lease_lost";
     const retry = e instanceof ClipsError ? e.retry : !(e instanceof LinkError);
     const last = !retry || (job.attempts ?? 1) >= 3;
     log(`[clips] ${code} ${JSON.stringify({ job: job.id, detail: String(e?.message ?? e).slice(0, 240) })}`);
@@ -1284,7 +1379,10 @@ export function startClipsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {},
         log(`[clips] started ${job.id} (${active.size} running)`);
         // the lease is 10 minutes; a long cut keeps it alive between clips, and this keeps it alive during one long
         // step or while the run waits its turn at the cutter
-        const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
+        // (a Supabase call only goes out when awaited or then-ed: this was a bare `void sb.rpc(...)` until Nov 7 2026, never
+        // sent, so every run with a step over 10 minutes was taken again by a second attempt while the first went on)
+        const lost = new AbortController(); job.signal = lost.signal;
+        const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then((r) => { if (!r.error && r.data !== true) lost.abort(); }, () => undefined); }, 4 * 60_000);
         runClipsJob(sb, { ...deps, log }, job).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`))
           .finally(() => { clearInterval(keep); active.delete(job.id); busy.clips = active.size > 0; });
       }

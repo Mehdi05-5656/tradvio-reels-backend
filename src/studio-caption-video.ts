@@ -304,7 +304,7 @@ export function startCaptionsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = 
         const job = r.data as Job | null;
         if (!job || !job.id) return;
         active.add(job.id); busy.captions = true;
-        const keep = setInterval(() => { void sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }); }, 4 * 60_000);
+        const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); /* (sent only when then-ed: a bare void never went out until Nov 7 2026) */ }, 4 * 60_000);
         runCaptionsJob(sb, { ...deps, log }, job).then((s) => log(`[captions] ${s} ${job.id}`)).catch((e) => log(`[captions] crashed ${job.id} ${e?.message ?? e}`))
           .finally(() => { clearInterval(keep); active.delete(job.id); busy.captions = active.size > 0; });
       }
