@@ -1,8 +1,9 @@
 // The Stories practice exam (docs/stories/STORY_MASTER_PLAN.md, phase 0): the same eight topics made after every change
 // to the story engine, so a change is kept only when the numbers go up. Admin only (the Studio admin, support@clone8.io).
 //   POST /api/studio/admin/story-exam            start a run for the admin's own account: the first film is queued with
-//                                                 options.exam = { run, index: 0, topics }; the Kage Motion worker queues
-//                                                 each next film when one ends (kage-motion/worker/exam.ts), one at a time
+//                                                 options.exam = { run, index, topics, lanes, mode } for each lane that
+//                                                 fits under the account's job limit; the Kage Motion worker fills the
+//                                                 run back up to its lanes as films end (kage-motion/worker/exam.ts)
 //   GET  /api/studio/admin/story-exam            the runs, newest first
 //   GET  /api/studio/admin/story-exam?run=<id>   one run: a row per film with the watcher's score, the animatic's, the
 //                                                 scoreboard numbers, the joke devices, the cost and the worker commit
@@ -67,11 +68,14 @@ export function registerStoryExam(app: Express, sbFn: () => SupabaseClient, deps
         const story = { ...q.options.story, topic: topics[i], ...(mode === "quick" ? { stage: "animatic" } : {}) };
         const options = { ...q.options, brief: topics[i], story, via: "admin", exam: { run, index: i, topics, lanes, mode } };
         const r = await sb.rpc("studio_create_job", { p_user: user, p_tool: "kage_motion", p_asset: null, p_options: options, p_credits: q.credits });
+        // at the account's limit of running jobs: start what fits; the worker fills the run up to its lanes as films end
+        // (exam-20261108-0013 failed here after its first film and left two lanes unstarted)
+        if (r.error && jobs.length && /too_many_jobs/.test(String(r.error.message ?? ""))) break;
         if (r.error) throw r.error;
         jobs.push(String((r.data as any)?.id ?? r.data));
       }
       console.log(`[exam] ${run} started: ${mode}, ${topics.length} films in ${lanes} lanes, ${q.credits} credits each`);
-      res.json({ run, mode, lanes, topics, credits_per_film: q.credits, jobs });
+      res.json({ run, mode, lanes, topics, credits_per_film: q.credits, jobs, started: jobs.length });
     } catch (e: any) {
       console.log(`[exam] ${String(e?.message ?? e).slice(0, 200)}`);
       res.status(e?.code === "story_off" ? 403 : 500).json({ error: e?.code ?? "exam_failed" });

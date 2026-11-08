@@ -38,6 +38,11 @@ test("story exam: only the Studio admin may start or read a run; a second run is
     calls.length = 0;
     const quick = await fetch(`http://127.0.0.1:${port}/api/studio/admin/story-exam`, { method: "POST", headers: { "content-type": "application/json", "x-who": "admin" }, body: JSON.stringify({ mode: "quick", lanes: 4 }) });
     assert.equal(quick.status, 200); assert.equal(calls.length, 4); assert.equal(calls[0].args.p_options.story.stage, "animatic", "a quick exam stops at the animatic"); assert.equal(calls[0].args.p_options.exam.mode, "quick");
+    // at the account's job limit after the first film: what fits is started, nothing fails (exam-20261108-0013)
+    calls.length = 0; let n = 0; const rpc = sb.rpc; sb.rpc = async (fn: string, args: any) => (++n > 1 ? { data: null, error: { message: "too_many_jobs", code: "P0001" } } : rpc(fn, args));
+    const short = await post("admin"); assert.equal(short.status, 200); const sj: any = await short.json(); assert.equal(sj.started, 1); assert.equal(sj.jobs.length, 1);
+    n = 0; sb.rpc = async () => ({ data: null, error: { message: "too_many_jobs", code: "P0001" } });
+    assert.equal((await post("admin")).status, 500, "nothing could start: an error, not an empty run"); sb.rpc = rpc;
     going = [{ id: "j", options: { exam: { run: "exam-old" } } }];
     const busy = await post("admin"); assert.equal(busy.status, 409); assert.equal(((await busy.json()) as any).run, "exam-old");
   } finally { srv.close(); }
