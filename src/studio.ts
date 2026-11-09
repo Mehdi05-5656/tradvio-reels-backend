@@ -1189,7 +1189,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     try {
       const sb = sbFn();
-      const r = await sb.from("studio_jobs").select("id,tool,status,asset_id,options,credits_reserved,credits_charged,progress,outputs,error_code,created_at,started_at,finished_at").eq("user_id", u).order("created_at", { ascending: false }).limit(100);
+      const r = await sb.from("studio_jobs").select("id,tool,status,asset_id,options,credits_reserved,credits_charged,progress,outputs,error_code,created_at,started_at,finished_at").eq("user_id", u).is("hidden_at", null).order("created_at", { ascending: false }).limit(100);
       if (r.error) throw r.error;
       const jobs = await withAssetNames(sb, u, (r.data ?? []).map(publicJob));
       // Posters for the grids: the first few of each finished job in one signing call. Videos are signed per job.
@@ -1227,6 +1227,19 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       }
       await withProgressPosters(sb, [job]);
       res.json({ job });
+    } catch (e) { fail(res, e); }
+  });
+
+  // Remove a finished job from the feed (done, failed or canceled; a live job is canceled instead). The files are not
+  // deleted here: the output bucket keeps them under its own retention, and the ledger row stays.
+  app.post("/api/studio/jobs/:id/hide", async (req, res) => {
+    const u = requireUser(req, res); if (!u) return;
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "job_not_found" });
+    try {
+      const r = await sbFn().from("studio_jobs").update({ hidden_at: new Date().toISOString() }).eq("id", req.params.id).eq("user_id", u).in("status", ["done", "failed", "canceled"]).select("id").maybeSingle();
+      if (r.error) throw r.error;
+      if (!r.data) return res.status(409).json({ error: "job_not_finished" });
+      res.json({ hidden: r.data.id });
     } catch (e) { fail(res, e); }
   });
 

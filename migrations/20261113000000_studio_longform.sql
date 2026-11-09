@@ -4,4 +4,6 @@ BEGIN;
 ALTER TABLE public.studio_jobs DROP CONSTRAINT IF EXISTS studio_jobs_tool_check;
 ALTER TABLE public.studio_jobs ADD CONSTRAINT studio_jobs_tool_check
   CHECK (tool = ANY (ARRAY['blueprint','blueprint_plus','recast','swap','restyle','trend','character','instrument','clips','import','captions','kage','kage_motion','longform']));
+-- A finished job the person removed from their feed (the files stay until the bucket's own retention).
+ALTER TABLE public.studio_jobs ADD COLUMN IF NOT EXISTS hidden_at timestamptz;
 COMMIT;
