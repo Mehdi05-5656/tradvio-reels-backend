@@ -29,7 +29,7 @@ import { corsMiddleware } from "./cors.js";
 import { registerStudio } from "./studio.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
-import { startInstrumentLoop } from "./studio-instruments.js";
+import { startInstrumentLoop, instrumentLoopSettings } from "./studio-instruments.js";
 import { startClipsLoop } from "./studio-clips.js";
 import { startCaptionsLoop } from "./studio-caption-video.js";
 import { startKageLoop } from "./studio-kage.js";
@@ -114,7 +114,7 @@ async function main() {
   registerVoices(app); // the voice library for the picker and the chat's voice card; empty without ELEVENLABS_API_KEY
   startRecastLoop(getSb); // Clone8 Studio Recast: only runs when HIGGSFIELD_API_KEY is set
   startCharacterLoop(getSb); // Studio characters (Soul portraits); off without HIGGSFIELD_API_KEY
-  startInstrumentLoop(getSb); // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
+  { const l = instrumentLoopSettings(process.env); startInstrumentLoop(getSb, {}, l.tickMs, l.parallel); } // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
   startClipsLoop(getSb, { plans: PLANS });
   startCaptionsLoop(getSb); // captions burned into videos; one at a time, never while clips are cutting
   startKageLoop(getSb); // Kage remixes (Claude plans, the platform renders every shot at once); off until STUDIO_KAGE_ENABLED=true
