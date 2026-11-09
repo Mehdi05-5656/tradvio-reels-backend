@@ -1200,6 +1200,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         const urls = new Map((signed.data ?? []).map((x: any) => [x.path, x.signedUrl]));
         for (const j of jobs) if (j.status === "done") j.outputs = j.outputs.map((o: any, i: number) => (i < LIST_POSTERS && o.poster_key ? { ...o, poster_url: urls.get(o.poster_key) ?? null } : o));
       }
+      await withProgressPosters(sb, jobs);
       res.json({ jobs });
     } catch (e) { fail(res, e); }
   });
@@ -1224,6 +1225,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         const videos = await Promise.all(job.outputs.map((o: any, i: number) => sb.storage.from("studio-outputs").createSignedUrl(o.key, 900, { download: `${base}-${String(o.index ?? i + 1).padStart(2, "0")}.${String(o.key).split(".").pop() || "mp4"}` })));
         job.outputs = job.outputs.map((o: any, i: number) => ({ ...o, url: videos[i].data?.signedUrl ?? null, poster_url: o.poster_key ? urls.get(o.poster_key) ?? null : null }));
       }
+      await withProgressPosters(sb, [job]);
       res.json({ job });
     } catch (e) { fail(res, e); }
   });
@@ -1383,6 +1385,16 @@ export async function withAssetNames(sb: SupabaseClient, u: string, jobs: any[])
 }
 
 /** A job's progress as its owner sees it: what we pay the renderer (spend_usd, pending_spend, spend_priced) stays ours. */
+/** A job still running may already have its poster (Films renders the thumbnail first): progress.poster_key is signed
+ *  into progress.poster_url so the dashboard can show it while the rest is made. Done jobs carry it on the output. */
+export async function withProgressPosters(sb: any, jobs: any[]): Promise<void> {
+  const live = jobs.filter((j) => (j.status === "queued" || j.status === "running") && typeof j.progress?.poster_key === "string");
+  if (!live.length) return;
+  const signed = await sb.storage.from("studio-outputs").createSignedUrls(live.map((j) => j.progress.poster_key), 900);
+  if (signed.error) return; // a poster is a nicety: the job still shows without it
+  const urls = new Map((signed.data ?? []).map((x: any) => [x.path, x.signedUrl]));
+  for (const j of live) j.progress = { ...j.progress, poster_url: urls.get(j.progress.poster_key) ?? null };
+}
 export function customerProgress(p: any): Record<string, any> {
   if (!p || typeof p !== "object") return {};
   const { spend_usd: _spend, pending_spend: _pending, spend_priced: _priced, ...rest } = p;

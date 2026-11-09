@@ -31,3 +31,19 @@ test("cost: a fixed part plus a per-minute part, overridable once measured", () 
   assert.equal(longformCostUsd({ LONGFORM_COST_USD_BASE: "1", LONGFORM_COST_USD_PER_MINUTE: "0.5" }, 10), 6);
   assert.ok(longformCredits({}, PLANS, 10) >= 1);
 });
+
+test("a running film's early poster is signed into progress.poster_url; done jobs and jobs without one are left alone", async () => {
+  const { withProgressPosters } = await import("../src/studio.ts");
+  const asked: string[][] = [];
+  const sb = { storage: { from: () => ({ createSignedUrls: async (keys: string[]) => { asked.push(keys); return { data: keys.map((k) => ({ path: k, signedUrl: `https://signed/${k}` })), error: null }; } }) } };
+  const jobs: any[] = [
+    { id: "a", status: "running", progress: { stage: "direct", poster_key: "u/a/t/poster.jpg" } },
+    { id: "b", status: "running", progress: { stage: "plan" } },
+    { id: "c", status: "done", progress: { poster_key: "u/c/t/poster.jpg" }, outputs: [] },
+  ];
+  await withProgressPosters(sb, jobs);
+  assert.deepEqual(asked, [["u/a/t/poster.jpg"]]);
+  assert.equal(jobs[0].progress.poster_url, "https://signed/u/a/t/poster.jpg");
+  assert.equal(jobs[1].progress.poster_url, undefined);
+  assert.equal(jobs[2].progress.poster_url, undefined);
+});
