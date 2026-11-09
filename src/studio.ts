@@ -26,6 +26,7 @@ import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.j
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
 import { StoryError, storiesEnabled, quoteStory } from "./studio-stories.js";
+import { LongformError, longformEnabled, quoteLongform } from "./studio-longform.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
@@ -108,13 +109,15 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Kage Motion: a narrated motion-graphics film from a brief (Claude writes it as code; the kage-motion worker renders it).
     kage_motion: kageMotionEnabled(env),
     // Stories: a funny 3D "If you…" film from a topic (Claude writes the scene; the kage-motion worker renders it).
-    story: storiesEnabled(env) && kageMotionEnabled(env) };
+    story: storiesEnabled(env) && kageMotionEnabled(env),
+    // Films (long form): a 2-10 minute narrated motion-graphics film from a story prompt (the clone8-longform worker).
+    longform: longformEnabled(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
 // ---------------------------------------------------------------------------------------------------
-export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import" | "captions" | "kage" | "kage_motion"; credits: number; options: Record<string, any>; summary: string };
+export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import" | "captions" | "kage" | "kage_motion" | "longform"; credits: number; options: Record<string, any>; summary: string };
 const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const characterChoice = (o: any) => {
   const cast = castChoice(o);
@@ -156,6 +159,7 @@ export function jobLabel(j: { tool: string; options?: any }): string {
   if (j.tool === "kage") return `Kage · ${String(o.concept ?? "a remix").slice(0, 60)}`;
   if (j.tool === "kage_motion" && o.story) return `Story · ${String(o.story.topic ?? o.brief ?? "a story").slice(0, 60)}`;
   if (j.tool === "kage_motion") return `Kage Motion · ${String(o.brief ?? "a film").slice(0, 60)}`;
+  if (j.tool === "longform") return `Film · ${String(o.longform?.prompt ?? "a story").slice(0, 60)}`;
   if (j.tool === "captions") { const n = Array.isArray(o.items) ? o.items.length : 1; return n === 1 ? `Captions · ${String(o.items?.[0]?.name ?? "a video").replace(/\.[a-z0-9]{2,4}$/i, "").slice(0, 60)}` : `Captions · ${n} videos`; }
   const secs = Number(o.seconds);
   return `${names[j.tool] ?? j.tool}${o.style_name ? ` · ${o.style_name}` : o.trend_name ? ` · ${o.trend_name}` : ""}${secs > 0 ? ` · ${secs} s` : ""}`;
@@ -526,7 +530,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
-    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
@@ -1112,6 +1116,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "import") return quoteImport(env, PLANS, body?.options);
     if (String(body?.tool ?? "") === "kage") return quoteKage(sb, u, env, PLANS, body?.options, asset);
     if (String(body?.tool ?? "") === "kage_motion") return quoteKageMotion(sb, u, env, PLANS, body?.options);
+    if (String(body?.tool ?? "") === "longform") return quoteLongform(env, PLANS, body?.options);
     if (String(body?.tool ?? "") === "story") { if (!kageMotionEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403); return quoteStory(env, PLANS, body?.options); }
     return quote(String(body?.tool ?? ""), body?.options, asset, costs);
   };
@@ -1354,10 +1359,10 @@ function clientProbe(p: any): Record<string, number> {
 /** The file name a saved copy gets: the upload's name without its extension, tidied, plus the tool. */
 export function downloadBase(assetName: string | null | undefined, tool: string, job?: { options?: any; outputs?: any[] }): string {
   // a story is named after its title ("Folding-Paper-42-Times-story"), not "clone8-kage"
-  const story = job?.options?.style === "story" || !!job?.options?.story;
+  const story = job?.options?.style === "story" || !!job?.options?.story || tool === "longform";
   const name = story ? String(job?.outputs?.[0]?.title ?? "") || assetName : assetName;
   const stem = String(name ?? "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
-  const word = story ? "story" : ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render", kage_motion: "kage", captions: "captions" } as Record<string, string>)[tool] ?? "copy";
+  const word = tool === "longform" ? "film" : story ? "story" : ({ recast: "recast", swap: "swap", restyle: "restyle", trend: "trend", character: "character", instrument: "render", kage_motion: "kage", captions: "captions" } as Record<string, string>)[tool] ?? "copy";
   return `${stem || "clone8"}-${word}`;
 }
 
