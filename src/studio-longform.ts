@@ -13,6 +13,8 @@ export const longformEnabled = (env: Record<string, string | undefined> = proces
 export const longformOpen = (env: Record<string, string | undefined> = process.env) => env.STUDIO_LONGFORM_OPEN === "true";
 export const LONGFORM_MINUTES = [2, 5, 10] as const;
 export const LONGFORM_MODES = ["auto", "true", "speculative", "fiction"] as const;
+/** The feel the person asks for; "auto" leaves it to the planner. The names are the engine's genres (clone8-longform writer/direction.ts). */
+export const LONGFORM_GENRES = ["auto", "true-crime", "horror", "mystery", "wonder", "history", "comedy", "thriller", "drama"] as const;
 export const LONGFORM_LIMITS = { promptMin: 6, promptMax: 600 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -28,7 +30,7 @@ export function longformCredits(env: Record<string, string | undefined>, plans: 
   return Math.max(1, costs.credit_floor ? creditsForCost(cost, costs.credit_floor, MARGIN_TARGET) : Math.ceil(cost * 100));
 }
 
-export type LongformOptions = { prompt: string; minutes: (typeof LONGFORM_MINUTES)[number]; mode: (typeof LONGFORM_MODES)[number] };
+export type LongformOptions = { prompt: string; minutes: (typeof LONGFORM_MINUTES)[number]; mode: (typeof LONGFORM_MODES)[number]; genre: (typeof LONGFORM_GENRES)[number] };
 
 export function parseLongformOptions(raw: any): LongformOptions {
   const prompt = String(raw?.prompt ?? "").replace(/\s+/g, " ").trim();
@@ -37,7 +39,8 @@ export function parseLongformOptions(raw: any): LongformOptions {
   const m = Number(raw?.minutes);
   const minutes: LongformOptions["minutes"] = Number.isFinite(m) ? LONGFORM_MINUTES.reduce<LongformOptions["minutes"]>((a, b) => (Math.abs(b - m) < Math.abs(a - m) ? b : a), LONGFORM_MINUTES[0]) : 10;
   const mode = (LONGFORM_MODES as readonly string[]).includes(String(raw?.mode)) ? (String(raw.mode) as LongformOptions["mode"]) : "auto";
-  return { prompt, minutes, mode };
+  const genre = (LONGFORM_GENRES as readonly string[]).includes(String(raw?.genre)) ? (String(raw.genre) as LongformOptions["genre"]) : "auto";
+  return { prompt, minutes, mode, genre };
 }
 
 export type LongformQuote = { tool: "longform"; credits: number; options: Record<string, any>; summary: string };
@@ -48,6 +51,7 @@ export function quoteLongform(env: Record<string, string | undefined>, plans: Pl
   const o = parseLongformOptions(raw);
   const cost = longformCostUsd(env, o.minutes);
   const modeWord = o.mode === "true" ? "a true story" : o.mode === "fiction" ? "fiction" : o.mode === "speculative" ? "real facts, imagined scenario" : "true story, what-if or fiction: the planner decides";
-  const summary = `${o.minutes}-minute narrated film · ${modeWord} · illustrated for this story · thumbnail, title and description included · about ${o.minutes * 4} minutes to make`;
-  return { tool: "longform", credits: longformCredits(env, plans, o.minutes), options: { longform: { prompt: o.prompt, minutes: o.minutes, mode: o.mode }, cost_usd: cost }, summary };
+  const feel = o.genre === "auto" ? "the feel chosen for the story" : `as ${o.genre.replace("-", " ")}`;
+  const summary = `${o.minutes}-minute narrated film · ${modeWord} · ${feel} · illustrated for this story · thumbnail, title and description included · about ${Math.round(18 + o.minutes * 5.5)} minutes to make`;
+  return { tool: "longform", credits: longformCredits(env, plans, o.minutes), options: { longform: { prompt: o.prompt, minutes: o.minutes, mode: o.mode, genre: o.genre }, cost_usd: cost }, summary };
 }

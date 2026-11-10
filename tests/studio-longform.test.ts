@@ -15,6 +15,9 @@ test("prompt required and bounded; length snaps to 2, 5 or 10 minutes; mode defa
   assert.equal(parseLongformOptions({ prompt: "a bank robbery", minutes: 1 }).minutes, 2);
   assert.equal(parseLongformOptions({ prompt: "a bank robbery", mode: "musical" }).mode, "auto");
   assert.equal(parseLongformOptions({ prompt: "a bank robbery", mode: "fiction" }).mode, "fiction");
+  assert.equal(parseLongformOptions({ prompt: "a bank robbery" }).genre, "auto");
+  assert.equal(parseLongformOptions({ prompt: "a bank robbery", genre: "horror" }).genre, "horror");
+  assert.equal(parseLongformOptions({ prompt: "a bank robbery", genre: "western" }).genre, "auto");
 });
 
 test("off unless switched on; the quote carries the options and a cost by length", () => {
@@ -22,6 +25,7 @@ test("off unless switched on; the quote carries the options and a cost by length
   const q = quoteLongform(ON, PLANS, { prompt: "the Gardner museum heist", minutes: 10, mode: "true" });
   assert.equal(q.tool, "longform"); assert.equal(q.options.longform.minutes, 10); assert.equal(q.options.longform.mode, "true");
   assert.match(q.summary, /10-minute narrated film/); assert.match(q.summary, /a true story/);
+  assert.match(quoteLongform(ON, PLANS, { prompt: "the Gardner museum heist", genre: "horror" }).summary, /as horror/);
   const short = quoteLongform(ON, PLANS, { prompt: "the Gardner museum heist", minutes: 2 });
   assert.ok(q.credits > short.credits, "a longer film costs more");
 });
