@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LongformError, longformCostUsd, longformCredits, parseLongformOptions, quoteLongform } from "../src/studio-longform.ts";
+import { LongformError, longformCostUsd, longformCredits, longformOpen, parseLongformOptions, quoteLongform } from "../src/studio-longform.ts";
 
 const PLANS = [{ id: "starter", monthly_usd: 19, annual_usd_per_month: 15, credits: 1000 }, { id: "creator", monthly_usd: 49, annual_usd_per_month: 39, credits: 3000 }];
-const ON = { STUDIO_LONGFORM_ENABLED: "true" };
+const ON = { STUDIO_LONGFORM_ENABLED: "true", STUDIO_LONGFORM_OPEN: "true" };
+const OWNER_ONLY = { STUDIO_LONGFORM_ENABLED: "true" };
 
 test("prompt required and bounded; length snaps to 2, 5 or 10 minutes; mode defaults to auto", () => {
   assert.throws(() => parseLongformOptions({ prompt: "hi" }), LongformError);
@@ -46,4 +47,10 @@ test("a running film's early poster is signed into progress.poster_url; done job
   assert.equal(jobs[0].progress.poster_url, "https://signed/u/a/t/poster.jpg");
   assert.equal(jobs[1].progress.poster_url, undefined);
   assert.equal(jobs[2].progress.poster_url, undefined);
+});
+
+test("switched on but not open: customers are refused, the owner's account gets a quote", () => {
+  assert.equal(longformOpen(OWNER_ONLY), false);
+  assert.throws(() => quoteLongform(OWNER_ONLY, PLANS, { prompt: "the Gardner museum heist" }), (e: any) => e instanceof LongformError && e.status === 403);
+  assert.equal(quoteLongform(OWNER_ONLY, PLANS, { prompt: "the Gardner museum heist" }, { owner: true }).tool, "longform");
 });

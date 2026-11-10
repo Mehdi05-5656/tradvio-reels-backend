@@ -9,6 +9,8 @@ export class LongformError extends Error {
 }
 
 export const longformEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_LONGFORM_ENABLED === "true";
+/** Open to every customer. Until then only the owner's account (the Studio admin) can make films: the test films. */
+export const longformOpen = (env: Record<string, string | undefined> = process.env) => env.STUDIO_LONGFORM_OPEN === "true";
 export const LONGFORM_MINUTES = [2, 5, 10] as const;
 export const LONGFORM_MODES = ["auto", "true", "speculative", "fiction"] as const;
 export const LONGFORM_LIMITS = { promptMin: 6, promptMax: 600 };
@@ -40,8 +42,9 @@ export function parseLongformOptions(raw: any): LongformOptions {
 
 export type LongformQuote = { tool: "longform"; credits: number; options: Record<string, any>; summary: string };
 
-export function quoteLongform(env: Record<string, string | undefined>, plans: PlanLike[], raw: any): LongformQuote {
+export function quoteLongform(env: Record<string, string | undefined>, plans: PlanLike[], raw: any, who: { owner?: boolean } = {}): LongformQuote {
   if (!longformEnabled(env)) throw new LongformError("longform_off", "Films are not switched on yet", 403);
+  if (!longformOpen(env) && !who.owner) throw new LongformError("longform_off", "Films are not open yet", 403);
   const o = parseLongformOptions(raw);
   const cost = longformCostUsd(env, o.minutes);
   const modeWord = o.mode === "true" ? "a true story" : o.mode === "fiction" ? "fiction" : o.mode === "speculative" ? "real facts, imagined scenario" : "true story, what-if or fiction: the planner decides";

@@ -26,7 +26,7 @@ import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.j
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
 import { StoryError, storiesEnabled, quoteStory } from "./studio-stories.js";
-import { LongformError, longformEnabled, quoteLongform } from "./studio-longform.js";
+import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
@@ -111,7 +111,7 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Stories: a funny 3D "If you…" film from a topic (Claude writes the scene; the kage-motion worker renders it).
     story: storiesEnabled(env) && kageMotionEnabled(env),
     // Films (long form): a 2-10 minute narrated motion-graphics film from a story prompt (the clone8-longform worker).
-    longform: longformEnabled(env) };
+    longform: longformEnabled(env) && longformOpen(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1096,7 +1096,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     }
     return out;
   };
-  const quoteFor = async (sb: SupabaseClient, u: string, body: any): Promise<Quote> => {
+  const quoteFor = async (sb: SupabaseClient, u: string, body: any, o: { owner?: boolean } = {}): Promise<Quote> => {
     if (String(body?.tool ?? "") === "instrument") {
       const q: InstrumentQuote = await quoteInstrument({ env, log }, PLANS, body?.options, resolveAssets(sb, u));
       return q;
@@ -1116,7 +1116,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "import") return quoteImport(env, PLANS, body?.options);
     if (String(body?.tool ?? "") === "kage") return quoteKage(sb, u, env, PLANS, body?.options, asset);
     if (String(body?.tool ?? "") === "kage_motion") return quoteKageMotion(sb, u, env, PLANS, body?.options);
-    if (String(body?.tool ?? "") === "longform") return quoteLongform(env, PLANS, body?.options);
+    if (String(body?.tool ?? "") === "longform") return quoteLongform(env, PLANS, body?.options, { owner: o.owner });
     if (String(body?.tool ?? "") === "story") { if (!kageMotionEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403); return quoteStory(env, PLANS, body?.options); }
     return quote(String(body?.tool ?? ""), body?.options, asset, costs);
   };
@@ -1125,7 +1125,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   app.post("/api/studio/quote", async (req, res) => {
     const u = requireUser(req, res); if (!u) return;
     try {
-      res.json(await quoteFor(sbFn(), u, req.body));
+      const sb = sbFn();
+      res.json(await quoteFor(sb, u, req.body, { owner: await isStudioAdmin(req, sb, env) }));
     } catch (e) { fail(res, e); }
   });
 
@@ -1133,10 +1134,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     try {
       const sb = sbFn();
-      const q = await quoteFor(sb, u, req.body);
+      const owner = await isStudioAdmin(req, sb, env);
+      const q = await quoteFor(sb, u, req.body, { owner });
       const asset = q.tool === "instrument" || q.tool === "captions" ? null : await loadAsset(sb, u, req.body?.asset_id);
       const tools = toolsEnabled(env);
-      if (!(tools as any)[q.tool]) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
+      // Films before they open: the owner's own test films go through on the switch alone
+      if (!(tools as any)[q.tool] && !(q.tool === "longform" && longformEnabled(env) && owner)) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       if ((q.tool === "recast" || q.tool === "swap" || q.tool === "trend") && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
