@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { StoryError, parseStoryOptions, quoteStory, storyCostUsd, storyCredits, storyFilmCostUsd, storyScriptCostUsd } from "../src/studio-stories.ts";
+import { StoryError, parseStoryOptions, quoteStory, storyCostUsd, storyCredits, storyExplainerCostUsd, storyExplainerEnabled, storyExplainerOpen, storyFilmCostUsd, storyScriptCostUsd } from "../src/studio-stories.ts";
 
 const PLANS = [{ id: "starter", monthly_usd: 19, annual_usd_per_month: 15, credits: 1000 }, { id: "creator", monthly_usd: 49, annual_usd_per_month: 39, credits: 3000 }];
 const ON = { STUDIO_STORIES_ENABLED: "true" };
@@ -40,4 +40,27 @@ test("cost: script fixed, film by length; overridable once measured", () => {
   assert.equal(storyCostUsd({}, 45), 1.55);
   assert.equal(storyFilmCostUsd({ STUDIO_STORY_COST_USD: "1" }, 45), 1);
   assert.ok(storyCredits({}, PLANS, 90) > storyCredits({}, PLANS, 45));
+});
+
+test("the no-character film: its own switch, the owner's account until it is open, a topic and a length and nothing else", () => {
+  const ask = { topic: "Want a bunker under your backyard?", kind: "explainer", seconds: 30, world: "cosmos", sidekick: "Dave", stage: "script" };
+  // off: nobody, the owner included; a story with a character is untouched
+  assert.throws(() => quoteStory(ON, PLANS, ask), (e: any) => e.code === "story_kind_off" && e.status === 403);
+  assert.throws(() => quoteStory(ON, PLANS, ask, { owner: true }), (e: any) => e.code === "story_kind_off");
+  assert.equal(quoteStory(ON, PLANS, { topic: "building a bridge" }).options.story.kind, undefined);
+  // enabled but not open: the owner only
+  const EN = { ...ON, STUDIO_STORY_EXPLAINER_ENABLED: "true" };
+  assert.equal(storyExplainerEnabled(EN), true); assert.equal(storyExplainerOpen(EN), false);
+  assert.throws(() => quoteStory(EN, PLANS, ask), (e: any) => e.code === "story_kind_off");
+  const q = quoteStory(EN, PLANS, ask, { owner: true });
+  assert.deepEqual(q.options.story, { topic: ask.topic, seconds: 30, kind: "explainer" });
+  assert.equal(q.tool, "kage_motion"); assert.match(q.summary, /no character/); assert.ok(q.credits > 0);
+  // open: everyone; OPEN alone (without ENABLED) opens nothing
+  const OPEN = { ...EN, STUDIO_STORY_EXPLAINER_OPEN: "true" };
+  assert.equal(quoteStory(OPEN, PLANS, ask).options.story.kind, "explainer");
+  assert.equal(storyExplainerOpen({ ...ON, STUDIO_STORY_EXPLAINER_OPEN: "true" }), false);
+  // lengths snap to 20 or 30; the price follows the length and the env
+  assert.equal(parseStoryOptions({ ...ask, seconds: 90 }).seconds, 30); assert.equal(parseStoryOptions({ ...ask, seconds: 12 }).seconds, 20); assert.equal(parseStoryOptions({ topic: ask.topic, kind: "explainer" }).seconds, 30);
+  assert.equal(storyExplainerCostUsd({}, 20), 1.9); assert.ok(storyExplainerCostUsd({}, 30) > storyExplainerCostUsd({}, 20)); assert.equal(storyExplainerCostUsd({ STUDIO_STORY_EXPLAINER_COST_USD: "1" }, 20), 1);
+  assert.throws(() => parseStoryOptions({ kind: "explainer", topic: "hi" }), StoryError);
 });

@@ -25,7 +25,7 @@ import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-capti
 import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.js";
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
-import { StoryError, storiesEnabled, quoteStory } from "./studio-stories.js";
+import { StoryError, storiesEnabled, storyExplainerOpen, quoteStory } from "./studio-stories.js";
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
@@ -111,7 +111,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Stories: a funny 3D "If you…" film from a topic (Claude writes the scene; the kage-motion worker renders it).
     story: storiesEnabled(env) && kageMotionEnabled(env),
     // Films (long form): a 2-10 minute narrated motion-graphics film from a story prompt (the clone8-longform worker).
-    longform: longformEnabled(env) && longformOpen(env) };
+    longform: longformEnabled(env) && longformOpen(env),
+    // Stories without a character (the no-character film): open to everyone only when its own switch says so.
+    story_explainer: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1117,7 +1119,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "kage") return quoteKage(sb, u, env, PLANS, body?.options, asset);
     if (String(body?.tool ?? "") === "kage_motion") return quoteKageMotion(sb, u, env, PLANS, body?.options);
     if (String(body?.tool ?? "") === "longform") return quoteLongform(env, PLANS, body?.options, { owner: o.owner });
-    if (String(body?.tool ?? "") === "story") { if (!kageMotionEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403); return quoteStory(env, PLANS, body?.options); }
+    if (String(body?.tool ?? "") === "story") { if (!kageMotionEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403); return quoteStory(env, PLANS, body?.options, { owner: o.owner }); }
     return quote(String(body?.tool ?? ""), body?.options, asset, costs);
   };
 

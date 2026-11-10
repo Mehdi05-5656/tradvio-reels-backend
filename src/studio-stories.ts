@@ -16,6 +16,14 @@ export const STORY_WORLDS = ["auto", "river", "yard", "jungle", "field", "cosmos
 export const STORY_CAPTIONS = ["auto", "word", "phrase"] as const;
 /** The lengths offered. 65 is "60+": just over a minute, never under 60 s (what monetisation programs ask for). */
 export const STORY_LENGTHS = [30, 45, 65, 90] as const;
+// The no-character film ("Want a bunker under your backyard?": the thing itself is the star, one cut-open scene that
+// changes on the narrator's words; the kage-motion worker's explainer). Its own switch, and until it is open only the
+// owner's account can make one (the tests): STUDIO_STORY_EXPLAINER_ENABLED, then STUDIO_STORY_EXPLAINER_OPEN.
+export const storyExplainerEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_STORY_EXPLAINER_ENABLED === "true";
+export const storyExplainerOpen = (env: Record<string, string | undefined> = process.env) => storyExplainerEnabled(env) && env.STUDIO_STORY_EXPLAINER_OPEN === "true";
+export const STORY_EXPLAINER_LENGTHS = [20, 30] as const;
+/** What a no-character film costs us (the plan, the scene built part by part and checked, the preview, the voice, the render). */
+export const storyExplainerCostUsd = (env: Record<string, string | undefined>, seconds: number) => Math.round(usd(env, "STUDIO_STORY_EXPLAINER_COST_USD", 1.9) * (seconds > 24 ? 1.15 : 1) * 100) / 100;
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -33,9 +41,11 @@ const credits = (env: Record<string, string | undefined>, plans: PlanLike[], usd
 export const storyCredits = (env: Record<string, string | undefined>, plans: PlanLike[], seconds: number) => credits(env, plans, storyCostUsd(env, seconds));
 
 export type StoryOptions = {
-  topic: string; seconds: (typeof STORY_LENGTHS)[number]; min_seconds: number; format: (typeof STORY_FORMATS)[number];
+  topic: string; seconds: (typeof STORY_LENGTHS)[number] | (typeof STORY_EXPLAINER_LENGTHS)[number]; min_seconds: number; format: (typeof STORY_FORMATS)[number];
   world: (typeof STORY_WORLDS)[number]; sidekick: string; captions: (typeof STORY_CAPTIONS)[number];
   stage: "script" | "film" | "all"; scene: Record<string, unknown> | null;
+  /** "explainer": the no-character film; unset: the story with a character */
+  kind?: "explainer";
 };
 
 const pick = <T extends readonly string[]>(list: T, v: unknown, d: T[number]): T[number] => ((list as readonly string[]).includes(String(v)) ? (String(v) as T[number]) : d);
@@ -44,8 +54,13 @@ export function parseStoryOptions(raw: any): StoryOptions {
   const topic = String(raw?.topic ?? "").replace(/\s+/g, " ").trim();
   if (topic.length < STORY_LIMITS.topicMin) throw new StoryError("story_topic", "Say what the story is about (for example: building a bridge across a river)");
   if (topic.length > STORY_LIMITS.topicMax) throw new StoryError("story_topic", `Keep the topic under ${STORY_LIMITS.topicMax} characters`);
-  // nearest offered length (older pages sent any number)
   const s = Number(raw?.seconds);
+  // the no-character film: a topic and a length, nothing else (no script stage, no world, no sidekick)
+  if (raw?.kind === "explainer") {
+    const secs = (Number.isFinite(s) ? STORY_EXPLAINER_LENGTHS.reduce<number>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_EXPLAINER_LENGTHS[0]) : 30) as StoryOptions["seconds"];
+    return { topic, seconds: secs, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, kind: "explainer" };
+  }
+  // nearest offered length (older pages sent any number)
   const seconds: StoryOptions["seconds"] = Number.isFinite(s) ? STORY_LENGTHS.reduce<StoryOptions["seconds"]>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_LENGTHS[0]) : 65;
   const sidekick = String(raw?.sidekick ?? "").replace(/[^\p{L}\p{N} '\-]/gu, "").replace(/\s+/g, " ").trim().slice(0, STORY_LIMITS.sidekickMax) || "Kevin";
   const stage = raw?.stage === "script" ? "script" : raw?.stage === "film" ? "film" : "all";
@@ -60,9 +75,16 @@ export function parseStoryOptions(raw: any): StoryOptions {
 
 export type StoryQuote = { tool: "kage_motion"; credits: number; options: Record<string, any>; summary: string };
 
-export function quoteStory(env: Record<string, string | undefined>, plans: PlanLike[], raw: any): StoryQuote {
+export function quoteStory(env: Record<string, string | undefined>, plans: PlanLike[], raw: any, who: { owner?: boolean } = {}): StoryQuote {
   if (!storiesEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403);
   const o = parseStoryOptions(raw);
+  if (o.kind === "explainer") {
+    if (!storyExplainerEnabled(env)) throw new StoryError("story_kind_off", "Stories without a character are not switched on yet", 403);
+    if (!storyExplainerOpen(env) && !who.owner) throw new StoryError("story_kind_off", "Stories without a character are not open yet", 403);
+    const cost = storyExplainerCostUsd(env, o.seconds);
+    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer" }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost };
+    return { tool: "kage_motion", credits: credits(env, plans, cost), options, summary: `${o.seconds} s 3D story · no character · vertical 9:16 · narrated` };
+  }
   const cost = o.stage === "script" ? storyScriptCostUsd(env) : o.stage === "film" ? storyFilmCostUsd(env, o.seconds) : storyCostUsd(env, o.seconds);
   const story = { topic: o.topic, seconds: o.seconds, ...(o.min_seconds ? { min_seconds: o.min_seconds } : {}), ...(o.format !== "auto" ? { format: o.format } : {}), ...(o.world !== "auto" ? { world: o.world } : {}), sidekick: o.sidekick, ...(o.captions !== "auto" ? { captions: o.captions } : {}), ...(o.stage !== "all" ? { stage: o.stage } : {}), ...(o.scene ? { scene: o.scene } : {}) };
   const options = { story, brief: o.topic, style: "story", aspect: "9:16", voice: "katana", seconds: o.seconds, cost_usd: cost };
