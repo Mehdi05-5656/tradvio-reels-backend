@@ -25,8 +25,12 @@ export function hasPlanAccess(customer: { status?: string | null; owner_pass?: b
   return !!customer && (customer.status === "active" || customer.status === "trialing" || customer.owner_pass === true);
 }
 
+/** The owner's own account: the largest plan's limits without the hourly job cap (batch production, owner's call
+ *  Nov 9 2026). How many jobs run at once is still bounded by studio_customers.parallel_jobs. */
+export const OWNER_LIMITS: PlanLimits = { ...PLAN_LIMITS.studio, jobs_per_hour: 100_000 };
+
 export function limitsFor(customer: { plan_id?: string | null; status?: string | null; owner_pass?: boolean | null } | null | undefined): PlanLimits {
-  if (customer?.owner_pass) return PLAN_LIMITS.studio; // the owner works at the largest plan's limits
+  if (customer?.owner_pass) return OWNER_LIMITS;
   const active = customer?.status === "active" || customer?.status === "trialing";
   const plan = customer?.plan_id ? PLAN_LIMITS[customer.plan_id as PlanId] : undefined;
   return active && plan ? plan : NO_PLAN_LIMITS;

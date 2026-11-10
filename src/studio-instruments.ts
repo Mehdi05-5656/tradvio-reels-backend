@@ -447,6 +447,15 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
   }
 }
 
+/** How many instrument jobs one server runs at once, and how often it looks for the next one. STUDIO_INSTRUMENT_PARALLEL
+ *  (1-16) raises the count from 4; above 4 the loop also claims every 5 s instead of 15 so the extra slots fill
+ *  (owner's batch runs, Nov 9 2026). Unset: 4 at once, every 15 s, as before. */
+export function instrumentLoopSettings(env: Record<string, string | undefined> = process.env): { parallel: number; tickMs: number } {
+  const n = Math.floor(Number(env.STUDIO_INSTRUMENT_PARALLEL));
+  const parallel = Number.isFinite(n) && n >= 1 ? Math.min(16, n) : 4;
+  return { parallel, tickMs: parallel > 4 ? 5_000 : 15_000 };
+}
+
 export function startInstrumentLoop(sbFn: () => SupabaseClient, deps: InstrumentDeps = {}, intervalMs = 15_000, maxParallel = 4): NodeJS.Timeout | null {
   const env = deps.env ?? process.env;
   if (!instrumentsEnabled(env).length) return null;

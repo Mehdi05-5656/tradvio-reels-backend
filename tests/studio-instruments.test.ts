@@ -176,3 +176,13 @@ test("a failed render refunds through studio_fail and a provider refusal is name
   const f = rpc.find((r) => r.name === "studio_fail");
   assert.equal(f.args.p_reason, "recast_failed"); assert.equal(f.args.p_retry, false);
 });
+
+test("instrument loop: 4 at once every 15 s unless STUDIO_INSTRUMENT_PARALLEL raises it (then every 5 s), capped at 16", async () => {
+  const { instrumentLoopSettings } = await import("../src/studio-instruments.js");
+  assert.deepEqual(instrumentLoopSettings({}), { parallel: 4, tickMs: 15_000 });
+  assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "10" }), { parallel: 10, tickMs: 5_000 });
+  assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "4" }), { parallel: 4, tickMs: 15_000 });
+  assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "99" }), { parallel: 16, tickMs: 5_000 });
+  assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "abc" }), { parallel: 4, tickMs: 15_000 });
+  assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "0" }), { parallel: 4, tickMs: 15_000 });
+});

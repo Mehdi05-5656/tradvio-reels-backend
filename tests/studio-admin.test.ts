@@ -227,6 +227,7 @@ test("the owner pass: plan access and the largest plan's limits, for the flagged
   assert.equal(hasPlanAccess({ status: "active" }), true);
   assert.equal(hasPlanAccess({ status: "canceled", owner_pass: false }), false);
   assert.equal(hasPlanAccess(null), false);
-  assert.deepEqual(limitsFor({ status: "none", plan_id: null, owner_pass: true }), PLAN_LIMITS.studio);
+  // the largest plan's files and storage, without the hourly job cap (owner's batch runs, Nov 9 2026)
+  assert.deepEqual(limitsFor({ status: "none", plan_id: null, owner_pass: true }), { ...PLAN_LIMITS.studio, jobs_per_hour: 100_000 });
   assert.deepEqual(limitsFor({ status: "none", plan_id: null }), NO_PLAN_LIMITS);
 });

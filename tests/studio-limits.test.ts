@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PLAN_LIMITS, NO_PLAN_LIMITS, limitsFor, uploadAllowance, jobAllowance, checkUpload, checkJobRate } from "../src/studio-limits.js";
+import { PLAN_LIMITS, NO_PLAN_LIMITS, OWNER_LIMITS, limitsFor, uploadAllowance, jobAllowance, checkUpload, checkJobRate } from "../src/studio-limits.js";
 
 test("limits: an active plan gets its own allowance, anyone else the small one", () => {
   assert.equal(limitsFor({ plan_id: "creator", status: "active" }), PLAN_LIMITS.creator);
@@ -9,6 +9,15 @@ test("limits: an active plan gets its own allowance, anyone else the small one",
   assert.equal(limitsFor(null), NO_PLAN_LIMITS);
   for (const l of Object.values(PLAN_LIMITS)) { assert.ok(l.assets > NO_PLAN_LIMITS.assets); assert.ok(l.storage_bytes > NO_PLAN_LIMITS.storage_bytes); assert.ok(l.jobs_per_hour > 0); }
   assert.ok(PLAN_LIMITS.starter.assets < PLAN_LIMITS.creator.assets && PLAN_LIMITS.creator.assets < PLAN_LIMITS.studio.assets, "limits grow with the plan");
+});
+
+test("limits: the owner pass gets the largest plan's files and storage, and no hourly job cap", () => {
+  const o = limitsFor({ owner_pass: true, status: "none" });
+  assert.equal(o, OWNER_LIMITS);
+  assert.equal(o.assets, PLAN_LIMITS.studio.assets); assert.equal(o.storage_bytes, PLAN_LIMITS.studio.storage_bytes);
+  assert.ok(o.jobs_per_hour >= 10_000, "batch runs on the owner's account are not rate-limited");
+  assert.equal(jobAllowance(o, 5_000), null);
+  assert.equal(PLAN_LIMITS.studio.jobs_per_hour, 100, "customers keep their caps");
 });
 
 test("limits: file count, then bytes, then nothing", () => {
