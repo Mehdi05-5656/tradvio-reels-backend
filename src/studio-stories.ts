@@ -21,9 +21,10 @@ export const STORY_LENGTHS = [30, 45, 65, 90] as const;
 // owner's account can make one (the tests): STUDIO_STORY_EXPLAINER_ENABLED, then STUDIO_STORY_EXPLAINER_OPEN.
 export const storyExplainerEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_STORY_EXPLAINER_ENABLED === "true";
 export const storyExplainerOpen = (env: Record<string, string | undefined> = process.env) => storyExplainerEnabled(env) && env.STUDIO_STORY_EXPLAINER_OPEN === "true";
-export const STORY_EXPLAINER_LENGTHS = [20, 30] as const;
+// (50 s is the reference's length: 172 words in 16 sentences; 30 s is the short cut of the same shape)
+export const STORY_EXPLAINER_LENGTHS = [30, 50] as const;
 /** What a no-character film costs us (the plan, the scene built part by part and checked, the preview, the voice, the render). */
-export const storyExplainerCostUsd = (env: Record<string, string | undefined>, seconds: number) => Math.round(usd(env, "STUDIO_STORY_EXPLAINER_COST_USD", 1.9) * (seconds > 24 ? 1.15 : 1) * 100) / 100;
+export const storyExplainerCostUsd = (env: Record<string, string | undefined>, seconds: number) => Math.round(usd(env, "STUDIO_STORY_EXPLAINER_COST_USD", 1.9) * (seconds > 30 ? 1.6 : 1) * 100) / 100;
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -57,7 +58,7 @@ export function parseStoryOptions(raw: any): StoryOptions {
   const s = Number(raw?.seconds);
   // the no-character film: a topic and a length, nothing else (no script stage, no world, no sidekick)
   if (raw?.kind === "explainer") {
-    const secs = (Number.isFinite(s) ? STORY_EXPLAINER_LENGTHS.reduce<number>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_EXPLAINER_LENGTHS[0]) : 30) as StoryOptions["seconds"];
+    const secs = (Number.isFinite(s) ? STORY_EXPLAINER_LENGTHS.reduce<number>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_EXPLAINER_LENGTHS[0]) : 50) as StoryOptions["seconds"];
     return { topic, seconds: secs, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, kind: "explainer" };
   }
   // nearest offered length (older pages sent any number)

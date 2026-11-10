@@ -59,8 +59,8 @@ test("the no-character film: its own switch, the owner's account until it is ope
   const OPEN = { ...EN, STUDIO_STORY_EXPLAINER_OPEN: "true" };
   assert.equal(quoteStory(OPEN, PLANS, ask).options.story.kind, "explainer");
   assert.equal(storyExplainerOpen({ ...ON, STUDIO_STORY_EXPLAINER_OPEN: "true" }), false);
-  // lengths snap to 20 or 30; the price follows the length and the env
-  assert.equal(parseStoryOptions({ ...ask, seconds: 90 }).seconds, 30); assert.equal(parseStoryOptions({ ...ask, seconds: 12 }).seconds, 20); assert.equal(parseStoryOptions({ topic: ask.topic, kind: "explainer" }).seconds, 30);
-  assert.equal(storyExplainerCostUsd({}, 20), 1.9); assert.ok(storyExplainerCostUsd({}, 30) > storyExplainerCostUsd({}, 20)); assert.equal(storyExplainerCostUsd({ STUDIO_STORY_EXPLAINER_COST_USD: "1" }, 20), 1);
+  // lengths snap to 30 or 50 (50, the reference's length, when none is asked); the price follows the length and the env
+  assert.equal(parseStoryOptions({ ...ask, seconds: 90 }).seconds, 50); assert.equal(parseStoryOptions({ ...ask, seconds: 12 }).seconds, 30); assert.equal(parseStoryOptions({ topic: ask.topic, kind: "explainer" }).seconds, 50);
+  assert.equal(storyExplainerCostUsd({}, 30), 1.9); assert.equal(storyExplainerCostUsd({}, 50), 3.04); assert.equal(storyExplainerCostUsd({ STUDIO_STORY_EXPLAINER_COST_USD: "1" }, 30), 1);
   assert.throws(() => parseStoryOptions({ kind: "explainer", topic: "hi" }), StoryError);
 });
