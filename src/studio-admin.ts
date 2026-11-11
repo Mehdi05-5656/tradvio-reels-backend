@@ -349,6 +349,11 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
   const paidBy = new Map<string, number>();
   for (const p of pays) if (p.user_id) paidBy.set(p.user_id, (paidBy.get(p.user_id) ?? 0) + p.usd);
   const countries = countryByUser(d);
+  // when each person was last here: the latest of a page they opened, a thing they made and a sign-in (a sign-in alone
+  // is not enough: people stay signed in for weeks)
+  const lastPage = new Map<string, string>();
+  for (const e of events) if (e.kind === "page" && e.user_id && (lastPage.get(e.user_id) ?? "") < e.created_at) lastPage.set(e.user_id, e.created_at);
+  const latest = (...xs: Array<string | null | undefined>) => xs.reduce((m: string | null, x) => (x && Number.isFinite(Date.parse(x)) && (!m || Date.parse(x) > Date.parse(m)) ? x : m), null);
   const people = d.users.filter((u) => keep(u.id)).map((u) => {
     const js = jobsBy.get(u.id) ?? [], c = cust.get(u.id);
     const costU = js.reduce((n, j) => n + jobCost(j, env).usd, 0) + events.filter((e) => e.user_id === u.id && (e.kind === "claude" || e.kind === "vendor")).reduce((n, e) => n + num(e.usd), 0);
@@ -361,6 +366,7 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
       jobs: js.length, done: js.filter((j) => j.status === "done").length, failed: js.filter((j) => j.status === "failed").length,
       credits: js.reduce((n, j) => n + num(j.credits_charged), 0), via_chat: js.filter((j) => { const v = jobVia(j, chatJobs, autoJobs); return v === "chat" || v === "automation"; }).length,
       tools: [...new Set(js.map((j) => j.tool))], paid_usd: r2(paid), cost_usd: r2(costU), profit_usd: r2(paid - stripeFeeTotal(pays.filter((p) => p.user_id === u.id)) - costU), last_job_at: last,
+      last_seen_at: latest(lastPage.get(u.id), last, u.last_sign_in_at),
     };
   }).sort((a, b) => b.created_at.localeCompare(a.created_at));
 

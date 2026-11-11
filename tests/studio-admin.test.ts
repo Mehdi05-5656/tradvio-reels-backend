@@ -366,3 +366,12 @@ test("the log route: the owner only; pages, one person, and a csv download", asy
     assert.equal((await csv.text()).trim().split("\r\n").length, body.total + 1);
   } finally { srv.close(); }
 });
+
+test("last on: the latest of a page opened, a thing made and a sign-in", () => {
+  const m = computeAdmin(data(), { days: 30, includeInternal: true, now: NOW }, ENV);
+  const a = m.users.find((u) => u.user_id === A)!, b = m.users.find((u) => u.user_id === B)!;
+  assert.equal(a.last_seen_at, ago(1), "signed in a day ago, after the last page and job");
+  assert.equal(b.last_seen_at, ago(1), "a page and a job a day ago, after the sign-in two days ago");
+  const d = data(); d.users.push({ id: "dddddddd-0000-4000-8000-000000000004", email: "new@example.com", created_at: ago(0), email_confirmed_at: null, last_sign_in_at: null });
+  assert.equal(computeAdmin(d, { days: 30, includeInternal: true, now: NOW }, ENV).users.find((u) => u.email === "new@example.com")!.last_seen_at, null);
+});
