@@ -89,7 +89,7 @@ test("today's roles, blockers and sources are kept", () => {
 // The same lists are in the dashboard's tests/onboarding.test.ts: an id on one side only is dropped from the save.
 const V3 = {
   role: ["creator", "clipper", "yt_automation", "pages", "ugc", "ai_influencer", "business", "agency", "exploring"],
-  goals: ["clips", "stories", "films", "captions", "multiply", "remake", "swap", "character", "trends", "ads", "earn", "publish", "managed"],
+  goals: ["clips", "stories", "films", "captions", "multiply", "remake", "swap", "character", "trends", "ads", "earn", "publish", "managed", "other"],
   platforms: ["tiktok", "instagram", "youtube", "facebook", "x", "linkedin", "threads", "snapchat", "none"],
   accounts: ["one", "2_5", "6_20", "21_100", "gt100"],
   posts_goal: ["lt30", "30_100", "100_500", "500_2000", "gt2000"],
@@ -98,7 +98,7 @@ const V3 = {
 };
 test("version 3: every answer the dashboard can send is kept", () => {
   for (const [k, ids] of Object.entries(V3)) for (const id of ids) assert.ok(QUESTIONS[k].values[id], `${k}.${id} is known`);
-  const all = { version: 3, role: "yt_automation", goals: V3.goals, goal: "films", platforms: ["youtube", "tiktok"], accounts: "2_5", posts_goal: "30_100", blocker: "ideas", heard: "ad" };
+  const all = { version: 3, role: "yt_automation", goals: V3.goals, goal: "films", goal_other: "Dub my videos into Spanish", platforms: ["youtube", "tiktok"], accounts: "2_5", posts_goal: "30_100", blocker: "ideas", heard: "ad" };
   assert.deepEqual(sanitizeAnswers(all), all);
 });
 test("answers from before version 3 are still read and counted", () => {
@@ -137,4 +137,15 @@ test("who started and did not finish, by the screen they stopped on", () => {
   assert.equal(s.unfinished, 3); assert.equal(s.answered, 1);
   assert.deepEqual(s.stopped, [{ id: "goals", label: "What they want to do", n: 2 }, { id: "channels", label: "Where they post", n: 1 }]);
   assert.deepEqual(s.by.role.map((r) => r.id), ["creator"], "unfinished answers are not counted as answers");
+});
+
+test('"Other" on the goals screen: kept with its words, dropped without them', () => {
+  assert.deepEqual(sanitizeAnswers({ goals: ["clips", "other"], goal: "clips", goal_other: "  Dub my videos\u0000 into Spanish " }), { goals: ["clips", "other"], goal: "clips", goal_other: "Dub my videos into Spanish" });
+  assert.deepEqual(sanitizeAnswers({ goals: ["clips", "other"], goal: "other", goal_other: "ab" }), { goals: ["clips"], goal: "clips" }, "under three characters is not an answer");
+  assert.deepEqual(sanitizeAnswers({ goals: ["other"], goal: "other" }), {}, "Other alone with no words saves nothing");
+  assert.deepEqual(sanitizeAnswers({ goals: ["clips"], goal: "clips", goal_other: "left over" }), { goals: ["clips"], goal: "clips" }, "words without Other are dropped");
+  assert.equal(sanitizeAnswers({ goals: ["other"], goal_other: "x".repeat(400) }).goal_other.length, 160);
+  assert.ok(profileLines({ goals: ["other"], goal: "other", goal_other: "Dub my videos" }).includes('In their own words, they are here to: "Dub my videos"'));
+  const s = signupInsights([{ onboarding: { completed_at: "2026-11-11T00:00:00Z", version: 3, goals: ["other"], goal: "other", goal_other: "Dub my videos" } }]);
+  assert.deepEqual(s.goal_others, ["Dub my videos"]); assert.equal(s.by.goal[0].label, "something else");
 });

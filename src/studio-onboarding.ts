@@ -19,7 +19,7 @@ export const QUESTIONS: Record<string, Spec> = {
     clips: "clipping long videos into shorts (Clips)", stories: "making faceless shorts from an idea (Stories)", films: "running a faceless YouTube channel with long films (Films)",
     captions: "adding captions that keep people watching (Captions)", multiply: "posting one video across many accounts as originals (Blueprint)", remake: "remaking an account's videos as their own (Accounts)",
     swap: "putting someone else in their video (Swap, Recast, Styles)", character: "building an AI influencer (AI Influencer)", trends: "hopping on trends fast (Trends)",
-    ads: "making ads and product videos (Kage)", earn: "getting paid for their views (creator program)", publish: "posting, scheduling and tracking everything (Publish, Performance)", managed: "done-for-you posting (managed service)",
+    ads: "making ads and product videos (Kage)", earn: "getting paid for their views (creator program)", publish: "posting, scheduling and tracking everything (Publish, Performance)", managed: "done-for-you posting (managed service)", other: "something else (in their own words)",
     // asked before Nov 10 2026, still read
     network: "running a page network without duplicate files (Blueprint)", faceless: "going faceless (Recast)", generate: "creating from a prompt (Instruments)", analytics: "growing with their numbers (Performance)",
   } },
@@ -36,7 +36,8 @@ export const QUESTIONS: Record<string, Spec> = {
 };
 /** Version 1 keys still accepted (people who answered before Oct 31 2026, or an old cached dashboard). */
 const V1 = new Set(["intent", "source", "recast_reason", "length", "character", "start"]);
-const TEXT_KEYS: Record<string, number> = { first_make: 400 };
+/** Free text: first_make (the older flow) and goal_other (what "Other" on the goals screen means, asked since Nov 10 2026). */
+const TEXT_KEYS: Record<string, number> = { first_make: 400, goal_other: 160 };
 const STEP_IDS = new Set(["role", "about", "goals", "goal", "channels", "volume", "blocker", "stack", "heard", "first"]);
 /** The five screens asked today, in order, and how each reads in the admin panel. */
 export const STEPS: Array<[string, string]> = [["role", "Who they are"], ["goals", "What they want to do"], ["channels", "Where they post"], ["blocker", "What holds them back"], ["heard", "How they found us"]];
@@ -60,6 +61,9 @@ export function sanitizeAnswers(input: Record<string, any>): Record<string, any>
   if (goals.includes(word(input.goal))) out.goal = word(input.goal);
   else if (goals.length === 1) out.goal = goals[0];
   for (const [k, max] of Object.entries(TEXT_KEYS)) { const t = plain(input[k], max); if (t) out[k] = t; }
+  // the words for "Other" are kept only while Other is picked, and Other only counts with at least three characters of them
+  if (!goals.includes("other")) delete out.goal_other;
+  else if (!out.goal_other || out.goal_other.length < 3) { out.goals = goals.filter((g) => g !== "other"); if (!out.goals.length) delete out.goals; if (out.goal === "other") { if (out.goals?.length) out.goal = out.goals[0]; else delete out.goal; } delete out.goal_other; }
   for (const k of V1) {
     const v = input[k];
     if (Array.isArray(v)) { const ids = v.map((x) => word(x)).filter(Boolean).slice(0, 12); if (ids.length) out[k] = ids; }
@@ -107,6 +111,7 @@ export function profileLines(ob: Record<string, any> | null | undefined): string
   }
   const goals = saidAll("goals", ob.goals);
   if (goals.length) lines.push(`Wants: ${goals.join("; ")}${said("goals", ob.goal) && goals.length > 1 ? `. First priority: ${said("goals", ob.goal)}` : ""}.`);
+  if (typeof ob.goal_other === "string" && ob.goal_other.trim()) lines.push(`In their own words, they are here to: "${ob.goal_other.trim().slice(0, 160)}"`);
   else if (ob.intent) lines.push(`Came for: ${String(ob.intent)}.`);
   const nets = saidAll("platforms", ob.platforms);
   if (nets.length || said("accounts", ob.accounts)) lines.push(`Posts on: ${[nets.join(", "), said("accounts", ob.accounts)].filter(Boolean).join(", ")}.`);
@@ -198,6 +203,8 @@ export function signupInsights(rows: Array<{ onboarding: any; status?: string | 
     skipped: answered.filter((r) => r.onboarding.skipped_at).length,
     by: Object.fromEntries(keys.map((k) => [k, tally(k)])),
     sources: [...sources.entries()].map(([source, n]) => ({ source, n })).sort((a, b) => b.n - a.n || a.source.localeCompare(b.source)).slice(0, 12),
+    /** what people who picked "Other" wrote, newest first */
+    goal_others: answered.filter((r) => typeof r.onboarding.goal_other === "string" && r.onboarding.goal_other.trim()).sort((a, b) => String(b.onboarding.completed_at).localeCompare(String(a.onboarding.completed_at))).slice(0, 40).map((r) => String(r.onboarding.goal_other)),
     first_makes: answered.filter((r) => typeof r.onboarding.first_make === "string").sort((a, b) => String(b.onboarding.completed_at).localeCompare(String(a.onboarding.completed_at))).slice(0, 12).map((r) => String(r.onboarding.first_make)),
   };
 }
