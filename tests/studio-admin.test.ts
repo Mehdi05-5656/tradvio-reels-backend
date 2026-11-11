@@ -307,8 +307,35 @@ test("the activity log: newest first, 50 a page, one person or everyone, a date 
   assert.equal(p1.totals.jobs, 120); assert.equal(p1.totals.cost_usd, 240); assert.equal(p1.totals.credits, 67200);
   assert.equal(p1.rows[0].id, "k0"); assert.equal(p3.rows[19].id, "k119");
   // a finished job with no cost on record has no profit figure, and is counted as unpriced
-  const clips = adminLog({ ...d, jobs: [{ id: "c1", user_id: A, tool: "clips", status: "done", options: {}, credits_charged: 200, progress: {}, outputs: [], created_at: ago(1) }] }, {}, ENV);
-  assert.equal(clips.rows[0].cost_usd, null); assert.equal(clips.rows[0].profit_usd, null); assert.equal(clips.totals.unpriced, 1); assert.equal(clips.totals.margin, null);
+  const odd = adminLog({ ...d, jobs: [{ id: "c1", user_id: A, tool: "mystery", status: "done", options: {}, credits_charged: 200, progress: {}, outputs: [], created_at: ago(1) }] }, {}, ENV);
+  assert.equal(odd.rows[0].cost_usd, null); assert.equal(odd.rows[0].profit_usd, null); assert.equal(odd.totals.unpriced, 1); assert.equal(odd.totals.margin, null);
+  // Clips and Captions: the download (tagged with the job), the Claude calls made while it ran, the transcript and the clips made
+  const t0 = Date.parse(ago(1));
+  const at = (min: number) => new Date(t0 + min * 60_000).toISOString();
+  const worker: AdminData = { ...d,
+    jobs: [
+      { id: "c1", user_id: A, tool: "clips", status: "done", options: { seconds: 3600 }, credits_charged: 200, progress: {}, outputs: [{}, {}, {}, {}, {}], created_at: at(0), finished_at: at(20) },
+      { id: "c2", user_id: A, tool: "clips", status: "failed", options: { seconds: 3600 }, credits_charged: 0, progress: {}, outputs: [], created_at: at(60), finished_at: at(70) },
+      { id: "c3", user_id: A, tool: "captions", status: "done", options: { seconds: 60 }, credits_charged: 10, progress: {}, outputs: [{}], created_at: at(120), finished_at: at(122) },
+    ],
+    events: [
+      { user_id: A, kind: "vendor", name: "youtube_proxy", usd: 0.9, props: { job: "c1" }, created_at: at(2) },
+      { user_id: A, kind: "claude", name: "clips_choose", usd: 0.4, props: {}, created_at: at(-5) }, // priced on the page just before it was queued
+      { user_id: A, kind: "claude", name: "clips_frame", usd: 0.01, props: {}, created_at: at(10) },
+      { user_id: A, kind: "vendor", name: "youtube_proxy", usd: 0.5, props: { job: "c2" }, created_at: at(62) },
+      { user_id: A, kind: "claude", name: "captions_keys", usd: 0.001, props: {}, created_at: at(121) },
+      { user_id: A, kind: "claude", name: "assistant", usd: 5, props: {}, created_at: at(5) }, // a chat at the same time is not the job's
+      { user_id: B, kind: "claude", name: "clips_choose", usd: 7, props: {}, created_at: at(5) }, // someone else's
+    ] };
+  const w = new Map(adminLog(worker, {}, ENV).rows.map((r) => [r.id, r]));
+  assert.equal(w.get("c1")!.cost_source, "calls"); assert.equal(w.get("c1")!.cost_usd, Math.round((0.9 + 0.4 + 0.01 + 0.22 + 5 * 0.004) * 1e4) / 1e4);
+  assert.ok(w.get("c1")!.profit_usd != null && w.get("c1")!.margin != null);
+  assert.equal(w.get("c2")!.cost_usd, 0.5, "a failed run still paid for its download"); assert.ok(w.get("c2")!.profit_usd! < 0);
+  assert.equal(w.get("c3")!.cost_usd, Math.round((0.001 + (60 / 3600) * 0.22) * 1e4) / 1e4);
+  // the panel's totals count those calls once, as before: the job itself adds nothing to them
+  const tot = computeAdmin(worker, { days: 30, includeInternal: true, now: NOW }, ENV);
+  assert.equal(tot.costs.generation_usd, 0);
+  assert.ok(Math.abs(tot.tools.find((x) => x.tool === "clips")!.cost_usd - (0.9 + 0.4 + 0.01 + 0.22 + 0.02 + 0.5)) < 0.011, "the Clips row of the tools table shows it");
   // the spreadsheet: a header, every row, formulas made plain
   const csv = adminLogCsv(many, {}, ENV).trim().split("\r\n");
   assert.equal(csv.length, 121); assert.ok(csv[0].startsWith("time_utc,email,country,feature,detail,status"));

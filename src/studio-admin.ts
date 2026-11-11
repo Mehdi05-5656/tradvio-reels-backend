@@ -35,7 +35,7 @@ const RENDER_TOOLS = new Set(["recast", "swap", "restyle", "trend"]);
 // ---------------------------------------------------------------------------------------------------
 // One job's cost to us, and where the figure comes from
 // ---------------------------------------------------------------------------------------------------
-export type CostSource = "billed" | "estimate" | "table" | "model" | "legacy" | "none";
+export type CostSource = "billed" | "estimate" | "table" | "model" | "legacy" | "calls" | "none";
 export function jobCost(j: any, env: Env = process.env): { usd: number; source: CostSource } {
   const p = j.progress ?? {}, o = j.options ?? {}, outs: any[] = Array.isArray(j.outputs) ? j.outputs : [];
   const done = j.status === "done";
@@ -64,6 +64,42 @@ export function jobCost(j: any, env: Env = process.env): { usd: number; source: 
   // this was not read, so every finished film counted as free.
   if ((j.tool === "kage_motion" || j.tool === "longform") && o.cost_usd != null) return { usd: num(o.cost_usd), source: "estimate" };
   return { usd: 0, source: "none" };
+}
+
+// Clips, Captions and imports run on our own workers, so the job keeps no bill. What they do cost is on record
+// elsewhere: the video download (a paid proxy, logged per job), the Claude calls (logged per person and time), and the
+// transcript (ElevenLabs, at our rate per hour). The servers themselves are a fixed monthly cost and are not in here.
+const WORKER_TOOLS = new Set(["clips", "captions", "import"]);
+const RENDER_USD_PER_CLIP = 0.004; // CPU and the stored file, per clip made (CLIP_COST)
+const TRANSCRIBE_USD_PER_HOUR = 0.22; // ElevenLabs scribe with word times (studio-clips.ts CLIP_COST)
+const CALL_PREFIX: Record<string, string[]> = { clips: ["clips_", "captions_"], captions: ["captions_", "caption"], import: [] };
+/** What each worker job cost in recorded calls. Only the log and the per-tool table use this: the panel's totals
+ *  already count every Claude and vendor event once, so adding these to a job there would count them twice. */
+export function callCostByJob(d: AdminData): Map<string, number> {
+  const out = new Map<string, number>();
+  const add = (id: string, usd: number) => out.set(id, (out.get(id) ?? 0) + usd);
+  const byUser = new Map<string, any[]>();
+  for (const j of d.jobs) if (WORKER_TOOLS.has(j.tool)) { const l = byUser.get(j.user_id) ?? []; l.push(j); byUser.set(j.user_id, l); out.set(String(j.id), 0); }
+  for (const e of d.events) {
+    if (e.kind !== "vendor" && e.kind !== "claude") continue;
+    const tagged = e.props?.job != null ? String(e.props.job) : null;
+    if (tagged) { if (out.has(tagged)) add(tagged, num(e.usd)); continue; }
+    if (e.kind !== "claude" || !e.user_id) continue;
+    // a Claude call names no job: it belongs to that person's job of the same kind that was running at the time
+    // (from 15 minutes before it was queued, when the page prices and previews, to when it finished)
+    const t = Date.parse(e.created_at);
+    const hit = (byUser.get(e.user_id) ?? []).filter((j) => (CALL_PREFIX[j.tool] ?? []).some((p) => String(e.name).startsWith(p)) && t >= Date.parse(j.created_at) - 15 * 60_000 && t <= (j.finished_at ? Date.parse(j.finished_at) : Date.parse(j.created_at) + 6 * 3_600_000))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+    if (hit) add(String(hit.id), num(e.usd));
+  }
+  for (const j of d.jobs) if ((j.tool === "clips" || j.tool === "captions") && j.status === "done") add(String(j.id), (num(j.options?.seconds) / 3600) * TRANSCRIBE_USD_PER_HOUR + (j.tool === "clips" ? (Array.isArray(j.outputs) ? j.outputs.length : 0) * RENDER_USD_PER_CLIP : 0));
+  return out;
+}
+/** A job's cost for the log: its own figure, or for a worker job what its calls cost. */
+export function jobCostFull(j: any, calls: Map<string, number>, env: Env = process.env): { usd: number; source: CostSource } {
+  const c = jobCost(j, env);
+  if (c.source === "none" && WORKER_TOOLS.has(j.tool) && calls.has(String(j.id)) && (j.status === "done" || (calls.get(String(j.id)) ?? 0) > 0)) return { usd: calls.get(String(j.id)) ?? 0, source: "calls" };
+  return c;
 }
 
 /** Where a job was started: the tool page, a chat, or a chat an automation opened. Older jobs: from the chats' runs. */
@@ -199,12 +235,14 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
 
   // ---- per tool
   const toolNames = [...new Set([...Object.keys(TOOL_LABEL), ...jobs.map((j) => j.tool)])];
+  const toolCalls = callCostByJob(d);
   const tools = toolNames.map((tool) => {
     const js = costed.filter((x) => x.j.tool === tool);
     const doneJs = js.filter((x) => x.j.status === "done");
     const credits = js.reduce((n, x) => n + num(x.j.credits_charged), 0);
     const value = js.reduce((n, x) => n + num(x.j.credits_charged) * creditValueFor(cust.get(x.j.user_id)), 0);
-    const costUsd = js.reduce((n, x) => n + x.c.usd, 0);
+    // worker tools (Clips, Captions) show what their calls cost; the totals above count those calls once already
+    const costUsd = js.reduce((n, x) => n + jobCostFull(x.j, toolCalls, env).usd, 0);
     const times = doneJs.map((x) => x.j.started_at && x.j.finished_at ? (Date.parse(x.j.finished_at) - Date.parse(x.j.started_at)) / 1000 : null).filter((x): x is number => x != null && x >= 0);
     const via = { tool: 0, chat: 0, automation: 0, unknown: 0 };
     for (const x of js) via[jobVia(x.j, chatJobs, autoJobs)]++;
@@ -432,6 +470,7 @@ function logRows(d: AdminData, q: LogQuery, env: Env) {
   const chatJobs = new Set<string>(), autoJobs = new Set<string>();
   for (const c of d.conversations) for (const st of (c.run?.steps ?? []) as any[]) if (st?.job_id) (c.automation_id ? autoJobs : chatJobs).add(String(st.job_id));
   for (const c of d.conversations) for (const m of (c.messages ?? []) as any[]) if (m?.choice?.job_id) chatJobs.add(String(m.choice.job_id));
+  const calls = callCostByJob(d);
   const from = q.from && Number.isFinite(Date.parse(q.from)) ? Date.parse(q.from) : null, to = q.to && Number.isFinite(Date.parse(q.to)) ? Date.parse(q.to) : null;
   return d.jobs
     // one person's log shows that person whoever they are; the full log leaves our own accounts out unless asked
@@ -439,9 +478,9 @@ function logRows(d: AdminData, q: LogQuery, env: Env) {
     .filter((j) => { const t = Date.parse(j.created_at); return (from == null || t >= from) && (to == null || t < to); })
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
     .map((j) => {
-      const c = jobCost(j, env), credits = num(j.credits_charged);
+      const c = jobCostFull(j, calls, env), credits = num(j.credits_charged);
       const worth = credits * creditValueFor(cust.get(j.user_id));
-      // a finished job with no cost on record (Clips, Captions, imports run on our own workers) has no honest profit figure
+      // a finished job with no cost on record at all has no honest profit figure
       const known = c.source !== "none" || j.status !== "done";
       let label = String(j.tool);
       try { label = jobLabel(j); } catch { /* the tool's own name */ }
