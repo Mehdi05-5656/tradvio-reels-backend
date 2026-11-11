@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
 import { phCapture } from "./posthog.js";
 import { checkUnsubscribeToken } from "./studio-mail.js";
-import { managedFit, sanitizeAnswers, signupInsights } from "./studio-onboarding.js";
+import { finishedRecord, managedFit, partialRecord, signupInsights } from "./studio-onboarding.js";
 import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-caption-video.js";
@@ -659,10 +659,21 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const raw = req.body?.answers;
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || JSON.stringify(raw).length > 8000) return res.status(400).json({ error: "invalid_answers" });
     // only known questions with known answers are kept (src/studio-onboarding.ts); anything else is dropped quietly
-    const a = sanitizeAnswers(raw);
     try {
       const sb = sbFn();
-      const r = await sb.from("studio_customers").upsert({ user_id: u, onboarding: { ...a, completed_at: new Date().toISOString() }, updated_at: new Date().toISOString() }, { onConflict: "user_id" }).select("onboarding").single();
+      const cur = await sb.from("studio_customers").select("onboarding").eq("user_id", u).maybeSingle();
+      if (cur.error) throw cur.error;
+      const existing = (cur.data?.onboarding ?? null) as Record<string, any> | null;
+      // a save part-way through (each screen as it is answered): kept so we can see where people stop; it never marks
+      // the questions as done and never touches answers that are already finished
+      if (req.body?.partial === true) {
+        const rec = partialRecord(existing, raw, req.body?.step);
+        if (!rec) return res.json({ onboarding: existing ?? {}, saved: false });
+        const r = await sb.from("studio_customers").upsert({ user_id: u, onboarding: rec, updated_at: new Date().toISOString() }, { onConflict: "user_id" }).select("onboarding").single();
+        if (r.error) throw r.error;
+        return res.json({ onboarding: r.data.onboarding, saved: true });
+      }
+      const r = await sb.from("studio_customers").upsert({ user_id: u, onboarding: finishedRecord(existing, raw), updated_at: new Date().toISOString() }, { onConflict: "user_id" }).select("onboarding").single();
       if (r.error) throw r.error;
       res.json({ onboarding: r.data.onboarding });
     } catch (e) { fail(res, e); }

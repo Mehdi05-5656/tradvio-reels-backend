@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QUESTIONS, sanitizeAnswers, profileLines, profileSuggestions, managedFit, signupInsights } from "../src/studio-onboarding.js";
+import { QUESTIONS, sanitizeAnswers, profileLines, profileSuggestions, managedFit, signupInsights, partialRecord, finishedRecord } from "../src/studio-onboarding.js";
 
 test("answers are kept only when the question and the answer exist", () => {
   const out = sanitizeAnswers({
@@ -35,7 +35,7 @@ test("the assistant reads who they are, what they want, their size, their proble
   const lines = profileLines({ role: "agency", clients: "4_10", niche: ["fitness"], goals: ["network", "publish"], goal: "network", platforms: ["tiktok", "instagram"], accounts: "21_100", posts_now: "30_100", posts_goal: "500_2000", library: "100_500", blocker: "flagged", tools: ["capcut", "none"], first_make: "Ten originals of my best gym clip" });
   assert.deepEqual(lines, [
     "They are an agency or SMMA making content for clients (4 to 10 clients; about fitness and health).",
-    "Wants: running a page network without duplicate files (Blueprint); posting and scheduling everywhere (Publish). First priority: running a page network without duplicate files (Blueprint).",
+    "Wants: running a page network without duplicate files (Blueprint); posting, scheduling and tracking everything (Publish, Performance). First priority: running a page network without duplicate files (Blueprint).",
     "Posts on: TikTok, Instagram, 21 to 100 accounts.",
     "Volume: 1 to 3 a day today, wants dozens a day; has 100 to 500 finished videos.",
     "Biggest problem: reposts getting flagged as unoriginal.",
@@ -83,4 +83,58 @@ test("who is signing up: counts per answer, paying alongside, sources and first 
 test("today's roles, blockers and sources are kept", () => {
   assert.deepEqual(sanitizeAnswers({ role: "clipper", blocker: "monetize", heard: "discord" }), { role: "clipper", blocker: "monetize", heard: "discord" });
   for (const r of ["ugc", "ai_influencer", "pages", "agency"]) assert.equal(sanitizeAnswers({ role: r }).role, r);
+});
+
+// ---- version 3 (Nov 10 2026): the same five screens, re-worded for what Clone8 does now ----
+// The same lists are in the dashboard's tests/onboarding.test.ts: an id on one side only is dropped from the save.
+const V3 = {
+  role: ["creator", "clipper", "yt_automation", "pages", "ugc", "ai_influencer", "business", "agency", "exploring"],
+  goals: ["clips", "stories", "films", "captions", "multiply", "remake", "swap", "character", "trends", "ads", "earn", "publish", "managed"],
+  platforms: ["tiktok", "instagram", "youtube", "facebook", "x", "linkedin", "threads", "snapchat", "none"],
+  accounts: ["one", "2_5", "6_20", "21_100", "gt100"],
+  posts_goal: ["lt30", "30_100", "100_500", "500_2000", "gt2000"],
+  blocker: ["volume", "filming", "ideas", "camera", "views", "monetize", "flagged", "accounts", "cost", "quality"],
+  heard: ["tiktok", "instagram", "youtube", "x", "discord", "reddit", "ai", "google", "creator", "friend", "ad", "other"],
+};
+test("version 3: every answer the dashboard can send is kept", () => {
+  for (const [k, ids] of Object.entries(V3)) for (const id of ids) assert.ok(QUESTIONS[k].values[id], `${k}.${id} is known`);
+  const all = { version: 3, role: "yt_automation", goals: V3.goals, goal: "films", platforms: ["youtube", "tiktok"], accounts: "2_5", posts_goal: "30_100", blocker: "ideas", heard: "ad" };
+  assert.deepEqual(sanitizeAnswers(all), all);
+});
+test("answers from before version 3 are still read and counted", () => {
+  assert.deepEqual(sanitizeAnswers({ version: 2, goals: ["network", "faceless", "generate", "analytics"] }).goals, ["network", "faceless", "generate", "analytics"]);
+  const s = signupInsights([
+    { onboarding: { completed_at: "2026-11-01T00:00:00Z", version: 2, role: "clipper", goal: "multiply", goals: ["multiply"] }, status: "active" },
+    { onboarding: { completed_at: "2026-11-11T00:00:00Z", version: 3, role: "clipper", goal: "clips", goals: ["clips", "captions"] }, status: "none" },
+  ]);
+  assert.equal(s.answered, 2); assert.equal(s.version2, 2, "both are on the newer questions"); assert.equal(s.current, 1);
+  assert.deepEqual(s.by.goal.map((r) => r.id).sort(), ["clips", "multiply"]);
+  assert.equal(s.by.goal.find((r) => r.id === "clips")!.label, "clipping long videos into shorts");
+});
+test("the assistant and chat read the new goals", () => {
+  assert.deepEqual(profileLines({ role: "yt_automation", goals: ["films", "stories"], goal: "films", blocker: "ideas" }), [
+    "They are running faceless YouTube channels (YouTube automation).",
+    "Wants: running a faceless YouTube channel with long films (Films); making faceless shorts from an idea (Stories). First priority: running a faceless YouTube channel with long films (Films).",
+    "Biggest problem: running out of ideas to post.",
+  ]);
+  assert.deepEqual(profileSuggestions({ version: 3, goal: "clips", goals: ["clips", "captions", "ads"] }).map((x) => x.prompt), ["Clip my latest long video into shorts.", "Add animated captions to my newest video.", "Make a short motion-graphics ad for my product."]);
+});
+test("part-way saves: kept with the screen they stopped on, never marked done, never over a finished record", () => {
+  const first = partialRecord(null, { version: 3, role: "clipper", evil: "x" }, "role", "2026-11-10T10:00:00Z")!;
+  assert.deepEqual(first, { version: 3, role: "clipper", started_at: "2026-11-10T10:00:00Z", stopped_at: "role", progress_at: "2026-11-10T10:00:00Z" });
+  const second = partialRecord(first, { version: 3, role: "clipper", goals: ["clips"], goal: "clips" }, "goals", "2026-11-10T10:01:00Z")!;
+  assert.equal(second.started_at, "2026-11-10T10:00:00Z", "the start is kept"); assert.equal(second.stopped_at, "goals"); assert.equal(second.completed_at, undefined);
+  assert.equal(partialRecord({ completed_at: "2026-11-01T00:00:00Z", role: "creator" }, { role: "clipper" }, "role"), null, "finished answers are left alone");
+  assert.equal(partialRecord(null, { role: "clipper" }, "nonsense"), null);
+  const done = finishedRecord(second, { version: 3, role: "clipper", goals: ["clips"], goal: "clips", heard: "tiktok" }, "2026-11-10T10:03:00Z");
+  assert.deepEqual(done, { role: "clipper", goals: ["clips"], goal: "clips", heard: "tiktok", version: 3, started_at: "2026-11-10T10:00:00Z", completed_at: "2026-11-10T10:03:00Z" });
+});
+test("who started and did not finish, by the screen they stopped on", () => {
+  const s = signupInsights([
+    { onboarding: { started_at: "a", stopped_at: "goals", role: "clipper" } }, { onboarding: { started_at: "b", stopped_at: "goals" } }, { onboarding: { started_at: "c", stopped_at: "channels" } },
+    { onboarding: { started_at: "d", completed_at: "e", role: "creator", version: 3 } }, { onboarding: {} },
+  ]);
+  assert.equal(s.unfinished, 3); assert.equal(s.answered, 1);
+  assert.deepEqual(s.stopped, [{ id: "goals", label: "What they want to do", n: 2 }, { id: "channels", label: "Where they post", n: 1 }]);
+  assert.deepEqual(s.by.role.map((r) => r.id), ["creator"], "unfinished answers are not counted as answers");
 });
