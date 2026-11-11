@@ -46,6 +46,7 @@ import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
 import { initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
+import { initCosts, registerStudioCosts } from "./studio-costs.js";
 import { registerStoryExam } from "./studio-story-exam.js";
 import compression from "compression";
 import WebSocket from "ws";
@@ -100,8 +101,10 @@ async function main() {
   registerClientLearning(app, getSb);
   registerLibraryArchive(app, getSb);
   initEvents(getSb); // the Studio admin panel's event record (studio_events): costs, checkouts, emails, page views
+  initCosts(getSb); // the cost ledger (studio_costs): every paid call, with its source
   registerStudio(app, getSb);
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
+  registerStudioCosts(app, getSb); // the admin panel's Money tab: what Clone8 paid, by vendor, tool and step
   registerStoryExam(app, getSb, { plans: PLANS }); // the Stories practice exam (admin only; STORY_MASTER_PLAN.md phase 0)
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
