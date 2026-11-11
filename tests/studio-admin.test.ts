@@ -231,3 +231,111 @@ test("the owner pass: plan access and the largest plan's limits, for the flagged
   assert.deepEqual(limitsFor({ status: "none", plan_id: null, owner_pass: true }), { ...PLAN_LIMITS.studio, jobs_per_hour: 100_000 });
   assert.deepEqual(limitsFor({ status: "none", plan_id: null }), NO_PLAN_LIMITS);
 });
+
+// ---------------------------------------------------------------------------------------------------
+// Country, film costs and the activity log (Nov 10 2026)
+// ---------------------------------------------------------------------------------------------------
+import { adminLog, adminLogCsv, countryByUser, featureOf } from "../src/studio-admin.js";
+import { countryFromRequest, noteCountry, resetGeoForTests } from "../src/studio-geo.js";
+
+test("a finished Kage, Story or Film costs what it was budgeted at; a failed one is not counted", () => {
+  assert.deepEqual(jobCost({ tool: "kage_motion", status: "done", options: { cost_usd: 2.1 } }, ENV), { usd: 2.1, source: "estimate" });
+  assert.deepEqual(jobCost({ tool: "longform", status: "done", options: { cost_usd: 3 } }, ENV), { usd: 3, source: "estimate" });
+  assert.deepEqual(jobCost({ tool: "kage_motion", status: "failed", options: { cost_usd: 2.1 } }, ENV), { usd: 0, source: "none" });
+  assert.deepEqual(jobCost({ tool: "clips", status: "done", options: {} }, ENV), { usd: 0, source: "none" }, "Clips keeps no cost: the log says so instead of showing a profit");
+  assert.equal(featureOf({ tool: "kage_motion", options: { story: { topic: "x" } } }), "Stories");
+  assert.equal(featureOf({ tool: "kage_motion", options: {} }), "Kage");
+  assert.equal(featureOf({ tool: "longform" }), "Films");
+});
+
+test("country: the edge header, two letters only; kept once per person and again when it changes", async () => {
+  assert.equal(countryFromRequest({ headers: { "cf-ipcountry": "fr" } }), "FR");
+  assert.equal(countryFromRequest({ headers: { "cf-ipcountry": "XX" } }), null);
+  assert.equal(countryFromRequest({ headers: { "cf-ipcountry": "France" } }), null);
+  assert.equal(countryFromRequest({ headers: {} }), null);
+  resetGeoForTests();
+  const writes: any[] = []; let rows = 1, fail = false;
+  const sb = { from: () => ({ update: (v: any) => ({ eq: (_k: string, id: string) => ({ select: async () => { if (fail) return { error: { message: "column country does not exist" } }; writes.push({ id, ...v }); return { data: Array.from({ length: rows }, () => ({ user_id: id })) }; } }) }) }) } as any;
+  assert.equal(await noteCountry(sb, A, { headers: { "cf-ipcountry": "US" } }), true);
+  assert.equal(await noteCountry(sb, A, { headers: { "cf-ipcountry": "US" } }), false, "the same country is not written twice");
+  assert.equal(await noteCountry(sb, A, { headers: { "cf-ipcountry": "GB" } }), true, "a move is");
+  assert.equal(await noteCountry(sb, A, { headers: {} }), false);
+  assert.deepEqual(writes.map((w) => w.country), ["US", "GB"]);
+  rows = 0; // no Studio row yet: nothing kept, so it is tried again next time
+  assert.equal(await noteCountry(sb, B, { headers: { "cf-ipcountry": "DE" } }), false);
+  rows = 1;
+  assert.equal(await noteCountry(sb, B, { headers: { "cf-ipcountry": "DE" } }), true);
+  fail = true; // before the migration
+  assert.equal(await noteCountry(sb, ME, { headers: { "cf-ipcountry": "US" } }), false);
+});
+
+test("people carry a country: the one we saw, else the payer's billing country", () => {
+  const d = data();
+  d.customers[0].country = "FR";
+  d.stripe.push({ id: "evt_c", type: "invoice.paid", received_at: ago(3), payload: { livemode: true, data: { object: { customer: "cus_b", customer_address: { country: "GB" }, amount_paid: 0 } } } });
+  d.stripe.push({ id: "evt_d", type: "invoice.paid", received_at: ago(3), payload: { livemode: true, data: { object: { customer: "cus_a", customer_address: { country: "US" }, amount_paid: 0 } } } });
+  const by = countryByUser(d);
+  assert.equal(by.get(A), "FR", "what we saw wins over the card's country");
+  assert.equal(by.get(B), "GB");
+  const m = computeAdmin(d, { days: 30, includeInternal: true, now: NOW }, ENV);
+  assert.equal(m.users.find((u) => u.user_id === A)!.country, "FR");
+  assert.equal(m.users.find((u) => u.user_id === ME)!.country, null);
+});
+
+test("the activity log: newest first, 50 a page, one person or everyone, a date range, and what each thing earned", () => {
+  const d = data();
+  const all = adminLog(d, {}, ENV);
+  assert.ok(all.rows.every((r) => r.user_id !== ME), "our own accounts are left out of the full log");
+  assert.deepEqual(all.rows.map((r) => r.at), [...all.rows.map((r) => r.at)].sort().reverse());
+  assert.equal(adminLog(d, { includeInternal: true }, ENV).total, all.total + d.jobs.filter((j) => j.user_id === ME).length);
+  const mine = adminLog(d, { user: ME }, ENV);
+  assert.ok(mine.total > 0 && mine.rows.every((r) => r.user_id === ME), "one person's log shows them even when they are one of ours");
+  assert.equal(mine.user?.email, "support@clone8.io");
+  // the billed swap: 80 credits on Creator monthly, cost $0.50
+  const j1 = adminLog(d, { user: A }, ENV).rows.find((r) => r.id === "j1")!;
+  assert.equal(j1.feature, "Swap"); assert.equal(j1.credits, 80); assert.equal(j1.cost_usd, 0.5); assert.equal(j1.cost_source, "billed");
+  assert.ok(j1.worth_usd > 0 && Math.abs(j1.profit_usd! - (j1.worth_usd - 0.5)) < 1e-3 && Math.abs(j1.margin! - (j1.worth_usd - 0.5) / j1.worth_usd) < 1e-3);
+  assert.equal(j1.render_s, 120); assert.equal(j1.via, "tool");
+  // a date range
+  const t = (days: number) => new Date(NOW.getTime() - days * 86400000).toISOString();
+  const week = adminLog(d, { from: t(2.5), to: t(0) }, ENV);
+  assert.deepEqual(week.rows.map((r) => r.id).sort(), d.jobs.filter((j) => j.user_id !== ME && Date.parse(j.created_at) >= Date.parse(t(2.5))).map((j) => j.id).sort());
+  // totals add up over every row, not just the page
+  const many: AdminData = { ...d, jobs: Array.from({ length: 120 }, (_, i) => ({ id: `k${i}`, user_id: A, tool: "kage_motion", status: "done", options: { cost_usd: 2, brief: "=cmd" }, credits_charged: 560, progress: {}, outputs: [], created_at: ago(1, i) })) };
+  const p1 = adminLog(many, {}, ENV), p3 = adminLog(many, { page: 3 }, ENV), p9 = adminLog(many, { page: 9 }, ENV);
+  assert.equal(p1.rows.length, 50); assert.equal(p1.pages, 3); assert.equal(p3.rows.length, 20); assert.equal(p9.page, 3, "a page past the end is the last page");
+  assert.equal(p1.totals.jobs, 120); assert.equal(p1.totals.cost_usd, 240); assert.equal(p1.totals.credits, 67200);
+  assert.equal(p1.rows[0].id, "k0"); assert.equal(p3.rows[19].id, "k119");
+  // a finished job with no cost on record has no profit figure, and is counted as unpriced
+  const clips = adminLog({ ...d, jobs: [{ id: "c1", user_id: A, tool: "clips", status: "done", options: {}, credits_charged: 200, progress: {}, outputs: [], created_at: ago(1) }] }, {}, ENV);
+  assert.equal(clips.rows[0].cost_usd, null); assert.equal(clips.rows[0].profit_usd, null); assert.equal(clips.totals.unpriced, 1); assert.equal(clips.totals.margin, null);
+  // the spreadsheet: a header, every row, formulas made plain
+  const csv = adminLogCsv(many, {}, ENV).trim().split("\r\n");
+  assert.equal(csv.length, 121); assert.ok(csv[0].startsWith("time_utc,email,country,feature,detail,status"));
+  assert.ok(csv[1].includes("ann@example.com") && csv[1].includes("Kage Motion · =cmd"), csv[1]);
+  assert.ok(adminLogCsv({ ...many, users: [{ ...d.users[0], email: "=evil@x.com" }, ...d.users.slice(1)] }, {}, ENV).includes(",'=evil@x.com,"));
+});
+
+test("the log route: the owner only; pages, one person, and a csv download", async () => {
+  clearAdminCacheForTests();
+  const app = express();
+  let who: any = null;
+  app.use((req, _res, next) => { (req as any).auth = who; next(); });
+  const sb = { auth: { admin: { getUserById: async (id: string) => ({ data: { user: id === ME ? { id: ME, email: "support@clone8.io", email_confirmed_at: ago(1) } : { id, email: "ann@example.com", email_confirmed_at: ago(1) } } }) } } } as any;
+  registerStudioAdmin(app, () => sb, { env: ENV, load: async () => data() });
+  const srv = app.listen(0); const base = `http://127.0.0.1:${(srv.address() as any).port}/api/studio/admin/log`;
+  try {
+    who = { user_id: A, email: "ann@example.com" };
+    assert.equal((await fetch(base)).status, 404);
+    assert.equal((await fetch(`${base}?format=csv`)).status, 404);
+    who = { user_id: ME, email: "support@clone8.io" };
+    const body: any = await (await fetch(`${base}?user=${A}`)).json();
+    assert.ok(body.total > 0 && body.rows.every((r: any) => r.user_id === A) && body.per === 50);
+    assert.equal((await fetch(`${base}?user=nope`)).status, 400);
+    const none: any = await (await fetch(`${base}?from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z`)).json();
+    assert.equal(none.total, 0); assert.equal(none.pages, 1);
+    const csv = await fetch(`${base}?user=${A}&format=csv`);
+    assert.match(csv.headers.get("content-type") ?? "", /text\/csv/); assert.match(csv.headers.get("content-disposition") ?? "", /attachment; filename="clone8-activity-/);
+    assert.equal((await csv.text()).trim().split("\r\n").length, body.total + 1);
+  } finally { srv.close(); }
+});

@@ -9,7 +9,7 @@
 // computeAdmin() is pure (tests feed it rows); loadAdminData() reads the tables; registerStudioAdmin() serves it.
 import type { Express } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { PLANS, planById, toolsEnabled } from "./studio.js";
+import { PLANS, jobLabel, planById, toolsEnabled } from "./studio.js";
 import { BLUEPRINT_COPY_COST_USD, BLUEPRINT_PLUS_COPY_COST_USD, CHARACTER_IMAGE_COST_USD, STRIPE_FEE, creditValueFloor, higgsfieldCostPerSecond, higgsfieldDiscount, netPerCredit, seedanceEditCostPerSecond } from "./studio-pricing.js";
 import { signupInsights } from "./studio-onboarding.js";
 import { isInternalEmail, isStudioAdmin } from "./studio-admin-auth.js";
@@ -27,7 +27,9 @@ export type AdminData = {
 };
 export type AdminOptions = { days: number | null; includeInternal: boolean; now?: Date };
 
-export const TOOL_LABEL: Record<string, string> = { blueprint: "Blueprint", blueprint_plus: "Blueprint+", recast: "Recast", swap: "Swap", restyle: "Styles", trend: "Trends", character: "Characters", instrument: "Instruments" };
+export const TOOL_LABEL: Record<string, string> = { blueprint: "Blueprint", blueprint_plus: "Blueprint+", recast: "Recast", swap: "Swap", restyle: "Styles", trend: "Trends", character: "Characters", instrument: "Instruments",
+  // everything that has shipped since: without a name here the panel showed the raw tool id
+  clips: "Clips", captions: "Captions", kage_motion: "Kage", longform: "Films", kage: "Kage remix", import: "Import" };
 const RENDER_TOOLS = new Set(["recast", "swap", "restyle", "trend"]);
 
 // ---------------------------------------------------------------------------------------------------
@@ -58,6 +60,9 @@ export function jobCost(j: any, env: Env = process.env): { usd: number; source: 
   if (j.tool === "character") return { usd: (outs.length || num(o.count) || 1) * CHARACTER_IMAGE_COST_USD * (1 - higgsfieldDiscount(env)), source: "model" };
   if (j.tool === "blueprint") return { usd: outs.length * BLUEPRINT_COPY_COST_USD, source: "model" };
   if (j.tool === "blueprint_plus") return { usd: outs.length * BLUEPRINT_PLUS_COPY_COST_USD, source: "model" };
+  // Kage, Stories and Films carry what one film is budgeted to cost us (set when the job is priced). Until Nov 10 2026
+  // this was not read, so every finished film counted as free.
+  if ((j.tool === "kage_motion" || j.tool === "longform") && o.cost_usd != null) return { usd: num(o.cost_usd), source: "estimate" };
   return { usd: 0, source: "none" };
 }
 
@@ -305,13 +310,14 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
   ];
   const paidBy = new Map<string, number>();
   for (const p of pays) if (p.user_id) paidBy.set(p.user_id, (paidBy.get(p.user_id) ?? 0) + p.usd);
+  const countries = countryByUser(d);
   const people = d.users.filter((u) => keep(u.id)).map((u) => {
     const js = jobsBy.get(u.id) ?? [], c = cust.get(u.id);
     const costU = js.reduce((n, j) => n + jobCost(j, env).usd, 0) + events.filter((e) => e.user_id === u.id && (e.kind === "claude" || e.kind === "vendor")).reduce((n, e) => n + num(e.usd), 0);
     const paid = paidBy.get(u.id) ?? 0;
     const last = js.reduce((m: string | null, j) => (!m || j.created_at > m ? j.created_at : m), null);
     return {
-      user_id: u.id, email: u.email, internal: internal.has(u.id), created_at: u.created_at, confirmed: !!u.email_confirmed_at, last_sign_in_at: u.last_sign_in_at,
+      user_id: u.id, email: u.email, country: countries.get(u.id) ?? null, internal: internal.has(u.id), created_at: u.created_at, confirmed: !!u.email_confirmed_at, last_sign_in_at: u.last_sign_in_at,
       plan: c?.plan_id ?? null, interval: c?.billing_interval ?? null, status: c?.status ?? "none", mrr_usd: mrrOf(c),
       onboarding: c?.onboarding && Object.keys(c.onboarding).length ? c.onboarding : null,
       jobs: js.length, done: js.filter((j) => j.status === "done").length, failed: js.filter((j) => j.status === "failed").length,
@@ -392,6 +398,88 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
     onboarding: signupInsights(d.customers.filter((c) => keep(c.user_id)).map((c) => ({ onboarding: c.onboarding, status: c.status }))),
   };
 }
+/** Where each person is: the country their browser last reached us from (studio_customers.country, kept by
+ *  studio-geo.ts), else the billing country Stripe holds for a payer. Two-letter codes. */
+export function countryByUser(d: AdminData): Map<string, string> {
+  const ok = (v: unknown) => (typeof v === "string" && /^[A-Za-z]{2}$/.test(v) ? v.toUpperCase() : null);
+  const out = new Map<string, string>();
+  const byCustomer = new Map<string, string>(d.customers.filter((c) => c.stripe_customer_id).map((c) => [String(c.stripe_customer_id), c.user_id]));
+  for (const e of d.stripe) {
+    const obj = e.payload?.data?.object ?? {};
+    const user = obj.metadata?.user_id ?? byCustomer.get(String(obj.customer ?? ""));
+    const cc = ok(obj.customer_details?.address?.country) ?? ok(obj.customer_address?.country);
+    if (user && cc) out.set(user, cc);
+  }
+  for (const c of d.customers) { const cc = ok(c.country); if (cc) out.set(c.user_id, cc); }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The activity log: one row per thing made, with what it was charged, what it cost us and what is left
+// ---------------------------------------------------------------------------------------------------
+export const LOG_PAGE = 50;
+export type LogQuery = { user?: string | null; from?: string | null; to?: string | null; includeInternal?: boolean; page?: number; per?: number };
+/** The feature as the person saw it: Stories run on the Kage worker, so the tool id alone would call them Kage. */
+export function featureOf(j: any): string {
+  if (j.tool === "kage_motion" && j.options?.story) return "Stories";
+  return TOOL_LABEL[j.tool] ?? String(j.tool);
+}
+function logRows(d: AdminData, q: LogQuery, env: Env) {
+  const email = new Map(d.users.map((u) => [u.id, u.email]));
+  const internal = new Set(d.users.filter((u) => isInternalEmail(u.email, env)).map((u) => u.id));
+  const cust = new Map<string, any>(d.customers.map((c) => [c.user_id, c]));
+  const countries = countryByUser(d);
+  const chatJobs = new Set<string>(), autoJobs = new Set<string>();
+  for (const c of d.conversations) for (const st of (c.run?.steps ?? []) as any[]) if (st?.job_id) (c.automation_id ? autoJobs : chatJobs).add(String(st.job_id));
+  for (const c of d.conversations) for (const m of (c.messages ?? []) as any[]) if (m?.choice?.job_id) chatJobs.add(String(m.choice.job_id));
+  const from = q.from && Number.isFinite(Date.parse(q.from)) ? Date.parse(q.from) : null, to = q.to && Number.isFinite(Date.parse(q.to)) ? Date.parse(q.to) : null;
+  return d.jobs
+    // one person's log shows that person whoever they are; the full log leaves our own accounts out unless asked
+    .filter((j) => (q.user ? j.user_id === q.user : q.includeInternal || !internal.has(j.user_id)))
+    .filter((j) => { const t = Date.parse(j.created_at); return (from == null || t >= from) && (to == null || t < to); })
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .map((j) => {
+      const c = jobCost(j, env), credits = num(j.credits_charged);
+      const worth = credits * creditValueFor(cust.get(j.user_id));
+      // a finished job with no cost on record (Clips, Captions, imports run on our own workers) has no honest profit figure
+      const known = c.source !== "none" || j.status !== "done";
+      let label = String(j.tool);
+      try { label = jobLabel(j); } catch { /* the tool's own name */ }
+      return {
+        id: String(j.id), at: String(j.created_at), user_id: String(j.user_id), email: email.get(j.user_id) ?? null, country: countries.get(j.user_id) ?? null,
+        tool: String(j.tool), feature: featureOf(j), detail: label, status: String(j.status), via: jobVia(j, chatJobs, autoJobs),
+        credits, worth_usd: r4(worth), cost_usd: known ? r4(c.usd) : null, cost_source: c.source,
+        profit_usd: known ? r4(worth - c.usd) : null, margin: known && worth > 0 ? r4((worth - c.usd) / worth) : null,
+        render_s: j.started_at && j.finished_at ? Math.max(0, Math.round((Date.parse(j.finished_at) - Date.parse(j.started_at)) / 1000)) : null,
+      };
+    });
+}
+export type LogRow = ReturnType<typeof logRows>[number];
+export function adminLog(d: AdminData, q: LogQuery = {}, env: Env = process.env) {
+  const rows = logRows(d, q, env);
+  const per = Math.min(200, Math.max(1, Math.round(q.per ?? LOG_PAGE)));
+  const pages = Math.max(1, Math.ceil(rows.length / per));
+  const page = Math.min(pages, Math.max(1, Math.round(q.page ?? 1) || 1));
+  const priced = rows.filter((r) => r.cost_usd != null);
+  const worth = rows.reduce((n, r) => n + r.worth_usd, 0), cost = priced.reduce((n, r) => n + (r.cost_usd ?? 0), 0);
+  const pricedWorth = priced.reduce((n, r) => n + r.worth_usd, 0);
+  const who = q.user ? d.users.find((u) => u.id === q.user) : null;
+  return {
+    user: q.user ? { user_id: q.user, email: who?.email ?? null } : null, from: q.from ?? null, to: q.to ?? null,
+    page, pages, per, total: rows.length,
+    totals: { jobs: rows.length, done: rows.filter((r) => r.status === "done").length, failed: rows.filter((r) => r.status === "failed").length, credits: rows.reduce((n, r) => n + r.credits, 0), worth_usd: r2(worth), cost_usd: r2(cost), profit_usd: r2(pricedWorth - cost), margin: pricedWorth > 0 ? r4((pricedWorth - cost) / pricedWorth) : null, unpriced: rows.length - priced.length },
+    rows: rows.slice((page - 1) * per, page * per),
+  };
+}
+export type AdminLog = ReturnType<typeof adminLog>;
+/** Every matching row as a spreadsheet. Cells that a spreadsheet would run as a formula are made plain text. */
+export function adminLogCsv(d: AdminData, q: LogQuery = {}, env: Env = process.env): string {
+  const cell = (v: unknown) => { let s = v == null ? "" : String(v); if (/^[=+\-@\t\r]/.test(s) && typeof v !== "number") s = `'${s}`; return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const head = ["time_utc", "email", "country", "feature", "detail", "status", "started_from", "credits_charged", "worth_usd", "our_cost_usd", "cost_basis", "profit_usd", "margin_pct", "render_seconds", "job_id"];
+  const lines = logRows(d, q, env).slice(0, 50_000).map((r) => [r.at, r.email, r.country, r.feature, r.detail, r.status, r.via, r.credits, r.worth_usd, r.cost_usd, r.cost_source === "none" ? (r.cost_usd == null ? "not recorded" : "") : r.cost_source, r.profit_usd, r.margin != null ? Math.round(r.margin * 1000) / 10 : null, r.render_s, r.id].map(cell).join(","));
+  return [head.join(","), ...lines].join("\r\n") + "\r\n";
+}
+
 function stripeFeeTotal(ps: Payment[]) { return ps.reduce((n, p) => n + stripeFee(p.usd), 0); }
 export type AdminMetrics = ReturnType<typeof computeAdmin>;
 
@@ -408,6 +496,7 @@ async function all(q: any, page = 1000, max = 50_000): Promise<any[]> {
   }
   return out;
 }
+const CUSTOMER_COLS = "user_id,stripe_customer_id,plan_id,billing_interval,status,period_end,cancel_at_period_end,credits_per_period,onboarding,created_at,referred_by,social_extra,auto_topup_enabled";
 export async function loadAdminData(sb: SupabaseClient): Promise<AdminData> {
   const admin = (sb as any).auth?.admin;
   const users: AdminData["users"] = [];
@@ -418,7 +507,8 @@ export async function loadAdminData(sb: SupabaseClient): Promise<AdminData> {
     if (list.length < 1000) break;
   }
   const [customers, jobs, ledger, stripe, conversations, automations, posts, profiles, insights, perfAccounts, assets, events, memory] = await Promise.all([
-    all(() => sb.from("studio_customers").select("user_id,stripe_customer_id,plan_id,billing_interval,status,period_end,cancel_at_period_end,credits_per_period,onboarding,created_at,referred_by,social_extra,auto_topup_enabled").order("created_at")),
+    // before the country migration the column is missing: read the row without it
+    all(() => sb.from("studio_customers").select(`${CUSTOMER_COLS},country`).order("created_at")).catch((e: any) => { if (!/country/.test(String(e?.message ?? ""))) throw e; return all(() => sb.from("studio_customers").select(CUSTOMER_COLS).order("created_at")); }),
     all(() => sb.from("studio_jobs").select("id,user_id,tool,status,options,credits_reserved,credits_charged,attempts,progress,outputs,error_code,created_at,started_at,finished_at").order("created_at")),
     all(() => sb.from("studio_credit_ledger").select("user_id,delta,reason,ref,note,created_at").order("id")),
     all(() => sb.from("studio_stripe_events").select("id,type,received_at,payload").in("type", ["checkout.session.completed", "invoice.paid"]).order("received_at"), 500, 20_000),
@@ -435,7 +525,9 @@ export async function loadAdminData(sb: SupabaseClient): Promise<AdminData> {
   return { users, customers, jobs, ledger, stripe, conversations, automations, posts, profiles, insights, perfAccounts, assets, events, memory };
 }
 
-/** GET /api/studio/admin/metrics?days=30&internal=0: the owner's account only; 404 for anyone else (the panel stays unannounced). */
+/** GET /api/studio/admin/metrics?days=30&internal=0: the owner's account only; 404 for anyone else (the panel stays unannounced).
+ *  GET /api/studio/admin/log?user=&from=&to=&internal=0&page=1: the activity log, 50 rows a page; &format=csv downloads
+ *  every matching row. from/to are instants (the page sends the start and end of the chosen days in its own time zone). */
 export function registerStudioAdmin(app: Express, sbFn: () => SupabaseClient, deps: { env?: Env; load?: (sb: SupabaseClient) => Promise<AdminData> } = {}) {
   const env = deps.env ?? process.env;
   let cache: { at: number; data: AdminData } | null = null;
@@ -451,6 +543,28 @@ export function registerStudioAdmin(app: Express, sbFn: () => SupabaseClient, de
       res.json(computeAdmin(cache.data, { days, includeInternal: req.query.internal === "1" }, env));
     } catch (e: any) {
       console.log(`[admin] ${String(e?.message ?? e).slice(0, 200)}`);
+      res.status(500).json({ error: "admin_failed" });
+    }
+  });
+  app.get("/api/studio/admin/log", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    try {
+      const sb = sbFn();
+      if (!(await isStudioAdmin(req, sb, env))) return res.status(404).json({ error: "not_found" });
+      const str = (v: unknown) => (typeof v === "string" && v.length <= 64 ? v : null);
+      const when = (v: unknown) => { const s = str(v); return s && Number.isFinite(Date.parse(s)) ? new Date(Date.parse(s)).toISOString() : null; };
+      const user = str(req.query.user);
+      if (user && !/^[0-9a-f-]{36}$/i.test(user)) return res.status(400).json({ error: "invalid_user" });
+      if (!cache || Date.now() - cache.at > 60_000 || req.query.fresh === "1") cache = { at: Date.now(), data: await (deps.load ?? loadAdminData)(sb) };
+      const q: LogQuery = { user, from: when(req.query.from), to: when(req.query.to), includeInternal: req.query.internal === "1", page: Number(req.query.page) || 1 };
+      if (req.query.format === "csv") {
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="clone8-activity-${new Date().toISOString().slice(0, 10)}.csv"`);
+        return res.send(adminLogCsv(cache.data, q, env));
+      }
+      res.json(adminLog(cache.data, q, env));
+    } catch (e: any) {
+      console.log(`[admin] log: ${String(e?.message ?? e).slice(0, 200)}`);
       res.status(500).json({ error: "admin_failed" });
     }
   });

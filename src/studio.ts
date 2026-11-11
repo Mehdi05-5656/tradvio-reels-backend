@@ -21,6 +21,7 @@ import { checkUnsubscribeToken } from "./studio-mail.js";
 import { finishedRecord, managedFit, partialRecord, signupInsights } from "./studio-onboarding.js";
 import { recordEvent, recordPageViews } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
+import { noteCountry } from "./studio-geo.js";
 import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-caption-video.js";
 import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.js";
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
@@ -619,6 +620,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup|owner_pass/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
       for (const r of [cust, bal, jobs, ledger]) if (r.error) throw r.error;
       const c: any = cust.data ?? null;
+      // where they are, for the admin panel (kept only when it is new or has changed; never waits)
+      if (c) void noteCountry(sb, u, req);
       const plan = planById(c?.plan_id);
       const spent = ((jobs.data ?? []) as any[]).reduce((n, j) => n + (j.credits_charged ?? (j.status === "queued" || j.status === "running" ? j.credits_reserved : 0)), 0);
       // name each credit movement by its job ("Swap · 44 s") instead of "Reserved for a job"
