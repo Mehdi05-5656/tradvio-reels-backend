@@ -67,6 +67,8 @@ export function quoteSplit(env: Env, asset: { id: string; kind: string; probe: a
 export type SplitDeps = ClipsDeps & {
   prepare?: (url: string, target: string) => Promise<void>;
   fetchLoop?: (loop: Loop, target: string) => Promise<void>;
+  /** a short-lived link to a loop in the library (a long loop is read from it directly, only the stretch needed) */
+  loopUrl?: (loop: Loop) => Promise<string>;
   words?: (u: string, assetId: string) => Promise<CapWord[]>;
   subjects?: (video: string, seconds: number, dir: string, userId: string) => Promise<Subject[]>;
   render?: (args: string[]) => Promise<void>;
@@ -114,6 +116,11 @@ async function defaultFetchLoop(sb: SupabaseClient, loop: Loop, target: string) 
   if (d.error || !d.data) throw new SplitError("splitscreen_loop_missing", "That gameplay could not be read", 502, true);
   await writeFile(target, Buffer.from(await d.data.arrayBuffer()));
 }
+async function defaultLoopUrl(sb: SupabaseClient, loop: Loop): Promise<string> {
+  const s = await sb.storage.from(LIBRARY_BUCKET).createSignedUrl(loopKey(loop.id), 3600);
+  if (s.error || !s.data?.signedUrl) throw new SplitError("splitscreen_loop_missing", "That gameplay could not be read", 502, true);
+  return s.data.signedUrl;
+}
 export async function runSplitJob(sb: SupabaseClient, deps: SplitDeps, job: Job, library: Loop[] = LIBRARY): Promise<string> {
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
   const o = job.options ?? {}, u = job.user_id;
@@ -133,14 +140,17 @@ export async function runSplitJob(sb: SupabaseClient, deps: SplitDeps, job: Job,
     const d = dir;
     await renew({ stage: "reading", message: "Reading your video", stage_at: new Date().toISOString() });
     const { url } = await signedClip(sb, u, job.asset_id);
-    const clip = join(d, "clip.mp4"), game = join(d, "game.mp4");
-    await Promise.all([
-      cutGate(env).run(() => (deps.prepare ?? prepareSource)(url, clip), () => renew({ message: "Next in line for the cutter" }).then(() => undefined)),
-      (deps.fetchLoop ? deps.fetchLoop(loop, game) : defaultFetchLoop(sb, loop, game)),
-    ]);
+    const clip = join(d, "clip.mp4");
+    await cutGate(env).run(() => (deps.prepare ?? prepareSource)(url, clip), () => renew({ message: "Next in line for the cutter" }).then(() => undefined));
     const fake = !!deps.render;
     const size = fake ? { w: 720, h: 1280 } : await probeDimensions(clip).then((s) => ({ w: s.width, h: s.height }));
     const seconds = fake ? Number(o.seconds) : await probeSeconds(clip);
+    // the loop: a stretch of a long one is read straight from the library (a few MB, not the whole file); a loop
+    // shorter than the clip is fetched whole, since it repeats
+    const win = gameWindow(loop.seconds, seconds, job.id);
+    let game = join(d, "game.mp4");
+    if (win.loop) await (deps.fetchLoop ? deps.fetchLoop(loop, game) : defaultFetchLoop(sb, loop, game));
+    else game = await (deps.loopUrl ? deps.loopUrl(loop) : defaultLoopUrl(sb, loop));
     const hasAudio = fake ? true : (await probeStream(clip)).hasAudio;
 
     let ass: string | null = null;
@@ -159,7 +169,6 @@ export async function runSplitJob(sb: SupabaseClient, deps: SplitDeps, job: Job,
     }
 
     await renew({ stage: "making", message: "Making your split screen", stage_at: new Date().toISOString() });
-    const win = gameWindow(loop.seconds, seconds, job.id);
     const out = join(d, "out.mp4"), still = join(d, "out.jpg");
     const args = splitArgs({ clip: { file: clip, size, seconds, hasAudio }, game: { file: game, size: loop.size, ...win, safe: loop.safe }, layout, ass, assFilter: ass ? assFilter(ass, env) : undefined, target: out });
     await cutGate(env).run(() => (deps.render ? deps.render(args) : ffmpeg(args, { timeoutMs: 15 * 60_000 }).then(() => undefined)), () => renew({ message: "Next in line for the cutter" }).then(() => undefined));

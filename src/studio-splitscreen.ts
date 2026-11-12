@@ -58,7 +58,8 @@ export function splitGraph(r: Pick<SplitRender, "clip" | "game" | "layout" | "as
  *  video lasts exactly as long as the clip; the sound is the clip's own (silence when it has none). */
 export function splitArgs(r: SplitRender): string[] {
   const g = r.game;
-  const gameIn = [...(g.loop ? ["-stream_loop", "-1"] : []), ...(g.start > 0 ? ["-ss", g.start.toFixed(2)] : []), "-i", g.file];
+  const net = /^https?:/.test(g.file) ? ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "30000000"] : [];
+  const gameIn = [...(g.loop ? ["-stream_loop", "-1"] : []), ...net, ...(g.start > 0 ? ["-ss", g.start.toFixed(2)] : []), "-i", g.file];
   const silence = r.clip.hasAudio ? [] : ["-f", "lavfi", "-t", r.clip.seconds.toFixed(2), "-i", "anullsrc=r=44100:cl=stereo"];
   const audioMap = ["-map", r.clip.hasAudio ? "0:a:0" : "2:a:0"];
   return [

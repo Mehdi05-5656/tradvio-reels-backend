@@ -75,6 +75,8 @@ test("a run: the loop's safe area and a stretch inside it, captions on the seam,
   assert.ok(y >= 102 && y + 640 <= 1178, `crop rows ${y}..${y + 640} stay inside 102..1178`);
   assert.match(graph, /ass=.*words\.ass/);
   assert.ok(args.includes("-ss"), "a stretch inside the long loop");
+  assert.equal(args[args.indexOf("-ss") + 3], "https://signed.example/x.mp4", "read straight from the library, not downloaded whole");
+  assert.ok(args.includes("-reconnect"));
   assert.deepEqual(args.slice(args.indexOf("[v]") + 1, args.indexOf("[v]") + 3), ["-map", "0:a:0"]);
   const done = rpc.find((r) => r.name === "studio_complete")!;
   assert.equal(done.args.p_credits_charged, 7);
@@ -96,4 +98,17 @@ test("a run with captions off, or with nobody speaking, makes the video without 
   const out = await runSplitJob(sb, { env: {}, log: () => undefined }, jobOf({ loop_id: "gone", seconds: 12 }), LIB);
   assert.equal(out, "splitscreen_no_loop");
   assert.ok(rpc.some((r) => r.name === "studio_fail") && !rpc.some((r) => r.name === "studio_complete"));
+});
+
+test("a loop shorter than the clip is fetched whole and repeated", async () => {
+  resetCutGate();
+  const { sb } = fakeSb();
+  let args: string[] = [], fetched = 0;
+  const short: Loop[] = [{ ...LIB[1], id: "short", seconds: 8 }];
+  const out = await runSplitJob(sb, { env: {}, log: () => undefined, prepare: async (_u, t) => writeFile(t, "c"), fetchLoop: async (_l, t) => { fetched++; await writeFile(t, "l"); }, words: async () => [],
+    render: async (a) => { args = a; await writeFile(a[a.length - 1], "v"); }, poster: async (_v, t) => writeFile(t, "j") }, jobOf({ loop_id: "short", seconds: 20 }), short);
+  assert.equal(out, "done");
+  assert.equal(fetched, 1);
+  assert.deepEqual(args.slice(args.indexOf("-stream_loop"), args.indexOf("-stream_loop") + 2), ["-stream_loop", "-1"]);
+  assert.match(args[args.indexOf("-stream_loop") + 3], /game\.mp4$/);
 });
