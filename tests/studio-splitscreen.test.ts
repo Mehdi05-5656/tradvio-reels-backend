@@ -103,3 +103,36 @@ test("splitGraph and splitArgs: crop, scale, stack in the right order, captions 
   assert.deepEqual(quiet.slice(quiet.indexOf("[v]") + 1, quiet.indexOf("[v]") + 3), ["-map", "2:a:0"]);
   assert.deepEqual(quiet.slice(quiet.indexOf("-stream_loop"), quiet.indexOf("-stream_loop") + 4), ["-stream_loop", "-1", "-i", "g.mp4"]);
 });
+
+import { cropInside } from "../src/studio-splitscreen.js";
+import { loopCrop, pickLoop, type Loop } from "../src/studio-splitscreen-library.js";
+
+test("cropInside and loopCrop: no framing can bring what lies outside a loop's safe area into view", () => {
+  const src = { w: 1280, h: 720 }, slot = { w: 720, h: 640 };
+  const safe = { x: 0.1, y: 0.15, w: 0.8, h: 0.75 }; // a channel name at the top, a counter at the bottom
+  for (const b of [{ zoom: 1, cx: 0, cy: 0 }, { zoom: 1, cx: 1, cy: 1 }, { zoom: 3, cx: 0, cy: 1 }, { zoom: 1, cx: 0.5, cy: 0.5 }]) {
+    const c = cropInside(src, safe, slot, b);
+    assert.ok(c.x >= 128 && c.y >= 108, `${JSON.stringify(c)} starts inside`);
+    assert.ok(c.x + c.w <= 1152 && c.y + c.h <= 648, `${JSON.stringify(c)} ends inside`);
+  }
+  assert.deepEqual(cropInside(src, null, slot, { zoom: 1, cx: 0.5, cy: 0.5 }), { x: 234, y: 0, w: 810, h: 720 });
+  const loop = { size: src, safe } as Pick<Loop, "size" | "safe">;
+  assert.deepEqual(loopCrop(loop, slot, { zoom: 1, cx: 0.5, cy: 0.5 }), cropInside(src, safe, slot, { zoom: 1, cx: 0.5, cy: 0.5 }));
+});
+
+test("pickLoop: the asked kind, the same pick for the same job", () => {
+  const mk = (id: string, kind: Loop["kind"]): Loop => ({ id, kind, name: id, seconds: 180, size: { w: 720, h: 1280 }, safe: { x: 0, y: 0, w: 1, h: 1 }, box: { zoom: 1, cx: 0.5, cy: 0.5 } });
+  const lib = [mk("a", "game"), mk("b", "game"), mk("c", "sim"), mk("d", "asmr")];
+  assert.equal(pickLoop("sim", "job", lib)?.id, "c");
+  assert.equal(pickLoop("game", "job-1", lib)?.id, pickLoop("game", "job-1", lib)?.id);
+  assert.equal(pickLoop("marble", "x", lib), null);
+  const seen = new Set(Array.from({ length: 40 }, (_, i) => pickLoop(null, `job-${i}`, lib)?.id));
+  assert.equal(seen.size, 4, "every loop gets picked across jobs");
+});
+
+test("the layout model is the same file in the backend and the dashboard", async () => {
+  const { readFileSync, existsSync } = await import("node:fs");
+  const twin = "../tradvio-reels-v2/src/lib/splitscreen-layout.ts";
+  if (!existsSync(twin)) return; // the dashboard is not beside this checkout (a server build)
+  assert.equal(readFileSync("src/splitscreen-layout.ts", "utf8"), readFileSync(twin, "utf8"));
+});
