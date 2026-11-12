@@ -11,6 +11,7 @@ import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, pla
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
 import { isAdmin } from "./auth.js";
+import { communityEnabled } from "./studio-community.js";
 import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
 import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
@@ -114,7 +115,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Films (long form): a 2-10 minute narrated motion-graphics film from a story prompt (the clone8-longform worker).
     longform: longformEnabled(env) && longformOpen(env),
     // Stories without a character (the no-character film): open to everyone only when its own switch says so.
-    story_explainer: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env) };
+    story_explainer: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env),
+    // Community: the shared library of generative films (its own switch).
+    community: communityEnabled(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
