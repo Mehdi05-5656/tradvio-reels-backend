@@ -83,8 +83,8 @@ export const SUBJECT_SCHEMA = {
 };
 export const SUBJECT_PROMPT = `These are frames from one short video, a second or so apart. It will fill one half of a split-screen video, cropped to a wide band, so we need to know what must stay in view.
 For every frame:
-- kind "face": a person is the subject. x and y are the centre of the main person's face (the one speaking or nearest the camera), from 0 to 1 across and down the picture; h is the face's height (chin to top of the head) as a share of the picture's height.
-- kind "subject": no face to follow, but one main thing (a product, an animal, hands at work). x, y its centre; h its height share.
+- kind "face": any person whose face or head is in the picture, even small or far away, even when their whole body shows. x and y are the centre of the main person's FACE (the one speaking or nearest the camera), from 0 to 1 across and down the picture; h is the face's height (chin to top of the head) as a share of the picture's height, not the body's.
+- kind "subject": nobody's head is in the picture, but one main thing is (a product, an animal, hands at work). x, y its centre; h its height share.
 - kind "screen": a screen recording, slides, a game, text that fills the picture.
 - kind "none": nothing in particular (scenery, a black frame). For "screen" and "none" give x 0.5, y 0.5, h 0.
 Answer for every frame, in order, by its number.`;

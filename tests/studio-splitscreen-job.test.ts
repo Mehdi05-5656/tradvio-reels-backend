@@ -24,10 +24,11 @@ test("switches: off by default; owner-only until the open switch; the tool list 
   assert.equal(code(() => quoteSplit(ON, asset(), { loop_id: "subway-official" }, { owner: true }, LIB)), "no error");
 });
 
-test("quote: one credit per 5 s, 5 at least; the loop asked for, or one of the asked kind; the layout made safe", () => {
-  assert.equal(splitCredits(3), 5); assert.equal(splitCredits(31), 7); assert.equal(splitCredits(180), 36);
+test("quote: 50 credits a video, whatever its length; the loop asked for, or one of the asked kind; the layout made safe", () => {
+  assert.equal(splitCredits({}), 50); assert.equal(splitCredits({ STUDIO_SPLITSCREEN_CREDITS: "70" }), 70); assert.equal(splitCredits({ STUDIO_SPLITSCREEN_CREDITS: "x" }), 50);
   const q = quoteSplit(OPEN, asset(31), { loop_id: "subway-official", layout: { seam: 0.9, swap: true } }, {}, LIB);
-  assert.equal(q.credits, 7);
+  assert.equal(q.credits, 50, "one flat price, whatever the length");
+  assert.equal(quoteSplit(OPEN, asset(170), {}, {}, LIB).credits, 50);
   assert.equal(q.options.loop_id, "subway-official");
   assert.equal(q.options.layout.seam, 0.7);
   assert.equal(q.options.layout.swap, true);
@@ -56,7 +57,7 @@ function fakeSb() {
   };
   return { sb, rpc, uploads };
 }
-const jobOf = (options: any) => ({ id: J, user_id: U, lease_token: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", asset_id: A, credits_reserved: 7, attempts: 1, progress: {}, options });
+const jobOf = (options: any) => ({ id: J, user_id: U, lease_token: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", asset_id: A, credits_reserved: 50, attempts: 1, progress: {}, options });
 
 test("a run: the loop's safe area and a stretch inside it, captions on the seam, the clip's sound, charged by length", async () => {
   resetCutGate();
@@ -79,7 +80,7 @@ test("a run: the loop's safe area and a stretch inside it, captions on the seam,
   assert.ok(args.includes("-reconnect"));
   assert.deepEqual(args.slice(args.indexOf("[v]") + 1, args.indexOf("[v]") + 3), ["-map", "0:a:0"]);
   const done = rpc.find((r) => r.name === "studio_complete")!;
-  assert.equal(done.args.p_credits_charged, 7);
+  assert.equal(done.args.p_credits_charged, 50);
   assert.deepEqual([done.args.p_outputs[0].tool, done.args.p_outputs[0].loop, done.args.p_outputs[0].captioned], ["splitscreen", "subway-official", true]);
   assert.deepEqual(uploads.map((u) => u.type), ["video/mp4", "image/jpeg"]);
 });

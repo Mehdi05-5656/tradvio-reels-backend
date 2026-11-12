@@ -171,3 +171,19 @@ test("the library: unique ids, every kind used, safe areas inside the picture, e
       }
   }
 });
+
+test("autoClipBox: the top of a tall subject or a head is never cut (the first live video: a person standing on a car)", () => {
+  const src = { w: 720, h: 1280 };
+  for (const seam of [0.5, 0.6]) {
+    const slot = { w: 720, h: Math.round(1280 * seam / 2) * 2 };
+    const s = { kind: "subject" as const, x: 0.51, y: 0.4, h: 0.43 };
+    const c = cropRect(src, slot, autoClipBox(src, slot, s));
+    const top = (s.y - s.h / 2) * src.h;
+    assert.ok(top - c.y >= 0.09 * c.h, `seam ${seam}: head top ${Math.round(top)} sits ${Math.round(top - c.y)} px below the crop top (crop ${c.h} tall)`);
+  }
+  // a close face keeps the old framing: centred a little above the middle
+  const f = autoClipBox(src, { w: 720, h: 640 }, { kind: "face", x: 0.5, y: 0.35, h: 0.12 });
+  const c = cropRect(src, { w: 720, h: 640 }, f);
+  const at = (0.35 * 1280 - c.y) / c.h;
+  assert.ok(at > 0.38 && at < 0.5, `face at ${at.toFixed(2)}`);
+});

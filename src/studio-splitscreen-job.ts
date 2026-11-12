@@ -33,11 +33,12 @@ type Env = Record<string, string | undefined>;
 export class SplitError extends ClipsError {}
 
 // ---------------------------------------------------------------------------------------------------
-// Price: one credit per 5 seconds, 5 at least (Captions' price: the words are the paid part, the render is server
-// time). To be checked against the measured cost of the first live runs (docs/split-screen/PLAN.md, phase 3).
+// Price: one flat price a video, whatever its length (the owner's call, Nov 12 2026: "50 credits per generation").
+// STUDIO_SPLITSCREEN_CREDITS changes it without a deploy. Measured cost of the first live video (fa5d54c4, 14.6 s):
+// $0.0007 for the face read, the words already kept, about 23 s of server time.
 // ---------------------------------------------------------------------------------------------------
-export const SPLIT_PRICE = { seconds_per_credit: 5, min_credits: 5 } as const;
-export const splitCredits = (seconds: number) => Math.max(SPLIT_PRICE.min_credits, Math.ceil(Math.max(0, seconds) / SPLIT_PRICE.seconds_per_credit));
+export const SPLIT_CREDITS_DEFAULT = 50;
+export const splitCredits = (env: Env = process.env) => { const n = Math.round(Number(env.STUDIO_SPLITSCREEN_CREDITS)); return n > 0 ? n : SPLIT_CREDITS_DEFAULT; };
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const KIND_IDS = KINDS.map((k) => k.id);
 
@@ -56,7 +57,7 @@ export function quoteSplit(env: Env, asset: { id: string; kind: string; probe: a
   if (!loop) throw new SplitError("splitscreen_no_loop", o.loop_id ? "That gameplay is no longer in the library" : "Pick a gameplay");
   const layout = cleanLayout(o.layout);
   const style = typeof o.caption_style === "string" ? o.caption_style.slice(0, 40) : "bold_pop";
-  return { tool: "splitscreen", credits: splitCredits(seconds),
+  return { tool: "splitscreen", credits: splitCredits(env),
     options: { loop_id: loop.id, layout, caption_style: style, seconds: round2(seconds), name: String(asset.name ?? "").slice(0, 120) },
     summary: `Split screen · ${loop.name} · ${Math.round(seconds)} s` };
 }
@@ -179,7 +180,7 @@ export async function runSplitJob(sb: SupabaseClient, deps: SplitDeps, job: Job,
     if (up.error) throw new SplitError("splitscreen_store_failed", String(up.error.message ?? up.error), 502, true);
     if (posterOk) { const p = await sb.storage.from("studio-outputs").upload(`${base}.jpg`, await readFile(still), { contentType: "image/jpeg", upsert: false }); if (p.error) posterOk = false; }
     const outputs = [{ index: 1, key: `${base}.mp4`, poster_key: posterOk ? `${base}.jpg` : undefined, kind: "video", bytes, duration: round2(seconds), tool: "splitscreen", loop: loop.id, captioned: !!ass }];
-    const charged = Math.min(job.credits_reserved, splitCredits(seconds));
+    const charged = job.credits_reserved; // the flat price that was quoted and reserved
     await renew({ stage: "done", charged }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
     if (done.error) throw done.error;
@@ -245,7 +246,7 @@ export function registerSplit(app: Express, h: Pick<LibraryHelpers, "sbFn" | "en
       const url = new Map<string, string>(((s as any).data ?? []).filter((x: any) => x?.signedUrl).map((x: any) => [x.path, x.signedUrl]));
       res.json({
         kinds: KINDS, limits: { min_seconds: SPLIT_LIMITS.min_seconds, max_seconds: SPLIT_LIMITS.max_seconds, seam_min: SPLIT_LIMITS.seam_min, seam_max: SPLIT_LIMITS.seam_max, zoom_max: SPLIT_LIMITS.zoom_max },
-        price: SPLIT_PRICE, out: SPLIT_OUT,
+        price: { credits: splitCredits(h.env) }, out: SPLIT_OUT,
         loops: library.map((l) => ({ id: l.id, kind: l.kind, name: l.name, seconds: l.seconds, size: l.size, safe: l.safe, box: l.box, video: url.get(loopKey(l.id)) ?? null, poster: url.get(posterKey(l.id)) ?? null })),
       });
     } catch (e) { h.fail(res, e); }

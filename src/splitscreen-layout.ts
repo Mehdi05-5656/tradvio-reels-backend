@@ -85,7 +85,11 @@ export function autoClipBox(src: Size, slot: Size, s: Subject | null): Box {
   if (s.h && s.h > 0 && s.kind !== "subject") zoom = clamp((base.h * 0.34) / (s.h * src.h), 1, 2.2);
   const crop = cropRect(src, slot, { zoom, cx: 0.5, cy: 0.5 });
   // the face at 44 % of the half's height: move the crop's centre down from the face by 6 % of the crop
-  return { zoom: Math.round(zoom * 100) / 100, cx: clamp(s.x, 0, 1), cy: clamp(s.y + (0.06 * crop.h) / src.h, 0, 1) };
+  let cy = s.y + (0.06 * crop.h) / src.h;
+  // never cut the top of the head (or of the subject): its top stays at least 10 % of the crop below the crop's top.
+  // A person standing on a car was read as a tall subject and centred, which cut their head off (first live video)
+  if (s.h && s.h > 0) { const top = (s.y - s.h / 2) * src.h; cy = Math.min(cy, (top - 0.1 * crop.h + crop.h / 2) / src.h); }
+  return { zoom: Math.round(zoom * 100) / 100, cx: clamp(s.x, 0, 1), cy: clamp(cy, 0, 1) };
 }
 
 /** The seam the auto-sizer picks: half and half, unless the clip is a close talking head in a vertical video (its
