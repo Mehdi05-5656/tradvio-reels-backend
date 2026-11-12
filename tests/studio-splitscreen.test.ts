@@ -136,3 +136,22 @@ test("the layout model is the same file in the backend and the dashboard", async
   if (!existsSync(twin)) return; // the dashboard is not beside this checkout (a server build)
   assert.equal(readFileSync("src/splitscreen-layout.ts", "utf8"), readFileSync(twin, "utf8"));
 });
+
+import { readSubjects, settleSubject } from "../src/studio-splitscreen.js";
+
+test("settleSubject: the kind most frames show; the middle of where the face was, so a glance away does not move the crop", () => {
+  const f = (x: number, y: number, h = 0.2) => ({ kind: "face" as const, x, y, h });
+  assert.deepEqual(settleSubject([f(0.4, 0.3), f(0.42, 0.31), f(0.9, 0.8), f(0.41, 0.3), { kind: "none", x: 0.5, y: 0.5 }]), { kind: "face", x: 0.415, y: 0.305, h: 0.2 });
+  assert.deepEqual(settleSubject([{ kind: "screen", x: 0.5, y: 0.5 }, { kind: "screen", x: 0.5, y: 0.5 }, f(0.2, 0.2)]), { kind: "screen", x: 0.5, y: 0.5 });
+  assert.equal(settleSubject([]), null);
+});
+
+test("readSubjects: one call to the small model with every still; unreadable answers fall back safely", async () => {
+  let body: any = null;
+  const fetch = async (_u: any, init: any) => { body = JSON.parse(init.body); return new Response(JSON.stringify({ model: "claude-haiku-5-5", usage: {}, content: [{ type: "text", text: JSON.stringify({ frames: [{ n: 1, kind: "face", x: 0.4, y: 0.3, h: 0.25 }, { n: 2, kind: "weird", x: 7, y: -1, h: "x" }] }) }] }), { status: 200 }); };
+  const out = await readSubjects({ env: { ANTHROPIC_API_KEY: "k" }, fetch: fetch as any, log: () => undefined }, [{ t: 0.3, jpg: Buffer.from("a") }, { t: 1.3, jpg: Buffer.from("b") }]);
+  assert.equal(body.model, "claude-haiku-5-5");
+  assert.equal(body.messages[0].content.filter((c: any) => c.type === "image").length, 2);
+  assert.deepEqual(out[0], { t: 0.3, kind: "face", x: 0.4, y: 0.3, h: 0.25 });
+  assert.deepEqual(out[1], { t: 1.3, kind: "none", x: 1, y: 0, h: 0 });
+});
