@@ -26,8 +26,32 @@ export const posterKey = (id: string) => `splitscreen/library/${id}.jpg`;
 const FULL: Rect = { x: 0, y: 0, w: 1, h: 1 };
 const L = (id: string, kind: Kind, name: string, w: number, h: number, safe: Rect = FULL, box: Box = CENTRE, seconds = 180): Loop => ({ id, kind, name, seconds, size: { w, h }, safe, box });
 
-/** The library. Sizes are the cleaned files'; safe areas and boxes were set from a contact sheet of each loop. */
-export const LIBRARY: Loop[] = [];
+const R = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+const B = (cy: number, cx = 0.5, zoom = 1): Box => ({ zoom, cx, cy });
+/** The library (Nov 12 2026): 3-minute stretches, silent, 30 fps, the short side at 720. Safe areas and action boxes
+ *  were set from a 6-frame contact sheet of each loop (splitscreen-library/sheets): HUDs, counters, channel names
+ *  and pillarbox bars sit outside the safe area. Left out for now: kinetic sand (a creator's watermark in the middle
+ *  of the picture) and the second bouncing-sims stretch (a "subscribe" overlay). Sources: docs/split-screen/PLAN.md. */
+export const LIBRARY: Loop[] = [
+  L("subway-official", "game", "Subway Surfers", 720, 1278, FULL, B(0.62), 185),
+  L("subway-orbital", "game", "Subway Surfers · Rio", 720, 1280, R(0, 0.14, 1, 0.86), B(0.64)),
+  L("minecraft-parkour-a", "game", "Minecraft parkour", 1280, 720),
+  L("minecraft-parkour-b", "game", "Minecraft parkour · colours", 1280, 720),
+  L("gta-megaramp", "game", "GTA mega ramp", 1280, 720, FULL, B(0.58)),
+  L("gta-carjumps-a", "game", "GTA car jumps", 1280, 720, FULL, B(0.6)),
+  L("gta-carjumps-b", "game", "GTA car jumps · sky ramp", 1280, 720, FULL, B(0.6)),
+  L("fortnite-a", "game", "Fortnite · snow", 1280, 720, R(0.18, 0.1, 0.6, 0.75), B(0.56)),
+  L("fortnite-b", "game", "Fortnite", 1280, 720, R(0.2, 0.14, 0.58, 0.72), B(0.58)),
+  L("beamng-ramps", "game", "BeamNG car jumps", 1280, 720, R(0.04, 0.08, 0.68, 0.9), B(0.6)),
+  L("going-balls", "ball", "Going Balls", 1280, 720, R(0, 0.15, 1, 0.85), B(0.62)),
+  L("sky-rolling-ball", "ball", "Sky Rolling Ball", 720, 1280, R(0.1, 0.18, 0.8, 0.82), B(0.6)),
+  L("bounce-sims-a", "sim", "Bouncing ball sims", 1280, 720, R(0.24, 0, 0.52, 1)),
+  L("marble-race", "marble", "Marble race", 1280, 720, R(0.12, 0.1, 0.86, 0.9)),
+  L("marble-loop", "marble", "Marble run", 1280, 720),
+  L("hydraulic-press", "asmr", "Hydraulic press", 1280, 720, FULL, B(0.45)),
+  L("soap-cutting", "asmr", "Soap cutting", 1278, 720, R(0.23, 0, 0.54, 1)),
+  L("slime", "asmr", "Slime", 1280, 720),
+];
 
 export const loopById = (id: unknown): Loop | null => LIBRARY.find((l) => l.id === id) ?? null;
 

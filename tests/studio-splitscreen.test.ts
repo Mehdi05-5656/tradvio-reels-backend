@@ -155,3 +155,19 @@ test("readSubjects: one call to the small model with every still; unreadable ans
   assert.deepEqual(out[0], { t: 0.3, kind: "face", x: 0.4, y: 0.3, h: 0.25 });
   assert.deepEqual(out[1], { t: 1.3, kind: "none", x: 1, y: 0, h: 0 });
 });
+
+import { LIBRARY, KINDS } from "../src/studio-splitscreen-library.js";
+test("the library: unique ids, every kind used, safe areas inside the picture, every crop of every loop stays in them", () => {
+  assert.equal(new Set(LIBRARY.map((l) => l.id)).size, LIBRARY.length);
+  for (const k of KINDS) assert.ok(LIBRARY.some((l) => l.kind === k.id), `kind ${k.id} has a loop`);
+  for (const l of LIBRARY) {
+    assert.ok(l.safe.x >= 0 && l.safe.y >= 0 && l.safe.x + l.safe.w <= 1.0001 && l.safe.y + l.safe.h <= 1.0001, l.id);
+    for (const slot of [{ w: 720, h: 640 }, { w: 720, h: 1280 }, { w: 720, h: 384 }])
+      for (const b of [l.box, { zoom: 1, cx: 0, cy: 0 }, { zoom: 2.5, cx: 1, cy: 1 }]) {
+        const c = loopCrop(l, slot, b);
+        assert.ok(c.x >= Math.floor(l.safe.x * l.size.w) - 1 && c.y >= Math.floor(l.safe.y * l.size.h) - 1, `${l.id} starts inside`);
+        assert.ok(c.x + c.w <= Math.ceil((l.safe.x + l.safe.w) * l.size.w) + 1 && c.y + c.h <= Math.ceil((l.safe.y + l.safe.h) * l.size.h) + 1, `${l.id} ends inside`);
+        assert.ok(c.x + c.w <= l.size.w && c.y + c.h <= l.size.h && c.w > 0 && c.h > 0, `${l.id} inside the file`);
+      }
+  }
+});
