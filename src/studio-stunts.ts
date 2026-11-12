@@ -42,7 +42,7 @@ export const stuntsEnabled = (env: Env = process.env) => env.STUDIO_STUNTS_ENABL
 /** Open to every customer. Until then only the owner's account (the Studio admin) can make them: the test videos. */
 export const stuntsOpen = (env: Env = process.env) => stuntsEnabled(env) && env.STUDIO_STUNTS_OPEN === "true";
 
-export const STUNT_LIMITS = { min_seconds: 3, max_seconds: 60, max_gags: 6, gap: 1.5, prompt_min: 12, prompt_max: 600, ideas_per_day: 20, stills: 40, gag_seconds: 5, tries: 2 };
+export const STUNT_LIMITS = { min_seconds: 3, max_seconds: 60, max_gags: 6, gap: 1.5, prompt_min: 12, prompt_max: 600, ideas_per_day: 20, idea_moments: 4, stills: 24, gag_seconds: 5, tries: 2 };
 export const STUNT_SPEEDS = [1.5, 2, 2.5] as const;
 export const STUNT_STYLE = " Shot on a phone, realistic, the same person, the same place, the same light. One continuous take with no cut; the camera follows the action handheld. Fast, physical, loud.";
 export const stuntEndpoint = (env: Env = process.env) => env.STUDIO_STUNTS_ENDPOINT || "alibaba/wan-3.0/image-to-video";
@@ -118,8 +118,8 @@ Pick the moments where an ending fits: the end of a sentence or a thought, a pau
 For each moment give:
 - at: the time in seconds the real shot hands over (the generated shot starts from the frame at exactly this time).
 - resume: the time the real video carries on from afterwards. Use the start of their next sentence when there is dead air after "at"; otherwise the same time as "at".
-- why: a few words on why this moment.
-- ideas: three different gags. Each has a short title (2 to 5 words) and a prompt.
+- why: why this moment, in six words or fewer (it is a label on a card: "End of the first sentence", "He points at the camera").
+- ideas: three different gags. Each has a short title (2 to 4 words) and a prompt of 40 words or fewer.
 
 A good prompt is one or two sentences in the present tense that say exactly what happens, physically and in order, starting from what is in that frame: who moves, what they touch, what it does, how the camera follows. Use what is really in the picture (the chair, the car, the dog, the coffee) and what they just said. Big, fast, physical, absurd: things launch, explode, get lifted, get yanked away, fall from the sky, drive through walls. The three ideas must differ in kind, not in detail.
 
@@ -163,12 +163,13 @@ type StuntDeps = ClipsDeps & {
   sleep?: (ms: number) => Promise<void>;
 };
 async function defaultStills(video: string, times: number[], dir: string): Promise<Buffer[]> {
-  const out: Buffer[] = [];
-  for (let i = 0; i < times.length; i++) {
-    const f = join(dir, `s${i}.jpg`);
+  // four at a time: each is one seek and one frame, and a person is waiting for the ideas
+  const out: Buffer[] = new Array(times.length), tag = randomUUID().slice(0, 8);
+  let next = 0;
+  const one = async () => { for (;;) { const i = next++; if (i >= times.length) return; const f = join(dir, `s${tag}-${i}.jpg`);
     await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", times[i].toFixed(2), "-i", video, "-frames:v", "1", "-vf", "scale=384:-2", "-q:v", "6", f], { timeoutMs: 60_000 });
-    out.push(await readFile(f));
-  }
+    out[i] = await readFile(f); } };
+  await Promise.all(Array.from({ length: Math.min(4, times.length) }, one));
   return out;
 }
 async function defaultIdeas(deps: StuntDeps, stills: Array<{ at: number; jpeg: Buffer }>, words: Array<{ text: string; start: number }>, seconds: number, userId: string): Promise<unknown> {
@@ -176,8 +177,8 @@ async function defaultIdeas(deps: StuntDeps, stills: Array<{ at: number; jpeg: B
   const content: any[] = [];
   for (const s of stills) { content.push({ type: "text", text: `Still at ${s.at.toFixed(1)} s` }); content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: s.jpeg.toString("base64") } }); }
   const said = words.length ? words.map((w) => `[${w.start.toFixed(1)}] ${w.text}`).join(" ") : "(nobody speaks)";
-  content.push({ type: "text", text: `The clip is ${seconds.toFixed(1)} seconds long.\n\nWords with their start times:\n${said}\n\nGive up to ${STUNT_LIMITS.max_gags} moments.` });
-  const out = await claudeJson(deps, { model: env.STUDIO_STUNTS_MODEL || "claude-sonnet-5-5", max_tokens: 6000, system: IDEAS_SYSTEM, output_config: { format: { type: "json_schema", schema: IDEAS_SCHEMA } }, messages: [{ role: "user", content }] }, "stunts_ideas", userId);
+  content.push({ type: "text", text: `The clip is ${seconds.toFixed(1)} seconds long.\n\nWords with their start times:\n${said}\n\nGive the ${STUNT_LIMITS.idea_moments} best moments, or fewer if the clip is short or has fewer good ones. Be brief: people are waiting for this.` });
+  const out = await claudeJson(deps, { model: env.STUDIO_STUNTS_MODEL || "claude-sonnet-5-5", max_tokens: 3000, system: IDEAS_SYSTEM, output_config: { format: { type: "json_schema", schema: IDEAS_SCHEMA } }, messages: [{ role: "user", content }] }, "stunts_ideas", userId);
   return out?.moments;
 }
 async function signed(sb: SupabaseClient, u: string, assetId: string) {
@@ -203,10 +204,10 @@ export async function ideasFor(sb: SupabaseClient, deps: StuntDeps, u: string, a
   const dir = await mkdtemp(join(tmpdir(), "studio-stunt-ideas-"));
   try {
     const times = stillTimes(seconds);
-    const jpegs = await (deps.stills ?? defaultStills)(url, times, dir);
-    // the words help (a gag lands on the end of a sentence), but a silent clip or a deaf service is not a reason to stop
-    let words: Array<{ text: string; start: number }> = [];
-    try { words = docWords(await wordsFor(sb, deps, u, assetId)).map((w) => ({ text: w.text, start: w.start })); } catch (e: any) { deps.log?.(`[stunts] no words for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); }
+    // the stills and the words at the same time (a person is waiting). The words help (a gag lands on the end of a
+    // sentence), but a silent clip or a deaf service is not a reason to stop.
+    const heard = wordsFor(sb, deps, u, assetId).then((d) => docWords(d).map((w) => ({ text: w.text, start: w.start })), (e: any) => { deps.log?.(`[stunts] no words for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return [] as Array<{ text: string; start: number }>; });
+    const [jpegs, words] = await Promise.all([(deps.stills ?? defaultStills)(url, times, dir), heard]);
     const stills = times.map((at, i) => ({ at, jpeg: jpegs[i] })).filter((s) => s.jpeg?.length);
     const raw = deps.ideas ? await deps.ideas(stills, words, seconds, u) : await defaultIdeas(deps, stills, words, seconds, u);
     const moments = cleanMoments(raw, seconds);
@@ -404,7 +405,10 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
     const state: Array<{ verdict: Verdict | "failed"; tries: number; note?: string }> = gags.map(() => ({ verdict: "failed", tries: 0 }));
     const made: Array<Made & { hasAudio: boolean }> = [];
     let finished = 0;
-    await renew({ stage: "making", message: gags.length > 1 ? `Making ${gags.length} stunts` : "Making the stunt", stage_at: new Date().toISOString() });
+    // what each stunt is doing, for the page: making, checking, again (a second try), made, left (out)
+    const states: string[] = gags.map(() => "making");
+    const say = (i: number, s: string) => { states[i] = s; return renew({ states: [...states] }).catch(() => undefined); };
+    await renew({ stage: "making", states: [...states], message: gags.length > 1 ? `Making ${gags.length} stunts` : "Making the stunt", stage_at: new Date().toISOString() });
     await Promise.all(gags.map(async (g, i) => {
       const frame = join(d, `frame-${i}.jpg`);
       try {
@@ -423,6 +427,7 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
             continue;
           }
           state[i].tries = t;
+          await say(i, "checking");
           const looked = deps.check ? await deps.check({ frame, clip: got.file, prompt: g.prompt, user: u }) : await defaultCheck(deps, { frame, clip: got.file, prompt: g.prompt, user: u }, d);
           const verdict: Verdict = typeof looked === "string" ? looked : looked.verdict, why = typeof looked === "string" ? "" : looked.note ?? "";
           log(`[stunts] gag ${i + 1} try ${t} of ${job.id}: ${verdict}${why ? ` (${why})` : ""}`);
@@ -430,6 +435,7 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
           // a good or a weak one is used as it is; only a broken one is worth paying for again (the check erred on
           // the strict side in the first live runs: every clip it called weak was one a person would keep)
           if (verdict !== "broken") { best = { file: got.file, verdict }; break; }
+          if (t < STUNT_LIMITS.tries) await say(i, "again");
         }
         if (best) {
           state[i].verdict = best.verdict;
@@ -439,7 +445,7 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
           if (!deps.render) { const first = join(d, `first-${i}.jpg`); await extractFrame(best.file, first, 0); const [a, b] = await Promise.all([frameStats(frame), frameStats(first)]); fix = a && b ? colourFix(a, b) : null; }
           made.push({ index: i, at: g.at, resume: g.resume, file: best.file, seconds: len, fix, hasAudio: gagInfo.hasAudio });
         }
-      } finally { finished++; await renew({ done: finished, message: finished < gags.length ? `${finished} of ${gags.length} stunts made` : "Joining them into your video" }).catch(() => undefined); }
+      } finally { finished++; states[i] = made.some((m) => m.index === i) ? "made" : "left"; await renew({ done: finished, states: [...states], message: finished < gags.length ? `${finished} of ${gags.length} stunts made` : "Joining them into your video" }).catch(() => undefined); }
     }));
     if (!made.length) throw new StuntsError(state.some((s) => s.note === "recast_nsfw") ? "stunts_refused" : "stunts_failed", "None of the stunts could be made", 502, false);
     made.sort((a, b) => a.at - b.at);

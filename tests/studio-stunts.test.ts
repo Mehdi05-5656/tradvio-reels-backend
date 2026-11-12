@@ -82,8 +82,8 @@ test("ideas: Claude's moments are kept in bounds, apart, with at most three clea
   ], 30);
   assert.deepEqual(m.map((x) => [x.at, x.resume, x.ideas.length]), [[6, 6, 1], [14, 15.5, 3]]);
   assert.deepEqual(cleanMoments("nonsense", 30), []);
-  const t = stillTimes(30);
-  assert.equal(t.length, 30); assert.equal(t[0], 0.5); assert.equal(t[t.length - 1], 29.5);
+  const t = stillTimes(20);
+  assert.equal(t.length, 20); assert.equal(t[0], 0.5); assert.equal(t[t.length - 1], 19.5);
   assert.equal(stillTimes(60).length, STUNT_LIMITS.stills, "never more stills than the limit");
 });
 
@@ -168,6 +168,10 @@ test("a run: a broken gag is made once more, one broken twice is left out and no
   assert.deepEqual(o.gags.map((g: any) => [g.title, g.made, g.verdict, g.tries]), [["Lift", true, "good", 2], ["Wall", false, "failed", 2], ["Rocket", true, "weak", 1]]);
   assert.deepEqual(uploads.map((u) => [u.bucket, u.type]), [["studio-outputs", "video/mp4"]]);
   assert.ok(!rpc.some((r) => r.name === "studio_fail"));
+  const seen = rpc.filter((r) => r.name === "studio_renew").map((r) => r.args.p_progress?.states).filter(Boolean);
+  assert.deepEqual(seen[0], ["making", "making", "making"], "the page is told what each stunt is doing from the start");
+  assert.deepEqual(seen[seen.length - 1], ["made", "left", "made"], "and how each one ended");
+  assert.ok(seen.some((s) => s.includes("again")) && seen.some((s) => s.includes("checking")), "a second try and the look at it are shown too");
   const kept = rpc.filter((r) => r.name === "studio_renew").map((r) => r.args.p_progress?.requests).filter(Boolean).pop();
   assert.equal(Object.keys(kept).length, 5, "every request sent is remembered, so a restart waits for it instead of sending it again");
 });
