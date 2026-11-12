@@ -198,3 +198,43 @@ test("analyze: odd numbers from a network (negative or huge lengths, zero views)
   assert.ok(Array.isArray(a.by_length));
   assert.doesNotMatch(JSON.stringify(a), /NaN|Infinity/);
 });
+
+test("a finished video goes into the library once: copied on the first ask, the same file after, only the owner's own finished videos", async () => {
+  const { registerOutputAsset, outputAssetLabel } = await import("../src/studio-output-asset.js");
+  const JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", LIVE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", NEW = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const tables: Record<string, any[]> = {
+    studio_customers: [{ user_id: ANN, status: "active" }], studio_assets: [],
+    studio_jobs: [
+      { id: JOB, user_id: ANN, tool: "kage_motion", status: "done", options: { story: { topic: "Want a pool?" } }, progress: { title: "Swimming pool" }, outputs: [{ key: `${ANN}/${JOB}/1.mp4`, index: 1, duration: 52 }, { key: `${ANN}/${JOB}/notes.txt`, kind: "text" }] },
+      { id: LIVE, user_id: ANN, tool: "swap", status: "running", options: {}, progress: {}, outputs: [] },
+    ],
+  };
+  const sb = fakeSb(tables);
+  let copies = 0;
+  const promote: any = async (_sb: any, _d: any, u: string, job: any, label: string) => { copies++; assert.equal(job.outputs.length, 1); tables.studio_assets.push({ id: NEW, user_id: u, kind: "video", status: "ready", name: `${label} · result.mp4`, probe: { derived_from_job: job.id } }); return NEW; };
+  const app = express(); app.use(express.json());
+  let who: string = ANN;
+  app.use((req: any, _res, next) => { req.auth = { user_id: who }; req.profile = { role: "user", user_id: who }; next(); });
+  registerOutputAsset(app, () => sb, { env: ENV, log: () => {}, promote });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r));
+  const call = async (job: string, key: string) => { const r = await fetch(`http://127.0.0.1:${(server.address() as any).port}/api/studio/jobs/${job}/asset`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key }) }); return { status: r.status, body: (await r.json()) as any }; };
+  try {
+    const key = `${ANN}/${JOB}/1.mp4`;
+    const [a, b] = await Promise.all([call(JOB, key), call(JOB, key)]);
+    assert.equal(a.status, 200, JSON.stringify(a.body)); assert.equal(b.status, 200);
+    assert.equal(a.body.asset.id, NEW); assert.equal(b.body.asset.id, NEW); assert.equal(copies, 1, "two presses at once make one copy");
+    assert.equal(tables.studio_assets[0].name, "Swimming pool · result.mp4");
+    assert.equal(tables.studio_jobs[0].outputs[0].asset_id, NEW, "the file is noted on the output");
+    const again = await call(JOB, key);
+    assert.deepEqual([again.status, again.body.asset.id, again.body.copied, copies], [200, NEW, false, 1], "asked again: the same file, no second copy");
+    assert.equal((await call(JOB, `${ANN}/${JOB}/notes.txt`)).status, 422, "text is not a video");
+    assert.equal((await call(JOB, "someone/else.mp4")).status, 404);
+    assert.equal((await call(LIVE, "x.mp4")).status, 404, "not finished");
+    assert.equal((await call("not-a-job", key)).status, 404);
+    who = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    assert.equal((await call(JOB, key)).status, 404, "another person's video is not found");
+    who = ANN; tables.studio_customers[0].status = "none"; tables.studio_jobs[0].outputs[0].asset_id = undefined; tables.studio_assets.length = 0;
+    assert.deepEqual([(await call(JOB, key)).status, copies], [402, 1], "without a plan nothing is copied");
+    assert.equal(outputAssetLabel({ tool: "swap", options: {} }).length > 0, true);
+  } finally { await new Promise((r) => server.close(r)); }
+});

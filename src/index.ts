@@ -39,6 +39,7 @@ import { registerAssistant, startAssistantLoop } from "./studio-assistant.js";
 import { registerAutomations } from "./studio-automations.js";
 import { registerSocial, startSocialLoop } from "./studio-social.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
+import { registerOutputAsset } from "./studio-output-asset.js";
 import { registerPeople } from "./studio-people.js";
 import { registerCharacters } from "./studio-character-library.js";
 import { registerCreators, startCreatorLoop } from "./studio-creators.js";
@@ -111,6 +112,7 @@ async function main() {
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
   registerSocial(app, getSb); // Studio self-serve posting to the person's own socials; off until STUDIO_SOCIAL_ENABLED=true. Not Publer.
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
+  registerOutputAsset(app, getSb); // a finished video into the library, so any other tool can take it
   registerPeople(app, getSb); // who is in a clip: faces for the chat card and the Swap page
   registerCharacters(app, getSb); // the pictures a person uses as characters, most used first
   registerCreators(app, getSb); // the Creator Program: paid views on creators' own TikTok / Instagram; off until STUDIO_CREATORS_ENABLED=true
