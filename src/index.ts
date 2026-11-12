@@ -48,6 +48,7 @@ import { startNoticesLoop } from "./studio-notices.js";
 import { startNudgesLoop } from "./studio-nudges.js";
 import { initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
+import { registerCommunity } from "./studio-community.js";
 import { initCosts, registerStudioCosts } from "./studio-costs.js";
 import { registerStoryExam } from "./studio-story-exam.js";
 import compression from "compression";
@@ -106,6 +107,7 @@ async function main() {
   initCosts(getSb); // the cost ledger (studio_costs): every paid call, with its source
   registerStudio(app, getSb);
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
+  registerCommunity(app, getSb); // Community: the shared library of generative films (off unless STUDIO_COMMUNITY_ENABLED)
   registerStudioCosts(app, getSb); // the admin panel's Money tab: what Clone8 paid, by vendor, tool and step
   registerStoryExam(app, getSb, { plans: PLANS }); // the Stories practice exam (admin only; STORY_MASTER_PLAN.md phase 0)
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
