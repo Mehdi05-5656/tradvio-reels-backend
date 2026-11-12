@@ -36,11 +36,11 @@ test("off by default; switched on but not open only the owner's account gets a q
 
 test("the job goes to the Kage Motion queue with options.motivation, and carries its cost", () => {
   const q = quoteMotivation(ON, PLANS, { ...TOPIC, seconds: 60 });
-  assert.deepEqual(q.options.motivation, { topic: "why consistency beats talent", seconds: 60 });
-  assert.equal(q.options.style, "motivation"); assert.equal(q.options.aspect, "16:9"); assert.equal(q.options.cost_usd, 0.51);
+  assert.deepEqual(q.options.motivation, { topic: "why consistency beats talent", seconds: 60, voice: "henry", shape: "9:16" });
+  assert.equal(q.options.style, "motivation"); assert.equal(q.options.aspect, "9:16"); assert.equal(q.options.voice, "henry"); assert.equal(q.options.cost_usd, 0.51);
   assert.match(q.summary, /60 s, script written for you/);
   const own = quoteMotivation(ON, PLANS, { script: words(155) });
-  assert.deepEqual(Object.keys(own.options.motivation), ["script"]); assert.match(own.summary, /About 50 s, your script/);
+  assert.deepEqual(Object.keys(own.options.motivation), ["script", "voice", "shape"]); assert.match(own.summary, /About 50 s, your script/);
 });
 
 test("priced from the cost at the house margin; a longer film costs more; the cost can be set from the environment", () => {
@@ -52,4 +52,12 @@ test("priced from the cost at the house margin; a longer film costs more; the co
     assert.ok(1 - motivationCostUsd({}, s) / (credits * floor) >= MARGIN_TARGET - 1e-9, `${s} s keeps the margin on the cheapest credits`);
   }
   assert.ok(motivationCredits({}, PLANS, 90) > motivationCredits({}, PLANS, 30));
+});
+
+test("Henry and vertical are the defaults; Thorn and wide are the other choices; anything else falls back", () => {
+  const d = parseMotivationOptions(TOPIC); assert.equal(d.voice, "henry"); assert.equal(d.shape, "9:16");
+  const o = parseMotivationOptions({ ...TOPIC, voice: "thorn", shape: "16:9" }); assert.equal(o.voice, "thorn"); assert.equal(o.shape, "16:9");
+  const x = parseMotivationOptions({ ...TOPIC, voice: "someone", shape: "1:1" }); assert.equal(x.voice, "henry"); assert.equal(x.shape, "9:16");
+  const q = quoteMotivation(ON, PLANS, { ...TOPIC, voice: "thorn", shape: "16:9" });
+  assert.match(q.summary, /narrated by Thorn/); assert.match(q.summary, /wide 16:9/); assert.equal(q.options.aspect, "16:9");
 });
