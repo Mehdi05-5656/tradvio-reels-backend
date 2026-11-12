@@ -512,6 +512,7 @@ export type LogQuery = { user?: string | null; from?: string | null; to?: string
 /** The feature as the person saw it: Stories run on the Kage worker, so the tool id alone would call them Kage. */
 export function featureOf(j: any): string {
   if (j.tool === "kage_motion" && j.options?.story) return "Stories";
+  if (j.tool === "kage_motion" && j.options?.motivation) return "Motivation";
   return TOOL_LABEL[j.tool] ?? String(j.tool);
 }
 function logRows(d: AdminData, q: LogQuery, env: Env) {

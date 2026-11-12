@@ -29,6 +29,7 @@ import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMoti
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
 import { StoryError, storiesEnabled, storyExplainerOpen, quoteStory } from "./studio-stories.js";
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
+import { MotivationError, motivationEnabled, motivationOpen, quoteMotivation } from "./studio-motivation.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
@@ -117,7 +118,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Stories without a character (the no-character film): open to everyone only when its own switch says so.
     story_explainer: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env),
     // Community: the shared library of generative films (its own switch).
-    community: communityEnabled(env) };
+    community: communityEnabled(env),
+    // Motivation: a narrated motivational film from a topic (the kage-motion worker); open to everyone only when its own switch says so.
+    motivation: motivationEnabled(env) && kageMotionEnabled(env) && motivationOpen(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -163,6 +166,7 @@ export function jobLabel(j: { tool: string; options?: any }): string {
   if (j.tool === "clips") return `Clips · ${String(o.source?.title ?? "a long video").slice(0, 60)}`;
   if (j.tool === "import") return "Import";
   if (j.tool === "kage") return `Kage · ${String(o.concept ?? "a remix").slice(0, 60)}`;
+  if (j.tool === "kage_motion" && o.motivation) return `Motivation · ${String(o.motivation.topic ?? o.brief ?? "a video").slice(0, 60)}`;
   if (j.tool === "kage_motion" && o.story) return `Story · ${String(o.story.topic ?? o.brief ?? "a story").slice(0, 60)}`;
   if (j.tool === "kage_motion") return `Kage Motion · ${String(o.brief ?? "a film").slice(0, 60)}`;
   if (j.tool === "longform") return `Film · ${String(o.longform?.prompt ?? "a story").slice(0, 60)}`;
@@ -536,7 +540,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
-    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError || e instanceof MotivationError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
@@ -1137,6 +1141,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "kage_motion") return quoteKageMotion(sb, u, env, PLANS, body?.options);
     if (String(body?.tool ?? "") === "longform") return quoteLongform(env, PLANS, body?.options, { owner: o.owner });
     if (String(body?.tool ?? "") === "story") { if (!kageMotionEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403); return quoteStory(env, PLANS, body?.options, { owner: o.owner }); }
+    if (String(body?.tool ?? "") === "motivation") { if (!kageMotionEnabled(env)) throw new MotivationError("motivation_off", "Motivation videos are not switched on yet", 403); return quoteMotivation(env, PLANS, body?.options, { owner: o.owner }); }
     return quote(String(body?.tool ?? ""), body?.options, asset, costs);
   };
 
