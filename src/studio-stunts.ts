@@ -42,7 +42,7 @@ export const stuntsEnabled = (env: Env = process.env) => env.STUDIO_STUNTS_ENABL
 /** Open to every customer. Until then only the owner's account (the Studio admin) can make them: the test videos. */
 export const stuntsOpen = (env: Env = process.env) => stuntsEnabled(env) && env.STUDIO_STUNTS_OPEN === "true";
 
-export const STUNT_LIMITS = { min_seconds: 3, max_seconds: 60, max_gags: 6, gap: 1.5, prompt_min: 12, prompt_max: 600, ideas_per_day: 20, idea_moments: 4, stills: 24, words_wait_ms: 8000, gag_seconds: 5, tries: 2 };
+export const STUNT_LIMITS = { min_seconds: 3, max_seconds: 60, max_gags: 6, gap: 1.5, prompt_min: 12, prompt_max: 600, ideas_per_day: 20, idea_moments: 4, stills: 24, words_wait_ms: 3000, gag_seconds: 5, tries: 2 };
 export const STUNT_SPEEDS = [1.5, 2, 2.5] as const;
 export const STUNT_STYLE = " Shot on a phone, realistic, the same person, the same place, the same light. One continuous take with no cut; the camera follows the action handheld. Fast, physical, loud.";
 export const stuntEndpoint = (env: Env = process.env) => env.STUDIO_STUNTS_ENDPOINT || "alibaba/wan-3.0/image-to-video";
@@ -163,14 +163,35 @@ type StuntDeps = ClipsDeps & {
   sleep?: (ms: number) => Promise<void>;
 };
 async function defaultStills(video: string, times: number[], dir: string): Promise<Buffer[]> {
-  // four at a time: each is one seek and one frame, and a person is waiting for the ideas
+  // two at a time, never more: each one decodes a stretch of the video, and four at once on a 4K phone file took the
+  // server 45 s on Nov 12 2026 (it is the fallback now; keyStills below is the way for a person's clip)
   const out: Buffer[] = new Array(times.length), tag = randomUUID().slice(0, 8);
   let next = 0;
   const one = async () => { for (;;) { const i = next++; if (i >= times.length) return; const f = join(dir, `s${tag}-${i}.jpg`);
-    await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", times[i].toFixed(2), "-i", video, "-frames:v", "1", "-vf", "scale=384:-2", "-q:v", "6", f], { timeoutMs: 60_000 });
+    await ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", "-ss", times[i].toFixed(2), "-i", video, "-frames:v", "1", "-vf", "scale=384:-2,format=yuvj420p", "-q:v", "6", f], { timeoutMs: 60_000 });
     out[i] = await readFile(f); } };
-  await Promise.all(Array.from({ length: Math.min(4, times.length) }, one));
+  await Promise.all(Array.from({ length: Math.min(2, times.length) }, one));
   return out;
+}
+/** The filter that keeps one key picture every `step` seconds (the first always). */
+export const keySelect = (seconds: number, want = STUNT_LIMITS.stills) => `select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,${Math.max(0.9, seconds / want).toFixed(2)})'`;
+/** The times ffmpeg's showinfo printed, in order: one per picture written. */
+export const shownTimes = (log: string): number[] => [...log.matchAll(/pts_time:([0-9.]+)/g)].map((m) => round2(Number(m[1])));
+/** Stills for the ideas, the quick way: only the video's key pictures are decoded (a phone stores about one a second),
+ *  in one pass over the file, each with its real time. Decoding to an exact second instead costs a whole stretch of
+ *  4K video per still. Fewer than three key pictures (a screen recording, an edited export) falls back to exact seeks. */
+async function keyStills(video: string, seconds: number, dir: string): Promise<Array<{ at: number; jpeg: Buffer }>> {
+  const tag = randomUUID().slice(0, 8);
+  let got: Array<{ at: number; jpeg: Buffer }> = [];
+  try {
+    const net = /^https?:/.test(video) ? ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "30000000"] : [];
+    const log = await ffmpeg(["-v", "info", "-nostdin", "-y", "-threads", "2", "-skip_frame", "nokey", ...net, "-i", video, "-an", "-t", (seconds + 1).toFixed(2), "-vf", `${keySelect(seconds)},scale=384:-2,format=yuvj420p,showinfo`, "-fps_mode", "passthrough", "-q:v", "6", join(dir, `k${tag}-%03d.jpg`)], { timeoutMs: 60_000 });
+    const times = shownTimes(log);
+    for (let i = 0; i < times.length && i < STUNT_LIMITS.stills; i++) { try { got.push({ at: times[i], jpeg: await readFile(join(dir, `k${tag}-${String(i + 1).padStart(3, "0")}.jpg`)) }); } catch { break; } }
+  } catch { got = []; }
+  if (got.length >= 3 || (got.length >= 2 && seconds <= 4)) return got;
+  const times = stillTimes(seconds), jpegs = await defaultStills(video, times, dir);
+  return times.map((at, i) => ({ at, jpeg: jpegs[i] })).filter((s) => s.jpeg?.length);
 }
 async function defaultIdeas(deps: StuntDeps, stills: Array<{ at: number; jpeg: Buffer }>, words: Array<{ text: string; start: number }>, seconds: number, userId: string): Promise<unknown> {
   const env = deps.env ?? process.env;
@@ -207,14 +228,16 @@ export async function ideasFor(sb: SupabaseClient, deps: StuntDeps, u: string, a
     const times = stillTimes(seconds);
     // the stills and the words at the same time (a person is waiting). The words help (a gag lands on the end of a
     // sentence), but a silent clip or a deaf service is not a reason to stop.
-    // Hearing a large phone file can take a quarter of a minute the first time: the ideas wait for the words only so
-    // long, then go from the pictures alone. The hearing carries on and is kept, so "new ideas" has the words.
+    // Hearing a large phone file took 9 to 16 s on live the first time: the ideas wait for the words only a moment past
+    // the pictures (words already kept arrive at once), then go from the pictures alone. The hearing carries on and
+    // is kept, so "new ideas" and Captions have the words.
     const t0 = Date.now(); let wordsMs: number | "late" = "late";
     const heard = wordsFor(sb, deps, u, assetId).then((d) => { wordsMs = Date.now() - t0; return docWords(d).map((w) => ({ text: w.text, start: w.start })); }, (e: any) => { wordsMs = Date.now() - t0; deps.log?.(`[stunts] no words for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return [] as Array<{ text: string; start: number }>; });
     const inTime = Promise.race([heard, new Promise<null>((r) => setTimeout(() => r(null), (deps as any).wordsWaitMs ?? STUNT_LIMITS.words_wait_ms))]);
-    const [jpegs, got] = await Promise.all([(deps.stills ?? defaultStills)(url, times, dir).then((j) => { stillsMs = Date.now() - t0; return j; }), inTime]);
+    const shots = deps.stills ? deps.stills(url, times, dir).then((j) => times.map((at, i) => ({ at, jpeg: j[i] }))) : keyStills(url, seconds, dir);
+    const [stills, got] = await Promise.all([shots.then((s) => { stillsMs = Date.now() - t0; return s.filter((x) => x.jpeg?.length); }), inTime]);
     const words = got ?? [];
-    const stills = times.map((at, i) => ({ at, jpeg: jpegs[i] })).filter((s) => s.jpeg?.length);
+    if (!stills.length) throw new StuntsError("source_missing", "The video could not be read", 502, true);
     const t1 = Date.now();
     const raw = deps.ideas ? await deps.ideas(stills, words, seconds, u) : await defaultIdeas(deps, stills, words, seconds, u);
     const moments = cleanMoments(raw, seconds);
@@ -558,4 +581,4 @@ export function registerStunts(app: Express, h: Pick<LibraryHelpers, "sbFn" | "e
   });
 }
 /** The cutter's own steps, for a local proof of the join outside a job. */
-export { defaultPrepare as prepareSource, defaultRender as renderJoin, defaultCheck as checkGag, frameStats };
+export { defaultPrepare as prepareSource, defaultRender as renderJoin, defaultCheck as checkGag, frameStats, keyStills };

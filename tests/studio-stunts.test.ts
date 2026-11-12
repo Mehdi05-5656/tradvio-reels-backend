@@ -7,7 +7,7 @@ import { PLANS, toolsEnabled } from "../src/studio.js";
 import { resetCostsForTests } from "../src/studio-costs.js";
 import { resetCutGate } from "../src/studio-capacity.js";
 import { saveWords } from "../src/studio-caption-video.js";
-import { ideasFor, STUNT_LIMITS, StuntsError, cleanGags, cleanMoments, colourFix, joinGraph, planTimeline, quoteStunts, runStuntsJob, stillTimes, stuntGagCostUsd, stuntGagCredits, stuntGenerationUsd, stuntsEnabled, stuntsOpen, workingSize } from "../src/studio-stunts.js";
+import { ideasFor, keySelect, shownTimes, STUNT_LIMITS, StuntsError, cleanGags, cleanMoments, colourFix, joinGraph, planTimeline, quoteStunts, runStuntsJob, stillTimes, stuntGagCostUsd, stuntGagCredits, stuntGenerationUsd, stuntsEnabled, stuntsOpen, workingSize } from "../src/studio-stunts.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ON = { STUDIO_STUNTS_ENABLED: "true", HIGGSFIELD_API_KEY: "k", ANTHROPIC_API_KEY: "k" };
@@ -253,4 +253,11 @@ test("ideas do not wait for slow words: they go from the pictures, and use the w
   await ideasFor(ideasSb({ words: WORDS, wordsDelayMs: 150 }).sb, deps(10), U, A);
   await ideasFor(ideasSb({ words: WORDS, wordsDelayMs: 5 }).sb, deps(400), U, A);
   assert.deepEqual(seen, [0, 2]);
+});
+
+test("stills for the ideas come from the video's key pictures: one every second at most, spread over a long clip, each with its real time", () => {
+  assert.equal(keySelect(8), "select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,0.90)'", "a short clip keeps every key picture a phone stores (about one a second)");
+  assert.equal(keySelect(58), "select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,2.42)'", "a long one is thinned to the limit");
+  assert.deepEqual(shownTimes("[Parsed_showinfo_3 @ 0x1] n:   0 pts:      0 pts_time:0       duration_time:1\n[Parsed_showinfo_3 @ 0x1] n:   1 pts:  30030 pts_time:1.001   x\n... pts_time:2.0353"), [0, 1, 2.04]);
+  assert.deepEqual(shownTimes("no pictures"), []);
 });
