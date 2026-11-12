@@ -375,3 +375,25 @@ test("last on: the latest of a page opened, a thing made and a sign-in", () => {
   const d = data(); d.users.push({ id: "dddddddd-0000-4000-8000-000000000004", email: "new@example.com", created_at: ago(0), email_confirmed_at: null, last_sign_in_at: null });
   assert.equal(computeAdmin(d, { days: 30, includeInternal: true, now: NOW }, ENV).users.find((u) => u.email === "new@example.com")!.last_seen_at, null);
 });
+
+test("sign-up emails: sent, pressed the button, paid after; a payment goes to the last email before it", async () => {
+  const { signupEmailStats } = await import("../src/studio-admin.js");
+  const ev = (user_id: string, kind: string, name: string, at: string, props: any = {}) => ({ user_id, kind, name, created_at: at, props });
+  const pay = (user_id: string, at: string, usd: number) => ({ user_id, at, usd, kind: "new_plan", ref: `${user_id}-${at}` }) as any;
+  const events = [
+    ev("a", "email", "plan_nudge_30m", "2026-11-12T01:00:00Z", { ok: true }), ev("a", "page", "pricing", "2026-11-12T01:05:00Z", { tab: "email-plan_30m" }),
+    ev("b", "email", "plan_nudge_30m", "2026-11-12T01:00:00Z", { ok: true }), ev("b", "email", "plan_nudge_day1", "2026-11-13T01:00:00Z", { ok: true }), ev("b", "page", "pricing", "2026-11-13T02:00:00Z", { tab: "email-plan_day1" }),
+    ev("c", "email", "plan_nudge_30m", "2026-11-12T01:00:00Z", { ok: true }),
+    ev("d", "email", "plan_nudge_30m", "2026-11-12T01:00:00Z", { ok: false }),          // refused: not sent
+    ev("e", "page", "pricing", "2026-11-12T01:05:00Z", { tab: "email-plan_30m" }),      // never emailed: not counted
+    ev("f", "email", "plan_nudge_30m", "2026-11-12T01:00:00Z", { ok: true }),
+  ];
+  const pays = [pay("a", "2026-11-12T01:10:00Z", 29), pay("a", "2026-11-14T00:00:00Z", 10), pay("b", "2026-11-13T03:00:00Z", 79), pay("f", "2026-11-11T00:00:00Z", 29) /* before the email */, pay("d", "2026-11-12T02:00:00Z", 29)];
+  const s = signupEmailStats(events, pays, null, Date.parse("2026-11-20T00:00:00Z"));
+  assert.deepEqual(s.steps, [
+    { id: "plan_30m", label: "30 minutes after sign-up", sent: 4, pressed: 1, paid: 1, paid_pressed: 1, revenue_usd: 39 },
+    { id: "plan_day1", label: "The next day", sent: 1, pressed: 1, paid: 1, paid_pressed: 1, revenue_usd: 79 },
+  ]);
+  assert.deepEqual([s.people, s.pressed, s.paid, s.revenue_usd, s.rate_pct], [4, 2, 2, 118, 50]);
+  assert.deepEqual(signupEmailStats([], [], null, Date.now()).rate_pct, null);
+});

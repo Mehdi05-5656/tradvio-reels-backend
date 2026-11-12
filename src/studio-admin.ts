@@ -193,6 +193,48 @@ const inRange = (iso: string | null | undefined, since: number | null, until: nu
 // ---------------------------------------------------------------------------------------------------
 // Everything, for one window
 // ---------------------------------------------------------------------------------------------------
+export const SIGNUP_EMAIL_STEPS: Array<{ id: string; event: string; label: string }> = [
+  { id: "plan_30m", event: "plan_nudge_30m", label: "30 minutes after sign-up" },
+  { id: "plan_day1", event: "plan_nudge_day1", label: "The next day" },
+];
+/** Emails sent in the range, and what the people who got them did afterwards (up to now, not only inside the range).
+ *  A payment is counted for the last email the person got before paying, so nobody is counted twice. "Pressed the
+ *  button" is the page the email's link opens, reported by the app; "paid after" does not prove the email was why. */
+export function signupEmailStats(events: any[], pays: Payment[], since: number | null, until: number) {
+  const sentAt = new Map<string, Map<string, string>>(); // step → user → when
+  for (const st of SIGNUP_EMAIL_STEPS) sentAt.set(st.id, new Map());
+  for (const e of events) {
+    if (e.kind !== "email" || !e.user_id || e.props?.ok === false) continue;
+    const st = SIGNUP_EMAIL_STEPS.find((x) => x.event === e.name);
+    if (st && inRange(e.created_at, since, until) && !sentAt.get(st.id)!.has(e.user_id)) sentAt.get(st.id)!.set(e.user_id, e.created_at);
+  }
+  const pressed = new Map<string, Set<string>>(SIGNUP_EMAIL_STEPS.map((st) => [st.id, new Set<string>()]));
+  for (const e of events) {
+    if (e.kind !== "page" || !e.user_id) continue;
+    const m = /^email-(\w+)$/.exec(String(e.props?.tab ?? ""));
+    const at = m ? sentAt.get(m[1])?.get(e.user_id) : undefined;
+    if (at && e.created_at >= at) pressed.get(m![1])!.add(e.user_id);
+  }
+  const payBy = new Map<string, Payment[]>();
+  for (const p of pays) if (p.user_id) payBy.set(p.user_id, [...(payBy.get(p.user_id) ?? []), p]);
+  const steps = SIGNUP_EMAIL_STEPS.map((st) => ({ id: st.id, label: st.label, sent: sentAt.get(st.id)!.size, pressed: pressed.get(st.id)!.size, paid: 0, paid_pressed: 0, revenue_usd: 0 }));
+  const people = new Set<string>(), paidPeople = new Set<string>(), pressedPeople = new Set<string>();
+  for (const st of SIGNUP_EMAIL_STEPS) { for (const u of sentAt.get(st.id)!.keys()) people.add(u); for (const u of pressed.get(st.id)!) pressedPeople.add(u); }
+  for (const u of people) {
+    const mine = SIGNUP_EMAIL_STEPS.map((st) => ({ id: st.id, at: sentAt.get(st.id)!.get(u) })).filter((x): x is { id: string; at: string } => !!x.at);
+    const first = mine.reduce((a, b) => (a.at < b.at ? a : b));
+    const after = (payBy.get(u) ?? []).filter((p) => p.at > first.at).sort((a, b) => a.at.localeCompare(b.at));
+    if (!after.length) continue;
+    // the last email they had before the first payment gets it
+    const credit = mine.filter((x) => x.at < after[0].at).reduce((a, b) => (a.at > b.at ? a : b));
+    const row = steps.find((s) => s.id === credit.id)!;
+    row.paid++; row.revenue_usd += after.reduce((n, p) => n + p.usd, 0); paidPeople.add(u);
+    if (pressed.get(credit.id)!.has(u)) row.paid_pressed++;
+  }
+  for (const s of steps) s.revenue_usd = r2(s.revenue_usd);
+  return { steps, people: people.size, pressed: pressedPeople.size, paid: paidPeople.size, revenue_usd: r2(steps.reduce((n, s) => n + s.revenue_usd, 0)), rate_pct: people.size ? r2(paidPeople.size / people.size * 100) : null };
+}
+
 export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process.env) {
   const now = opt.now ?? new Date();
   const until = now.getTime();
@@ -312,6 +354,9 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
     claude_usd: r4(claudeEv.filter((e) => ["assistant", "chat_title", "chat_summary", "people"].includes(e.name)).reduce((n, e) => n + num(e.usd), 0)),
   };
 
+  // ---- the emails to sign-ups without a plan: who got one, who pressed its button, who paid afterwards
+  const signupEmails = signupEmailStats(events, pays, since, until);
+
   // ---- usage elsewhere
   const pages = new Map<string, { views: number; users: Set<string> }>();
   for (const e of evIn.filter((x) => x.kind === "page")) { const p = pages.get(e.name) ?? { views: 0, users: new Set<string>() }; p.views++; if (e.user_id) p.users.add(e.user_id); pages.set(e.name, p); }
@@ -326,6 +371,7 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
     social: { linked_users: d.profiles.filter((p) => keep(p.user_id) && Array.isArray(p.accounts) && p.accounts.length).length, posts: postsIn.length, sent: postsIn.filter((p) => ["posted", "sent", "success", "published"].includes(String(p.status))).length, scheduled: postsIn.filter((p) => p.status === "scheduled").length, failed: postsIn.filter((p) => ["failed", "error"].includes(String(p.status))).length, from_chat: postsIn.filter((p) => p.conversation_id).length, by_platform: [...byPlatform.entries()].map(([platform, n]) => ({ platform, n })).sort((a, b) => b.n - a.n) },
     performance: { connected_users: new Set(d.perfAccounts.filter((a) => keep(a.user_id)).map((a) => a.user_id)).size, accounts: d.perfAccounts.filter((a) => keep(a.user_id)).length, insights: d.insights.filter((i) => keep(i.user_id) && inRange(i.created_at, since, until)).length },
     emails: group(evIn.filter((e) => e.kind === "email"), (e) => e.name),
+    signup_emails: signupEmails,
     checkouts: group(evIn.filter((e) => e.kind === "checkout"), (e) => e.name),
     tracked_since: events.length ? events.reduce((m, e) => (e.created_at < m ? e.created_at : m), events[0].created_at) : null,
   };

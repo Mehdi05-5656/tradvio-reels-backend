@@ -60,7 +60,8 @@ export type NudgeMail = { subject: string; text: string; html: string; unsubscri
 /** The words of one step for one person. Exported so they are tested and previewed. */
 export function nudgeEmail(step: NudgeStep, who: { userId: string; onboarding?: any }, env: Record<string, string | undefined> = process.env): NudgeMail {
   const goal = goalOf(who.onboarding);
-  const app = dashboard(env), plans = `${app}/#studio/pricing`;
+  // the link says which email it came from (?e=), so the admin panel can count who pressed it; nothing else is tracked
+  const app = dashboard(env), plans = `${app}/#studio/pricing?e=${step}`;
   const unsub = unsubscribeUrl(who.userId, env);
   const signoff = (env.STUDIO_MAIL_SIGNER || "The Clone8 team").trim();
   const footer = ["You are getting this because you created a Clone8 account and have not picked a plan.", ...(env.STUDIO_MAIL_ADDRESS ? [env.STUDIO_MAIL_ADDRESS.trim()] : [])];

@@ -50,7 +50,7 @@ test("the words: the person's own goal, one button to the plans, a way out, both
   const a = nudgeEmail("plan_30m", { userId: U(1), onboarding: { goal: "stories" } }, ENV);
   assert.equal(a.subject, "Your first Story is one step away");
   assert.match(a.text, /You told us you want to make faceless shorts from an idea\. In Stories/);
-  assert.match(a.text, /Pick a plan: https:\/\/app\.clone8\.io\/#studio\/pricing/);
+  assert.match(a.text, /Pick a plan: https:\/\/app\.clone8\.io\/#studio\/pricing\?e=plan_30m\n/);
   assert.match(a.text, /reply to this email/);
   assert.match(a.text, /Stop these emails: https:\/\//);
   assert.ok(a.unsubscribeUrl);
