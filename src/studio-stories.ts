@@ -25,6 +25,18 @@ export const storyExplainerOpen = (env: Record<string, string | undefined> = pro
 export const STORY_EXPLAINER_LENGTHS = [30, 50] as const;
 /** What a no-character film costs us (the plan, the scene built part by part and checked, the preview, the voice, the render). */
 export const storyExplainerCostUsd = (env: Record<string, string | undefined>, seconds: number) => Math.round(usd(env, "STUDIO_STORY_EXPLAINER_COST_USD", 1.9) * (seconds > 30 ? 1.6 : 1) * 100) / 100;
+// The second way of making a no-character film ("premium"; the first is "standard"): the picture is written from
+// scratch for that one film, so it can show any subject, people included, at about three times the cost and a longer
+// wait. Offered as a choice on the Stories page. Its own switches, the same shape as the no-character film's: the
+// feature exists (STUDIO_STORY_PREMIUM_ENABLED), then customers may use it (STUDIO_STORY_PREMIUM_OPEN); until it is
+// open only the owner's account can. The worker reads options.story.engine ("premium"; absent means standard).
+export const STORY_ENGINES = ["standard", "premium"] as const;
+export const storyPremiumEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_STORY_PREMIUM_ENABLED === "true";
+export const storyPremiumOpen = (env: Record<string, string | undefined> = process.env) => storyPremiumEnabled(env) && env.STUDIO_STORY_PREMIUM_OPEN === "true";
+/** What a premium film costs us, whatever its length (STUDIO_STORY_PREMIUM_COST_USD, default $9: runs so far cost $7 to $10). */
+export const storyPremiumCostUsd = (env: Record<string, string | undefined>) => Math.round(usd(env, "STUDIO_STORY_PREMIUM_COST_USD", 9) * 100) / 100;
+/** The margin a premium film is sold at (STUDIO_STORY_PREMIUM_MARGIN, a share from 0 to 0.9; default: the house margin). */
+export const storyPremiumMargin = (env: Record<string, string | undefined>) => { const raw = String(env.STUDIO_STORY_PREMIUM_MARGIN ?? "").trim(); const m = Number(raw); return raw !== "" && Number.isFinite(m) && m >= 0 && m <= 0.9 ? m : MARGIN_TARGET; };
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -38,8 +50,10 @@ export const storyScriptCostUsd = (env: Record<string, string | undefined>) => u
 export function storyCostUsd(env: Record<string, string | undefined>, seconds: number): number {
   return Math.round((storyFilmCostUsd(env, seconds) + storyScriptCostUsd(env)) * 100) / 100;
 }
-const credits = (env: Record<string, string | undefined>, plans: PlanLike[], usdCost: number) => { const costs = studioCosts(env, plans); return Math.max(1, costs.credit_floor ? creditsForCost(usdCost, costs.credit_floor, MARGIN_TARGET) : Math.ceil(usdCost * 100)); };
+const credits = (env: Record<string, string | undefined>, plans: PlanLike[], usdCost: number, margin = MARGIN_TARGET) => { const costs = studioCosts(env, plans); return Math.max(1, costs.credit_floor ? creditsForCost(usdCost, costs.credit_floor, margin) : Math.ceil(usdCost * 100)); };
 export const storyCredits = (env: Record<string, string | undefined>, plans: PlanLike[], seconds: number) => credits(env, plans, storyCostUsd(env, seconds));
+/** Credits for a premium film: its own cost at its own margin, through the same pricing function as everything else. */
+export const storyPremiumCredits = (env: Record<string, string | undefined>, plans: PlanLike[]) => credits(env, plans, storyPremiumCostUsd(env), storyPremiumMargin(env));
 
 export type StoryOptions = {
   topic: string; seconds: (typeof STORY_LENGTHS)[number] | (typeof STORY_EXPLAINER_LENGTHS)[number]; min_seconds: number; format: (typeof STORY_FORMATS)[number];
@@ -47,6 +61,8 @@ export type StoryOptions = {
   stage: "script" | "film" | "all"; scene: Record<string, unknown> | null;
   /** "explainer": the no-character film; unset: the story with a character */
   kind?: "explainer";
+  /** "premium": the picture written from scratch for this film (no-character films only); unset: standard */
+  engine?: "premium";
 };
 
 const pick = <T extends readonly string[]>(list: T, v: unknown, d: T[number]): T[number] => ((list as readonly string[]).includes(String(v)) ? (String(v) as T[number]) : d);
@@ -56,10 +72,14 @@ export function parseStoryOptions(raw: any): StoryOptions {
   if (topic.length < STORY_LIMITS.topicMin) throw new StoryError("story_topic", "Say what the story is about (for example: building a bridge across a river)");
   if (topic.length > STORY_LIMITS.topicMax) throw new StoryError("story_topic", `Keep the topic under ${STORY_LIMITS.topicMax} characters`);
   const s = Number(raw?.seconds);
+  // which engine makes it: standard when none is named; a name we do not know is refused, never guessed at
+  const engine = raw?.engine == null || raw.engine === "" ? "standard" : raw.engine;
+  if (!(STORY_ENGINES as readonly unknown[]).includes(engine)) throw new StoryError("story_engine", "Pick one of the two ways to make this story");
+  if (engine === "premium" && raw?.kind !== "explainer") throw new StoryError("story_engine", "This way of making a story is for stories without a character");
   // the no-character film: a topic and a length, nothing else (no script stage, no world, no sidekick)
   if (raw?.kind === "explainer") {
     const secs = (Number.isFinite(s) ? STORY_EXPLAINER_LENGTHS.reduce<number>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_EXPLAINER_LENGTHS[0]) : 50) as StoryOptions["seconds"];
-    return { topic, seconds: secs, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, kind: "explainer" };
+    return { topic, seconds: secs, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, kind: "explainer", ...(engine === "premium" ? { engine: "premium" as const } : {}) };
   }
   // nearest offered length (older pages sent any number)
   const seconds: StoryOptions["seconds"] = Number.isFinite(s) ? STORY_LENGTHS.reduce<StoryOptions["seconds"]>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_LENGTHS[0]) : 65;
@@ -82,9 +102,13 @@ export function quoteStory(env: Record<string, string | undefined>, plans: PlanL
   if (o.kind === "explainer") {
     if (!storyExplainerEnabled(env)) throw new StoryError("story_kind_off", "Stories without a character are not switched on yet", 403);
     if (!storyExplainerOpen(env) && !who.owner) throw new StoryError("story_kind_off", "Stories without a character are not open yet", 403);
-    const cost = storyExplainerCostUsd(env, o.seconds);
-    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer" }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost };
-    return { tool: "kage_motion", credits: credits(env, plans, cost), options, summary: `${o.seconds} s 3D story · no character · vertical 9:16 · narrated` };
+    // premium: refused while it is off or not open, never quietly made the standard way
+    const premium = o.engine === "premium";
+    if (premium && !storyPremiumEnabled(env)) throw new StoryError("story_engine_off", "Stories built from scratch are not switched on yet", 403);
+    if (premium && !storyPremiumOpen(env) && !who.owner) throw new StoryError("story_engine_off", "Stories built from scratch are not open yet", 403);
+    const cost = premium ? storyPremiumCostUsd(env) : storyExplainerCostUsd(env, o.seconds);
+    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost };
+    return { tool: "kage_motion", credits: premium ? storyPremiumCredits(env, plans) : credits(env, plans, cost), options, summary: `${o.seconds} s 3D story · no character${premium ? " · built from scratch" : ""} · vertical 9:16 · narrated` };
   }
   const cost = o.stage === "script" ? storyScriptCostUsd(env) : o.stage === "film" ? storyFilmCostUsd(env, o.seconds) : storyCostUsd(env, o.seconds);
   const story = { topic: o.topic, seconds: o.seconds, ...(o.min_seconds ? { min_seconds: o.min_seconds } : {}), ...(o.format !== "auto" ? { format: o.format } : {}), ...(o.world !== "auto" ? { world: o.world } : {}), sidekick: o.sidekick, ...(o.captions !== "auto" ? { captions: o.captions } : {}), ...(o.stage !== "all" ? { stage: o.stage } : {}), ...(o.scene ? { scene: o.scene } : {}) };

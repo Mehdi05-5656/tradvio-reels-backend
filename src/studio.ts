@@ -27,7 +27,7 @@ import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-capti
 import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.js";
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
-import { StoryError, storiesEnabled, storyExplainerOpen, quoteStory } from "./studio-stories.js";
+import { StoryError, storiesEnabled, storyExplainerOpen, storyPremiumOpen, quoteStory } from "./studio-stories.js";
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { MotivationError, motivationEnabled, motivationOpen, quoteMotivation } from "./studio-motivation.js";
 import { quoteStunts, registerStunts, stuntsEnabled, stuntsOpen } from "./studio-stunts.js";
@@ -123,7 +123,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Motivation: a narrated motivational film from a topic (the kage-motion worker); open to everyone only when its own switch says so.
     motivation: motivationEnabled(env) && kageMotionEnabled(env) && motivationOpen(env),
     // Stunts: impossible endings on a person's own clip (Wan on the platform API); open to everyone only when its own switch says so.
-    stunts: stuntsOpen(env) };
+    stunts: stuntsOpen(env),
+    // Stories built from scratch (the premium way of making a no-character story): open to everyone only when its own switch says so.
+    story_premium: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env) && storyPremiumOpen(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
