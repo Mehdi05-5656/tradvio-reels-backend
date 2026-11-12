@@ -261,7 +261,8 @@ export type Verdict = "good" | "weak" | "broken";
 const CHECK_SYSTEM = `You check one generated video clip that continues a real phone video. You see the real frame it started from, then four stills from the generated clip in order, and the gag that was asked for.
 - "good": the gag clearly happens, the person and the place are recognisably the same as in the real frame, and nothing is malformed (melted faces, extra limbs, objects turning into other objects).
 - "weak": the gag only half happens or happens late, or the person drifts noticeably, but it is watchable.
-- "broken": the gag does not happen, the person is someone else, the picture is malformed, or the clip barely moves.`;
+- "broken": the gag does not happen, the person is someone else, the picture is malformed, or the clip barely moves.
+The note is one short sentence, under 20 words.`;
 const CHECK_SCHEMA = { type: "object", additionalProperties: false, required: ["verdict", "note"], properties: { verdict: { type: "string", enum: ["good", "weak", "broken"] }, note: { type: "string" } } };
 async function defaultCheck(deps: StuntDeps, ctx: { frame: string; clip: string; prompt: string; user: string }, dir: string): Promise<Verdict> {
   const env = deps.env ?? process.env;
@@ -274,7 +275,7 @@ async function defaultCheck(deps: StuntDeps, ctx: { frame: string; clip: string;
     const small = join(dir, `real-${id}.jpg`);
     await ffmpeg(["-v", "error", "-nostdin", "-y", "-i", ctx.frame, "-vf", "scale=384:-2", "-q:v", "6", small], { timeoutMs: 60_000 });
     const content = [{ type: "text", text: "The real frame:" }, img(await readFile(small)), { type: "text", text: "The generated clip, in order:" }, ...jpegs.map(img), { type: "text", text: `The gag asked for: ${ctx.prompt}` }];
-    const out = await claudeJson(deps, { model: env.STUDIO_STUNTS_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 400, system: CHECK_SYSTEM, output_config: { format: { type: "json_schema", schema: CHECK_SCHEMA } }, messages: [{ role: "user", content }] }, "stunts_check", ctx.user);
+    const out = await claudeJson(deps, { model: env.STUDIO_STUNTS_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 1500, system: CHECK_SYSTEM, output_config: { format: { type: "json_schema", schema: CHECK_SCHEMA } }, messages: [{ role: "user", content }] }, "stunts_check", ctx.user);
     return out?.verdict === "broken" ? "broken" : out?.verdict === "weak" ? "weak" : "good";
   } catch (e: any) { deps.log?.(`[stunts] check skipped: ${String(e?.message ?? e).slice(0, 120)}`); return "good"; } // a check that cannot run never costs the person their gag
 }
