@@ -212,21 +212,28 @@ async function withUploadLock<T>(fn: () => Promise<T>): Promise<T> {
  * Returns { ymd: "2026-09-06", hhmm: "13:04", minutesSinceMidnight: 784 } in
  * America/Los_Angeles for the given date (default: now).
  */
+// The two formatters are made once: building one costs about 40 microseconds, and a 30-day report asks for the
+// Pacific time of every reading (some 240,000 calls), which held the whole server for seconds (Nov 12 2026).
+const PT_PARTS = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Los_Angeles",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+const PT_OFFSET = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
+  timeZoneName: "shortOffset",
+});
 export function ptNow(now: Date = new Date()): {
   ymd: string;
   hhmm: string;
   minutes: number;
   iso: string;
 } {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now);
+  const parts = PT_PARTS.formatToParts(now);
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
   const ymd = `${get("year")}-${get("month")}-${get("day")}`;
   const hh = get("hour");
@@ -245,10 +252,7 @@ export function ptDateTimeToUtc(ymd: string, hhmm: string): Date {
   // First naive guess: treat as UTC, then compute PT offset for that instant.
   let guess = Date.UTC(y, m - 1, d, hh, mm, 0);
   for (let i = 0; i < 2; i++) {
-    const fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Los_Angeles",
-      timeZoneName: "shortOffset",
-    }).formatToParts(new Date(guess));
+    const fmt = PT_OFFSET.formatToParts(new Date(guess));
     const off = fmt.find((p) => p.type === "timeZoneName")?.value ?? "GMT-8";
     // "GMT-7" or "GMT-08:00"
     const match = /GMT([+-])(\d{1,2})(?::?(\d{2}))?/.exec(off);

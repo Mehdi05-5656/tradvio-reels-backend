@@ -45,35 +45,67 @@ export function platformKey(link:any):string|null{
 }
 // Live numbers win while they are no more than 6 hours older than Publer's latest capture.
 export const LIVE_PREFERENCE_MS=6*3600_000;
-export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnType<typeof resolveRange>,live:any[]=[],liveAccounts:any[]=[],now=new Date()){
+type ReportArgs=[slots:any[],logs:any[],snapshots:any[],range:ReturnType<typeof resolveRange>,live?:any[],liveAccounts?:any[],now?:Date];
+/** The report, built in one go. For the routes and the warmer use buildReportYielding: this one holds the server
+ *  for as long as it takes (about a second for 30 days of every account). */
+export function buildReport(...args:ReportArgs){
+  const steps=buildReportSteps(...args);let r=steps.next();while(!r.done)r=steps.next();return r.value;
+}
+/** The same report, built in slices: after every `sliceMs` of work the server gets to answer whoever is waiting
+ *  before the next slice starts. A long report can then never freeze the API (Nov 12 2026: the warmer's 30-day
+ *  report held every request for 16 to 22 seconds, every eight minutes). */
+export async function buildReportYielding(args:ReportArgs,sliceMs=12,stats?:{longest_ms:number;work_ms:number;pauses:number}):Promise<ReturnType<typeof buildReport>>{
+  const steps=buildReportSteps(...args);let at=performance.now(),last=at,r=steps.next();
+  const note=()=>{const now=performance.now();if(stats){stats.longest_ms=Math.max(stats.longest_ms,now-last);stats.work_ms+=now-last;}last=now;return now;};
+  while(!r.done){
+    // `longest_ms` is the longest stretch between two places the build could have paused (one sort, at worst)
+    if(note()-at>=sliceMs){await new Promise<void>(go=>setImmediate(go));at=last=performance.now();if(stats)stats.pauses++;}
+    r=steps.next();
+  }
+  note();
+  return r.value;
+}
+/** How many readings are handled between two places where the yielding build may pause. */
+const STEP=1500;
+function* buildReportSteps(slots:any[],logs:any[],snapshots:any[],range:ReturnType<typeof resolveRange>,live:any[]=[],liveAccounts:any[]=[],now=new Date()){
   const allowed=new Set(slots.map(s=>s.phone_slot));
   logs=logs.filter(l=>allowed.has(l.phone_slot)&&l.slot_local_date>=range.from&&l.slot_local_date<=range.to);
-  const prep=(rows:any[],source:string)=>rows.filter(s=>allowed.has(s.phone_slot)&&Date.parse(s.captured_at)<Date.parse(range.end))
-    .map(s=>({...s,source,captured_at:new Date(s.captured_at).toISOString()}))
-    .sort((a,b)=>Date.parse(a.captured_at)-Date.parse(b.captured_at)||Number(a.id)-Number(b.id));
-  snapshots=prep(snapshots,"publer");live=prep(live,"live");
-  const alias=new Map<string,string>();
-  const keyOf=(s:any)=>{
-    if(s.source==="live")return `${s.phone_slot}|${s.provider==="instagram"?"ig":"tt"}:${s.platform_post_id}`;
-    const pk=platformKey(s.raw?.post_link)??platformKey(s.publer_post_id);
-    return pk?`${s.phone_slot}|${pk}`:identity(s);
+  // Every reading's time is parsed once (`t`, in ms) and reused by the sorts and the day buckets below: parsing it
+  // again in each comparison, on some 120,000 readings for 30 days, was seconds of work with the server held.
+  const startMs=Date.parse(range.start),endMs=Date.parse(range.end);
+  const prep=function*(rows:any[],source:string){
+    const out:any[]=[];let n=0;
+    for(const s of rows){if(++n%STEP===0)yield;if(!allowed.has(s.phone_slot))continue;const t=Date.parse(s.captured_at);if(!(t<endMs))continue;out.push({...s,source,captured_at:new Date(t).toISOString(),t});}
+    yield;
+    return out.sort((a,b)=>a.t-b.t||Number(a.id)-Number(b.id));
   };
-  for(const s of snapshots){const k=keyOf(s),raw=s.raw??{};
+  snapshots=yield* prep(snapshots,"publer");yield;live=yield* prep(live,"live");yield;
+  let n=0;
+  const alias=new Map<string,string>();
+  // A reading's post key is worked out once (`k`) and read back everywhere after: it used to be rebuilt, with its
+  // link patterns, three times per reading.
+  const keyOf=(s:any):string=>s.k;
+  for(const s of snapshots){if(++n%STEP===0)yield;const raw=s.raw??{},pkLink=platformKey(raw.post_link),pkId=platformKey(s.publer_post_id),pk=pkLink??pkId;
+    const k=s.k=pk?`${s.phone_slot}|${pk}`:identity(s);
     // raw.old_id is the Publer post id our publisher recorded; TikTok posts often have no permalink in the log.
-    for(const id of [s.publer_post_id,raw.id,raw.post_link,raw.old_id,platformKey(raw.post_link),platformKey(s.publer_post_id)].filter(Boolean))alias.set(`${s.phone_slot}|${id}`,k);}
-  for(const s of live){const k=keyOf(s);
-    for(const id of [s.publer_post_id,s.post_link,platformKey(s.post_link)].filter(Boolean))alias.set(`${s.phone_slot}|${id}`,k);}
+    for(const id of [s.publer_post_id,raw.id,raw.post_link,raw.old_id,pkLink,pkId])if(id)alias.set(`${s.phone_slot}|${id}`,k);}
+  for(const s of live){if(++n%STEP===0)yield;const k=s.k=`${s.phone_slot}|${s.provider==="instagram"?"ig":"tt"}:${s.platform_post_id}`;
+    for(const id of [s.publer_post_id,s.post_link,platformKey(s.post_link)])if(id)alias.set(`${s.phone_slot}|${id}`,k);}
   // One timeline per post and per source. Publer and the public profile count views differently
   // (for TikTok, Publer's "views" are reach), so a change is only ever measured between two
   // readings from the same source. When both sources observe a post on the same Pacific day,
   // the live readings are used for that day and the Publer readings are set aside.
+  yield;
   const timeline=[...snapshots,...live]
-    .sort((a,b)=>Date.parse(a.captured_at)-Date.parse(b.captured_at)||(a.source===b.source?Number(a.id)-Number(b.id):a.source==="publer"?-1:1));
+    .sort((a,b)=>a.t-b.t||(a.source===b.source?Number(a.id)-Number(b.id):a.source==="publer"?-1:1));
   // One bucket per Pacific day; a single-day range (Today, Yesterday) is bucketed by Pacific hour instead,
   // "YYYY-MM-DDTHH", so the chart has a shape instead of one point. A DST day folds its repeated hour into
   // one bucket and leaves its skipped hour empty.
   const hourly=range.from===range.to;
-  const bucketOf=(iso:string)=>{const p=ptNow(new Date(iso));return hourly?`${p.ymd}T${p.hhmm.slice(0,2)}`:p.ymd;};
+  // Pacific time is a whole number of hours from UTC, so every reading in the same UTC hour has the same Pacific
+  // day and hour: looked up once per hour, not once per reading.
+  const ptHours=new Map<number,{ymd:string;hh:string}>();
+  const ptOf=(t:number)=>{const h=Math.floor(t/3600_000);let p=ptHours.get(h);if(!p){const n=ptNow(new Date(t));p={ymd:n.ymd,hh:n.hhmm.slice(0,2)};ptHours.set(h,p);}return p;};
   const series:any[]=[];
   if(hourly)for(let h=0;h<24;h++)series.push({date:`${range.from}T${String(h).padStart(2,"0")}`,observed_views:null,observations:0,accounts:{}});
   else for(let d=range.from;d<=range.to;d=shiftDay(d,1))series.push({date:d,observed_views:null,observations:0,accounts:{}});
@@ -86,8 +118,10 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
   type Gain={delta:number;bucket:string};
   type DayGains={phone_slot:string;live:Gain[];publer:Gain[];liveSeed?:Gain;publerSeed?:Gain};
   const byDay=new Map<string,Map<string,DayGains>>();
+  yield;
   for(const s of timeline){
-    const key=keyOf(s),v=num(s.video_views),track=`${key}|${s.source}`,old=previous.get(track),day=ptNow(new Date(s.captured_at)).ymd,bucket=bucketOf(s.captured_at);
+    if(++n%STEP===0)yield;
+    const key=keyOf(s),v=num(s.video_views),track=`${key}|${s.source}`,old=previous.get(track),pt=ptOf(s.t),day=pt.ymd,bucket=hourly?`${pt.ymd}T${pt.hh}`:pt.ymd;
     const published=s.source==="live"?s.posted_at:(s.raw?.scheduled_at??s.raw?.published_at);
     if(s.captured_at>=range.start){coverage.snapshots++;if(s.source==="live")coverage.live_snapshots++;}
     // A reading without a view count neither counts nor moves the baseline.
@@ -100,13 +134,14 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
         // A downward correction is excluded and the higher baseline is kept, so climbing back
         // to an earlier value is not counted as new views.
         if(delta<0)coverage.corrections++;else{g[s.source as "live"|"publer"].push({delta,bucket});counted.add(key);}
-      } else if(published&&Date.parse(published)>=Date.parse(range.start)&&Date.parse(published)<=Date.parse(s.captured_at)){
+      } else if(published&&Date.parse(published)>=startMs&&Date.parse(published)<=s.t){
         // First reading of a post published inside the range: its whole count is new (used once per post).
         g[s.source==="live"?"liveSeed":"publerSeed"]={delta:v,bucket};counted.add(key);
       } else missing.add(key);
     }
     if(!old||v>=Number(old.video_views))previous.set(track,s);
   }
+  yield;
   const seeded=new Set<string>();
   for(const day of hourly?[range.from]:series.map(d=>d.date)){
     for(const [key,g] of byDay.get(day)??[]){
@@ -118,14 +153,16 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
         const d=dayMap.get(bucket);if(!d)continue;
         d.observed_views=(d.observed_views??0)+delta;d.observations++;
         d.accounts[g.phone_slot]=(d.accounts[g.phone_slot]??0)+delta;
-        gains.set(g.phone_slot,[...(gains.get(g.phone_slot)??[]),delta]);
+        const own=gains.get(g.phone_slot);if(own)own.push(delta);else gains.set(g.phone_slot,[delta]);
       }
     }
   }
   // Hours of a single day that have already begun read 0 when nothing was observed; hours still ahead stay unknown.
   if(hourly)for(const d of series)if(d.observed_views===null&&ptDateTimeToUtc(range.from,`${d.date.slice(11,13)}:00`).getTime()<=now.getTime())d.observed_views=0;
+  yield;
   for(const s of snapshots)latestPub.set(keyOf(s),s);
   for(const s of live)latestLive.set(keyOf(s),s);
+  yield;
   coverage.missing_baselines=[...missing].filter(k=>!counted.has(k)).length;
   // Per-metric merge: the preferred source supplies each number; the other fills gaps
   // (for example Instagram shares and saves, which are not public, come from Publer).
@@ -147,6 +184,7 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
   const posts:any[]=[],postKeys=new Set<string>(),matched=new Set<string>();
   const empty={values:Object.fromEntries(metrics.map(k=>[k,null])),captured_at:null,live_captured_at:null,publer_captured_at:null,metrics_source:null,link:null,thumbnail:null,caption:null,at:null};
   for(const l of logs.filter(l=>l.status==="published")){
+    if(++n%STEP===0)yield;
     const key=`${l.phone_slot}|${l.publer_post_id??l.publer_post_link??l.queue_id??`${l.slot_local_date}:${l.slot_index}`}`;
     if(postKeys.has(key))continue;postKeys.add(key);
     const k=lookup(l),m=(k&&merged(k))||empty;
@@ -161,7 +199,9 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
       status:"published",recorded_by:"publisher",captured_at:m.captured_at,live_captured_at:m.live_captured_at,
       publer_captured_at:m.publer_captured_at,metrics_source:m.metrics_source,public_visibility:visibility,...m.values});
   }
+  yield;
   for(const key of new Set([...latestPub.keys(),...latestLive.keys()])){
+    if(++n%STEP===0)yield;
     if(matched.has(key))continue;
     const m=merged(key)!,phone_slot=(latestPub.get(key)??latestLive.get(key)).phone_slot;
     if(!m.at||Date.parse(m.at)<Date.parse(range.start)||Date.parse(m.at)>=Date.parse(range.end))continue;
@@ -169,7 +209,9 @@ export function buildReport(slots:any[],logs:any[],snapshots:any[],range:ReturnT
       status:"provider_analytics",recorded_by:"analytics",captured_at:m.captured_at,live_captured_at:m.live_captured_at,
       publer_captured_at:m.publer_captured_at,metrics_source:m.metrics_source,public_visibility:m.live_captured_at?"public":null,...m.values});
   }
+  yield;
   posts.sort((a,b)=>b.published_at.localeCompare(a.published_at));
+  yield;
   coverage.posts_with_metrics=posts.filter(p=>p.captured_at).length;
   const accounts=slots.map(s=>{
     const attempts=logs.filter(l=>l.phone_slot===s.phone_slot).sort((a,b)=>Number(b.id)-Number(a.id));
@@ -273,7 +315,10 @@ async function computeReport(sb:any,slots:any[],ids:string[],range:ReturnType<ty
       // Live metrics are an enhancement: if they are unavailable the report still loads from Publer.
       const liveOk=!lr.error&&!la.error;
       if(!liveOk)console.warn("[report] live metrics unavailable:",lr.error?.message??la.error?.message);
-      const result:any=buildReport(slots,logs,r.data??[],range,liveOk?(lr.data??[]):[],liveOk?(la.data??[]):[]);
+      // built in slices, so the API keeps answering while a large report is put together
+      const stats={longest_ms:0,work_ms:0,pauses:0};
+      const result:any=await buildReportYielding([slots,logs,r.data??[],range,liveOk?(lr.data??[]):[],liveOk?(la.data??[]):[]],12,stats);
+      if(stats.longest_ms>250)console.warn(`[report] slow build ${JSON.stringify({from:range.from,to:range.to,longest_ms:Math.round(stats.longest_ms),work_ms:Math.round(stats.work_ms),pauses:stats.pauses})}`);
       result.live_metrics=liveOk?"available":"unavailable";
       return result;
 }
