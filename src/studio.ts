@@ -31,6 +31,8 @@ import { StoryError, storiesEnabled, storyExplainerOpen, storyPremiumOpen, quote
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { MotivationError, motivationEnabled, motivationOpen, quoteMotivation } from "./studio-motivation.js";
 import { quoteStunts, registerStunts, stuntsEnabled, stuntsOpen } from "./studio-stunts.js";
+import { quoteSplit, registerSplit } from "./studio-splitscreen-job.js";
+import { splitscreenEnabled, splitscreenOpen } from "./studio-splitscreen.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
@@ -125,13 +127,15 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Stunts: impossible endings on a person's own clip (Wan on the platform API); open to everyone only when its own switch says so.
     stunts: stuntsOpen(env),
     // Stories built from scratch (the premium way of making a no-character story): open to everyone only when its own switch says so.
-    story_premium: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env) && storyPremiumOpen(env) };
+    story_premium: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env) && storyPremiumOpen(env),
+    // Split screen: the person's clip over a gameplay loop; open to everyone only when its own switch says so.
+    splitscreen: splitscreenOpen(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Quotes: the credits a job will reserve, computed from validated options before anything is queued.
 // ---------------------------------------------------------------------------------------------------
-export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import" | "captions" | "kage" | "kage_motion" | "longform" | "stunts"; credits: number; options: Record<string, any>; summary: string };
+export type Quote = { tool: "blueprint" | "blueprint_plus" | "recast" | "swap" | "restyle" | "trend" | "character" | "instrument" | "clips" | "import" | "captions" | "kage" | "kage_motion" | "longform" | "stunts" | "splitscreen"; credits: number; options: Record<string, any>; summary: string };
 const UUID_OPT = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const characterChoice = (o: any) => {
   const cast = castChoice(o);
@@ -175,6 +179,7 @@ export function jobLabel(j: { tool: string; options?: any }): string {
   if (j.tool === "kage_motion" && o.story) return `Story · ${String(o.story.topic ?? o.brief ?? "a story").slice(0, 60)}`;
   if (j.tool === "kage_motion") return `Kage Motion · ${String(o.brief ?? "a film").slice(0, 60)}`;
   if (j.tool === "longform") return `Film · ${String(o.longform?.prompt ?? "a story").slice(0, 60)}`;
+  if (j.tool === "splitscreen") return `Split screen · ${String(o.name ?? "a video").replace(/\.[a-z0-9]{2,4}$/i, "").slice(0, 50)}`;
   if (j.tool === "stunts") { const n = Array.isArray(o.gags) ? o.gags.length : 1; return `Stunts · ${n} ${n === 1 ? "stunt" : "stunts"} · ${String(o.name ?? "a video").replace(/\.[a-z0-9]{2,4}$/i, "").slice(0, 50)}`; }
   if (j.tool === "captions") { const n = Array.isArray(o.items) ? o.items.length : 1; return n === 1 ? `Captions · ${String(o.items?.[0]?.name ?? "a video").replace(/\.[a-z0-9]{2,4}$/i, "").slice(0, 60)}` : `Captions · ${n} videos`; }
   const secs = Number(o.seconds);
@@ -564,6 +569,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   registerCaptions(app, { sbFn, env, requireUser, fail, log });
   registerStunts(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
+  registerSplit(app, { sbFn, env, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
   registerKage(app, { sbFn, env, requireUser, fail, log });
   // every price setting looked up once at start: a sandbox id left behind shows in the log by its setting's name
   if (deps.stripe === undefined && env === process.env && env.STRIPE_SECRET_KEY) setTimeout(() => {
@@ -1133,6 +1139,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     }
     if (String(body?.tool ?? "") === "captions") return quoteCaptions(sb, u, env, body?.options);
     if (String(body?.tool ?? "") === "stunts") return quoteStunts(env, PLANS, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
+    if (String(body?.tool ?? "") === "splitscreen") return quoteSplit(env, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
     const asset = await loadAsset(sb, u, body?.asset_id);
     if (String(body?.tool ?? "") === "clips") {
       const q = await quoteClips({ env, log }, PLANS, asset, body?.options);
@@ -1171,7 +1178,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const asset = q.tool === "instrument" || q.tool === "captions" ? null : await loadAsset(sb, u, req.body?.asset_id);
       const tools = toolsEnabled(env);
       // Films before they open: the owner's own test films go through on the switch alone
-      if (!(tools as any)[q.tool] && !(q.tool === "longform" && longformEnabled(env) && owner) && !(q.tool === "stunts" && stuntsEnabled(env) && owner)) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
+      if (!(tools as any)[q.tool] && !(q.tool === "longform" && longformEnabled(env) && owner) && !(q.tool === "stunts" && stuntsEnabled(env) && owner) && !(q.tool === "splitscreen" && splitscreenEnabled(env) && owner)) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       if ((q.tool === "recast" || q.tool === "swap" || q.tool === "trend") && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
