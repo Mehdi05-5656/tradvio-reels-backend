@@ -8,8 +8,8 @@
 //   2. For each gag the exact frame at that moment is the first frame of an image-to-video request (Wan 3.0 on the
 //      platform API, 5 s, 720p, with sound). A model test on Nov 11 2026 chose it: it followed the gags best and is
 //      among the cheapest (docs/stunts-test).
-//   3. A vision check looks at the result beside the real frame: did the gag happen, is it the same person. A weak
-//      one is made once more; a broken one is left out and not charged.
+//   3. A vision check looks at the result beside the real frame: did something impossible happen, is it the same
+//      person and place. A broken one is made once more; if that is broken too it is left out and not charged.
 //   4. The join: the gag is sped up (the model is slower than a punchline), its colour brought to the real frame's,
 //      its sound levelled, and the timeline is real → gag → real from where the person carries on.
 //   5. Price: per gag, from the model's price with an allowance for the second try, at the standard margin. Charged
@@ -154,8 +154,10 @@ type StuntDeps = ClipsDeps & {
   /** stills of a video as JPEG bytes (tests) */
   stills?: (video: string, times: number[], dir: string) => Promise<Buffer[]>;
   ideas?: (stills: Array<{ at: number; jpeg: Buffer }>, words: Array<{ text: string; start: number }>, seconds: number, userId: string) => Promise<unknown>;
-  generate?: (ctx: { job: string; user: string; frame: string; prompt: string; key: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void> }) => Promise<{ file: string; requestId: string }>;
-  check?: (ctx: { frame: string; clip: string; prompt: string; user: string }) => Promise<Verdict>;
+  generate?: (ctx: { job: string; user: string; frame: string; prompt: string; key: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void>; /** where the frame already sits on the platform, and a way to remember it: a resend is then the same request, which the platform answers with the first one instead of refusing or billing twice */ frameUrl?: string | null; onFrame?: (url: string) => Promise<void> }) => Promise<{ file: string; requestId: string }>;
+  check?: (ctx: { frame: string; clip: string; prompt: string; user: string }) => Promise<Verdict | { verdict: Verdict; note?: string }>;
+  /** told about every try once it has been looked at (a local proof keeps the clips; nothing in production listens) */
+  onTry?: (info: { index: number; attempt: number; file: string; verdict: Verdict; note: string }) => Promise<void> | void;
   render?: (ctx: RenderCtx) => Promise<void>;
   prepare?: (url: string, target: string) => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
@@ -220,15 +222,20 @@ export async function ideasFor(sb: SupabaseClient, deps: StuntDeps, u: string, a
 const POLL_MS = 6000, MAX_WAIT_MS = 15 * 60_000;
 /** The frame goes to the platform's temporary store (it wants a public address), then the request is sent and awaited.
  *  A request already sent (its id kept in the job's progress) is only awaited, never sent twice. */
-async function defaultGenerate(deps: StuntDeps, ctx: { job: string; user: string; frame: string; prompt: string; key: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void> }, dir: string): Promise<{ file: string; requestId: string }> {
+async function defaultGenerate(deps: StuntDeps, ctx: { job: string; user: string; frame: string; prompt: string; key: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void>; /** where the frame already sits on the platform, and a way to remember it: a resend is then the same request, which the platform answers with the first one instead of refusing or billing twice */ frameUrl?: string | null; onFrame?: (url: string) => Promise<void> }, dir: string): Promise<{ file: string; requestId: string }> {
   const env = deps.env ?? process.env, sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   let requestId = ctx.requestId ?? null;
   if (!requestId) {
-    const up = await hf(deps, "/files/generate-upload-url", { method: "POST", body: JSON.stringify({ content_type: "image/jpeg" }) });
-    if (up.status !== 200 || !up.body?.upload_url || !up.body?.public_url) throw new RecastError("recast_rejected", `no upload address (${up.status})`, true);
-    const put = await (deps.fetch ?? fetch)(String(up.body.upload_url), { method: "PUT", headers: { "Content-Type": "image/jpeg", ...(up.body.upload_headers ?? {}) }, body: await readFile(ctx.frame), signal: AbortSignal.timeout(120_000) });
-    if (!put.ok) throw new RecastError("recast_rejected", `frame upload ${put.status}`, true);
-    const body = { prompt: ctx.prompt + STUNT_STYLE, image_url: String(up.body.public_url), duration: STUNT_LIMITS.gag_seconds, resolution: "720p", generate_audio: true };
+    let frameUrl = ctx.frameUrl ?? null;
+    if (!frameUrl) {
+      const up = await hf(deps, "/files/generate-upload-url", { method: "POST", body: JSON.stringify({ content_type: "image/jpeg" }) });
+      if (up.status !== 200 || !up.body?.upload_url || !up.body?.public_url) throw new RecastError("recast_rejected", `no upload address (${up.status})`, true);
+      const put = await (deps.fetch ?? fetch)(String(up.body.upload_url), { method: "PUT", headers: { "Content-Type": "image/jpeg", ...(up.body.upload_headers ?? {}) }, body: await readFile(ctx.frame), signal: AbortSignal.timeout(120_000) });
+      if (!put.ok) throw new RecastError("recast_rejected", `frame upload ${put.status}`, true);
+      frameUrl = String(up.body.public_url);
+      await ctx.onFrame?.(frameUrl); // remembered before anything is sent
+    }
+    const body = { prompt: ctx.prompt + STUNT_STYLE, image_url: frameUrl, duration: STUNT_LIMITS.gag_seconds, resolution: "720p", generate_audio: true };
     const r = await hf(deps, `/${stuntEndpoint(env)}`, { method: "POST", body: JSON.stringify(body), idempotency: ctx.key });
     if (![200, 201, 202].includes(r.status) || !r.body?.request_id) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
     requestId = String(r.body.request_id);
@@ -258,15 +265,18 @@ async function defaultGenerate(deps: StuntDeps, ctx: { job: string; user: string
 }
 
 export type Verdict = "good" | "weak" | "broken";
-const CHECK_SYSTEM = `You check one generated video clip that continues a real phone video. You see the real frame it started from, then four stills from the generated clip in order, and the gag that was asked for.
-- "good": the gag clearly happens, the person and the place are recognisably the same as in the real frame, and nothing is malformed (melted faces, extra limbs, objects turning into other objects).
-- "weak": the gag only half happens or happens late, or the person drifts noticeably, but it is watchable.
-- "broken": the gag does not happen, the person is someone else, the picture is malformed, or the clip barely moves.
-The note is one short sentence, under 20 words.`;
+const CHECK_SYSTEM = `You check one generated video clip that continues a real phone video, for a comedy edit. You see the real frame it started from, then four stills from the generated clip in order, and the gag that was asked for.
+
+Judge the spirit, not the wording. The clip is good when something big, physical and impossible clearly happens to the person or to the thing in the frame, starting from the real frame. It does not have to match the gag's details: a different impossible thing is as good as the one asked for, and a missing small gesture does not matter. The camera is meant to move and follow the action, so seeing other parts of the same room, a new angle, or the person small, far away or hidden by what they ride is normal and is not a different place or a different person.
+
+- "good": something impossible clearly happens, and the first stills are recognisably the same person and place as the real frame.
+- "weak": something impossible does happen, but it is small or only starts in the last still.
+- "broken": nothing impossible happens in any still (it looks like ordinary footage throughout: this is always "broken", never "weak"); or the very first still is already a different place or person; or a face close to the camera is clearly someone else; or bodies and objects are badly malformed for most of the clip (melted faces, extra limbs, things turning into other things).
+When unsure between "good" and "weak", pick "good". The note is one short sentence, under 20 words.`;
 const CHECK_SCHEMA = { type: "object", additionalProperties: false, required: ["verdict", "note"], properties: { verdict: { type: "string", enum: ["good", "weak", "broken"] }, note: { type: "string" } } };
-async function defaultCheck(deps: StuntDeps, ctx: { frame: string; clip: string; prompt: string; user: string }, dir: string): Promise<Verdict> {
+async function defaultCheck(deps: StuntDeps, ctx: { frame: string; clip: string; prompt: string; user: string }, dir: string): Promise<{ verdict: Verdict; note: string }> {
   const env = deps.env ?? process.env;
-  if (env.STUDIO_STUNTS_CHECK === "off") return "good";
+  if (env.STUDIO_STUNTS_CHECK === "off") return { verdict: "good", note: "not checked" };
   try {
     const len = await probeSeconds(ctx.clip);
     const id = randomUUID().slice(0, 8);
@@ -276,8 +286,8 @@ async function defaultCheck(deps: StuntDeps, ctx: { frame: string; clip: string;
     await ffmpeg(["-v", "error", "-nostdin", "-y", "-i", ctx.frame, "-vf", "scale=384:-2", "-q:v", "6", small], { timeoutMs: 60_000 });
     const content = [{ type: "text", text: "The real frame:" }, img(await readFile(small)), { type: "text", text: "The generated clip, in order:" }, ...jpegs.map(img), { type: "text", text: `The gag asked for: ${ctx.prompt}` }];
     const out = await claudeJson(deps, { model: env.STUDIO_STUNTS_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 1500, system: CHECK_SYSTEM, output_config: { format: { type: "json_schema", schema: CHECK_SCHEMA } }, messages: [{ role: "user", content }] }, "stunts_check", ctx.user);
-    return out?.verdict === "broken" ? "broken" : out?.verdict === "weak" ? "weak" : "good";
-  } catch (e: any) { deps.log?.(`[stunts] check skipped: ${String(e?.message ?? e).slice(0, 120)}`); return "good"; } // a check that cannot run never costs the person their gag
+    return { verdict: out?.verdict === "broken" ? "broken" : out?.verdict === "weak" ? "weak" : "good", note: text(out?.note, 200) };
+  } catch (e: any) { deps.log?.(`[stunts] check skipped: ${String(e?.message ?? e).slice(0, 120)}`); return { verdict: "good", note: "check skipped" }; } // a check that cannot run never costs the person their gag
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -390,6 +400,7 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
 
     // every gag at once: the model takes two to three minutes each, and they do not depend on one another
     const requests: Record<string, string> = { ...(job.progress?.requests ?? {}) };
+    const frames: Record<string, string> = { ...(job.progress?.frames ?? {}) };
     const state: Array<{ verdict: Verdict | "failed"; tries: number; note?: string }> = gags.map(() => ({ verdict: "failed", tries: 0 }));
     const made: Array<Made & { hasAudio: boolean }> = [];
     let finished = 0;
@@ -401,7 +412,8 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
         let best: { file: string; verdict: Verdict } | null = null;
         for (let t = 1; t <= STUNT_LIMITS.tries; t++) {
           const key = `${job.id}:${i}:${t}`;
-          const ctx = { job: job.id, user: u, frame, prompt: g.prompt, key, requestId: requests[key] ?? null, onSubmit: async (id: string) => { requests[key] = id; await renew({ requests: { ...requests } }).catch(() => undefined); } };
+          const ctx = { job: job.id, user: u, frame, prompt: g.prompt, key, requestId: requests[key] ?? null, onSubmit: async (id: string) => { requests[key] = id; await renew({ requests: { ...requests } }).catch(() => undefined); },
+            frameUrl: frames[String(i)] ?? null, onFrame: async (url: string) => { frames[String(i)] = url; await renew({ frames: { ...frames } }); } };
           let got: { file: string; requestId: string };
           try { got = deps.generate ? await deps.generate(ctx) : await defaultGenerate(deps, ctx, d); }
           catch (e: any) {
@@ -411,9 +423,13 @@ export async function runStuntsJob(sb: SupabaseClient, deps: StuntDeps, job: Job
             continue;
           }
           state[i].tries = t;
-          const verdict = deps.check ? await deps.check({ frame, clip: got.file, prompt: g.prompt, user: u }) : await defaultCheck(deps, { frame, clip: got.file, prompt: g.prompt, user: u }, d);
-          if (verdict === "good") { best = { file: got.file, verdict }; break; }
-          if (verdict === "weak" && !best) best = { file: got.file, verdict };
+          const looked = deps.check ? await deps.check({ frame, clip: got.file, prompt: g.prompt, user: u }) : await defaultCheck(deps, { frame, clip: got.file, prompt: g.prompt, user: u }, d);
+          const verdict: Verdict = typeof looked === "string" ? looked : looked.verdict, why = typeof looked === "string" ? "" : looked.note ?? "";
+          log(`[stunts] gag ${i + 1} try ${t} of ${job.id}: ${verdict}${why ? ` (${why})` : ""}`);
+          await Promise.resolve(deps.onTry?.({ index: i, attempt: t, file: got.file, verdict, note: why })).catch(() => undefined);
+          // a good or a weak one is used as it is; only a broken one is worth paying for again (the check erred on
+          // the strict side in the first live runs: every clip it called weak was one a person would keep)
+          if (verdict !== "broken") { best = { file: got.file, verdict }; break; }
         }
         if (best) {
           state[i].verdict = best.verdict;
@@ -525,4 +541,4 @@ export function registerStunts(app: Express, h: Pick<LibraryHelpers, "sbFn" | "e
   });
 }
 /** The cutter's own steps, for a local proof of the join outside a job. */
-export { defaultPrepare as prepareSource, defaultRender as renderJoin, frameStats };
+export { defaultPrepare as prepareSource, defaultRender as renderJoin, defaultCheck as checkGag, frameStats };

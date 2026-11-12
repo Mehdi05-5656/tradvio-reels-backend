@@ -142,10 +142,10 @@ function fakeSb() {
 const jobOf = (gags: any[], each = 10) => ({ id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", user_id: U, lease_token: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", asset_id: A, credits_reserved: each * gags.length, attempts: 1, progress: {},
   options: { gags: cleanGags(gags, 30), speed: 2, seconds: 30, credits_per_gag: each } });
 
-test("a run: a weak gag is made once more, a broken one is left out and not charged, the rest are joined in order", async () => {
+test("a run: a broken gag is made once more, one broken twice is left out and not charged, a weak one is used as it is", async () => {
   resetCostsForTests(); resetCutGate();
   const { sb, rpc, uploads } = fakeSb();
-  const asked: string[] = [], verdicts: Record<string, string[]> = { "0": ["weak", "good"], "1": ["broken", "broken"], "2": ["good"] };
+  const asked: string[] = [], verdicts: Record<string, string[]> = { "0": ["broken", "good"], "1": ["broken", "broken"], "2": ["weak"] };
   let rendered: any = null;
   const out = await runStuntsJob(sb, {
     env: {}, log: () => undefined,
@@ -156,7 +156,7 @@ test("a run: a weak gag is made once more, a broken one is left out and not char
   }, jobOf([gag(5, { title: "Lift" }), gag(12, { title: "Wall" }), gag(20, { title: "Rocket", resume: 22 })]));
   assert.equal(out, "partial");
   const J = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-  assert.deepEqual(asked.sort(), [`${J}:0:1`, `${J}:0:2`, `${J}:1:1`, `${J}:1:2`, `${J}:2:1`], "two tries at most; a good one is not made again");
+  assert.deepEqual(asked.sort(), [`${J}:0:1`, `${J}:0:2`, `${J}:1:1`, `${J}:1:2`, `${J}:2:1`], "two tries at most; a good or a weak one is not made again");
   assert.deepEqual(rendered.made.map((m: any) => m.index), [0, 2]);
   assert.match(rendered.made[0].file, /_0_2\.mp4$/, "the second, good try is the one used");
   assert.deepEqual(rendered.segments.map((s: any) => s.kind), ["real", "gag", "real", "gag", "real"]);
@@ -165,7 +165,7 @@ test("a run: a weak gag is made once more, a broken one is left out and not char
   assert.equal(done.args.p_credits_charged, 20, "two of three made: two charged, the third goes back");
   const o = done.args.p_outputs[0];
   assert.deepEqual([o.kind, o.tool, o.duration], ["video", "stunts", 5 + 2.5 + 15 + 2.5 + 8]);
-  assert.deepEqual(o.gags.map((g: any) => [g.title, g.made, g.verdict, g.tries]), [["Lift", true, "good", 2], ["Wall", false, "failed", 2], ["Rocket", true, "good", 1]]);
+  assert.deepEqual(o.gags.map((g: any) => [g.title, g.made, g.verdict, g.tries]), [["Lift", true, "good", 2], ["Wall", false, "failed", 2], ["Rocket", true, "weak", 1]]);
   assert.deepEqual(uploads.map((u) => [u.bucket, u.type]), [["studio-outputs", "video/mp4"]]);
   assert.ok(!rpc.some((r) => r.name === "studio_fail"));
   const kept = rpc.filter((r) => r.name === "studio_renew").map((r) => r.args.p_progress?.requests).filter(Boolean).pop();
@@ -181,6 +181,12 @@ test("a run: a request already sent is waited for, not sent again; nothing made 
   await runStuntsJob(a.sb, { env: {}, log: () => undefined, prepare: async (_u, t) => writeFile(t, "s"), check: async () => "good", render: async (c) => writeFile(c.target, "v"),
     generate: async (c) => { seen.push(c.requestId); const f = join(c.frame, "..", "g.mp4"); await writeFile(f, "g"); return { file: f, requestId: c.requestId ?? "new" }; } }, j);
   assert.deepEqual(seen, ["req-kept"]);
+  // the frame's address on the platform is remembered too: a resend after a restart is the same request, not a new one
+  const c = fakeSb(); const urls: Array<string | null | undefined> = [];
+  const j2 = jobOf([gag(5)]); (j2 as any).progress = { frames: { "0": "https://cdn.example/frame.jpg" } };
+  await runStuntsJob(c.sb, { env: {}, log: () => undefined, prepare: async (_u, t) => writeFile(t, "s"), check: async () => "good", render: async (x) => writeFile(x.target, "v"),
+    generate: async (x) => { urls.push(x.frameUrl); const f = join(x.frame, "..", "g.mp4"); await writeFile(f, "g"); return { file: f, requestId: "r" }; } }, j2);
+  assert.deepEqual(urls, ["https://cdn.example/frame.jpg"]);
   assert.equal(a.rpc.find((r) => r.name === "studio_complete")!.args.p_credits_charged, 10);
 
   const b = fakeSb();
