@@ -42,7 +42,7 @@ export const stuntsEnabled = (env: Env = process.env) => env.STUDIO_STUNTS_ENABL
 /** Open to every customer. Until then only the owner's account (the Studio admin) can make them: the test videos. */
 export const stuntsOpen = (env: Env = process.env) => stuntsEnabled(env) && env.STUDIO_STUNTS_OPEN === "true";
 
-export const STUNT_LIMITS = { min_seconds: 3, max_seconds: 60, max_gags: 6, gap: 1.5, prompt_min: 12, prompt_max: 600, ideas_per_day: 20, idea_moments: 4, stills: 24, gag_seconds: 5, tries: 2 };
+export const STUNT_LIMITS = { min_seconds: 3, max_seconds: 60, max_gags: 6, gap: 1.5, prompt_min: 12, prompt_max: 600, ideas_per_day: 20, idea_moments: 4, stills: 24, words_wait_ms: 8000, gag_seconds: 5, tries: 2 };
 export const STUNT_SPEEDS = [1.5, 2, 2.5] as const;
 export const STUNT_STYLE = " Shot on a phone, realistic, the same person, the same place, the same light. One continuous take with no cut; the camera follows the action handheld. Fast, physical, loud.";
 export const stuntEndpoint = (env: Env = process.env) => env.STUDIO_STUNTS_ENDPOINT || "alibaba/wan-3.0/image-to-video";
@@ -202,17 +202,28 @@ export async function ideasFor(sb: SupabaseClient, deps: StuntDeps, u: string, a
   }
   if (o.allowNew === false) throw new StuntsError("stunts_rate_limited", "That is a lot of new ideas for one day; try again tomorrow", 429);
   const dir = await mkdtemp(join(tmpdir(), "studio-stunt-ideas-"));
+  let stillsMs = 0;
   try {
     const times = stillTimes(seconds);
     // the stills and the words at the same time (a person is waiting). The words help (a gag lands on the end of a
     // sentence), but a silent clip or a deaf service is not a reason to stop.
-    const heard = wordsFor(sb, deps, u, assetId).then((d) => docWords(d).map((w) => ({ text: w.text, start: w.start })), (e: any) => { deps.log?.(`[stunts] no words for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return [] as Array<{ text: string; start: number }>; });
-    const [jpegs, words] = await Promise.all([(deps.stills ?? defaultStills)(url, times, dir), heard]);
+    // Hearing a large phone file can take a quarter of a minute the first time: the ideas wait for the words only so
+    // long, then go from the pictures alone. The hearing carries on and is kept, so "new ideas" has the words.
+    const t0 = Date.now(); let wordsMs: number | "late" = "late";
+    const heard = wordsFor(sb, deps, u, assetId).then((d) => { wordsMs = Date.now() - t0; return docWords(d).map((w) => ({ text: w.text, start: w.start })); }, (e: any) => { wordsMs = Date.now() - t0; deps.log?.(`[stunts] no words for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return [] as Array<{ text: string; start: number }>; });
+    const inTime = Promise.race([heard, new Promise<null>((r) => setTimeout(() => r(null), (deps as any).wordsWaitMs ?? STUNT_LIMITS.words_wait_ms))]);
+    const [jpegs, got] = await Promise.all([(deps.stills ?? defaultStills)(url, times, dir).then((j) => { stillsMs = Date.now() - t0; return j; }), inTime]);
+    const words = got ?? [];
     const stills = times.map((at, i) => ({ at, jpeg: jpegs[i] })).filter((s) => s.jpeg?.length);
+    const t1 = Date.now();
     const raw = deps.ideas ? await deps.ideas(stills, words, seconds, u) : await defaultIdeas(deps, stills, words, seconds, u);
     const moments = cleanMoments(raw, seconds);
+    deps.log?.(`[stunts] ideas ${JSON.stringify({ asset: assetId, seconds: Math.round(seconds), stills: stills.length, stills_ms: stillsMs, words_ms: got ? wordsMs : "late", words: words.length, model_ms: Date.now() - t1, total_ms: Date.now() - t0, moments: moments.length })}`);
     if (!moments.length) throw new StuntsError("stunts_no_ideas", "No good moment was found in this video; pick one yourself", 422);
-    await sb.storage.from("studio-outputs").upload(ideasKey(u, assetId), Buffer.from(JSON.stringify({ v: 1, at: new Date().toISOString(), moments })), { contentType: "application/json", upsert: true }).catch(() => undefined);
+    // kept as plain text: the bucket takes a fixed list of file types and JSON is not one of them (a JSON upload is
+    // refused, which is why nothing was ever kept before Nov 12 2026)
+    const keep = await sb.storage.from("studio-outputs").upload(ideasKey(u, assetId), Buffer.from(JSON.stringify({ v: 1, at: new Date().toISOString(), moments })), { contentType: "text/plain", upsert: true }).then((r: any) => r?.error ?? null, (e: any) => e);
+    if (keep) deps.log?.(`[stunts] ideas not kept for ${assetId}: ${String(keep?.message ?? keep).slice(0, 120)}`);
     return { moments, seconds, cached: false };
   } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }

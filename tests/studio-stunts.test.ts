@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { PLANS, toolsEnabled } from "../src/studio.js";
 import { resetCostsForTests } from "../src/studio-costs.js";
 import { resetCutGate } from "../src/studio-capacity.js";
-import { STUNT_LIMITS, StuntsError, cleanGags, cleanMoments, colourFix, joinGraph, planTimeline, quoteStunts, runStuntsJob, stillTimes, stuntGagCostUsd, stuntGagCredits, stuntGenerationUsd, stuntsEnabled, stuntsOpen, workingSize } from "../src/studio-stunts.js";
+import { saveWords } from "../src/studio-caption-video.js";
+import { ideasFor, STUNT_LIMITS, StuntsError, cleanGags, cleanMoments, colourFix, joinGraph, planTimeline, quoteStunts, runStuntsJob, stillTimes, stuntGagCostUsd, stuntGagCredits, stuntGenerationUsd, stuntsEnabled, stuntsOpen, workingSize } from "../src/studio-stunts.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ON = { STUDIO_STUNTS_ENABLED: "true", HIGGSFIELD_API_KEY: "k", ANTHROPIC_API_KEY: "k" };
@@ -208,4 +209,48 @@ test("the migration adds 'stunts' and keeps every job type the live rule has", (
   for (const t of ["blueprint", "blueprint_plus", "recast", "swap", "restyle", "trend", "character", "instrument", "clips", "import", "captions", "kage", "kage_motion", "longform", "stunts"]) assert.ok(sql.includes(`'${t}'`), t);
   assert.ok(!/IF EXISTS/i.test(sql.replace(/^--.*$/gm, "")), "no IF EXISTS: the Supabase tool declines those");
   assert.equal((sql.replace(/^--.*$/gm, "").match(/;/g) ?? []).length, 1, "one statement, so the rule is never absent");
+});
+
+// What the private bucket accepts, as read from the live project on Nov 12 2026. A file of any other type is refused,
+// silently for a cache: that is how saved ideas and saved caption words were never kept.
+const BUCKET_TYPES = ["video/mp4", "image/jpeg", "application/zip", "audio/mpeg", "text/plain"];
+function ideasSb(o: { wordsDelayMs?: number; words?: any } = {}) {
+  const files = new Map<string, string>(), uploads: Array<{ key: string; type: string }> = [];
+  const sb: any = {
+    from: () => { const q: any = { select: () => q, eq: () => q, maybeSingle: async () => ({ data: { id: A, kind: "video", name: "x.mp4", object_key: `${U}/x.mp4`, status: "ready", probe: { duration: 12, width: 1080, height: 1920 } }, error: null }) }; return q; },
+    storage: { from: () => ({
+      createSignedUrl: async () => ({ data: { signedUrl: "https://signed.example/x.mp4" }, error: null }),
+      download: async (key: string) => { if (/\/captions\//.test(key)) { if (o.wordsDelayMs) await new Promise((r) => setTimeout(r, o.wordsDelayMs)); const d = o.words ? JSON.stringify(o.words) : files.get(key); return d ? { data: new Blob([d]), error: null } : { data: null, error: new Error("not found") }; }
+        const d = files.get(key); return d ? { data: new Blob([d]), error: null } : { data: null, error: new Error("not found") }; },
+      upload: async (key: string, body: Buffer, opt: any) => { uploads.push({ key, type: opt?.contentType }); if (!BUCKET_TYPES.includes(opt?.contentType)) return { error: new Error("mime type not supported") }; files.set(key, body.toString("utf8")); return { error: null }; },
+    }) },
+  };
+  return { sb, files, uploads };
+}
+const MOMENTS = [{ at: 5, resume: 5, why: "End of the sentence", ideas: [{ title: "Chair launches", prompt: "The chair fires him straight up through the ceiling tiles." }] }];
+const WORDS = { v: 1, at: "2026-11-12T00:00:00Z", words: [["Hello", 0.2, 0.5, null], ["there", 0.6, 0.9, null]], keys: [], language: "en", duration: 12 };
+
+test("ideas are kept in a file type the bucket accepts, and read back instead of being thought up again", async () => {
+  const s = ideasSb({ words: WORDS });
+  let asked = 0;
+  const deps = { env: {}, log: () => undefined, stills: async (_v: string, times: number[]) => times.map(() => Buffer.from("jpg")), ideas: async () => { asked++; return MOMENTS; } };
+  const first = await ideasFor(s.sb, deps, U, A);
+  assert.deepEqual([first.cached, first.moments.length, asked], [false, 1, 1]);
+  const kept = s.uploads.find((u) => /\/stunts\//.test(u.key))!;
+  assert.ok(BUCKET_TYPES.includes(kept.type), `the ideas file is sent as ${kept.type}`);
+  const again = await ideasFor(s.sb, deps, U, A);
+  assert.deepEqual([again.cached, again.moments[0].ideas[0].title, asked], [true, "Chair launches", 1], "a second visit costs nothing and does not wait");
+  const fresh = await ideasFor(s.sb, deps, U, A, { fresh: true });
+  assert.deepEqual([fresh.cached, asked], [false, 2], "'new ideas' still thinks again");
+  // Captions keeps its words the same way (the same refusal hit it)
+  await saveWords(s.sb, U, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", { words: [], keys: [], language: null, duration: 3 });
+  assert.ok(BUCKET_TYPES.includes(s.uploads[s.uploads.length - 1].type), "caption words are sent as a type the bucket accepts");
+});
+
+test("ideas do not wait for slow words: they go from the pictures, and use the words when they are in time", async () => {
+  const seen: number[] = [];
+  const deps = (wait: number) => ({ env: {}, log: () => undefined, wordsWaitMs: wait, stills: async (_v: string, times: number[]) => times.map(() => Buffer.from("jpg")), ideas: async (_s: any, words: any[]) => { seen.push(words.length); return MOMENTS; } }) as any;
+  await ideasFor(ideasSb({ words: WORDS, wordsDelayMs: 150 }).sb, deps(10), U, A);
+  await ideasFor(ideasSb({ words: WORDS, wordsDelayMs: 5 }).sb, deps(400), U, A);
+  assert.deepEqual(seen, [0, 2]);
 });

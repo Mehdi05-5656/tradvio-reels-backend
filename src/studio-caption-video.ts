@@ -68,7 +68,10 @@ export async function readWords(sb: SupabaseClient, u: string, assetId: string):
 }
 export async function saveWords(sb: SupabaseClient, u: string, assetId: string, doc: Omit<WordsDoc, "v" | "at">): Promise<void> {
   const body: WordsDoc = { v: 1, at: new Date().toISOString(), ...doc };
-  await sb.storage.from("studio-outputs").upload(wordsKey(u, assetId), Buffer.from(JSON.stringify(body)), { contentType: "application/json", upsert: true });
+  // kept as plain text: the bucket takes a fixed list of file types and JSON is not one of them, so a JSON upload was
+  // refused and no words were ever kept (found Nov 12 2026: zero word files in the bucket)
+  const r = await sb.storage.from("studio-outputs").upload(wordsKey(u, assetId), Buffer.from(JSON.stringify(body)), { contentType: "text/plain", upsert: true });
+  if (r?.error) console.warn(`[captions] words not kept for ${assetId}: ${String(r.error.message ?? r.error).slice(0, 120)}`);
 }
 const KEY_SCHEMA = { type: "object", additionalProperties: false, required: ["keys"], properties: { keys: { type: "array", items: { type: "integer" } } } };
 /** The words that carry each line (names, numbers, the verb or noun that is the point), about one in six, marked by a
