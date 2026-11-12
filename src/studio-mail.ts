@@ -2,7 +2,7 @@
 // logged no-op), so the product never depends on it.
 //
 // Deliverability (inbox, not spam or Promotions): every message is a plain transactional note about something the
-// person did. Text and HTML carry the same words; the HTML is one light card with no images, no tracking pixels, no
+// person did. Text and HTML carry the same words; the HTML is one card (light or dark, the reader's setting) with no images, no tracking pixels, no
 // web fonts, one button and at most a couple of plain links; subjects are short and literal (no emoji, capitals,
 // prices or sales words). Notices that a person can turn off carry RFC 8058 one-click unsubscribe headers, which
 // Gmail and Yahoo ask of senders; receipts do not (they are not optional). Each message gets its own X-Entity-Ref-ID
@@ -40,8 +40,6 @@ export async function sendMail(mail: Mail, deps: MailDeps = {}): Promise<string 
 }
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-/** Escaped text with its bare https links made clickable (quiet colour, no tracking). */
-const linked = (s: string, color = "#0f8f7f") => esc(s).replace(/(https:\/\/[^\s<]+)/g, `<a href="$1" style="color:${color}">$1</a>`);
 
 /** Paragraph breaks and bare links; nothing else. */
 export function toHtml(text: string): string {
@@ -56,41 +54,64 @@ export type EmailBody = {
   /** Short rows shown as a quiet list ("Swap · 12 s", "Ready"). */
   rows?: Array<{ label: string; value: string }>;
   button?: { label: string; url: string };
+  /** Paragraphs under the button (the invitation to reply, say). */
+  after?: string[];
+  /** Who signs it, on its own line ("Sam, Clone8"). */
+  signoff?: string;
   /** Small print under the card: why this arrived, how to stop it. */
   footer?: string[];
   unsubscribeUrl?: string | null;
 };
 
-/** One email in two forms with the same words: plain text, and a light HTML card (no images, one button). */
+// Light and dark. The email follows the reader's own setting, three ways, because mail apps differ:
+//  - Apple Mail, iOS Mail, Outlook for Mac and Samsung Mail read the dark colours in the media query below;
+//  - Outlook.com and the Outlook apps rewrite colours themselves and tag the result ([data-ogsc]/[data-ogsb]), so the
+//    same dark colours are repeated under those tags;
+//  - Gmail ignores both and inverts light colours by itself, so the light colours are chosen to survive that: no
+//    images, no picture of a logo, no coloured text on a coloured ground except the one button, whose teal and white
+//    Gmail leaves alone.
+// Every colour is an inline style (light) plus a class (dark), never a background image.
+const DARK = { bg: "#0b0d12", card: "#14171f", line: "#262b38", head: "#f4f6f8", text: "#c5ccd6", mute: "#8b94a1", link: "#3ddccb", btn: "#22cdbb", btnText: "#03211d" };
+const darkRules = (pre: string) => `${pre} .e-bg{background:${DARK.bg} !important}${pre} .e-card{background:${DARK.card} !important;border-color:${DARK.line} !important}${pre} .e-head{color:${DARK.head} !important}${pre} .e-text{color:${DARK.text} !important}${pre} .e-mute{color:${DARK.mute} !important}${pre} .e-line{border-color:${DARK.line} !important}${pre} .e-link{color:${DARK.link} !important}${pre} .e-btn{background:${DARK.btn} !important}${pre} .e-btn a{color:${DARK.btnText} !important}`;
+const EMAIL_CSS = `:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${darkRules("")}}${darkRules("[data-ogsc]")}${darkRules("[data-ogsb]")}@media (max-width:480px){.e-pad{padding:22px 20px 20px !important}.e-btn a{display:block !important;text-align:center !important}.e-btnwrap{width:100% !important}}`;
+
+/** One email in two forms with the same words: plain text, and an HTML card that follows the reader's light or dark
+ *  setting (no images, one button). */
 export function renderEmail(b: EmailBody): { text: string; html: string } {
   const text = [
     b.heading,
     ...b.paragraphs,
     ...(b.rows?.length ? [b.rows.map((r) => `${r.label}: ${r.value}`).join("\n")] : []),
     ...(b.button ? [`${b.button.label}: ${b.button.url}`] : []),
+    ...(b.after ?? []),
+    ...(b.signoff ? [b.signoff] : []),
     ...(b.footer ?? []),
     ...(b.unsubscribeUrl ? [`Stop these emails: ${b.unsubscribeUrl}`] : []),
   ].join("\n\n");
   const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif";
+  const link = (s: string, color: string, cls: string) => esc(s).replace(/(https:\/\/[^\s<]+)/g, `<a href="$1" class="${cls}" style="color:${color}">$1</a>`);
+  const para = (p: string) => `<p class="e-text" style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#33404a">${link(p, "#0f8f7f", "e-link")}</p>`;
   const rows = b.rows?.length
-    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:4px 0 20px;border-collapse:collapse">${b.rows.map((r) => `<tr><td style="padding:8px 0;border-top:1px solid #edf0f2;font-size:14px;color:#0f1720">${esc(r.label)}</td><td align="right" style="padding:8px 0;border-top:1px solid #edf0f2;font-size:14px;color:#5b6670;white-space:nowrap">${esc(r.value)}</td></tr>`).join("")}</table>`
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:4px 0 20px;border-collapse:collapse">${b.rows.map((r) => `<tr><td class="e-head e-line" style="padding:9px 0;border-top:1px solid #e6eaed;font-size:14px;color:#0f1720">${esc(r.label)}</td><td align="right" class="e-mute e-line" style="padding:9px 0 9px 12px;border-top:1px solid #e6eaed;font-size:14px;color:#5b6670">${esc(r.value)}</td></tr>`).join("")}</table>`
     : "";
   const button = b.button
-    ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 4px"><tr><td style="border-radius:10px;background:#0f8f7f"><a href="${esc(b.button.url)}" style="display:inline-block;padding:11px 20px;font-family:${font};font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">${esc(b.button.label)}</a></td></tr></table>`
+    ? `<table role="presentation" class="e-btnwrap" cellpadding="0" cellspacing="0" style="margin:8px 0 6px"><tr><td class="e-btn" style="border-radius:12px;background:#0f8f7f"><a href="${esc(b.button.url)}" style="display:inline-block;padding:13px 24px;font-family:${font};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:12px">${esc(b.button.label)}</a></td></tr></table>`
     : "";
-  const foot = [...(b.footer ?? []).map((f) => linked(f, "#8a949c")), ...(b.unsubscribeUrl ? [`<a href="${esc(b.unsubscribeUrl)}" style="color:#8a949c">Stop these emails</a>`] : [])];
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${esc(b.heading)}</title></head>
-<body style="margin:0;padding:0;background:#f5f7f8">
+  const after = (b.after ?? []).map((p, i) => (i === 0 ? `<div style="height:14px;line-height:14px;font-size:14px">&nbsp;</div>` : "") + para(p)).join("");
+  const signoff = b.signoff ? `<p class="e-head" style="margin:${b.after?.length ? "2px" : "16px"} 0 0;font-size:15px;line-height:1.6;font-weight:600;color:#0f1720">${esc(b.signoff)}</p>` : "";
+  const foot = [...(b.footer ?? []).map((f) => link(f, "#6b7680", "e-mute")), ...(b.unsubscribeUrl ? [`<a href="${esc(b.unsubscribeUrl)}" class="e-mute" style="color:#6b7680;text-decoration:underline">Stop these emails</a>`] : [])];
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${esc(b.heading)}</title><style>${EMAIL_CSS}</style></head>
+<body class="e-bg" style="margin:0;padding:0;background:#f5f7f8">
 <div style="display:none;max-height:0;overflow:hidden;opacity:0">${esc(b.preheader)}</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7f8"><tr><td align="center" style="padding:28px 12px">
+<table role="presentation" class="e-bg" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7f8"><tr><td align="center" style="padding:28px 12px">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px">
-<tr><td style="padding:0 4px 14px;font-family:${font};font-size:15px;font-weight:700;letter-spacing:-0.2px;color:#0f1720">Clone8 Studio</td></tr>
-<tr><td style="background:#ffffff;border:1px solid #e6eaed;border-radius:14px;padding:26px 26px 22px;font-family:${font};color:#0f1720">
-<h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:700">${esc(b.heading)}</h1>
-${b.paragraphs.map((p) => `<p style="margin:0 0 14px;font-size:15px;line-height:1.55;color:#33404a">${linked(p)}</p>`).join("")}
-${rows}${button}
+<tr><td class="e-head" style="padding:0 4px 14px;font-family:${font};font-size:19px;font-weight:700;letter-spacing:-0.5px;color:#0f1720">clone<span class="e-link" style="color:#0f8f7f">8</span></td></tr>
+<tr><td class="e-card e-pad" style="background:#ffffff;border:1px solid #e6eaed;border-radius:16px;padding:28px 28px 24px;font-family:${font};color:#0f1720">
+<h1 class="e-head" style="margin:0 0 14px;font-size:21px;line-height:1.3;font-weight:700;letter-spacing:-0.2px;color:#0f1720">${esc(b.heading)}</h1>
+${b.paragraphs.map(para).join("")}
+${rows}${button}${after}${signoff}
 </td></tr>
-${foot.length ? `<tr><td style="padding:14px 6px 0;font-family:${font};font-size:12px;line-height:1.6;color:#8a949c">${foot.join("<br>")}</td></tr>` : ""}
+${foot.length ? `<tr><td class="e-mute" style="padding:16px 6px 0;font-family:${font};font-size:12px;line-height:1.6;color:#6b7680">${foot.join("<br>")}</td></tr>` : ""}
 </table></td></tr></table></body></html>`;
   return { text, html };
 }

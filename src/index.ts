@@ -44,6 +44,7 @@ import { registerCharacters } from "./studio-character-library.js";
 import { registerCreators, startCreatorLoop } from "./studio-creators.js";
 import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
+import { startNudgesLoop } from "./studio-nudges.js";
 import { initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
 import { initCosts, registerStudioCosts } from "./studio-costs.js";
@@ -127,6 +128,7 @@ async function main() {
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
   startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week
   startNoticesLoop(getSb); // Clone8 Studio emails: only runs when RESEND_API_KEY is set
+  startNudgesLoop(getSb); // emails to sign-ups without a plan (30 minutes, then a day); off unless STUDIO_NUDGES=on
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
   registerManagedRoutes(app, getSb);
