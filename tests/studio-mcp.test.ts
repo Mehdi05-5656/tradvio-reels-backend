@@ -142,3 +142,14 @@ test("connector: someone without a plan is told so with the price, and a refusal
   const go = await runTool("clone8_make_story", { topic: "How does a hot air balloon fly?", confirm: true }, noPlan);
   assert.equal(go.isError, true); assert.match(go.content[0].text, /needs a Clone8 plan.*#studio\/pricing/);
 });
+
+test("connector: the Clone8 logo is served at the connector's address, and named in its details", async () => {
+  const s = await serve(OPEN);
+  try {
+    const ico = await fetch(`${s.base}/favicon.ico`); assert.equal(ico.status, 200); assert.match(String(ico.headers.get("content-type")), /icon/);
+    assert.ok((await ico.arrayBuffer()).byteLength > 1000);
+    assert.equal((await fetch(`${s.base}/icon.png`)).status, 200);
+    const init = await (await rpc(s.base, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, "u1")).json();
+    assert.match(init.result.serverInfo.icons[0].src, /\/icon\.png$/); assert.equal(init.result.serverInfo.websiteUrl, "https://clone8.io");
+  } finally { s.close(); }
+});

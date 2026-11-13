@@ -8,6 +8,7 @@
 // Switches: STUDIO_MCP_ENABLED (the endpoint exists; otherwise 404), STUDIO_MCP_OPEN (customers may use it; otherwise
 // the owner's account only). Stateless: a new server per request, nothing held between calls.
 import type { Express, Request, Response } from "express";
+import { resolve } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -135,8 +136,9 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
 }
 
 /** The MCP server for one request, acting as one person. */
-export function mcpServer(call: StudioCall) {
-  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0" }, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos from an idea. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
+/** `base`: the connector's own public address (where its logo is served). */
+export function mcpServer(call: StudioCall, o: { base: string } = { base: "https://mcp.clone8.io" }) {
+  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos from an idea. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TOOLS as any }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     try { return (await runTool(req.params.name, req.params.arguments ?? {}, call)) as any; }
@@ -163,6 +165,12 @@ export function registerMcp(app: Express, sbFn: () => SupabaseClient, o: { env?:
     res.json({ resource: `${baseUrl(req, env)}${MCP_PATH}`, authorization_servers: [`${supa}/auth/v1`], bearer_methods_supported: ["header"], resource_name: "Clone8", resource_documentation: "https://clone8.io" });
   };
   app.get("/.well-known/oauth-protected-resource", metadata);
+  // the Clone8 logo at the connector's address: chat apps show the icon of the server's own domain beside its name
+  const brand = (file: string, type: string) => (_req: Request, res: Response) => { res.setHeader("Cache-Control", "public, max-age=86400"); res.type(type).sendFile(resolve(process.cwd(), "assets/brand", file)); };
+  app.get("/favicon.ico", brand("favicon.ico", "image/x-icon"));
+  app.get("/favicon-64.png", brand("favicon-64.png", "image/png"));
+  app.get("/apple-touch-icon.png", brand("apple-touch-icon.png", "image/png"));
+  app.get("/icon.png", brand("icon-512.png", "image/png"));
   app.get(`/.well-known/oauth-protected-resource${MCP_PATH}`, metadata);
 
   app.all(MCP_PATH, async (req, res) => {
@@ -180,7 +188,7 @@ export function registerMcp(app: Express, sbFn: () => SupabaseClient, o: { env?:
       const text = await r.text(); let json: any = null; try { json = text ? JSON.parse(text) : null; } catch { json = { error: "bad_response" }; }
       return { status: r.status, json };
     };
-    const server = mcpServer(call);
+    const server = mcpServer(call, { base: baseUrl(req, env) });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => { void transport.close(); void server.close(); });
     try { await server.connect(transport); await transport.handleRequest(req as any, res as any, req.body); }
