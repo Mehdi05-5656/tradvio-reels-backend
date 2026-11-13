@@ -199,7 +199,11 @@ export function registerApple(app: Express, d: Deps): void {
         else {
           // auto-renew turned off: the plan runs to its end, then lapses (Apple sends EXPIRED then)
           const autoRenew = n.notificationType === "DID_CHANGE_RENEWAL_STATUS" ? n.subtype === "AUTO_RENEW_ENABLED" : renewal?.autoRenewStatus === undefined ? null : renewal.autoRenewStatus === 1;
-          outcome = (await applyAppleTransaction(sb, user, tx, { autoRenew })).note;
+          try { outcome = (await applyAppleTransaction(sb, user, tx, { autoRenew })).note; }
+          catch (e: any) {
+            // the account was deleted in the app; Apple keeps billing until the person cancels, and nothing is left to update
+            if (/foreign key|23503/i.test(String(e?.message ?? e?.code ?? ""))) outcome = `account ${user} deleted; nothing applied`; else throw e;
+          }
         }
       }
       await sb.from("studio_apple_events").update({ processed_at: new Date().toISOString(), error: null }).eq("id", id);

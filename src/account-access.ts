@@ -31,6 +31,8 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (path === "/api/studio/email/unsubscribe" && ["GET", "HEAD"].includes(req.method)) return next();
     // The plan catalog is public; it carries no account data.
     if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
+    // The iPhone app: its update prompts (no account data) and the page Stripe returns app buyers to.
+    if ((path === "/api/studio/app-config" || path === "/api/studio/app-return") && ["GET", "HEAD"].includes(req.method)) return next();
     // So is the instrument catalog: the models on offer, their settings and price hints, nothing per person.
     if (path === "/api/studio/instruments" && ["GET", "HEAD"].includes(req.method)) return next();
     if (!req.auth) {

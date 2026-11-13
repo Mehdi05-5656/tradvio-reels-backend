@@ -8,6 +8,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { registerPlanChange, ensurePortalConfig, missingPrices, isNoSuchPrice, upgradeCredits } from "./studio-plan-change.js";
 import { iapEnabled, registerApple } from "./studio-apple.js";
+import { registerMobile } from "./studio-mobile.js";
 import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
@@ -548,6 +549,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     return stripeClient;
   };
   const dashboard = () => (env.DASHBOARD_URL || "https://app.clone8.io").replace(/\/+$/, "");
+  /** This server's own address, for pages Stripe sends people back to. */
+  const apiBase = (req: Request) => (env.PUBLIC_API_URL || `https://${req.get("host") || "tradvio-reels-backend.onrender.com"}`).replace(/\/+$/, "");
   const stripeOrNull = (): StripeLike | null => { try { return stripe(); } catch { return null; } };
   // auto top-up for chat runs and anything else that spends outside the job route (production only)
   if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
@@ -569,6 +572,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   };
   registerPlanChange(app, { sbFn, stripe, env, dashboard, requireUser, fail, log });
   registerApple(app, { sbFn, env, requireUser, fail, log });
+  registerMobile(app, { sbFn, env, stripeOrNull, requireUser, fail, log });
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   registerCaptions(app, { sbFn, env, requireUser, fail, log });
   registerStunts(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
@@ -715,6 +719,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const u = requireUser(req, res); if (!u) return;
     const plan = planById(req.body?.plan), interval: Interval = req.body?.interval === "year" ? "year" : "month";
     if (!plan) return res.status(400).json({ error: "unknown_plan" });
+    const fromApp = req.body?.return_to === "app";
     const price = priceIdFor(plan.id, interval, env);
     if (!price) return res.status(503).json({ error: "billing_unavailable", detail: "That plan is not configured in Stripe yet" });
     try {
@@ -738,8 +743,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         subscription_data: { metadata: { user_id: u, plan_id: plan.id } },
         allow_promotion_codes: true,
         // back to the page they left to pick a plan (their setup is kept there), else their account
-        success_url: `${dashboard()}/${returnTo(req.body?.return_hash) ?? "#studio/account"}${returnTo(req.body?.return_hash)?.includes("?") ? "&" : "?"}checkout=success`,
-        cancel_url: `${dashboard()}/#studio/pricing?checkout=canceled`,
+        // from the iPhone app: back into the app afterwards; otherwise back to the page they left to pick a plan
+        success_url: fromApp ? `${apiBase(req)}/api/studio/app-return?checkout=success` : `${dashboard()}/${returnTo(req.body?.return_hash) ?? "#studio/account"}${returnTo(req.body?.return_hash)?.includes("?") ? "&" : "?"}checkout=success`,
+        cancel_url: fromApp ? `${apiBase(req)}/api/studio/app-return?checkout=canceled` : `${dashboard()}/#studio/pricing?checkout=canceled`,
       });
       log(`[studio] checkout ${JSON.stringify({ user: u, plan: plan.id, interval, session: session.id })}`);
       recordEvent({ user_id: u, kind: "checkout", name: "plan", props: { plan: plan.id, interval } });
