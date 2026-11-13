@@ -28,6 +28,7 @@ import { configurePublerRate } from "./publer-rate.js";
 import { corsMiddleware } from "./cors.js";
 import { registerStudio } from "./studio.js";
 import { registerMcp } from "./studio-mcp.js";
+import { registerByo } from "./studio-byo.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
 import { startInstrumentLoop, instrumentLoopSettings } from "./studio-instruments.js";
@@ -110,6 +111,7 @@ async function main() {
   initEvents(getSb); // the Studio admin panel's event record (studio_events): costs, checkouts, emails, page views
   initCosts(getSb); // the cost ledger (studio_costs): every paid call, with its source
   registerStudio(app, getSb);
+  registerByo(app, getSb); // Signature written in the person's own chat: the scene tools' routes (src/studio-byo.ts)
   registerMcp(app, getSb); // the Clone8 connector for Claude/ChatGPT (docs/mcp/PLAN.md); off unless STUDIO_MCP_ENABLED, owner-only unless STUDIO_MCP_OPEN
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
   registerCommunity(app, getSb); // Community: the shared library of generative films (off unless STUDIO_COMMUNITY_ENABLED)

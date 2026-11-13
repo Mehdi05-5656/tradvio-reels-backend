@@ -37,6 +37,14 @@ export const storyPremiumOpen = (env: Record<string, string | undefined> = proce
 export const storyPremiumCostUsd = (env: Record<string, string | undefined>) => Math.round(usd(env, "STUDIO_STORY_PREMIUM_COST_USD", 9) * 100) / 100;
 /** The margin a premium film is sold at (STUDIO_STORY_PREMIUM_MARGIN, a share from 0 to 0.9; default: the house margin). */
 export const storyPremiumMargin = (env: Record<string, string | undefined>) => { const raw = String(env.STUDIO_STORY_PREMIUM_MARGIN ?? "").trim(); const m = Number(raw); return raw !== "" && Number.isFinite(m) && m >= 0 && m <= 0.9 ? m : MARGIN_TARGET; };
+/** Signature written by the person's own AI (docs/mcp/PLAN.md, step 3): their chat writes the scene through the
+ *  connector; we keep the script, the voice, the renders and the line check. Its own switches, like premium's:
+ *  STUDIO_STORY_BYO_ENABLED (exists; the owner's account only), STUDIO_STORY_BYO_OPEN (customers too). */
+export const storyByoEnabled = (env: Record<string, string | undefined> = process.env) => storyPremiumEnabled(env) && env.STUDIO_STORY_BYO_ENABLED === "true";
+export const storyByoOpen = (env: Record<string, string | undefined> = process.env) => storyByoEnabled(env) && env.STUDIO_STORY_BYO_OPEN === "true";
+/** What it costs us (STUDIO_STORY_BYO_COST_USD, default $1.20: the script, the voice, the grader's three votes a line,
+ *  the renders; measured on Sonnet-written films Nov 12 2026 at about $1.0-1.2 without the author's own calls). */
+export const storyByoCostUsd = (env: Record<string, string | undefined>) => Math.round(usd(env, "STUDIO_STORY_BYO_COST_USD", 1.2) * 100) / 100;
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -63,6 +71,8 @@ export type StoryOptions = {
   kind?: "explainer";
   /** "premium": the picture written from scratch for this film (no-character films only); unset: standard */
   engine?: "premium";
+  /** premium only: the scene is written by the person's own AI in their chat (the connector), not by ours */
+  byo?: true;
 };
 
 const pick = <T extends readonly string[]>(list: T, v: unknown, d: T[number]): T[number] => ((list as readonly string[]).includes(String(v)) ? (String(v) as T[number]) : d);
@@ -79,7 +89,8 @@ export function parseStoryOptions(raw: any): StoryOptions {
   // the no-character film: a topic and a length, nothing else (no script stage, no world, no sidekick)
   if (raw?.kind === "explainer") {
     const secs = (Number.isFinite(s) ? STORY_EXPLAINER_LENGTHS.reduce<number>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_EXPLAINER_LENGTHS[0]) : 50) as StoryOptions["seconds"];
-    return { topic, seconds: secs, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, kind: "explainer", ...(engine === "premium" ? { engine: "premium" as const } : {}) };
+    if (raw?.byo === true && engine !== "premium") throw new StoryError("story_engine", "Only a Signature story can be written in your own chat");
+    return { topic, seconds: secs, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, kind: "explainer", ...(engine === "premium" ? { engine: "premium" as const } : {}), ...(engine === "premium" && raw?.byo === true ? { byo: true as const } : {}) };
   }
   // nearest offered length (older pages sent any number)
   const seconds: StoryOptions["seconds"] = Number.isFinite(s) ? STORY_LENGTHS.reduce<StoryOptions["seconds"]>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_LENGTHS[0]) : 65;
@@ -106,9 +117,13 @@ export function quoteStory(env: Record<string, string | undefined>, plans: PlanL
     const premium = o.engine === "premium";
     if (premium && !storyPremiumEnabled(env)) throw new StoryError("story_engine_off", "Stories built from scratch are not switched on yet", 403);
     if (premium && !storyPremiumOpen(env) && !who.owner) throw new StoryError("story_engine_off", "Stories built from scratch are not open yet", 403);
-    const cost = premium ? storyPremiumCostUsd(env) : storyExplainerCostUsd(env, o.seconds);
-    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost };
-    return { tool: "kage_motion", credits: premium ? storyPremiumCredits(env, plans) : credits(env, plans, cost), options, summary: `${o.seconds} s 3D story · no character${premium ? " · built from scratch" : ""} · vertical 9:16 · narrated` };
+    // written in the person's own chat: refused while off or not open (never quietly made by our model at this price)
+    const byo = premium && o.byo === true;
+    if (byo && !storyByoEnabled(env)) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not switched on yet", 403);
+    if (byo && !storyByoOpen(env) && !who.owner) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not open yet", 403);
+    const cost = byo ? storyByoCostUsd(env) : premium ? storyPremiumCostUsd(env) : storyExplainerCostUsd(env, o.seconds);
+    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}), ...(byo ? { byo: true } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost };
+    return { tool: "kage_motion", credits: byo ? credits(env, plans, cost, storyPremiumMargin(env)) : premium ? storyPremiumCredits(env, plans) : credits(env, plans, cost), options, summary: `${o.seconds} s 3D story · no character${byo ? " · Signature, the scene written in your own chat" : premium ? " · built from scratch" : ""} · vertical 9:16 · narrated` };
   }
   const cost = o.stage === "script" ? storyScriptCostUsd(env) : o.stage === "film" ? storyFilmCostUsd(env, o.seconds) : storyCostUsd(env, o.seconds);
   const story = { topic: o.topic, seconds: o.seconds, ...(o.min_seconds ? { min_seconds: o.min_seconds } : {}), ...(o.format !== "auto" ? { format: o.format } : {}), ...(o.world !== "auto" ? { world: o.world } : {}), sidekick: o.sidekick, ...(o.captions !== "auto" ? { captions: o.captions } : {}), ...(o.stage !== "all" ? { stage: o.stage } : {}), ...(o.scene ? { scene: o.scene } : {}) };

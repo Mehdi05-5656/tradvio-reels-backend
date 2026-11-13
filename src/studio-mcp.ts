@@ -14,6 +14,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
+import { storyByoEnabled, storyByoOpen } from "./studio-stories.js";
 
 type Env = Record<string, string | undefined>;
 export const mcpEnabled = (env: Env = process.env) => env.STUDIO_MCP_ENABLED === "true";
@@ -27,7 +28,7 @@ export const MCP_PATH = "/api/studio/mcp";
 const APP_URL = "https://app.clone8.io";
 
 /** A call to one of the Studio's own routes, as the person. */
-export type StudioCall = (method: "GET" | "POST", path: string, body?: unknown) => Promise<{ status: number; json: any }>;
+export type StudioCall = (method: "GET" | "POST", path: string, body?: unknown, o?: { timeoutMs?: number }) => Promise<{ status: number; json: any }>;
 
 const STORY_SECONDS = [30, 50] as const;
 const MOTIVATION_SECONDS = [30, 45, 60, 90] as const;
@@ -67,7 +68,31 @@ export const MCP_TOOLS = [
   { name: "clone8_recent", title: "Recent videos", description: "The person's most recent videos (up to 10), newest first, with their state. Free to call.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
 ] as const;
 
-type Result = { content: { type: "text"; text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+// Signature written in the person's own chat (docs/mcp/PLAN.md, step 3; src/studio-byo.ts): listed only for accounts
+// that may use it (STUDIO_STORY_BYO_ENABLED, and STUDIO_STORY_BYO_OPEN or the owner's account)
+const JOB = { job_id: { type: "string", description: "the id clone8_make_signature_in_chat gave" } };
+const SCENE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
+export const BYO_MCP_TOOLS = [
+  {
+    name: "clone8_make_signature_in_chat", title: "Make a Signature story, written by you",
+    description: "Make a Signature 3D story video (vertical, narrated) where YOU, in this chat, write its 3D scene as code with the scene tools, instead of Clone8's own AI: the person pays far fewer credits. Clone8 writes the script, records the narrator, renders and checks every line. Takes 30-60 minutes of your work in this chat. SPENDS CREDITS. Without confirm: true it only returns the price; tell the person (and that you will write the scene here), then call again with confirm: true once they agree. Then read the brief with clone8_scene_brief.",
+    inputSchema: { type: "object", properties: { topic: { type: "string", minLength: 6, maxLength: 600, description: "what the story is about, e.g. \"Want a treehouse in your backyard?\"" }, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["topic"] },
+    annotations: SCENE,
+  },
+  { name: "clone8_scene_brief", title: "Read the scene brief", description: "The brief for writing the film's scene: the rules, the kit (your manual, as source code) and an example film, in parts. Read every part, in order, before writing. Free.", inputSchema: { type: "object", properties: { ...JOB, part: { type: "integer", minimum: 1 } }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
+  { name: "clone8_write_scene", title: "Write the scene", description: "write_scene in the brief: write the whole scene file (its full contents). Once, for the first version; fix with clone8_edit_scene.", inputSchema: { type: "object", properties: { ...JOB, code: { type: "string" } }, required: ["job_id", "code"] }, annotations: SCENE },
+  { name: "clone8_edit_scene", title: "Edit the scene", description: "edit_scene in the brief: replace one exact passage of the scene file (old_text must appear exactly once).", inputSchema: { type: "object", properties: { ...JOB, old_text: { type: "string" }, new_text: { type: "string" } }, required: ["job_id", "old_text", "new_text"] }, annotations: SCENE },
+  { name: "clone8_typecheck", title: "Check the scene", description: "typecheck in the brief: type-check the scene file and its rules.", inputSchema: { type: "object", properties: { ...JOB }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
+  { name: "clone8_render_stills", title: "Render stills", description: "render_stills in the brief: up to 8 frames you choose, back as one picture. Counts against the budget.", inputSchema: { type: "object", properties: { ...JOB, frames: { type: "array", items: { type: "integer" }, maxItems: 8 } }, required: ["job_id", "frames"] }, annotations: SCENE },
+  { name: "clone8_render_preview", title: "Render a preview", description: "render_preview in the brief: the whole film as one contact sheet. Counts against the budget.", inputSchema: { type: "object", properties: { ...JOB }, required: ["job_id"] }, annotations: SCENE },
+  { name: "clone8_finish", title: "Finish the scene", description: "finish in the brief: end your work, with your report. Every line is then checked; call clone8_scene_wait for the result.", inputSchema: { type: "object", properties: { ...JOB, report: { type: "string" } }, required: ["job_id", "report"] }, annotations: SCENE },
+  { name: "clone8_scene_wait", title: "Wait for Clone8", description: "The answer to a call that was still being worked on, the film's script when it is ready, the lines to repair after the check, or where the film is. Free.", inputSchema: { type: "object", properties: { ...JOB }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
+] as const;
+const SCENE_TOOL: Record<string, string> = { clone8_write_scene: "write_scene", clone8_edit_scene: "edit_scene", clone8_typecheck: "typecheck", clone8_render_stills: "render_stills", clone8_render_preview: "render_preview", clone8_finish: "finish" };
+
+type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+type Result = { content: Content[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+const withImages = (text: string, images: unknown, data?: Record<string, unknown>): Result => ({ content: [{ type: "text", text }, ...(Array.isArray(images) ? images : []).map((d) => ({ type: "image" as const, data: String(d), mimeType: "image/jpeg" }))], ...(data ? { structuredContent: data } : {}) });
 const ok = (text: string, data?: Record<string, unknown>): Result => ({ content: [{ type: "text", text }], ...(data ? { structuredContent: data } : {}) });
 const err = (text: string, data?: Record<string, unknown>): Result => ({ content: [{ type: "text", text }], ...(data ? { structuredContent: data } : {}), isError: true });
 const nearest = (v: unknown, from: readonly number[], d: number) => { const n = Number(v); return Number.isFinite(n) ? from.reduce((a, b) => (Math.abs(b - n) < Math.abs(a - n) ? b : a), from[0]) : d; };
@@ -87,6 +112,11 @@ export function studioRequest(name: string, a: any): { tool: string; options: Re
     if (name === "clone8_make_story" && topic.length < 6) return { invalid: "The topic needs at least 6 characters." };
     const signature = a?.engine === "signature";
     return { tool: "story", options: { topic, seconds: nearest(a?.seconds, STORY_SECONDS, 50), kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", ...(signature ? { engine: "premium" } : {}) } };
+  }
+  if (name === "clone8_make_signature_in_chat") {
+    const topic = String(a?.topic ?? "").trim();
+    if (topic.length < 6) return { invalid: "The topic needs at least 6 characters." };
+    return { tool: "story", options: { topic, seconds: 50, kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", engine: "premium", byo: true } };
   }
   if (name === "clone8_make_motivation" || (name === "clone8_quote" && a?.kind === "motivation")) {
     const script = String(a?.script ?? "").trim(), topic = String(a?.topic ?? "").trim();
@@ -125,7 +155,7 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
     if (films) kinds.push({ kind: "film", what: "a narrated widescreen film from a story prompt, with its YouTube title, description and thumbnail", minutes: [...FILM_MINUTES], kinds: Object.keys(FILM_KINDS), feels: [...FILM_FEELS] });
     return ok(kinds.length ? kinds.map((k) => `${k.kind}: ${k.what} (${k.minutes ? `${(k.minutes as number[]).join(" / ")} min` : `${(k.seconds as number[]).join(" / ")} s`}${k.engines ? `; ${(k.engines as string[]).join(" or ")}` : ""})`).join("\n") : "Nothing can be made from chat right now.", { kinds });
   }
-  if (name === "clone8_quote" || name === "clone8_make_story" || name === "clone8_make_motivation" || name === "clone8_make_film") {
+  if (name === "clone8_quote" || name === "clone8_make_story" || name === "clone8_make_motivation" || name === "clone8_make_film" || name === "clone8_make_signature_in_chat") {
     const q = studioRequest(name, a); if ("invalid" in q) return err(q.invalid);
     const body = { tool: q.tool, asset_id: null, options: q.options };
     const [quote, me] = await Promise.all([call("POST", "/api/studio/quote", body), call("GET", "/api/studio/me")]);
@@ -140,7 +170,30 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
     }
     const r = await call("POST", "/api/studio/jobs", body); if (r.status !== 201) return refusal(r);
     const job = r.json.job ?? {};
+    if (name === "clone8_make_signature_in_chat") return ok(`Started: ${summary}, ${credits} credits. job_id ${job.id}. Clone8 is writing the script and recording the narrator (a minute or two). Now read the brief, every part in order: clone8_scene_brief with this job_id (part 1 first). Then call clone8_scene_wait for the film's script and write the scene.`, { started: true, job_id: job.id, credits, summary });
     return ok(`Started: ${summary}, ${credits} credits. Job ${job.id}. Check it with clone8_job; it also appears in ${APP_URL}/#studio/${pageOf(q.tool, q.options)}.`, { started: true, job_id: job.id, credits, summary });
+  }
+  if (name === "clone8_scene_brief") {
+    const id = String(a?.job_id ?? ""); if (!/^[0-9a-f-]{36}$/i.test(id)) return err("job_id is the id clone8_make_signature_in_chat returned.");
+    const r = await call("GET", `/api/studio/byo/${id}/brief?part=${Math.max(1, Math.floor(Number(a?.part ?? 1)) || 1)}`); if (r.status !== 200) return refusal(r);
+    if (!r.json.ready) return ok(`Not ready yet: ${r.json.note ?? "the script and the narrator are being made"}. Ask again in about 30 seconds.`, { ready: false });
+    const { part, parts } = r.json; const next = part < parts ? `\n\n[End of part ${part} of ${parts}. Read part ${part + 1} next.]` : `\n\n[End of the brief (${parts} parts). Now call clone8_scene_wait for this film's script, then write the scene.]`;
+    return ok(`[The brief, part ${part} of ${parts}]\n\n${r.json.text}${next}`, { ready: true, part, parts });
+  }
+  if (SCENE_TOOL[name]) {
+    const id = String(a?.job_id ?? ""); if (!/^[0-9a-f-]{36}$/i.test(id)) return err("job_id is the id clone8_make_signature_in_chat returned.");
+    const { job_id: _j, ...input } = a ?? {};
+    const r = await call("POST", `/api/studio/byo/${id}/calls?wait=40`, { tool: SCENE_TOOL[name], input }, { timeoutMs: 55_000 });
+    if (r.status !== 200) return refusal(r);
+    return withImages(String(r.json.text ?? ""), r.json.images, { done: !!r.json.done, call_id: r.json.call_id });
+  }
+  if (name === "clone8_scene_wait") {
+    const id = String(a?.job_id ?? ""); if (!/^[0-9a-f-]{36}$/i.test(id)) return err("job_id is the id clone8_make_signature_in_chat returned.");
+    const r = await call("GET", `/api/studio/byo/${id}/wait?wait=40`, undefined, { timeoutMs: 55_000 }); if (r.status !== 200) return refusal(r);
+    const j = r.json;
+    if (j.kind === "state" && j.status === "done") return runTool("clone8_job", { job_id: id }, call);
+    const head = j.kind === "call" ? `[The answer to your ${j.tool}]\n` : j.kind === "message" ? "[From Clone8]\n" : "";
+    return withImages(`${head}${j.text ?? ""}`, j.images, { kind: j.kind, status: j.status ?? null });
   }
   if (name === "clone8_job") {
     const id = String(a?.job_id ?? ""); if (!/^[0-9a-f-]{36}$/i.test(id)) return err("job_id is the id clone8_make_* returned.");
@@ -160,9 +213,9 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
 
 /** The MCP server for one request, acting as one person. */
 /** `base`: the connector's own public address (where its logo is served). */
-export function mcpServer(call: StudioCall, o: { base: string } = { base: "https://mcp.clone8.io" }) {
+export function mcpServer(call: StudioCall, o: { base: string; byo?: boolean } = { base: "https://mcp.clone8.io" }) {
   const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos and long films from an idea. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TOOLS as any }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...MCP_TOOLS, ...(o.byo ? BYO_MCP_TOOLS : [])] as any }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     try { return (await runTool(req.params.name, req.params.arguments ?? {}, call)) as any; }
     catch (e: any) { return err(`Clone8 could not do that just now (${String(e?.message ?? e).slice(0, 120)}).`) as any; }
@@ -205,14 +258,16 @@ export function registerMcp(app: Express, sbFn: () => SupabaseClient, o: { env?:
     }
     if (req.method !== "POST") return res.status(405).setHeader("Allow", "POST").json({ error: "method_not_allowed" });
     const tester = typeof a.email === "string" && mcpTesters(env).has(a.email.toLowerCase());
-    if (!mcpOpen(env) && !tester && !(await isStudioAdmin(req, sbFn(), env))) return res.status(403).json({ error: "connector_not_open", detail: "The Clone8 connector is not open yet" });
+    let admin: boolean | null = null; const isAdmin = async () => (admin ??= await isStudioAdmin(req, sbFn(), env));
+    if (!mcpOpen(env) && !tester && !(await isAdmin())) return res.status(403).json({ error: "connector_not_open", detail: "The Clone8 connector is not open yet" });
+    const byo = storyByoEnabled(env) && (storyByoOpen(env) || (await isAdmin()));
     const auth = String(req.header("authorization") ?? ""); const loop = o.loopback ?? `http://127.0.0.1:${Number(env.PORT || 10000)}`;
-    const call: StudioCall = async (method, path, body) => {
-      const r = await fetchFn(`${loop}${path}`, { method, headers: { authorization: auth, "content-type": "application/json", "x-clone8-via": "mcp" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000) });
+    const call: StudioCall = async (method, path, body, co) => {
+      const r = await fetchFn(`${loop}${path}`, { method, headers: { authorization: auth, "content-type": "application/json", "x-clone8-via": "mcp" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(co?.timeoutMs ?? 30_000) });
       const text = await r.text(); let json: any = null; try { json = text ? JSON.parse(text) : null; } catch { json = { error: "bad_response" }; }
       return { status: r.status, json };
     };
-    const server = mcpServer(call, { base: baseUrl(req, env) });
+    const server = mcpServer(call, { base: baseUrl(req, env), byo });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => { void transport.close(); void server.close(); });
     try { await server.connect(transport); await transport.handleRequest(req as any, res as any, req.body); }
