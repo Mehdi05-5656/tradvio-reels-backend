@@ -27,6 +27,7 @@ import { captionsEnabled, quoteCaptions, registerCaptions } from "./studio-capti
 import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.js";
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
+import { MCP_PATH, mcpEnabled, mcpOpen } from "./studio-mcp.js";
 import { StoryError, storiesEnabled, storyExplainerOpen, storyPremiumOpen, quoteStory } from "./studio-stories.js";
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { MotivationError, motivationEnabled, motivationOpen, quoteMotivation } from "./studio-motivation.js";
@@ -649,6 +650,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const named = jobIds.length ? await sb.from("studio_jobs").select("id,tool,status,options,created_at").eq("user_id", u).in("id", jobIds) : { data: [] as any[] };
       const labels = new Map(((named.data ?? []) as any[]).map((j) => [j.id, { label: jobLabel(j), status: j.status }]));
       const ledgerOut = ((ledger.data ?? []) as any[]).map((l) => (l.job_id && labels.has(l.job_id) ? { ...l, job_label: labels.get(l.job_id)!.label, job_status: labels.get(l.job_id)!.status } : l));
+      const admin = await isStudioAdmin(req, sb, env);
       res.json({
         subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id, has_subscription: !!c.stripe_subscription_id && ["active", "trialing", "past_due"].includes(c.status) } : null,
         active: hasPlanAccess(c),
@@ -664,7 +666,9 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         // where "it's ready" emails go (the page says so when a long run starts)
         email: req.auth && "email" in req.auth ? (req.auth as any).email ?? null : null,
         // the owner's account sees the admin button; the key is absent for everyone else
-        ...((await isStudioAdmin(req, sb, env)) ? { admin: true } : {}),
+        ...(admin ? { admin: true } : {}),
+        // the Clone8 connector for Claude / ChatGPT (studio-mcp.ts): its address, once it is open (the owner sees it before)
+        ...(mcpEnabled(env) && (mcpOpen(env) || admin) ? { connector: { url: `${env.STUDIO_MCP_PUBLIC_URL || "https://mcp.clone8.io"}${MCP_PATH}` } } : {}),
       });
     } catch (e) { fail(res, e); }
   });
