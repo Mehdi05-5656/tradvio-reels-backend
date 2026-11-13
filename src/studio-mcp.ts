@@ -34,27 +34,27 @@ const MOTIVATION_SECONDS = [30, 45, 60, 90] as const;
 
 /** What the chat's AI sees: names, what each does, what it costs, and that starting one spends credits. */
 export const MCP_TOOLS = [
-  { name: "clone8_account", description: "The person's Clone8 plan and credit balance, and how many videos they made in the last 30 days. Free to call.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
-  { name: "clone8_catalog", description: "What Clone8 can make right now from this chat, with each kind's length choices. Free to call. Use clone8_quote for a price.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+  { name: "clone8_account", title: "Account and credits", description: "The person's Clone8 plan and credit balance, and how many videos they made in the last 30 days. Free to call.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+  { name: "clone8_catalog", title: "What Clone8 can make", description: "What Clone8 can make right now from this chat, with each kind's length choices. Free to call. Use clone8_quote for a price.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
   {
-    name: "clone8_quote", description: "The price in credits of a video before making it, and the person's balance. Free to call; spends nothing.",
+    name: "clone8_quote", title: "Price a video", description: "The price in credits of a video before making it, and the person's balance. Free to call; spends nothing.",
     inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["story", "motivation"] }, seconds: { type: "integer", description: "story: 30 or 50; motivation: 30, 45, 60 or 90" }, engine: { type: "string", enum: ["express", "signature"], description: "story only. express: the default, faster and cheaper. signature: built from scratch for the idea, takes longer, costs more." } }, required: ["kind"] },
     annotations: { readOnlyHint: true },
   },
   {
-    name: "clone8_make_story",
+    name: "clone8_make_story", title: "Make a story video",
     description: "Make a narrated vertical 3D story video (no character) about a topic, e.g. \"How does a hot air balloon fly?\". SPENDS CREDITS. Without confirm: true it only returns the price; tell the person the price and call again with confirm: true once they agree. Takes about 15 minutes (Express) or 30 minutes (Signature); follow it with clone8_job.",
     inputSchema: { type: "object", properties: { topic: { type: "string", minLength: 6, maxLength: 600 }, seconds: { type: "integer", enum: [...STORY_SECONDS], default: 50 }, engine: { type: "string", enum: ["express", "signature"], default: "express" }, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["topic"] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
-    name: "clone8_make_motivation",
+    name: "clone8_make_motivation", title: "Make a motivation video",
     description: "Make a narrated motivation video (cinematic clips, a deep voice, sound effects) about a topic, or from the person's own script. SPENDS CREDITS. Without confirm: true it only returns the price; tell the person and call again with confirm: true once they agree. Takes about 3 minutes; follow it with clone8_job.",
     inputSchema: { type: "object", properties: { topic: { type: "string", maxLength: 600 }, script: { type: "string", maxLength: 4000, description: "the person's own words, instead of a topic" }, seconds: { type: "integer", enum: [...MOTIVATION_SECONDS], default: 45 }, wide: { type: "boolean", description: "16:9 instead of vertical 9:16" }, confirm: { type: "boolean" } } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
-  { name: "clone8_job", description: "How a video is getting on: its step while it is made, then links to watch and download it (the links last 15 minutes). Free to call.", inputSchema: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
-  { name: "clone8_recent", description: "The person's most recent videos (up to 10), newest first, with their state. Free to call.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+  { name: "clone8_job", title: "Check a video", description: "How a video is getting on: its step while it is made, then links to watch and download it (the links last 15 minutes). Free to call.", inputSchema: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
+  { name: "clone8_recent", title: "Recent videos", description: "The person's most recent videos (up to 10), newest first, with their state. Free to call.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
 ] as const;
 
 type Result = { content: { type: "text"; text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };

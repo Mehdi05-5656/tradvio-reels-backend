@@ -69,6 +69,8 @@ test("connector: motivation, account, catalog, job and recent read the Studio's 
   assert.equal((await runTool("clone8_job", { job_id: "../me" }, s.call)).isError, true, "only a job id reaches the route");
   assert.match((await runTool("clone8_recent", {}, s.call)).content[0].text, /motivation · running · j1/);
   for (const t of MCP_TOOLS) if (t.name.startsWith("clone8_make_")) assert.match(t.description, /SPENDS CREDITS/);
+  // Claude's directory requires a title on every tool and the read-only / destructive hints
+  for (const t of MCP_TOOLS) { assert.ok((t as any).title, t.name); assert.equal(typeof (t as any).annotations.readOnlyHint, "boolean"); }
 });
 
 async function serve(env: Record<string, string>, fetchFn?: typeof fetch) {
