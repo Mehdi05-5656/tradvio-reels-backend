@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import { MCP_PATH, MCP_TOOLS, registerMcp, runTool, studioRequest, type StudioCall } from "../src/studio-mcp.ts";
+import { accountAccess } from "../src/account-access.ts";
 
 const ON = { STUDIO_MCP_ENABLED: "true", SUPABASE_URL: "https://proj.supabase.co" };
 const OPEN = { ...ON, STUDIO_MCP_OPEN: "true" };
@@ -86,9 +87,9 @@ test("connector over HTTP: off is 404; signed out is 401 naming where to sign in
   const on = await serve(ON);
   try {
     const r = await rpc(on.base, {});
-    assert.equal(r.status, 401); assert.match(String(r.headers.get("www-authenticate")), /resource_metadata=".*\/\.well-known\/oauth-protected-resource\/api\/mcp"/);
+    assert.equal(r.status, 401); assert.match(String(r.headers.get("www-authenticate")), /resource_metadata=".*\/\.well-known\/oauth-protected-resource\/api\/studio\/mcp"/);
     const meta = await (await fetch(`${on.base}/.well-known/oauth-protected-resource${MCP_PATH}`)).json();
-    assert.deepEqual(meta.authorization_servers, ["https://proj.supabase.co/auth/v1"]); assert.match(meta.resource, /\/api\/mcp$/);
+    assert.deepEqual(meta.authorization_servers, ["https://proj.supabase.co/auth/v1"]); assert.match(meta.resource, /\/api\/studio\/mcp$/);
     // signed in, but not the owner (the admin check finds no confirmed owner email), and the connector not open
     assert.equal((await rpc(on.base, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "u1")).status, 403);
   } finally { on.close(); }
@@ -107,4 +108,25 @@ test("connector over HTTP: when open, a signed-in person lists the tools and a c
     assert.match(call.result.content[0].text, /No plan · 42 credits/);
     assert.equal(seen.length, 1); assert.match(seen[0].url, /\/api\/studio\/me$/); assert.equal(seen[0].auth, "Bearer t", "the Studio is asked with the person's own sign-in");
   } finally { s.close(); }
+});
+
+test("connector behind the real access boundary: signed out gets the sign-in header; a signed-in customer reaches it", async () => {
+  // what production does: resolveAuth's result, then account-access.ts, then the connector. The connector's path must sit
+  // where a signed-in customer (not only the operator) is let through, and the boundary's own 401 must carry the header.
+  const env = { ...OPEN };
+  const saved = { ...process.env }; Object.assign(process.env, env);
+  const app = express(); app.use(express.json());
+  app.use((req, _res, next) => { const u = req.header("x-test-user"); (req as any).auth = u ? { user_id: u, email: "c@example.com" } : null; (req as any).profile = u ? { user_id: u, role: "client" } : null; next(); });
+  app.use(accountAccess((() => ({})) as any));
+  const fakeFetch = (async () => new Response(JSON.stringify({ subscription: null, active: true, balance: 7, usage_30d: { jobs: 0 } }), { status: 200 })) as typeof fetch;
+  registerMcp(app, () => ({}) as any, { env, fetchFn: fakeFetch });
+  const srv = app.listen(0); const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  try {
+    assert.equal(MCP_PATH, "/api/studio/mcp");
+    const out = await rpc(base, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(out.status, 401); assert.match(String(out.headers.get("www-authenticate")), /oauth-protected-resource\/api\/studio\/mcp/);
+    const call = await rpc(base, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "clone8_account", arguments: {} } }, "customer-1");
+    assert.equal(call.status, 200, "a signed-in customer is not refused as a non-operator");
+    assert.match((await call.json()).result.content[0].text, /7 credits/);
+  } finally { srv.close(); process.env = saved; }
 });

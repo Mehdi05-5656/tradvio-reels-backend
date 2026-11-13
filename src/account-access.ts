@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isAdmin, isOperator } from "./auth.js";
+import { MCP_PATH, mcpChallenge } from "./studio-mcp.js";
 
 // POSTs that carry their own credential instead of a session: HMAC-signed webhooks (CreatorVault), Stripe's
 // signed webhook, and the rate-limited public forms of clone8.io (invite requests, funnel counters). The access
@@ -32,7 +33,11 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
     // So is the instrument catalog: the models on offer, their settings and price hints, nothing per person.
     if (path === "/api/studio/instruments" && ["GET", "HEAD"].includes(req.method)) return next();
-    if (!req.auth) return res.status(401).json({ error: "unauthorized" });
+    if (!req.auth) {
+      // the Clone8 connector: a chat app learns from this header where people sign in (docs/mcp/PLAN.md)
+      const challenge = path === MCP_PATH ? mcpChallenge(req) : null; if (challenge) res.setHeader("WWW-Authenticate", challenge);
+      return res.status(401).json({ error: "unauthorized" });
+    }
     // Clone8 Studio: every route acts on the signed-in person's own plan, credits, uploads and jobs.
     // The handlers scope each query to that person; the database functions do the same.
     if (path.startsWith("/api/studio/") && "user_id" in req.auth && req.profile) return next();

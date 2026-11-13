@@ -17,7 +17,9 @@ import { isStudioAdmin } from "./studio-admin-auth.js";
 type Env = Record<string, string | undefined>;
 export const mcpEnabled = (env: Env = process.env) => env.STUDIO_MCP_ENABLED === "true";
 export const mcpOpen = (env: Env = process.env) => mcpEnabled(env) && env.STUDIO_MCP_OPEN === "true";
-export const MCP_PATH = "/api/mcp";
+// Under /api/studio/ on purpose: the access boundary (account-access.ts) lets a signed-in person through to the Studio's
+// routes and refuses everything else to anyone but the operator, so a path outside it would be refused for customers.
+export const MCP_PATH = "/api/studio/mcp";
 const APP_URL = "https://app.clone8.io";
 
 /** A call to one of the Studio's own routes, as the person. */
@@ -136,6 +138,12 @@ export function mcpServer(call: StudioCall) {
   return server;
 }
 
+/** The answer to a connector that is not signed in yet: where to learn how to sign in (RFC 9728). The access boundary
+ *  sends it, because it answers signed-out requests before the connector's own handler runs. */
+export function mcpChallenge(req: Request, env: Env = process.env): string | null {
+  return mcpEnabled(env) ? `Bearer resource_metadata="${baseUrl(req, env)}/.well-known/oauth-protected-resource${MCP_PATH}"` : null;
+}
+
 const baseUrl = (req: Request, env: Env) => env.STUDIO_MCP_BASE_URL || `${String(req.header("x-forwarded-proto") ?? req.protocol).split(",")[0]}://${req.get("host")}`;
 
 /** The routes. `loopback` is where the Studio's own routes answer (this same server). */
@@ -154,7 +162,7 @@ export function registerMcp(app: Express, sbFn: () => SupabaseClient, o: { env?:
     if (!mcpEnabled(env)) return res.status(404).json({ error: "not_found" });
     const a = req.auth as any;
     if (!a?.user_id) {
-      res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${baseUrl(req, env)}/.well-known/oauth-protected-resource${MCP_PATH}"`);
+      res.setHeader("WWW-Authenticate", mcpChallenge(req, env)!);
       return res.status(401).json({ error: "unauthorized", detail: "Sign in to Clone8 to use the connector" });
     }
     if (req.method !== "POST") return res.status(405).setHeader("Allow", "POST").json({ error: "method_not_allowed" });
