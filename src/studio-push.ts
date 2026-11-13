@@ -50,7 +50,7 @@ function session(where: keyof typeof HOSTS): ClientHttp2Session {
 /** One push. Resolves Apple's status and reason (410 / BadDeviceToken mean the token is gone). */
 export async function sendPush(env: Record<string, string | undefined>, device: { token: string; sandbox: boolean }, note: { title: string; body: string; jobId: string }): Promise<{ status: number; reason: string | null }> {
   const auth = await authToken(env);
-  const body = JSON.stringify({ aps: { alert: { title: note.title, body: note.body }, sound: "default" }, jobId: note.jobId });
+  const body = JSON.stringify({ aps: { alert: { title: note.title, body: note.body }, sound: "default" }, jobId: note.jobId, body: { jobId: note.jobId } });
   return new Promise((resolve) => {
     const req = session(device.sandbox ? "sandbox" : "production").request({
       ":method": "POST", ":path": `/3/device/${device.token}`, authorization: `bearer ${auth}`,
