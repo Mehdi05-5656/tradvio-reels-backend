@@ -102,10 +102,11 @@ export function jobCostFull(j: any, calls: Map<string, number>, env: Env = proce
   return c;
 }
 
-/** Where a job was started: the tool page, a chat, or a chat an automation opened. Older jobs: from the chats' runs. */
-export function jobVia(j: any, chatJobs: Set<string>, autoJobs: Set<string>): "tool" | "chat" | "automation" | "unknown" {
+/** Where a job was started: the tool page, a chat, a chat an automation opened, or the person's own AI through the
+ *  connector (Claude). Older jobs: from the chats' runs. */
+export function jobVia(j: any, chatJobs: Set<string>, autoJobs: Set<string>): "tool" | "chat" | "automation" | "connector" | "unknown" {
   const v = j.options?.via;
-  if (v === "tool" || v === "chat" || v === "automation") return v;
+  if (v === "tool" || v === "chat" || v === "automation" || v === "connector") return v;
   if (autoJobs.has(j.id)) return "automation";
   if (chatJobs.has(j.id)) return "chat";
   return "unknown";
@@ -286,7 +287,7 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
     // worker tools (Clips, Captions) show what their calls cost; the totals above count those calls once already
     const costUsd = js.reduce((n, x) => n + jobCostFull(x.j, toolCalls, env).usd, 0);
     const times = doneJs.map((x) => x.j.started_at && x.j.finished_at ? (Date.parse(x.j.finished_at) - Date.parse(x.j.started_at)) / 1000 : null).filter((x): x is number => x != null && x >= 0);
-    const via = { tool: 0, chat: 0, automation: 0, unknown: 0 };
+    const via = { tool: 0, chat: 0, automation: 0, connector: 0, unknown: 0 };
     for (const x of js) via[jobVia(x.j, chatJobs, autoJobs)]++;
     return {
       tool, label: TOOL_LABEL[tool] ?? tool, jobs: js.length, done: doneJs.length, failed: js.filter((x) => x.j.status === "failed").length, canceled: js.filter((x) => x.j.status === "canceled").length,

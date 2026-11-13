@@ -18,7 +18,7 @@ import { loadOrgSlots } from "./org-visibility.js";
 export type AuthCtx =
   | null
   | { admin_secret: true }
-  | { user_id: string; email?: string };
+  | { user_id: string; email?: string; /** set when the token was issued to an OAuth app (the Claude connector) */ client_id?: string };
 
 export type ProfileCtx = null | {
   user_id: string;
@@ -45,7 +45,7 @@ const JWKS_URL = SUPABASE_URL
   : null;
 const jwks = JWKS_URL ? createRemoteJWKSet(JWKS_URL) : null;
 
-async function verifySupabaseJwt(token: string): Promise<{ sub: string; email?: string } | null> {
+async function verifySupabaseJwt(token: string): Promise<{ sub: string; email?: string; client_id?: string } | null> {
   if (!jwks) return null;
   try {
     const { payload } = await jwtVerify(token, jwks, {
@@ -53,7 +53,8 @@ async function verifySupabaseJwt(token: string): Promise<{ sub: string; email?: 
       audience: "authenticated",
     });
     if (!payload.sub) return null;
-    return { sub: String(payload.sub), email: (payload as any).email };
+    const clientId = (payload as any).client_id;
+    return { sub: String(payload.sub), email: (payload as any).email, ...(typeof clientId === "string" && clientId ? { client_id: clientId } : {}) };
   } catch {
     return null;
   }
@@ -76,7 +77,7 @@ export async function resolveAuth(req: Request, _res: Response, next: NextFuncti
     const token = authHeader.slice(7).trim();
     const claims = await verifySupabaseJwt(token);
     if (claims) {
-      req.auth = { user_id: claims.sub, email: claims.email };
+      req.auth = { user_id: claims.sub, email: claims.email, ...(claims.client_id ? { client_id: claims.client_id } : {}) };
       // Hydrate profile.
       try {
         const { data, error } = await supabase()

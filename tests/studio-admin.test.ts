@@ -91,6 +91,7 @@ test("where a job came from: its tag, else the chat or automation that ran it", 
   assert.equal(jobVia({ id: "x", options: {} }, new Set(["x"]), new Set()), "chat");
   assert.equal(jobVia({ id: "x", options: {} }, new Set(), new Set(["x"])), "automation");
   assert.equal(jobVia({ id: "x", options: {} }, new Set(), new Set()), "unknown");
+  assert.equal(jobVia({ id: "x", options: { via: "connector" } }, new Set(), new Set()), "connector", "made from Claude through the connector");
 });
 
 test("money in: live payments only, split by kind and plan; auto top-ups from the ledger; a plan's checkout is not counted twice", () => {
@@ -119,7 +120,7 @@ test("the admin numbers for 30 days: money, profit, tools, fallbacks, chat, usag
   // tools
   const swap = m.tools.find((t) => t.tool === "swap")!;
   assert.deepEqual([swap.jobs, swap.done, swap.credits, swap.cost_usd], [2, 2, 580, 4.5]);
-  assert.deepEqual(swap.via, { tool: 1, chat: 0, automation: 0, unknown: 1 });
+  assert.deepEqual(swap.via, { tool: 1, chat: 0, automation: 0, connector: 0, unknown: 1 });
   assert.ok(swap.value_usd > 0 && swap.margin! > 0);
   assert.equal(m.tools.find((t) => t.tool === "recast")!.via.chat, 1, "the chat's run names the older job");
   // fallbacks
