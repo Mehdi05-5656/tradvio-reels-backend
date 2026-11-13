@@ -31,6 +31,10 @@ export type StudioCall = (method: "GET" | "POST", path: string, body?: unknown) 
 
 const STORY_SECONDS = [30, 50] as const;
 const MOTIVATION_SECONDS = [30, 45, 60, 90] as const;
+// Films (studio-longform.ts): the Films page's own choices, in the words a person would use in chat
+const FILM_MINUTES = [2, 5, 10] as const;
+const FILM_KINDS = { auto: "auto", "true story": "true", "what if": "speculative", fiction: "fiction" } as const;
+const FILM_FEELS = ["auto", "true-crime", "horror", "mystery", "wonder", "history", "comedy", "thriller", "drama"] as const;
 
 /** What the chat's AI sees: names, what each does, what it costs, and that starting one spends credits. */
 export const MCP_TOOLS = [
@@ -38,7 +42,7 @@ export const MCP_TOOLS = [
   { name: "clone8_catalog", title: "What Clone8 can make", description: "What Clone8 can make right now from this chat, with each kind's length choices. Free to call. Use clone8_quote for a price.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
   {
     name: "clone8_quote", title: "Price a video", description: "The price in credits of a video before making it, and the person's balance. Free to call; spends nothing.",
-    inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["story", "motivation"] }, seconds: { type: "integer", description: "story: 30 or 50; motivation: 30, 45, 60 or 90" }, engine: { type: "string", enum: ["express", "signature"], description: "story only. express: the default, faster and cheaper. signature: built from scratch for the idea, takes longer, costs more." } }, required: ["kind"] },
+    inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["story", "motivation", "film"] }, seconds: { type: "integer", description: "story: 30 or 50; motivation: 30, 45, 60 or 90" }, minutes: { type: "integer", enum: [...FILM_MINUTES], description: "film only: 2, 5 or 10" }, engine: { type: "string", enum: ["express", "signature"], description: "story only. express: the default, faster and cheaper. signature: built from scratch for the idea, takes longer, costs more." } }, required: ["kind"] },
     annotations: { readOnlyHint: true },
   },
   {
@@ -51,6 +55,12 @@ export const MCP_TOOLS = [
     name: "clone8_make_motivation", title: "Make a motivation video",
     description: "Make a narrated motivation video (cinematic clips, a deep voice, sound effects) about a topic, or from the person's own script. SPENDS CREDITS. Without confirm: true it only returns the price; tell the person and call again with confirm: true once they agree. Takes about 3 minutes; follow it with clone8_job.",
     inputSchema: { type: "object", properties: { topic: { type: "string", maxLength: 600 }, script: { type: "string", maxLength: 4000, description: "the person's own words, instead of a topic" }, seconds: { type: "integer", enum: [...MOTIVATION_SECONDS], default: 45 }, wide: { type: "boolean", description: "16:9 instead of vertical 9:16" }, confirm: { type: "boolean" } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "clone8_make_film", title: "Make a film",
+    description: "Make a narrated widescreen (16:9) film of 2, 5 or 10 minutes from a story prompt, e.g. \"The Gardner museum heist\": researched, written, illustrated, narrated and cut, with a YouTube title, description and thumbnail. SPENDS CREDITS. Without confirm: true it only returns the price; tell the person and call again with confirm: true once they agree. Takes about 30 minutes (2 min) to 75 minutes (10 min); follow it with clone8_job now and then.",
+    inputSchema: { type: "object", properties: { prompt: { type: "string", minLength: 6, maxLength: 600, description: "what the story is about" }, minutes: { type: "integer", enum: [...FILM_MINUTES], default: 10 }, kind: { type: "string", enum: Object.keys(FILM_KINDS), default: "auto", description: "true story (researched and checked), what if (real facts, imagined scenario), fiction, or auto (decided from the prompt)" }, feel: { type: "string", enum: [...FILM_FEELS], default: "auto" }, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["prompt"] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   { name: "clone8_job", title: "Check a video", description: "How a video is getting on: its step while it is made, then links to watch and download it (the links last 15 minutes). Free to call.", inputSchema: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
@@ -84,10 +94,17 @@ export function studioRequest(name: string, a: any): { tool: string; options: Re
     const shape = a?.wide ? "16:9" : "9:16";
     return { tool: "motivation", options: script ? { script, shape } : { topic: topic || "A video, priced", seconds: nearest(a?.seconds, MOTIVATION_SECONDS, 45), shape } };
   }
-  return { invalid: "kind must be story or motivation" };
+  if (name === "clone8_make_film" || (name === "clone8_quote" && a?.kind === "film")) {
+    const prompt = String(a?.prompt ?? "A film, priced").replace(/\s+/g, " ").trim();
+    if (name === "clone8_make_film" && prompt.length < 6) return { invalid: "Say what the story is about, in at least 6 characters." };
+    const kind = (FILM_KINDS as Record<string, string>)[String(a?.kind ?? "auto").toLowerCase()] ?? "auto";
+    const feel = (FILM_FEELS as readonly string[]).includes(String(a?.feel)) ? String(a.feel) : "auto";
+    return { tool: "longform", options: { prompt: prompt.slice(0, 600), minutes: nearest(a?.minutes, FILM_MINUTES, 10), mode: kind, genre: feel } };
+  }
+  return { invalid: "kind must be story, motivation or film" };
 }
 
-const pageOf = (tool: string, options: any) => (tool === "kage_motion" && options?.motivation ? "motivation" : tool === "kage_motion" && options?.story ? "stories" : tool === "story" ? "stories" : tool);
+const pageOf = (tool: string, options: any) => (tool === "kage_motion" && options?.motivation ? "motivation" : tool === "kage_motion" && options?.story ? "stories" : tool === "story" ? "stories" : tool === "longform" ? "films" : tool);
 
 /** Runs one tool for the person. Exported for the tests. */
 export async function runTool(name: string, a: any, call: StudioCall): Promise<Result> {
@@ -103,9 +120,12 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
     const t = r.json.tools ?? {}; const kinds: Record<string, unknown>[] = [];
     if (t.story_explainer) kinds.push({ kind: "story", what: "a narrated vertical 3D story (no character) about any topic", seconds: [...STORY_SECONDS], engines: t.story_premium ? ["express", "signature"] : ["express"] });
     if (t.motivation) kinds.push({ kind: "motivation", what: "a narrated motivation video with cinematic clips and sound effects", seconds: [...MOTIVATION_SECONDS] });
-    return ok(kinds.length ? kinds.map((k) => `${k.kind}: ${k.what} (${(k.seconds as number[]).join(" / ")} s${k.engines ? `; ${(k.engines as string[]).join(" or ")}` : ""})`).join("\n") : "Nothing can be made from chat right now.", { kinds });
+    // Films before they open: the Studio prices one only for the accounts it lets make them (the owner), so ask it
+    const films = !!t.longform || (await call("POST", "/api/studio/quote", { tool: "longform", asset_id: null, options: { prompt: "A film, priced", minutes: 10 } })).status === 200;
+    if (films) kinds.push({ kind: "film", what: "a narrated widescreen film from a story prompt, with its YouTube title, description and thumbnail", minutes: [...FILM_MINUTES], kinds: Object.keys(FILM_KINDS), feels: [...FILM_FEELS] });
+    return ok(kinds.length ? kinds.map((k) => `${k.kind}: ${k.what} (${k.minutes ? `${(k.minutes as number[]).join(" / ")} min` : `${(k.seconds as number[]).join(" / ")} s`}${k.engines ? `; ${(k.engines as string[]).join(" or ")}` : ""})`).join("\n") : "Nothing can be made from chat right now.", { kinds });
   }
-  if (name === "clone8_quote" || name === "clone8_make_story" || name === "clone8_make_motivation") {
+  if (name === "clone8_quote" || name === "clone8_make_story" || name === "clone8_make_motivation" || name === "clone8_make_film") {
     const q = studioRequest(name, a); if ("invalid" in q) return err(q.invalid);
     const body = { tool: q.tool, asset_id: null, options: q.options };
     const [quote, me] = await Promise.all([call("POST", "/api/studio/quote", body), call("GET", "/api/studio/me")]);
@@ -125,9 +145,9 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
   if (name === "clone8_job") {
     const id = String(a?.job_id ?? ""); if (!/^[0-9a-f-]{36}$/i.test(id)) return err("job_id is the id clone8_make_* returned.");
     const r = await call("GET", `/api/studio/jobs/${id}`); if (r.status !== 200) return refusal(r);
-    const j = r.json.job ?? {}; const outs = (Array.isArray(j.outputs) ? j.outputs : []).map((o: any) => ({ url: o.url ?? null, poster_url: o.poster_url ?? null }));
+    const j = r.json.job ?? {}; const outs = (Array.isArray(j.outputs) ? j.outputs : []).map((o: any) => ({ url: o.url ?? null, poster_url: o.poster_url ?? null, ...(o.title ? { title: String(o.title) } : {}) }));
     const step = j.progress?.step ?? j.progress?.stage ?? null;
-    const text = j.status === "done" ? `Done. ${outs.map((o: any, i: number) => `Video${outs.length > 1 ? ` ${i + 1}` : ""}: ${o.url}`).join("\n")}\n(Links last 15 minutes; it is kept in ${APP_URL}/#studio/${pageOf(j.tool, j.options)}.)` : j.status === "failed" || j.status === "canceled" ? `${j.status === "failed" ? "It failed" : "It was canceled"}${j.error_code ? ` (${j.error_code})` : ""}; the credits it held were returned.` : `${j.status === "queued" ? "Waiting to start" : "Being made"}${step ? `: ${step}` : ""}. Check again in a minute or two.`;
+    const text = j.status === "done" ? `Done. ${outs.map((o: any, i: number) => `${o.title ? `“${o.title}” ` : ""}Video${outs.length > 1 ? ` ${i + 1}` : ""}: ${o.url}`).join("\n")}\n(Links last 15 minutes; it is kept in ${APP_URL}/#studio/${pageOf(j.tool, j.options)}.)` : j.status === "failed" || j.status === "canceled" ? `${j.status === "failed" ? "It failed" : "It was canceled"}${j.error_code ? ` (${j.error_code})` : ""}; the credits it held were returned.` : `${j.status === "queued" ? "Waiting to start" : "Being made"}${step ? `: ${step}` : ""}. Check again in a minute or two.`;
     return ok(text, { status: j.status, step, outputs: outs, error: j.error_code ?? null });
   }
   if (name === "clone8_recent") {
@@ -141,7 +161,7 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
 /** The MCP server for one request, acting as one person. */
 /** `base`: the connector's own public address (where its logo is served). */
 export function mcpServer(call: StudioCall, o: { base: string } = { base: "https://mcp.clone8.io" }) {
-  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos from an idea. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
+  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos and long films from an idea. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TOOLS as any }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     try { return (await runTool(req.params.name, req.params.arguments ?? {}, call)) as any; }

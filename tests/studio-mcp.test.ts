@@ -73,6 +73,22 @@ test("connector: motivation, account, catalog, job and recent read the Studio's 
   for (const t of MCP_TOOLS) { assert.ok((t as any).title, t.name); assert.equal(typeof (t as any).annotations.readOnlyHint, "boolean"); }
 });
 
+test("connector: a film is priced first, then started with the same request the Films page sends", async () => {
+  const s = fakeStudio();
+  const q = await runTool("clone8_make_film", { prompt: "The Gardner museum heist", minutes: 4, kind: "True story", feel: "true-crime" }, s.call);
+  assert.equal(q.structuredContent?.started, false); assert.ok(!s.calls.some((c) => c.path === "/api/studio/jobs"));
+  const r = await runTool("clone8_make_film", { prompt: "  The Gardner   museum heist ", minutes: 4, kind: "true story", feel: "true-crime", confirm: true }, s.call);
+  assert.equal(r.structuredContent?.started, true); assert.match(r.content[0].text, /#studio\/films/);
+  assert.deepEqual(s.calls.filter((c) => c.path === "/api/studio/jobs")[0].body, { tool: "longform", asset_id: null, options: { prompt: "The Gardner museum heist", minutes: 5, mode: "true", genre: "true-crime" } });
+  // unknown choices fall back to the page's defaults; a too-short prompt is refused before anything is asked
+  assert.deepEqual((studioRequest("clone8_make_film", { prompt: "A bank robbery", kind: "documentary", feel: "jazz" }) as any).options, { prompt: "A bank robbery", minutes: 10, mode: "auto", genre: "auto" });
+  assert.equal((await runTool("clone8_make_film", { prompt: "heist" }, fakeStudio().call)).isError, true);
+  // the catalog names films only when the Studio would price one for this person (open, or the owner before it opens)
+  assert.match((await runTool("clone8_catalog", {}, s.call)).content[0].text, /^film: .*\(2 \/ 5 \/ 10 min\)$/m);
+  const closed: StudioCall = async (m, path, body) => (path === "/api/studio/quote" && (body as any)?.tool === "longform" ? { status: 403, json: { error: "longform_off" } } : s.call(m, path, body));
+  assert.doesNotMatch((await runTool("clone8_catalog", {}, closed)).content[0].text, /film:/);
+});
+
 async function serve(env: Record<string, string>, fetchFn?: typeof fetch) {
   const app = express(); app.use(express.json());
   app.use((req, _res, next) => { const u = req.header("x-test-user"); (req as any).auth = u ? { user_id: u, email: "someone@example.com" } : null; next(); });
