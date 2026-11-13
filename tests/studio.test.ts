@@ -160,12 +160,14 @@ test("checkout links the customer, subscription events mirror the plan, paid inv
   assert.match(await applyStripeEvent(sb, stripe, { type: "invoice.paid", data: { object: { id: "in_3", customer: "cus_other", parent: { subscription_details: { subscription: "sub_1" } } } } }), /granted 3500/);
   assert.ok(sb.writes.some((w: any) => w.table === "studio_customers" && w.op === "upsert" && w.v.stripe_customer_id === "cus_other"), "the link is written from the subscription's user id");
   assert.equal(await applyStripeEvent(sb, stripe, { type: "payment_intent.created", data: { object: {} } }), "ignored");
-  // Annual billing: one invoice a year pays for twelve months of credits, granted at once.
+  // Annual billing: one invoice a year pays for twelve months of credits, which arrive month by month (each batch expires
+  // 60 days after it arrives): studio_grant_spread over the period.
   process.env.STRIPE_PRICE_CREATOR_YEAR = "price_cy";
   const annual = fakeStripe({ sub_1: sub({ items: { data: [{ price: { id: "price_cy", recurring: { interval: "year" } }, current_period_start: 1761523200, current_period_end: 1793059200 }] } }) });
   assert.match(await applyStripeEvent(sb, annual, { type: "invoice.paid", data: { object: { id: "in_year", customer: "cus_1", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_1" } } } } }), /granted 42000/);
-  const year = sb.calls.filter((c: any) => c.name === "studio_grant").at(-1);
-  assert.deepEqual([year.args.p_credits, year.args.p_ref, year.args.p_expire_previous, year.args.p_note], [42000, "in_year", true, "Creator annual subscription_create"]);
+  const year = sb.calls.filter((c: any) => c.name === "studio_grant_spread").at(-1);
+  assert.deepEqual([year.args.p_total, year.args.p_ref, year.args.p_until, year.args.p_note], [42000, "in_year", new Date(1793059200 * 1000).toISOString(), "Creator annual subscription_create"]);
+  assert.ok(!sb.calls.some((c: any) => c.name === "studio_grant" && c.args.p_ref === "in_year"), "never granted at once");
   delete process.env.STRIPE_PRICE_CREATOR_MONTH; delete process.env.STRIPE_PRICE_CREATOR_YEAR;
 });
 
@@ -410,12 +412,12 @@ test("invoice.paid that arrives before the customer link still grants, by the su
   const NEW = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const tables: Record<string, any[]> = { studio_customers: [{ user_id: NEW, stripe_customer_id: null, status: "none", plan_id: null, onboarding: {} }], studio_credit_ledger: [], studio_stripe_events: [] };
   const grants: any[] = [];
-  const sb = fakeSb(tables, (name, args) => { if (name === "studio_grant") { grants.push(args); return { data: { granted: true }, error: null }; } if (name === "studio_referral_reward") return { data: { granted: false }, error: null }; return { data: {}, error: null }; });
+  const sb = fakeSb(tables, (name, args) => { if (name === "studio_grant" || name === "studio_grant_spread") { grants.push({ name, ...args }); return { data: { granted: true }, error: null }; } if (name === "studio_referral_reward") return { data: { granted: false }, error: null }; return { data: {}, error: null }; });
   const stripe = fakeStripe({ sub_new: sub({ id: "sub_new", customer: "cus_new", metadata: { user_id: NEW }, items: { data: [{ price: { id: "price_cy", recurring: { interval: "year" } }, current_period_start: 1761523200, current_period_end: 1793059200 }] } }) });
   process.env.STRIPE_PRICE_CREATOR_YEAR = "price_cy";
   const out = await applyStripeEvent(sb, stripe, { id: "evt_race", type: "invoice.paid", data: { object: { id: "in_race", customer: "cus_new", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_new" } } } } });
   assert.match(out, /granted 42000/);
-  assert.deepEqual([grants[0].p_user, grants[0].p_credits, grants[0].p_ref, grants[0].p_expire_previous], [NEW, 42000, "in_race", true]);
+  assert.deepEqual([grants[0].name, grants[0].p_user, grants[0].p_total, grants[0].p_ref], ["studio_grant_spread", NEW, 42000, "in_race"], "a yearly plan's credits, spread over its months");
   assert.ok(sb.writes.some((w: any) => w.table === "studio_customers" && w.op === "upsert" && w.v.stripe_customer_id === "cus_new"), "the customer link is written on the way");
   const stripe2 = fakeStripe({ sub_x: sub({ id: "sub_x", customer: "cus_x", metadata: {} }) });
   await assert.rejects(() => applyStripeEvent(sb, stripe2, { id: "evt_x", type: "invoice.paid", data: { object: { id: "in_x", customer: "cus_x", billing_reason: "subscription_create", parent: { subscription_details: { subscription: "sub_x" } } } } }), /unknown customer/, "no user anywhere: throw so Stripe retries");

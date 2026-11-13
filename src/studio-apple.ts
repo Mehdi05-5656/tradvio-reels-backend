@@ -108,9 +108,12 @@ export async function applyAppleTransaction(sb: SupabaseClient, user: string, tx
   });
   if (s.error) throw s.error;
   if (!active) return { user, plan: plan.id, note: `${plan.id} ${kind.interval} lapsed` };
-  // each period's transaction grants that period's credits, replacing what was left of the last one (as Stripe's invoices do)
-  const credits = plan.credits * (kind.interval === "year" ? 12 : 1);
-  const g = await sb.rpc("studio_grant", { p_user: user, p_credits: credits, p_ref: `in_apple_${txid}`, p_expire_previous: true, p_note: `${plan.name} ${kind.interval === "year" ? "annual " : ""}Apple period` });
+  // each period's transaction grants that period's credits (as Stripe's invoices do); a year's arrive month by month
+  // (studio_grant_spread), since every batch of plan credits expires 60 days after it arrives
+  const credits = plan.credits * (kind.interval === "year" ? 12 : 1); const note = `${plan.name} ${kind.interval === "year" ? "annual " : ""}Apple period`;
+  const g = kind.interval === "year"
+    ? await sb.rpc("studio_grant_spread", { p_user: user, p_total: credits, p_ref: `in_apple_${txid}`, p_until: iso(expires), p_note: note })
+    : await sb.rpc("studio_grant", { p_user: user, p_credits: credits, p_ref: `in_apple_${txid}`, p_expire_previous: true, p_note: note });
   if (g.error) throw g.error;
   return { user, plan: plan.id, credits, note: `${plan.id} ${kind.interval} ${g.data?.granted ? "granted" : "already granted"} ${credits}` };
 }

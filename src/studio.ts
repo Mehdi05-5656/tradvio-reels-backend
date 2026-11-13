@@ -535,13 +535,18 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     if (reason === "subscription_update" && !invoiceChargesPlan(obj)) return `invoice.paid → extra social accounts only (${s.social_extra}), no credits`;
     // A new period replaces what was left; a mid-cycle upgrade adds its credits on top.
     const expire = reason === "subscription_cycle" || reason === "subscription_create" || reason === "";
-    // Credits are priced per month. An annual invoice pays for twelve of them at once, so it grants the
-    // year's credits in one go; they last until the next annual invoice replaces them. A mid-period upgrade buys the new
-    // plan's credits for the time left, less the old plan's unused share, as Stripe prorates the price.
+    // Credits are priced per month. An annual invoice pays for twelve of them, which arrive one month at a time (the
+    // first now, then on each monthly date: studio_grant_spread), because every batch of credits expires 60 days after it
+    // arrives (migrations/20261122000000_studio_credit_expiry.sql). A mid-period upgrade buys the new plan's credits for
+    // the time left, less the old plan's unused share, as Stripe prorates the price; on a yearly plan they too arrive
+    // over the months left. Nothing expires at renewal any more (p_expire_previous is ignored).
     const prorated = reason === "subscription_update" ? upgradeCredits(obj) : null;
     const credits = prorated ?? s.plan.credits * (s.interval === "year" ? 12 : 1);
     if (credits <= 0) return `invoice.paid → upgrade with no credits to add (${reason})`;
-    const g = await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: `${s.plan.name} ${s.interval === "year" ? "annual " : ""}${reason || "invoice"}` });
+    const note = `${s.plan.name} ${s.interval === "year" ? "annual " : ""}${reason || "invoice"}`;
+    const g = s.interval === "year" && s.period_end
+      ? await sb.rpc("studio_grant_spread", { p_user: userId, p_total: credits, p_ref: String(obj.id), p_until: s.period_end, p_note: note })
+      : await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: note });
     if (g.error) throw g.error;
     // The first paid invoice of a referred person credits both sides, once; the function is a no-op otherwise.
     let referral = "";
@@ -681,11 +686,14 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const sb = sbFn();
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id,stripe_subscription_id";
-      const [cust0, bal, jobs, ledger] = await Promise.all([
+      const [cust0, bal, jobs, ledger, expiry] = await Promise.all([
         sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error,owner_pass${iapEnabled(env) ? ",billing_source" : ""}`).eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
         sb.from("studio_jobs").select("id,tool,status,credits_reserved,credits_charged,created_at").eq("user_id", u).gte("created_at", since).order("created_at", { ascending: false }).limit(200),
         sb.from("studio_credit_ledger").select("delta,reason,job_id,ref,note,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(50),
+        // when credits expire (migrations/20261122000000_studio_credit_expiry.sql): the next batch, what never expires, the
+        // next month of a yearly plan to come; absent (an error) before that migration, and the page shows nothing
+        sb.rpc("studio_credit_summary", { p_user: u }).then((r: any) => r, () => ({ data: null, error: true })),
       ]);
       // Before the referrals migration those three columns do not exist: read the row without them, referral stays empty.
       const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup|owner_pass|billing_source/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
@@ -706,6 +714,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         active: hasPlanAccess(c),
         ...(c?.owner_pass ? { owner_pass: true } : {}),
         balance: Number(bal.data ?? 0),
+        ...(expiry && !expiry.error && expiry.data ? { credit_expiry: expiry.data } : {}),
         onboarding: c?.onboarding ?? {},
         usage_30d: { jobs: (jobs.data ?? []).length, credits: spent },
         ledger: ledgerOut,
