@@ -132,3 +132,13 @@ test("connector behind the real access boundary: signed out gets the sign-in hea
     assert.match((await call.json()).result.content[0].text, /7 credits/);
   } finally { srv.close(); process.env = saved; }
 });
+
+test("connector: someone without a plan is told so with the price, and a refusal to start says where to get one", async () => {
+  const noPlan: StudioCall = async (method, path) => path === "/api/studio/me" ? { status: 200, json: { subscription: null, active: false, balance: 0, usage_30d: { jobs: 0 } } }
+    : path === "/api/studio/quote" ? { status: 200, json: { credits: 237, summary: "30 s 3D story" } }
+    : path === "/api/studio/jobs" ? { status: 409, json: { error: "subscription_required" } } : { status: 404, json: {} };
+  const q = await runTool("clone8_make_story", { topic: "How does a hot air balloon fly?" }, noPlan);
+  assert.equal(q.structuredContent?.plan_needed, true); assert.match(q.content[0].text, /needs a Clone8 plan first.*#studio\/pricing/);
+  const go = await runTool("clone8_make_story", { topic: "How does a hot air balloon fly?", confirm: true }, noPlan);
+  assert.equal(go.isError, true); assert.match(go.content[0].text, /needs a Clone8 plan.*#studio\/pricing/);
+});

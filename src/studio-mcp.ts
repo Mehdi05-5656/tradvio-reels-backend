@@ -61,6 +61,8 @@ const nearest = (v: unknown, from: readonly number[], d: number) => { const n = 
 const refusal = (r: { status: number; json: any }) => {
   const j = r.json ?? {};
   if (j.error === "insufficient_credits") return err(`Not enough credits: this needs ${j.needed}, the balance is ${j.balance}. More credits: ${APP_URL}/#studio/pricing`, { error: j.error, needed: j.needed, balance: j.balance });
+  if (j.error === "subscription_required") return err(`Making videos needs a Clone8 plan. The person can pick one here: ${APP_URL}/#studio/pricing (then ask again).`, { error: j.error, pricing: `${APP_URL}/#studio/pricing` });
+  if (j.error === "too_many_jobs") return err("Clone8 is already making as many videos as this plan allows at once. Try again when one has finished (clone8_recent shows them).", { error: j.error });
   return err(String(j.detail ?? j.message ?? j.error ?? `Clone8 said ${r.status}`), { error: j.error ?? `http_${r.status}` });
 };
 
@@ -105,6 +107,9 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
     const [quote, me] = await Promise.all([call("POST", "/api/studio/quote", body), call("GET", "/api/studio/me")]);
     if (quote.status !== 200) return refusal(quote);
     const credits = Number(quote.json.credits ?? quote.json.quote?.credits); const balance = me.status === 200 ? Number(me.json.balance) : null; const summary = String(quote.json.summary ?? quote.json.quote?.summary ?? "");
+    // no plan: say so with the price, before anyone agrees to something that cannot start
+    const planless = me.status === 200 && !me.json.active && !me.json.owner_pass;
+    if (planless && (name === "clone8_quote" || a?.confirm !== true)) return ok(`${summary}: ${credits} credits. Making videos needs a Clone8 plan first; the person can pick one here: ${APP_URL}/#studio/pricing. Nothing has been spent.`, { credits, balance, summary, started: false, plan_needed: true, pricing: `${APP_URL}/#studio/pricing` });
     if (name === "clone8_quote" || a?.confirm !== true) {
       const short = balance != null && balance < credits;
       return ok(`${summary}: ${credits} credits${balance != null ? ` (balance ${balance}${short ? `, not enough: ${APP_URL}/#studio/pricing` : ""})` : ""}.${name === "clone8_quote" ? "" : " Nothing has been spent: ask the person, then call again with confirm: true."}`, { credits, balance, summary, started: false });
