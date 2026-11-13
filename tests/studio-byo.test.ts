@@ -7,7 +7,8 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import { BRIEF_PART_CHARS, briefParts, registerByo } from "../src/studio-byo.ts";
 import { BYO_MCP_TOOLS, MCP_TOOLS, mcpServer, runTool, studioRequest, type StudioCall } from "../src/studio-mcp.ts";
-import { StoryError, parseStoryOptions, quoteStory, storyByoCostUsd, storyPremiumMargin } from "../src/studio-stories.ts";
+import { StoryError, parseStoryOptions, quoteStory, storyByoCostUsd, storyByoMargin, storyByoMinMargin } from "../src/studio-stories.ts";
+import { PLANS as LIVE_PLANS } from "../src/studio.ts";
 import { creditValueFloor, creditsForCost } from "../src/studio-pricing.ts";
 
 const PLANS = [{ id: "starter", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000 }, { id: "studio", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000 }];
@@ -20,7 +21,15 @@ test("in-chat Signature: off, owner-only, then open; priced from its own cost at
   assert.throws(() => quoteStory(BYO, PLANS, ask), (e: any) => e.code === "story_byo_off", "switched on but not open: customers are refused");
   const q = quoteStory(BYO, PLANS, ask, { owner: true });
   assert.deepEqual(q.options.story, { topic: ask.topic, seconds: 50, kind: "explainer", engine: "premium", byo: true }); assert.equal(q.options.cost_usd, 1.2);
-  assert.equal(q.credits, creditsForCost(1.2, creditValueFloor(PLANS), storyPremiumMargin(BYO)));
+  assert.equal(storyByoMargin(BYO), 0.5, "the house margin, not Signature's"); assert.equal(storyByoMinMargin(BYO), 0.45);
+  assert.equal(q.credits, creditsForCost(1.2, creditValueFloor(PLANS), 0.5));
+  // the ceiling handed to the worker: what the credits earn at the cheapest credit, less the 45 % floor
+  assert.equal(q.options.cost_cap_usd, Math.floor(q.credits * creditValueFloor(PLANS) * 0.55 * 100) / 100);
+  // on the live plans: 150 credits, and a film may cost us at most $1.32
+  const live = quoteStory(BYO, LIVE_PLANS as any, ask, { owner: true }); assert.equal(live.credits, 150); assert.equal(live.options.cost_cap_usd, 1.32);
+  assert.ok(live.options.cost_cap_usd / (live.credits * creditValueFloor(LIVE_PLANS as any)) <= 0.55 + 1e-9, "at the ceiling the margin is still 45 % or more");
+  assert.equal(quoteStory({ ...BYO, STUDIO_STORY_BYO_MIN_MARGIN: "0.5" }, LIVE_PLANS as any, ask, { owner: true }).options.cost_cap_usd, 1.2);
+  assert.equal(quoteStory(BYO, PLANS, { ...ask, byo: undefined }, { owner: true }).options.cost_cap_usd, undefined, "only films written in a chat carry a ceiling");
   const full = quoteStory(BYO, PLANS, { ...ask, byo: undefined }, { owner: true });
   assert.ok(q.credits < full.credits * 0.5, `written in the chat is under half Signature's price (${q.credits} against ${full.credits})`);
   assert.match(q.summary, /written in your own chat/);

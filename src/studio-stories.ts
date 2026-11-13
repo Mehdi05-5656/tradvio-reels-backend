@@ -45,6 +45,12 @@ export const storyByoOpen = (env: Record<string, string | undefined> = process.e
 /** What it costs us (STUDIO_STORY_BYO_COST_USD, default $1.20: the script, the voice, the grader's three votes a line,
  *  the renders; measured on Sonnet-written films Nov 12 2026 at about $1.0-1.2 without the author's own calls). */
 export const storyByoCostUsd = (env: Record<string, string | undefined>) => Math.round(usd(env, "STUDIO_STORY_BYO_COST_USD", 1.2) * 100) / 100;
+/** Its margin: the house's (50 %) unless STUDIO_STORY_BYO_MARGIN says otherwise. The owner's rule (Nov 13 2026): the
+ *  person is not charged more than our normal margin for doing the writing themselves. */
+export const storyByoMargin = (env: Record<string, string | undefined>) => { const raw = String(env.STUDIO_STORY_BYO_MARGIN ?? "").trim(); const m = Number(raw); return raw !== "" && Number.isFinite(m) && m >= 0 && m <= 0.9 ? m : MARGIN_TARGET; };
+/** The least margin a film may end at (STUDIO_STORY_BYO_MIN_MARGIN, default 45 %, the owner's floor): the worker is
+ *  handed the cost ceiling that follows from it (options.cost_cap_usd) and skips anything optional that would pass it. */
+export const storyByoMinMargin = (env: Record<string, string | undefined>) => { const raw = String(env.STUDIO_STORY_BYO_MIN_MARGIN ?? "").trim(); const m = Number(raw); return raw !== "" && Number.isFinite(m) && m >= 0 && m < 0.9 ? m : 0.45; };
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -122,8 +128,12 @@ export function quoteStory(env: Record<string, string | undefined>, plans: PlanL
     if (byo && !storyByoEnabled(env)) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not switched on yet", 403);
     if (byo && !storyByoOpen(env) && !who.owner) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not open yet", 403);
     const cost = byo ? storyByoCostUsd(env) : premium ? storyPremiumCostUsd(env) : storyExplainerCostUsd(env, o.seconds);
-    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}), ...(byo ? { byo: true } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost };
-    return { tool: "kage_motion", credits: byo ? credits(env, plans, cost, storyPremiumMargin(env)) : premium ? storyPremiumCredits(env, plans) : credits(env, plans, cost), options, summary: `${o.seconds} s 3D story · no character${byo ? " · Signature, the scene written in your own chat" : premium ? " · built from scratch" : ""} · vertical 9:16 · narrated` };
+    const price = byo ? credits(env, plans, cost, storyByoMargin(env)) : premium ? storyPremiumCredits(env, plans) : credits(env, plans, cost);
+    // the most the film may cost us: what its credits earn at the cheapest credit, less the lowest margin accepted
+    const floor = studioCosts(env, plans).credit_floor;
+    const cap = byo && floor ? { cost_cap_usd: Math.floor(price * floor * (1 - storyByoMinMargin(env)) * 100) / 100 } : {};
+    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}), ...(byo ? { byo: true } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost, ...cap };
+    return { tool: "kage_motion", credits: price, options, summary: `${o.seconds} s 3D story · no character${byo ? " · Signature, the scene written in your own chat" : premium ? " · built from scratch" : ""} · vertical 9:16 · narrated` };
   }
   const cost = o.stage === "script" ? storyScriptCostUsd(env) : o.stage === "film" ? storyFilmCostUsd(env, o.seconds) : storyCostUsd(env, o.seconds);
   const story = { topic: o.topic, seconds: o.seconds, ...(o.min_seconds ? { min_seconds: o.min_seconds } : {}), ...(o.format !== "auto" ? { format: o.format } : {}), ...(o.world !== "auto" ? { world: o.world } : {}), sidekick: o.sidekick, ...(o.captions !== "auto" ? { captions: o.captions } : {}), ...(o.stage !== "all" ? { stage: o.stage } : {}), ...(o.scene ? { scene: o.scene } : {}) };
