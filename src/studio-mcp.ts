@@ -87,8 +87,10 @@ const pageOf = (tool: string, options: any) => (tool === "kage_motion" && option
 export async function runTool(name: string, a: any, call: StudioCall): Promise<Result> {
   if (name === "clone8_account") {
     const r = await call("GET", "/api/studio/me"); if (r.status !== 200) return refusal(r);
-    const s = r.json.subscription; const plan = s?.plan?.name ?? null;
-    return ok(`${plan ? `${plan} plan${r.json.active ? "" : " (not active)"}` : "No plan"} · ${r.json.balance} credits · ${r.json.usage_30d?.jobs ?? 0} videos in the last 30 days.`, { plan, active: !!r.json.active, balance: r.json.balance, videos_30d: r.json.usage_30d?.jobs ?? 0 });
+    const s = r.json.subscription; const plan = s?.plan?.name ?? null; const pass = !!r.json.owner_pass;
+    // (the Studio counts at most 200 of the last 30 days' jobs, so 200 means "200 or more")
+    const n = Number(r.json.usage_30d?.jobs ?? 0); const count = n >= 200 ? "200 or more" : String(n);
+    return ok(`${pass ? "Owner pass" : plan ? `${plan} plan${r.json.active ? "" : " (not active)"}` : "No plan"} · ${r.json.balance} credits · ${count} videos in the last 30 days.`, { plan, owner_pass: pass, active: !!r.json.active || pass, balance: r.json.balance, videos_30d: count });
   }
   if (name === "clone8_catalog") {
     const r = await call("GET", "/api/studio/plans"); if (r.status !== 200) return refusal(r);

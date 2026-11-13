@@ -61,6 +61,8 @@ test("connector: motivation, account, catalog, job and recent read the Studio's 
   assert.deepEqual((studioRequest("clone8_make_motivation", { script: "  Get up.  ", wide: true }) as any).options, { script: "Get up.", shape: "16:9" });
   assert.deepEqual((studioRequest("clone8_make_motivation", { topic: "discipline", seconds: 50 }) as any).options, { topic: "discipline", seconds: 45, shape: "9:16" });
   assert.match((await runTool("clone8_account", {}, s.call)).content[0].text, /Creator plan · 5000 credits · 3 videos/);
+  const owner: StudioCall = async () => ({ status: 200, json: { subscription: null, active: false, owner_pass: true, balance: 67167, usage_30d: { jobs: 200 } } });
+  assert.match((await runTool("clone8_account", {}, owner)).content[0].text, /^Owner pass · 67167 credits · 200 or more videos/);
   assert.match((await runTool("clone8_catalog", {}, s.call)).content[0].text, /express or signature/);
   const done = await runTool("clone8_job", { job_id: "11111111-2222-3333-4444-555555555555" }, s.call);
   assert.match(done.content[0].text, /https:\/\/v\/1\.mp4/); assert.match(done.content[0].text, /#studio\/stories/);
