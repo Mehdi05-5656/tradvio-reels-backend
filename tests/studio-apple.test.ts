@@ -110,3 +110,9 @@ test("apple: the owner is the account the purchase was made with, else the accou
   assert.equal(await ownerOf(fakeSb({ customer: { user_id: OTHER } }), { appAccountToken: undefined, originalTransactionId: "1" }), OTHER);
   assert.equal(await ownerOf(fakeSb(), { appAccountToken: "not-a-uuid", originalTransactionId: undefined as any }), null);
 });
+
+test("apple: Apple's server notifications pass the sign-in gate (they carry Apple's signature, not a login)", async () => {
+  const { selfAuthenticatedPost } = await import("../src/account-access.js");
+  assert.equal(selfAuthenticatedPost("/api/studio/apple/notifications", "POST"), true);
+  assert.equal(selfAuthenticatedPost("/api/studio/apple/transaction", "POST"), false, "the app's route needs the person's login");
+});

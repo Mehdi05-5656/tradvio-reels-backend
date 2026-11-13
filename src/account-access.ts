@@ -10,7 +10,7 @@ import { MCP_PATH, mcpChallenge } from "./studio-mcp.js";
 export function selfAuthenticatedPost(path: string, method: string): boolean {
   if (method !== "POST") return false;
   const p = path.replace(/\/+$/, "");
-  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/studio/stripe/webhook" || p === "/api/studio/social/webhook" || p === "/api/studio/email/unsubscribe";
+  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/studio/stripe/webhook" || p === "/api/studio/social/webhook" || p === "/api/studio/email/unsubscribe" || p === "/api/studio/apple/notifications";
 }
 
 // Default-deny legacy/global routes. Ownership is checked on the server, never
