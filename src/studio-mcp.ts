@@ -18,6 +18,9 @@ import { isStudioAdmin } from "./studio-admin-auth.js";
 type Env = Record<string, string | undefined>;
 export const mcpEnabled = (env: Env = process.env) => env.STUDIO_MCP_ENABLED === "true";
 export const mcpOpen = (env: Env = process.env) => mcpEnabled(env) && env.STUDIO_MCP_OPEN === "true";
+/** Emails let in before the connector opens, for testing it with fresh accounts (STUDIO_MCP_TESTERS, comma-separated).
+ *  Read from the verified sign-in token's email, never from anything the request says about itself. */
+export const mcpTesters = (env: Env = process.env) => new Set(String(env.STUDIO_MCP_TESTERS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter((e) => e.includes("@")));
 // Under /api/studio/ on purpose: the access boundary (account-access.ts) lets a signed-in person through to the Studio's
 // routes and refuses everything else to anyone but the operator, so a path outside it would be refused for customers.
 export const MCP_PATH = "/api/studio/mcp";
@@ -181,7 +184,8 @@ export function registerMcp(app: Express, sbFn: () => SupabaseClient, o: { env?:
       return res.status(401).json({ error: "unauthorized", detail: "Sign in to Clone8 to use the connector" });
     }
     if (req.method !== "POST") return res.status(405).setHeader("Allow", "POST").json({ error: "method_not_allowed" });
-    if (!mcpOpen(env) && !(await isStudioAdmin(req, sbFn(), env))) return res.status(403).json({ error: "connector_not_open", detail: "The Clone8 connector is not open yet" });
+    const tester = typeof a.email === "string" && mcpTesters(env).has(a.email.toLowerCase());
+    if (!mcpOpen(env) && !tester && !(await isStudioAdmin(req, sbFn(), env))) return res.status(403).json({ error: "connector_not_open", detail: "The Clone8 connector is not open yet" });
     const auth = String(req.header("authorization") ?? ""); const loop = o.loopback ?? `http://127.0.0.1:${Number(env.PORT || 10000)}`;
     const call: StudioCall = async (method, path, body) => {
       const r = await fetchFn(`${loop}${path}`, { method, headers: { authorization: auth, "content-type": "application/json", "x-clone8-via": "mcp" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000) });

@@ -153,3 +153,17 @@ test("connector: the Clone8 logo is served at the connector's address, and named
     assert.match(init.result.serverInfo.icons[0].src, /\/icon\.png$/); assert.equal(init.result.serverInfo.websiteUrl, "https://clone8.io");
   } finally { s.close(); }
 });
+
+test("connector: before it opens, an email on STUDIO_MCP_TESTERS is let in, anyone else is not", async () => {
+  const fakeFetch = (async () => new Response(JSON.stringify({ subscription: null, active: false, balance: 0, usage_30d: { jobs: 0 } }), { status: 200 })) as typeof fetch;
+  const s = await serve({ ...ON, STUDIO_MCP_TESTERS: " Tester@Example.com , other@x.io" }, fakeFetch);
+  try {
+    // the fake sign-in middleware gives every user the email someone@example.com
+    assert.equal((await rpc(s.base, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "u1")).status, 403);
+  } finally { s.close(); }
+  const app = express(); app.use(express.json());
+  app.use((req, _res, next) => { (req as any).auth = { user_id: "t1", email: "tester@example.com" }; next(); });
+  registerMcp(app, () => ({}) as any, { env: { ...ON, STUDIO_MCP_TESTERS: " Tester@Example.com , other@x.io" }, fetchFn: fakeFetch });
+  const srv = app.listen(0); const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  try { assert.equal((await rpc(base, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "t1")).status, 200); } finally { srv.close(); }
+});
