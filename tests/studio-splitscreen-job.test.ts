@@ -9,8 +9,8 @@ import type { Loop } from "../src/studio-splitscreen-library.js";
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", J = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ON = { STUDIO_SPLITSCREEN_ENABLED: "true" }, OPEN = { ...ON, STUDIO_SPLITSCREEN_OPEN: "true" };
 const LIB: Loop[] = [
-  { id: "subway-official", kind: "game", name: "Subway Surfers", seconds: 185, size: { w: 720, h: 1280 }, safe: { x: 0, y: 0.08, w: 1, h: 0.84 }, box: { zoom: 1, cx: 0.5, cy: 0.55 } },
-  { id: "bounce-sims-a", kind: "sim", name: "Bouncing balls", seconds: 180, size: { w: 1280, h: 720 }, safe: { x: 0, y: 0, w: 1, h: 1 }, box: { zoom: 1, cx: 0.5, cy: 0.5 } },
+  { id: "subway-official", kind: "subway", name: "Subway Surfers", seconds: 185, size: { w: 720, h: 1280 }, safe: { x: 0, y: 0.08, w: 1, h: 0.84 }, box: { zoom: 1, cx: 0.5, cy: 0.55 } },
+  { id: "bounce-sims-a", kind: "bounce", name: "Bouncing balls", seconds: 180, size: { w: 1280, h: 720 }, safe: { x: 0, y: 0, w: 1, h: 1 }, box: { zoom: 1, cx: 0.5, cy: 0.5 } },
 ];
 const asset = (duration = 30) => ({ id: A, kind: "video", name: "podcast.mp4", probe: { duration, width: 1080, height: 1920 } });
 const code = (fn: () => unknown) => { try { fn(); } catch (e: any) { return e instanceof SplitError ? e.code : `other:${e?.message}`; } return "no error"; };
@@ -32,7 +32,7 @@ test("quote: 50 credits a video, whatever its length; the loop asked for, or one
   assert.equal(q.options.loop_id, "subway-official");
   assert.equal(q.options.layout.seam, 0.7);
   assert.equal(q.options.layout.swap, true);
-  assert.equal(quoteSplit(OPEN, asset(), { kind: "sim" }, {}, LIB).options.loop_id, "bounce-sims-a");
+  assert.equal(quoteSplit(OPEN, asset(), { kind: "bounce" }, {}, LIB).options.loop_id, "bounce-sims-a");
   assert.equal(code(() => quoteSplit(OPEN, asset(), { loop_id: "gone" }, {}, LIB)), "splitscreen_no_loop");
   assert.equal(code(() => quoteSplit(OPEN, asset(1), {}, {}, LIB)), "splitscreen_too_short");
   assert.equal(code(() => quoteSplit(OPEN, asset(240), {}, {}, LIB)), "splitscreen_too_long");

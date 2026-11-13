@@ -122,9 +122,9 @@ test("cropInside and loopCrop: no framing can bring what lies outside a loop's s
 
 test("pickLoop: the asked kind, the same pick for the same job", () => {
   const mk = (id: string, kind: Loop["kind"]): Loop => ({ id, kind, name: id, seconds: 180, size: { w: 720, h: 1280 }, safe: { x: 0, y: 0, w: 1, h: 1 }, box: { zoom: 1, cx: 0.5, cy: 0.5 } });
-  const lib = [mk("a", "game"), mk("b", "game"), mk("c", "sim"), mk("d", "asmr")];
-  assert.equal(pickLoop("sim", "job", lib)?.id, "c");
-  assert.equal(pickLoop("game", "job-1", lib)?.id, pickLoop("game", "job-1", lib)?.id);
+  const lib = [mk("a", "subway"), mk("b", "subway"), mk("c", "bounce"), mk("d", "slime")];
+  assert.equal(pickLoop("bounce", "job", lib)?.id, "c");
+  assert.equal(pickLoop("subway", "job-1", lib)?.id, pickLoop("subway", "job-1", lib)?.id);
   assert.equal(pickLoop("marble", "x", lib), null);
   const seen = new Set(Array.from({ length: 40 }, (_, i) => pickLoop(null, `job-${i}`, lib)?.id));
   assert.equal(seen.size, 4, "every loop gets picked across jobs");
@@ -159,7 +159,7 @@ test("readSubjects: one call to the small model with every still; unreadable ans
 import { LIBRARY, KINDS } from "../src/studio-splitscreen-library.js";
 test("the library: unique ids, every kind used, safe areas inside the picture, every crop of every loop stays in them", () => {
   assert.equal(new Set(LIBRARY.map((l) => l.id)).size, LIBRARY.length);
-  for (const k of KINDS) assert.ok(LIBRARY.some((l) => l.kind === k.id), `kind ${k.id} has a loop`);
+  for (const k of KINDS) { const n = LIBRARY.filter((l) => l.kind === k.id).length; assert.ok(n >= 18, `${k.label} has ${n} loops; every category needs at least 18`); }
   for (const l of LIBRARY) {
     assert.ok(l.safe.x >= 0 && l.safe.y >= 0 && l.safe.x + l.safe.w <= 1.0001 && l.safe.y + l.safe.h <= 1.0001, l.id);
     for (const slot of [{ w: 720, h: 640 }, { w: 720, h: 1280 }, { w: 720, h: 384 }])
