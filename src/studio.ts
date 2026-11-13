@@ -7,6 +7,7 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { registerPlanChange, ensurePortalConfig, missingPrices, isNoSuchPrice, upgradeCredits } from "./studio-plan-change.js";
+import { iapEnabled, registerApple } from "./studio-apple.js";
 import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
@@ -567,6 +568,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     return u;
   };
   registerPlanChange(app, { sbFn, stripe, env, dashboard, requireUser, fail, log });
+  registerApple(app, { sbFn, env, requireUser, fail, log });
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   registerCaptions(app, { sbFn, env, requireUser, fail, log });
   registerStunts(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
@@ -632,13 +634,13 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const BASE = "plan_id,billing_interval,status,period_start,period_end,cancel_at_period_end,credits_per_period,parallel_jobs,onboarding,stripe_customer_id,stripe_subscription_id";
       const [cust0, bal, jobs, ledger] = await Promise.all([
-        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error,owner_pass`).eq("user_id", u).maybeSingle(),
+        sb.from("studio_customers").select(`${BASE},referral_code,referred_by,email_opt_out,auto_topup_enabled,auto_topup_below,auto_topup_usd,auto_topup_last_at,auto_topup_error,owner_pass${iapEnabled(env) ? ",billing_source" : ""}`).eq("user_id", u).maybeSingle(),
         sb.rpc("studio_balance", { p_user: u }),
         sb.from("studio_jobs").select("id,tool,status,credits_reserved,credits_charged,created_at").eq("user_id", u).gte("created_at", since).order("created_at", { ascending: false }).limit(200),
         sb.from("studio_credit_ledger").select("delta,reason,job_id,ref,note,created_at").eq("user_id", u).order("created_at", { ascending: false }).limit(50),
       ]);
       // Before the referrals migration those three columns do not exist: read the row without them, referral stays empty.
-      const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup|owner_pass/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
+      const cust = cust0.error && /referral_code|referred_by|email_opt_out|auto_topup|owner_pass|billing_source/.test(String(cust0.error.message ?? "")) ? await sb.from("studio_customers").select(BASE).eq("user_id", u).maybeSingle() : cust0;
       for (const r of [cust, bal, jobs, ledger]) if (r.error) throw r.error;
       const c: any = cust.data ?? null;
       // where they are, for the admin panel (kept only when it is new or has changed; never waits)
@@ -652,7 +654,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const ledgerOut = ((ledger.data ?? []) as any[]).map((l) => (l.job_id && labels.has(l.job_id) ? { ...l, job_label: labels.get(l.job_id)!.label, job_status: labels.get(l.job_id)!.status } : l));
       const admin = await isStudioAdmin(req, sb, env);
       res.json({
-        subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id, has_subscription: !!c.stripe_subscription_id && ["active", "trialing", "past_due"].includes(c.status) } : null,
+        subscription: c ? { plan, interval: c.billing_interval, status: c.status, period_start: c.period_start, period_end: c.period_end, cancel_at_period_end: c.cancel_at_period_end, credits_per_period: c.credits_per_period, parallel_jobs: c.parallel_jobs, has_billing: !!c.stripe_customer_id, has_subscription: !!c.stripe_subscription_id && ["active", "trialing", "past_due"].includes(c.status), billing_source: (c as any).billing_source ?? (c.stripe_subscription_id ? "stripe" : null) } : null,
         active: hasPlanAccess(c),
         ...(c?.owner_pass ? { owner_pass: true } : {}),
         balance: Number(bal.data ?? 0),
@@ -717,8 +719,10 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (!price) return res.status(503).json({ error: "billing_unavailable", detail: "That plan is not configured in Stripe yet" });
     try {
       const sb = sbFn();
-      const cust = await sb.from("studio_customers").select("stripe_customer_id,stripe_subscription_id,status").eq("user_id", u).maybeSingle();
+      const cust: { data: any; error: any } = await sb.from("studio_customers").select(iapEnabled(env) ? "stripe_customer_id,stripe_subscription_id,status,billing_source" : "stripe_customer_id,stripe_subscription_id,status").eq("user_id", u).maybeSingle();
       if (cust.error) throw cust.error;
+      // a plan billed through Apple (the iPhone app) is changed there; the website never sells a second one on top
+      if ((cust.data as any)?.billing_source === "apple" && ["active", "trialing", "past_due"].includes(String(cust.data?.status))) return res.status(409).json({ error: "billed_by_apple", detail: "Your plan is billed through Apple. Change it in the iPhone app or your Apple settings." });
       // a real subscription changes plan in place (POST /api/studio/billing/change); a second one is never started
       if ((cust.data?.status === "active" || cust.data?.status === "trialing") && cust.data?.stripe_subscription_id) return res.status(409).json({ error: "already_subscribed", detail: "Change plans from the plan page" });
       const email = req.auth && "email" in req.auth ? req.auth.email : undefined;
