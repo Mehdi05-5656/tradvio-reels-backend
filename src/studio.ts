@@ -9,6 +9,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { registerPlanChange, ensurePortalConfig, missingPrices, isNoSuchPrice, upgradeCredits } from "./studio-plan-change.js";
 import { iapEnabled, registerApple } from "./studio-apple.js";
 import { registerMobile } from "./studio-mobile.js";
+import { registerDevices } from "./studio-push.js";
 import { creditsForCost, MAX_SOCIAL_EXTRA, SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, planFeatureLines, studioCosts, unitEconomics, packById, PACKS, type StudioCosts } from "./studio-pricing.js";
 import { MAX_SECONDS as GENJUTSU_MAX, planLongPath } from "./studio-longpath.js";
 import { AUTO_MAX_USD, AUTO_MIN_USD, TOPUP_MAX_USD, TOPUP_MIN_USD, chargeAutoTopUp, cleanUsd, maybeAutoTopUp, savedCard, startAutoTopUpLoop, topupCredits, topupInfo, topupRate, type StripeTopUp } from "./studio-topup.js";
@@ -573,6 +574,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   registerPlanChange(app, { sbFn, stripe, env, dashboard, requireUser, fail, log });
   registerApple(app, { sbFn, env, requireUser, fail, log });
   registerMobile(app, { sbFn, env, stripeOrNull, requireUser, fail, log });
+  registerDevices(app, { sbFn, requireUser, fail });
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   registerCaptions(app, { sbFn, env, requireUser, fail, log });
   registerStunts(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });

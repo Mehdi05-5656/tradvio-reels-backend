@@ -48,6 +48,7 @@ import { registerCharacters } from "./studio-character-library.js";
 import { registerCreators, startCreatorLoop } from "./studio-creators.js";
 import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
+import { startPushLoop } from "./studio-push.js";
 import { startNudgesLoop } from "./studio-nudges.js";
 import { initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
@@ -136,6 +137,7 @@ async function main() {
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
   startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week
   startNoticesLoop(getSb); // Clone8 Studio emails: only runs when RESEND_API_KEY is set
+  startPushLoop(getSb); // iPhone push notices: only runs when the APNS_* settings are set
   startNudgesLoop(getSb); // emails to sign-ups without a plan (30 minutes, then a day); off unless STUDIO_NUDGES=on
   startStuntsLoop(getSb); // Studio stunts (impossible endings on a person's clip); off until STUDIO_STUNTS_ENABLED=true
   startSplitLoop(getSb); // Studio split screen (a clip over a gameplay loop); off until STUDIO_SPLITSCREEN_ENABLED=true
