@@ -37,6 +37,7 @@ import { startClipsLoop } from "./studio-clips.js";
 import { startCaptionsLoop } from "./studio-caption-video.js";
 import { startStuntsLoop } from "./studio-stunts.js";
 import { startSplitLoop } from "./studio-splitscreen-job.js";
+import { startReshootLoop } from "./studio-reshoot.js";
 import { startKageLoop } from "./studio-kage.js";
 import { startImportLoop } from "./studio-library.js";
 import { PLANS } from "./studio.js";
@@ -145,6 +146,7 @@ async function main() {
   startNudgesLoop(getSb); // emails to sign-ups without a plan (30 minutes, then a day); off unless STUDIO_NUDGES=on
   startStuntsLoop(getSb); // Studio stunts (impossible endings on a person's clip); off until STUDIO_STUNTS_ENABLED=true
   startSplitLoop(getSb); // Studio split screen (a clip over a gameplay loop); off until STUDIO_SPLITSCREEN_ENABLED=true
+  startReshootLoop(getSb); // Studio reshoot (a one-camera take re-filmed as a multi-camera edit); off until STUDIO_RESHOOT_ENABLED=true
   registerPublicRoutes(app, getSb);
   registerInviteRequestInbox(app, getSb);
   registerManagedRoutes(app, getSb);
