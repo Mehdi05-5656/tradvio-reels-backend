@@ -184,8 +184,13 @@ test("what is sent: the edit model reads the shot, the reference models are poin
   assert.match(wide, /now wears: a blue ski jacket/);
   const orbit = { ...NO_CHANGE, move: "orbit" as const };
   const first = promptFor(orbit, "seedance_move", { k: 0, n: 2, chained: false }), second = promptFor(orbit, "seedance_move", { k: 1, n: 2, chained: true });
-  assert.match(first, /opens on the framing of the first frame of <<<video_1>>>.*from in front of the person to behind the person.*<<<image_1>>> shows how the person looks/);
-  assert.match(second, /^The video opens exactly on <<<image_1>>>.*from behind the person to in front of the person.*<<<image_2>>> shows how the person looks/);
+  // the wording that orbited in the Nov 14 test: a new shot whose only difference is the camera, never a list of "keep"s
+  assert.match(first, /^Recreate <<<video_1>>> exactly: .*The only difference is the camera: .*from in front of the person to behind the person.*<<<image_1>>> shows how the person looks\.$/);
+  assert.match(second, /^The video opens exactly on <<<image_1>>>\. From that first frame, .*from behind the person to in front of the person.*only the camera differs from <<<video_1>>>.*as in <<<image_2>>>\.$/);
+  for (const m of [first, second]) assert.ok(!/Keep the same|lip movements, mouth shapes/.test(m), "no edit-style keep list: the platform reads it as an edit and keeps the source camera");
+  assert.match(promptFor({ ...NO_CHANGE, move: "orbit", place: "snowy mountain ridge" }, "seedance_move", { k: 0, n: 1, chained: false }), /Also: The place is now: snowy mountain ridge/);
+  assert.match(promptFor(close, "seedance_edit", undefined, true), /The reference image is a still from another shot of this same video: match its place, its light and the person's outfit exactly\.$/);
+  assert.deepEqual(bodyFor({ engine: "seedance_edit", prompt: "p", videoUrl: "v", imageUrls: ["a"], seconds: 6, aspect: "9:16" }).image_urls, ["a"], "the anchor still goes with the edit model");
   assert.match(promptFor({ ...NO_CHANGE, move: "push_in" }, "seedance_move", { k: 1, n: 2, chained: true }), /pushes in .* to a close-up of the face/);
   assert.deepEqual(bodyFor({ engine: "seedance_edit", prompt: "p", videoUrl: "v", imageUrls: [], seconds: 6, aspect: "9:16" }), { prompt: "p", video_url: "v", resolution: "720p", generate_audio: false });
   assert.deepEqual(bodyFor({ engine: "wan", prompt: "p", videoUrl: "v", imageUrls: [], seconds: 6, aspect: "9:16" }), { prompt: "p", video_urls: ["v"], duration: 6, resolution: "720p", aspect_ratio: "9:16", generate_audio: false });
@@ -314,6 +319,45 @@ test("a run: a request already sent is waited for, not sent again; nothing made 
   assert.equal(refused, "reshoot_refused", "the page can say the platform would not make this face");
   const out2 = await runReshootJob(fakeSb().sb, { ...base, render: async () => { throw new RecastError("recast_balance", "empty"); } }, jobOf([shot(0, 6, { angle: "closeup" }), shot(6, 30, { keep: true })]) as any);
   assert.equal(out2, "recast_balance", "our own problem stops the run instead of being blamed on the shot");
+});
+
+test("a run: shots that share a look are matched to the first one's still; a move is never anchored", async () => {
+  resetCostsForTests(); resetCutGate();
+  const { sb } = fakeSb();
+  const order: string[] = [], images: Record<string, string[]> = {}, prompts: Record<string, string> = {};
+  const snow = { place: "snowy mountain ridge", outfit: "a blue ski jacket" };
+  const job = jobOf([shot(0, 6, { ...snow }), shot(6, 12, { ...snow, angle: "closeup" }), shot(12, 18, { angle: "low" }), shot(18, 26, { move: "orbit", ...snow }), shot(26, 30, { ...snow, angle: "wide" })]);
+  await runReshootJob(sb, { env: {}, log: () => undefined, prepare: async (_u, t) => writeFile(t, "s"), cut: async (_s, _f, _t, t) => writeFile(t, "c"), retime: async (_f, _s, _z, t) => writeFile(t, "r"), likeness: async () => 15, check: async () => ({ verdict: "good" }), join: async (c) => writeFile(c.target, "v"),
+    render: async (c) => { const shotNo = c.key.split(":")[1]; order.push(shotNo); images[c.key] = c.imageUrls; prompts[c.key] = c.prompt; await new Promise((r) => setTimeout(r, 10)); const f = join(c.dir, `${c.key.replace(/:/g, "_")}.mp4`); await writeFile(f, "g"); return { file: f, requestId: "r" }; } }, job as any);
+  assert.deepEqual(images[`${J}:0:1`], [], "the first shot of the look sets it");
+  assert.match(images[`${J}:1:1`][0], /anchor-0\.jpg/, "the next shot of the same look carries its still");
+  assert.match(images[`${J}:4:1`][0], /anchor-0\.jpg/);
+  assert.match(prompts[`${J}:1:1`], /match its place, its light and the person's outfit exactly/);
+  assert.deepEqual(images[`${J}:2:1`], [], "a camera-only shot is not part of a look");
+  assert.ok(!images[`${J}:3:1:0`].some((u) => /anchor/.test(u)), "a move keeps its own pictures");
+  assert.ok(order.indexOf("1") > order.indexOf("0") && order.indexOf("4") > order.indexOf("0"), "followers start after the first shot of their look");
+});
+
+test("costs are written when a render is delivered, not when it is sent (a failed or refused one is refunded)", async () => {
+  resetCostsForTests();
+  const calls: string[] = [];
+  const mk = (final: string) => async (url: string, init: any) => {
+    calls.push(`${init?.method} ${url}`);
+    const body = /\/requests\//.test(url) ? { status: final, video: { url: "https://cdn.example/out.mp4" } } : /cdn\.example/.test(url) ? null : { request_id: "req-1" };
+    if (/cdn\.example/.test(url)) return new Response(Buffer.from("mp4"), { status: 200 });
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const { initCosts, bufferedCostsForTests } = await import("../src/studio-costs.js");
+  initCosts(() => ({ from: () => ({ insert: async () => ({ error: null }) }) }) as any);
+  const { sb } = fakeSb();
+  const run = (final: string) => runReshootJob(sb, { env: { HIGGSFIELD_API_KEY: "k" }, fetch: mk(final) as any, sleep: async () => undefined, log: () => undefined, prepare: async (_u, t) => writeFile(t, "s"), cut: async (_s, _f, _t, t) => writeFile(t, "c"), retime: async (_f, _s, _z, t) => writeFile(t, "r"), likeness: async () => 15, check: async () => ({ verdict: "good" }), join: async (c) => writeFile(c.target, "v") }, jobOf([shot(0, 6, { angle: "closeup" }), shot(6, 30, { keep: true })]) as any);
+  await run("failed");
+  assert.equal(bufferedCostsForTests().length, 0, "a refused or failed render costs nothing");
+  await run("completed");
+  const rows = bufferedCostsForTests();
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].tool, rows[0].product, rows[0].usd, rows[0].basis, rows[0].ref], ["reshoot", "bytedance/seedance-2.5/video-edit", 6 * 0.463, "list", "req-1"]);
+  resetCostsForTests();
 });
 
 test("a run: progress reports are written one after another, so the last word is always the newest", async () => {

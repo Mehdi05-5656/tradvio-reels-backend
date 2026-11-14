@@ -375,21 +375,28 @@ export async function planFor(sb: SupabaseClient, deps: ReshootDeps, u: string, 
 // One shot on the platform
 // ---------------------------------------------------------------------------------------------------
 const KEEP_TAIL = "Keep the person's face, hair, body and clothes exactly the same, and their lip movements, mouth shapes, words, expressions, gestures and head movements in exactly the same timing as the source.";
-/** What the model is told for one shot (or one piece of a move). */
-export function promptFor(s: Change, e: Engine, piece?: { k: number; n: number; chained: boolean }): string {
+/** Said when a still from an earlier shot of the same look is sent along, so every shot shows the same place and outfit. */
+export const ANCHOR_WORDS = "The reference image is a still from another shot of this same video: match its place, its light and the person's outfit exactly.";
+/** What the model is told for one shot (or one piece of a move). `anchored`: a still of an earlier shot with the same
+ *  look is sent as the reference image. */
+export function promptFor(s: Change, e: Engine, piece?: { k: number; n: number; chained: boolean }, anchored = false): string {
   const look = [LIGHT_WORDS[s.light], s.place ? `The place is now: ${s.place}, with the person in the same pose in it.` : "", s.outfit ? `The person now wears: ${s.outfit}.` : ""].filter(Boolean).join(" ");
   const keepAlso = `${s.light === "same" ? " Keep the same light." : ""}${s.place ? "" : " Keep the same place."}${s.outfit ? "" : " Keep the same clothes."}`;
   if (e === "seedance_move") {
     const k = piece?.k ?? 0, n = piece?.n ?? 1;
     // a first piece gets one picture (how the person looks); a later one opens on the last picture of the one before
     // (image 1) and is told how the person looks with image 2
-    const opening = piece?.chained ? "The video opens exactly on <<<image_1>>> and continues from it. " : "The video opens on the framing of the first frame of <<<video_1>>>. ";
-    const looks = piece?.chained ? "<<<image_2>>>" : "<<<image_1>>>";
-    return `${opening}Recreate <<<video_1>>>: the same person doing exactly the same movements with exactly the same timing; ${MOVE_WORDS[s.move as Exclude<Move, "none">](k, n)}. ${look} ${KEEP_TAIL}${keepAlso} ${looks} shows how the person looks.`.replace(/\s+/g, " ").trim();
+    // Worded as a new shot whose only difference is the camera (the wording that orbited in the Nov 14 test). Long
+    // "keep everything the same" lists read to the platform as an edit: it then refuses the duration and shape, or
+    // renders the source's own camera path (the first live orbit, job 161c4b44).
+    const move = MOVE_WORDS[s.move as Exclude<Move, "none">](k, n), also = look ? ` Also: ${look}` : "";
+    if (piece?.chained) return `The video opens exactly on <<<image_1>>>. From that first frame, ${move}. The person does exactly the same movements with exactly the same timing as in <<<video_1>>>; only the camera differs from <<<video_1>>>. The same person, clothes, place and light throughout, as in <<<image_2>>>.${also}`.replace(/\s+/g, " ").trim();
+    return `Recreate <<<video_1>>> exactly: the same person doing exactly the same movements with exactly the same timing as in <<<video_1>>>. The only difference is the camera: ${move}. <<<image_1>>> shows how the person looks.${also}`.replace(/\s+/g, " ").trim();
   }
-  if (e === "wan") return `Recreate the reference video <<<video_1>>> shot for shot, filmed from a new camera position: ${ANGLE_WORDS[s.angle]}. ${look} ${KEEP_TAIL}${keepAlso} Only what is asked changes.`.replace(/\s+/g, " ").trim();
+  const anchor = anchored ? ` ${ANCHOR_WORDS}` : "";
+  if (e === "wan") return `Recreate the reference video <<<video_1>>> shot for shot, filmed from a new camera position: ${ANGLE_WORDS[s.angle]}. ${look} ${KEEP_TAIL}${keepAlso} Only what is asked changes.${anchor}`.replace(/\s+/g, " ").trim();
   const camera = s.angle === "same" ? "Keep the same camera position and framing." : `Re-film it from a new camera angle: ${ANGLE_WORDS[s.angle]}.`;
-  return `Re-film this exact clip. ${camera} ${look} ${KEEP_TAIL}${keepAlso} Only what is asked changes.`.replace(/\s+/g, " ").trim();
+  return `Re-film this exact clip. ${camera} ${look} ${KEEP_TAIL}${keepAlso} Only what is asked changes.${anchor}`.replace(/\s+/g, " ").trim();
 }
 /** The platform's nearest aspect ratio to the take (reference modes ask for one; edit mode follows the source). */
 export function aspectFor(w: number, h: number): string {
@@ -400,8 +407,9 @@ type ShotCtx = { job: string; user: string; engine: Engine; key: string; prompt:
 const POLL_MS = 8000, MAX_WAIT_MS = 25 * 60_000;
 /** The request body for one shot (or one piece of a move), exactly as sent. */
 export function bodyFor(c: Pick<ShotCtx, "engine" | "prompt" | "videoUrl" | "imageUrls" | "seconds" | "aspect">): Record<string, any> {
-  if (c.engine === "seedance_edit") return { prompt: c.prompt, video_url: c.videoUrl, resolution: "720p", generate_audio: false };
-  if (c.engine === "wan") return { prompt: c.prompt, video_urls: [c.videoUrl], duration: c.seconds, resolution: "720p", aspect_ratio: c.aspect, generate_audio: false };
+  const images = c.imageUrls.length ? { image_urls: c.imageUrls } : {};
+  if (c.engine === "seedance_edit") return { prompt: c.prompt, video_url: c.videoUrl, ...images, resolution: "720p", generate_audio: false };
+  if (c.engine === "wan") return { prompt: c.prompt, video_urls: [c.videoUrl], ...images, duration: c.seconds, resolution: "720p", aspect_ratio: c.aspect, generate_audio: false };
   return { prompt: c.prompt, video_urls: [c.videoUrl], image_urls: c.imageUrls, duration: c.seconds, resolution: "720p", aspect_ratio: c.aspect, generate_audio: false };
 }
 async function defaultRender(deps: ReshootDeps, c: ShotCtx): Promise<{ file: string; requestId: string }> {
@@ -411,8 +419,6 @@ async function defaultRender(deps: ReshootDeps, c: ShotCtx): Promise<{ file: str
     const r = await hf(deps, `/${ENDPOINTS[c.engine]}`, { method: "POST", body: JSON.stringify(bodyFor(c)), idempotency: c.key });
     if (![200, 201, 202].includes(r.status) || !r.body?.request_id) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
     requestId = String(r.body.request_id);
-    // billed from here whatever comes back: the cost is written when the request is taken, at the list rate
-    recordCost({ job_id: c.job, user_id: c.user, tool: "reshoot", provider: "higgsfield", product: ENDPOINTS[c.engine], source: `reshoot_${c.engine}`, units: { seconds: c.seconds }, usd: Math.round(c.seconds * engineUsdPerSecond(c.engine, env) * 10000) / 10000, basis: "list", ref: requestId });
     await c.onSubmit?.(requestId);
   }
   const started = Date.now();
@@ -423,6 +429,9 @@ async function defaultRender(deps: ReshootDeps, c: ShotCtx): Promise<{ file: str
     catch (e: any) { if (e instanceof RecastError && e.retry) { await sleep(POLL_MS); continue; } throw e; }
     const status = String(st.body?.status ?? "unknown").toLowerCase();
     if (status === "completed") {
+      // the cost is written when a render is delivered, at the list rate: a failed or refused one is refunded by the
+      // platform (the first live jobs wrote it when sent, which counted a refused render as paid)
+      recordCost({ job_id: c.job, user_id: c.user, tool: "reshoot", provider: "higgsfield", product: ENDPOINTS[c.engine], source: `reshoot_${c.engine}`, units: { seconds: c.seconds }, usd: Math.round(c.seconds * engineUsdPerSecond(c.engine, env) * 10000) / 10000, basis: "list", ref: requestId });
       const url = outputUrls(st.body).videos[0];
       if (!url) throw new RecastError("recast_bad_output", "completed without a video");
       const dl = await (deps.fetch ?? fetch)(url, { signal: AbortSignal.timeout(300_000) });
@@ -456,6 +465,8 @@ const CHECK_SYSTEM = `You check one re-filmed shot of a person's video. You see 
 - "good": clearly the same person (face, hair, build), and the asked change is visible (a different camera position, light, place or outfit as asked). Small differences in the background are normal.
 - "weak": the same person, but the change is small or only partly there.
 - "broken": a different-looking person, a badly malformed face or body, extra people, or nothing at all changed.
+- A new camera angle was asked and the re-filmed stills show the person from the same side and distance as the real shot: "broken".
+- A camera move was asked (orbit, push in) and no re-filmed still shows the camera clearly somewhere else than in the real shot (for an orbit, at least one still shows the person from a clearly different side; for a push in, the last still is clearly closer): "broken". A full orbit can end where it started, so judge all the stills. Following the real shot's own camera path is not a move.
 When unsure between "good" and "weak", pick "good". The note is one short sentence, under 20 words.`;
 const CHECK_SCHEMA = { type: "object", additionalProperties: false, required: ["verdict", "note"], properties: { verdict: { type: "string", enum: ["good", "weak", "broken"] }, note: { type: "string" } } };
 async function stillsOf(video: string, fractions: number[], dir: string): Promise<Buffer[]> {
@@ -589,12 +600,12 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
     const retime = (file: string, secs: number, target: string) => (deps.retime ? deps.retime(file, secs, size, target) : defaultRetime(file, secs, size, target));
 
     /** One try at one shot: the re-filmed file, retimed to the shot's length. */
-    const attempt = async (s: PricedShot, i: number, t: number, piece: string): Promise<string> => {
+    const attempt = async (s: PricedShot, i: number, t: number, piece: string, anchorUrl: string | null): Promise<string> => {
       const len = round2(s.end - s.start), engine = s.engine as Engine;
       if (engine !== "seedance_move") {
         const pieceUrl = await publish(piece, `shot-${i}.mp4`, "video/mp4");
         const key = `${job.id}:${i}:${t}`;
-        const got = await render({ job: job.id, user: u, engine, key, prompt: promptFor(s, engine), videoUrl: pieceUrl, imageUrls: [], seconds: s.seconds, aspect, requestId: requests[key] ?? null, onSubmit: (id) => remember(key, id), dir: d });
+        const got = await render({ job: job.id, user: u, engine, key, prompt: promptFor(s, engine, undefined, !!anchorUrl), videoUrl: pieceUrl, imageUrls: anchorUrl ? [anchorUrl] : [], seconds: s.seconds, aspect, requestId: requests[key] ?? null, onSubmit: (id) => remember(key, id), dir: d });
         const out = join(d, `shot-${i}-${t}.mp4`);
         await retime(got.file, len, out);
         return out;
@@ -630,14 +641,32 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
     const report: Array<{ state: ShotState; tries: number; verdict: Verdict | null; note: string; engine: Engine | null; file: string | null }> = shots.map((s) => ({ state: s.keep ? "original" : "waiting", tries: 0, verdict: null, note: "", engine: s.engine, file: null }));
     let finished = 0;
     await renew({ stage: "making", states: [...states], message: todo.length > 1 ? `Re-filming ${todo.length} shots` : "Re-filming the shot", stage_at: new Date().toISOString() });
-    await Promise.all(todo.map(async ({ s, i }) => {
+    // Shots that share a look (the same new light, place or outfit) are matched to the first of them: it is made first,
+    // and a still of it goes with the others as their reference picture. Made one by one, two shots of the same place
+    // and outfit came back different (daylight and grey trousers, sunset and blue: the first live look, job 817b5481).
+    // A move is never anchored (its pieces already carry pictures).
+    const anchors = new Map<string, Promise<string | null>>(), settle = new Map<string, (url: string | null) => void>();
+    const lookKey = (s: Shot) => (s.move === "none" && (s.place || s.outfit || s.light !== "same") ? `${s.light}|${s.place.toLowerCase()}|${s.outfit.toLowerCase()}` : null);
+    const leaderOf = new Map<number, boolean>();
+    for (const { s, i } of todo) { const k = lookKey(s); if (k && !anchors.has(k)) { anchors.set(k, new Promise((r) => settle.set(k, r))); leaderOf.set(i, true); } }
+    const stillOf = async (file: string, i: number): Promise<string | null> => {
       try {
+        const jpg = join(d, `anchor-${i}.jpg`);
+        if (test) await writeFile(jpg, ""); else await extractFrame(file, jpg, Math.max(0, (await probeSeconds(file)) / 2));
+        return await publish(jpg, `anchor-${i}.jpg`, "image/jpeg");
+      } catch { return null; }
+    };
+    await Promise.all(todo.map(async ({ s, i }) => {
+      const k = lookKey(s), leads = leaderOf.get(i) === true;
+      try {
+        // a shot of a shared look that is not the first waits for the first one's still (none if that one failed)
+        const anchorUrl = k && !leads ? await anchors.get(k)! : null;
         await say(i, "making");
         const piece = join(d, `shot-${i}.mp4`);
         await cut(s.start, s.end, piece);
         for (let t = 1; t <= RESHOOT_LIMITS.tries; t++) {
           let file: string;
-          try { file = await attempt(s, i, t, piece); }
+          try { file = await attempt(s, i, t, piece, anchorUrl); }
           catch (e: any) {
             if (e instanceof RecastError && ["recast_auth", "recast_balance", "recast_not_configured"].includes(e.code)) throw e; // ours to fix, not this shot's fault
             report[i].tries = t; report[i].note = e instanceof RecastError ? e.code : "error";
@@ -657,6 +686,7 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
           if (t < RESHOOT_LIMITS.tries) await say(i, "again");
         }
       } finally {
+        if (k && leads) settle.get(k)!(report[i].file ? await stillOf(report[i].file!, i) : null);
         finished++;
         report[i].state = report[i].file ? "made" : "kept";
         states[i] = report[i].state;
