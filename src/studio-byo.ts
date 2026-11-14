@@ -9,6 +9,17 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+/** How many films written in a chat may be in progress at once, across everyone (STUDIO_STORY_BYO_MAX_LIVE, default 2).
+ *  Each holds one of the worker's few film slots for as long as its chat works (25-50 minutes on the first live films),
+ *  so without a cap a handful of chats would leave the worker no room for anyone's Express or Signature film. */
+export const byoMaxLive = (env: Record<string, string | undefined> = process.env) => { const n = Math.floor(Number(env.STUDIO_STORY_BYO_MAX_LIVE)); return Number.isFinite(n) && n >= 1 ? n : 2; };
+/** Are as many in-chat films in progress as the cap allows? (queued or running, anyone's) */
+export async function byoBusy(sb: SupabaseClient, env: Record<string, string | undefined> = process.env): Promise<boolean> {
+  const q = await sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("tool", "kage_motion").in("status", ["queued", "running"]).eq("options->story->>byo", "true");
+  if (q.error) return false; // (a count that cannot be read does not stop anyone)
+  return (q.count ?? 0) >= byoMaxLive(env);
+}
+
 export const BYO_TOOLS = ["write_scene", "edit_scene", "typecheck", "render_stills", "render_preview", "finish"] as const;
 /** The brief is long (the kit is its manual): it is read in parts small enough for a chat app's tool results. */
 export const BRIEF_PART_CHARS = 60_000;

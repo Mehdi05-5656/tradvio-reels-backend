@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
-import { BRIEF_PART_CHARS, briefParts, registerByo } from "../src/studio-byo.ts";
+import { BRIEF_PART_CHARS, briefParts, byoBusy, byoMaxLive, registerByo } from "../src/studio-byo.ts";
 import { BYO_MCP_TOOLS, MCP_TOOLS, mcpServer, runTool, studioRequest, type StudioCall } from "../src/studio-mcp.ts";
 import { StoryError, parseStoryOptions, quoteStory, storyByoCostUsd, storyByoMargin, storyByoMinMargin } from "../src/studio-stories.ts";
 import { PLANS as LIVE_PLANS } from "../src/studio.ts";
@@ -138,4 +138,13 @@ test("connector: the in-chat tools are listed only when allowed; the start tool 
   assert.deepEqual(st.content[1], { type: "image", data: "QUJD", mimeType: "image/jpeg" });
   assert.match((await runTool("clone8_scene_wait", { job_id: JOB }, call)).content[0].type, /text/);
   assert.equal((await runTool("clone8_write_scene", { job_id: "../me", code: "x" }, call)).isError, true, "only a job id reaches the routes");
+});
+
+test("only a few films written in a chat at once: the cap counts anyone's queued or running ones", async () => {
+  const seen: any[] = [];
+  const sb = (count: number | null, error: any = null): any => ({ from: (t: string) => { const b: any = { select: (_c: string, o: any) => { seen.push([t, o]); return b; }, eq: (k: string, v: any) => { seen.push([k, v]); return b; }, in: (k: string, v: any) => { seen.push([k, v]); return b; }, then: (ok: any) => Promise.resolve({ count, error }).then(ok) }; return b; } });
+  assert.equal(byoMaxLive({}), 2); assert.equal(byoMaxLive({ STUDIO_STORY_BYO_MAX_LIVE: "3" }), 3); assert.equal(byoMaxLive({ STUDIO_STORY_BYO_MAX_LIVE: "0" }), 2);
+  assert.equal(await byoBusy(sb(1), {}), false); assert.equal(await byoBusy(sb(2), {}), true); assert.equal(await byoBusy(sb(2), { STUDIO_STORY_BYO_MAX_LIVE: "3" }), false);
+  assert.equal(await byoBusy(sb(null, { message: "down" }), {}), false, "a count that cannot be read does not stop anyone");
+  assert.ok(seen.some(([k, v]) => k === "options->story->>byo" && v === "true") && seen.some(([k, v]) => k === "status" && Array.isArray(v) && v.includes("queued") && v.includes("running")));
 });

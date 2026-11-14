@@ -32,6 +32,7 @@ import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMoti
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
 import { MCP_PATH, mcpEnabled, mcpOpen } from "./studio-mcp.js";
 import { StoryError, storiesEnabled, storyExplainerOpen, storyPremiumOpen, quoteStory } from "./studio-stories.js";
+import { byoBusy } from "./studio-byo.js";
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { MotivationError, motivationEnabled, motivationOpen, quoteMotivation } from "./studio-motivation.js";
 import { quoteStunts, registerStunts, stuntsEnabled, stuntsOpen } from "./studio-stunts.js";
@@ -1205,6 +1206,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);
+      // films written in a chat hold a worker slot while the chat works: only a few at once (src/studio-byo.ts)
+      if (q.options?.story?.byo === true && (await byoBusy(sb, env))) throw new StudioError("byo_busy", "Clone8 is making as many films written in chats as it can at once. Try again in a few minutes; nothing was charged.", 429);
       // Clips and imports land in a collection that exists from the start, so the run can be watched as it fills.
       let collectionId: string | null = null, madeCollection = false;
       if (q.tool === "clips" || q.tool === "import") {
