@@ -540,11 +540,20 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
   const o = job.options ?? {}, u = job.user_id;
   const shots: PricedShot[] = Array.isArray(o.shots) ? o.shots : [];
-  const renew = async (p: Record<string, any>) => {
-    const r = await sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: { ...(job.progress ?? {}), ...p } });
-    if (r.error) throw r.error;
-    if (r.data !== true) throw new ReshootError("lease_lost", "lease lost");
-    job.progress = { ...(job.progress ?? {}), ...p };
+  // shots run side by side and each reports its state; the reports are written one after another, each on top of the
+  // one before, so an older one can never land last and undo a newer one (a lost request id would be sent again
+  // after a restart: seen as a stale "waiting" on the first live job, Nov 14 2026)
+  let queue: Promise<unknown> = Promise.resolve();
+  const renew = (p: Record<string, any>): Promise<void> => {
+    const next = queue.then(async () => {
+      const merged = { ...(job.progress ?? {}), ...p };
+      const r = await sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: merged });
+      if (r.error) throw r.error;
+      if (r.data !== true) throw new ReshootError("lease_lost", "lease lost");
+      job.progress = merged;
+    });
+    queue = next.catch(() => undefined);
+    return next;
   };
   let dir: string | null = null;
   try {

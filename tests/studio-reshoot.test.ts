@@ -316,6 +316,23 @@ test("a run: a request already sent is waited for, not sent again; nothing made 
   assert.equal(out2, "recast_balance", "our own problem stops the run instead of being blamed on the shot");
 });
 
+test("a run: progress reports are written one after another, so the last word is always the newest", async () => {
+  resetCostsForTests(); resetCutGate();
+  const { sb, rpc } = fakeSb();
+  let inflight = 0, overlapped = false;
+  const rpc0 = sb.rpc;
+  // a database that answers slowly and unevenly, as the live one did
+  sb.rpc = async (name: string, args: any) => { inflight++; if (inflight > 1) overlapped = true; await new Promise((r) => setTimeout(r, 5 + Math.random() * 25)); inflight--; return rpc0(name, args); };
+  const job = jobOf([shot(0, 6, { angle: "closeup" }), shot(6, 12, { angle: "low" }), shot(12, 18, { angle: "three_quarter_left" }), shot(18, 30, { keep: true })]);
+  await runReshootJob(sb, { env: {}, log: () => undefined, prepare: async (_u, t) => writeFile(t, "s"), cut: async (_s, _f, _t, t) => writeFile(t, "c"), retime: async (_f, _s, _z, t) => writeFile(t, "r"), likeness: async () => 15, check: async () => ({ verdict: "good" }), join: async (c) => writeFile(c.target, "v"),
+    render: async (c) => { await c.onSubmit?.(`req-${c.key}`); await new Promise((r) => setTimeout(r, Math.random() * 30)); const f = join(c.dir, `${c.key.replace(/:/g, "_")}.mp4`); await writeFile(f, "g"); return { file: f, requestId: `req-${c.key}` }; } }, job as any);
+  assert.equal(overlapped, false, "never two writes at once");
+  const renews = rpc.filter((r) => r.name === "studio_renew").map((r) => r.args.p_progress);
+  const lastMaking = renews.filter((p) => p.stage === "making").pop();
+  assert.deepEqual(lastMaking.states, ["made", "made", "made", "original"]);
+  assert.equal(Object.keys(renews[renews.length - 1].requests ?? {}).length, 3, "every request id is kept to the end");
+});
+
 test("plan route core: cuts from the words, Claude's choices merged, kept as plain text and read back for free", async () => {
   const files = new Map<string, string>(), uploads: Array<{ key: string; type: string }> = [];
   const words = { v: 1, at: "2026-11-14T00:00:00Z", words: Array.from({ length: 40 }, (_, i) => [i === 14 ? "done." : "word", i * 0.5, i * 0.5 + 0.4, null]), keys: [], language: "en", duration: 20 };
