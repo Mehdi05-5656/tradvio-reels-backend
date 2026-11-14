@@ -91,6 +91,16 @@ test("quote: the video has to be the person's, 5 to 60 s, and they have to say i
   assert.equal(look.options.shots[look.options.shots.length - 1].end, 20);
   assert.equal(look.credits, look.options.shots.reduce((t: number, s: any) => t + s.seconds * 45, 0));
   assert.equal(code(() => quoteReshoot(OPEN, PLANS, asset(20), { rights: true, mode: "look", look: {} })), "reshoot_nothing");
+  // the page sends the stretches it showed and priced (cut on the words): the server uses those, so the button's price
+  // is the charge. A 20 s take cut on the words at 5, 10.5 and 15.5 s bills 5 + 6 + 5 + 5 = 21 s; cut evenly at 6 and
+  // 12 s (what the server did before) it billed 6 + 6 + 8 = 20 s, a price the page never showed.
+  const shown = quoteReshoot(OPEN, PLANS, asset(20), { rights: true, mode: "look", look: { place: "snowy mountain ridge" }, shots: [{ start: 0, end: 5 }, { start: 5, end: 10.5 }, { start: 10.5, end: 15.5 }, { start: 15.5, end: 20 }] });
+  assert.deepEqual(shown.options.shots.map((s: any) => [s.start, s.end, s.place]), [[0, 5, "snowy mountain ridge"], [5, 10.5, "snowy mountain ridge"], [10.5, 15.5, "snowy mountain ridge"], [15.5, 20, "snowy mountain ridge"]]);
+  assert.equal(shown.credits, 21 * 45);
+  const even = quoteReshoot(OPEN, PLANS, asset(20), { rights: true, mode: "look", look: { place: "x y" } });
+  assert.deepEqual(even.options.shots.map((s: any) => s.start), [0, 6, 12], "with no stretches sent, cut evenly");
+  assert.equal(even.credits, 20 * 45);
+  assert.equal(code(() => quoteReshoot(OPEN, PLANS, asset(8.03), { rights: true, mode: "look", look: { place: "x y" }, shots: [{ start: 0, end: 2 }, { start: 2, end: 8.03 }] })), "reshoot_shot_short", "the same rules as any edit");
 });
 
 test("shots: one after another over the whole take; changed shots 4 to 8 s, moves up to 12 s and two at most; something has to change", () => {

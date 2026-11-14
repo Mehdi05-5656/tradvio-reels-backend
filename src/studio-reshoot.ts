@@ -244,12 +244,14 @@ export function quoteReshoot(env: Env, plans: PlanLike[], asset: { id: string; k
   if (seconds > RESHOOT_LIMITS.max_seconds + 0.5) throw new ReshootError("reshoot_too_long", `Reshoot takes videos up to ${RESHOOT_LIMITS.max_seconds} seconds; trim this one or make a clip from it first`);
   const o = raw && typeof raw === "object" ? raw : {};
   if (o.rights !== true) throw new ReshootError("reshoot_rights", "Confirm that this is you, or people who agreed to be in it");
-  // "one look" is the same edit as one shot per stretch, every shot with the same change and the camera kept
+  // "one look" is the same edit as one shot per stretch, every shot with the same change and the camera kept. The
+  // stretches are the ones the page showed and priced (sent as shots); a request without them is cut evenly.
   let shots: Shot[];
   if (o.mode === "look") {
     const look = cleanChange({ ...o.look, angle: "same", move: "none" });
     if (!changes(look)) throw new ReshootError("reshoot_nothing", "Pick a light, a place or an outfit");
-    shots = cleanShots(autoCuts(seconds, []).slice(0, -1).map((start, i, a) => ({ start, end: a[i + 1] ?? round2(seconds), ...look })), seconds);
+    const cuts = Array.isArray(o.shots) && o.shots.length ? [...o.shots.map((s: any) => round2(Number(s?.start))), round2(Number(o.shots[o.shots.length - 1]?.end))] : autoCuts(seconds, []);
+    shots = cleanShots(cuts.slice(0, -1).map((start, i) => ({ start, end: cuts[i + 1], ...look })), seconds);
   } else shots = cleanShots(o.shots, seconds);
   const priced = priceShots(shots, plans, env);
   const changed = priced.filter((s) => !s.keep);
