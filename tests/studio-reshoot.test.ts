@@ -11,7 +11,7 @@ import { RecastError } from "../src/studio-recast.js";
 import {
   RESHOOT_LIMITS, ReshootError, aspectFor, autoCuts, billedSeconds, bodyFor, cleanShots, creditsPerSecondFor, defaultShots, describe, engineFor, engineUsdPerSecond, isCopy, joinGraph, mergePlan, movePieces,
   parsePsnr, planFor, priceShots, promptFor, quoteReshoot, reshootConfig, reshootEnabled, reshootOpen, retimeFactor, runReshootJob, NO_CHANGE,
-  CINEMA_ENDPOINT, FIRM_WORDS, PIECE_TRIES, cinemaMove, endpointFor, movePieceSeconds, pieceMoved, renderUsdPerSecond,
+  CINEMA_ENDPOINT, FIRM_WORDS, PIECE_TRIES, cinemaMove, endpointFor, followedTake, movePieceSeconds, pieceMoved, renderUsdPerSecond,
 } from "../src/studio-reshoot.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", J = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -185,11 +185,14 @@ test("what is sent: the edit model reads the shot, the reference models are poin
   assert.match(wide, /now wears: a blue ski jacket/);
   const orbit = { ...NO_CHANGE, move: "orbit" as const };
   const first = promptFor(orbit, "seedance_move", { k: 0, n: 2, chained: false }), second = promptFor(orbit, "seedance_move", { k: 1, n: 2, chained: true });
-  // the wording that orbited in the Nov 14 test: a new shot whose only difference is the camera, never a list of "keep"s
-  assert.match(first, /^Recreate <<<video_1>>> exactly: .*The only difference is the camera: .*from in front of the person to behind the person.*<<<image_1>>> shows how the person looks\.$/);
-  assert.match(second, /^The video opens exactly on <<<image_1>>>\. From that first frame, .*from behind the person to in front of the person.*only the camera differs from <<<video_1>>>.*as in <<<image_2>>>\.$/);
-  for (const m of [first, second]) assert.ok(!/Keep the same|lip movements, mouth shapes/.test(m), "no edit-style keep list: the platform reads it as an edit and keeps the source camera");
-  assert.match(promptFor({ ...NO_CHANGE, move: "orbit", place: "snowy mountain ridge" }, "seedance_move", { k: 0, n: 1, chained: false }), /Also: The place is now: snowy mountain ridge/);
+  // worded as a new video: the platform reads edit-like words as an edit and renders on the take's own camera
+  assert.match(first, /^Generate a new video\. The person from <<<image_1>>> performs the same movements, gestures and timing as the person in <<<video_1>>>: the same light; the same place; the same clothes\. The camera: .*from in front of the person to behind the person.*a new, moving camera that never stops travelling\.$/);
+  assert.match(second, /^Generate a new video that opens on <<<image_1>>>\. From that first frame, .*from behind the person to in front of the person.*looks as in <<<image_2>>>/);
+  for (const m of [first, second]) assert.ok(!/Recreate|re-film|exactly|only the camera differs|is now|Keep the same|lip movements, mouth shapes/i.test(m), `nothing that reads as an edit: ${m}`);
+  const snowy = promptFor({ ...NO_CHANGE, move: "orbit", place: "snowy mountain ridge", outfit: "a blue ski jacket", light: "night" }, "seedance_move", { k: 0, n: 1, chained: false });
+  assert.match(snowy, /the place is snowy mountain ridge; they wear a blue ski jacket/);
+  assert.ok(!/ now |relit/i.test(snowy), snowy);
+  assert.match(snowy, /: lit as night: dark surroundings/);
   assert.match(promptFor(close, "seedance_edit", undefined, true), /The reference image is a still from another shot of this same video: match its place, its light and the person's outfit exactly\.$/);
   assert.deepEqual(bodyFor({ engine: "seedance_edit", prompt: "p", videoUrl: "v", imageUrls: ["a"], seconds: 6, aspect: "9:16" }).image_urls, ["a"], "the anchor still goes with the edit model");
   assert.match(promptFor({ ...NO_CHANGE, move: "push_in" }, "seedance_move", { k: 1, n: 2, chained: true }), /pushes in .* to a close-up of the face/);
@@ -426,6 +429,9 @@ test("a move's piece: the camera counts as moved only when the background shows 
   assert.equal(pieceMoved("push_in", sized("bigger", "same", "same")).moved, false, "judged on the last still");
   assert.equal(pieceMoved("orbit", []).moved, true, "nothing to judge: never costs the person their shot");
   assert.equal(PIECE_TRIES, 2);
+  // measured Nov 14 2026: renders that kept to the take's camera 19.4 to 19.6 dB, real orbits 13.5 to 13.8
+  for (const db of [19.42, 19.62]) assert.equal(followedTake(db), true);
+  for (const db of [13.5, 13.84, null]) assert.equal(followedTake(db), false);
 });
 
 test("switches for moves: the piece length, and Cinema Studio with a named camera move", () => {
@@ -467,11 +473,20 @@ test("a run: a piece that stayed on the take's camera is made again on its own; 
   assert.equal(outA, "done");
   assert.deepEqual(sentA.map((x) => x.key), [`${J}:0:1:0`, `${J}:0:1:1`, `${J}:0:1:1:r1`], "only the piece that stayed put is made again, not the whole move");
   assert.ok(sentA[2].prompt.endsWith(FIRM_WORDS));
-  assert.match(sentA[1].prompt, /^The video opens exactly on <<<image_1>>>/);
+  assert.match(sentA[1].prompt, /^Generate a new video that opens on <<<image_1>>>/);
   const doneA = a.rpc.find((r) => r.name === "studio_complete")!;
   assert.equal(doneA.args.p_credits_charged, 8 * 45, "the extra piece is ours, not the person's");
   const checks = a.rpc.filter((r) => r.name === "studio_renew").map((r) => r.args.p_progress?.move_checks).filter(Boolean).pop();
   assert.deepEqual(checks.map((m: any) => [m.piece, m.try, m.moved]), [[0, 1, true], [1, 1, false], [1, 2, true]]);
+  // the free measure catches a piece that kept to the take's camera before Claude is asked
+  resetCostsForTests(); resetCutGate();
+  const m = fakeSb(), sentM: any[] = [], asked: number[] = [];
+  const bm: any = base(sentM, () => false);
+  bm.likeness = async (src: string, res: string) => (/shot-0-p1\.mp4$/.test(src) && !/r1/.test(res) ? 19.6 : 14);
+  bm.pieceCheck = async (c: any) => { asked.push(c.piece); return { moved: true }; };
+  assert.equal(await runReshootJob(m.sb, bm, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 30, { keep: true })]) as any), "done");
+  assert.deepEqual(sentM.map((x) => x.key), [`${J}:0:1:0`, `${J}:0:1:1`, `${J}:0:1:1:r1`]);
+  assert.deepEqual(asked, [0, 1], "Claude is not asked about the piece the measure already caught");
   // stuck twice: no third piece, no whole-shot retry; the original stays and nothing is charged for it
   resetCostsForTests(); resetCutGate();
   const b = fakeSb(), sentB: any[] = [];

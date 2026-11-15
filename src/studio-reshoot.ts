@@ -65,6 +65,9 @@ export const RESHOOT_LIMITS = {
   max_shots: 12, text_max: 120, plans_per_day: 20, tries: 2,
   /** a result this close to its source (PSNR in dB, at the working size) is the source sent back, not a new shot */
   same_psnr: 27,
+  /** a move's piece this close to its stretch of the take followed the take's own camera path (Nov 14 2026: every
+   *  render that followed it measured 19.4 to 19.6 dB, every real orbit 13.5 to 13.8) */
+  path_psnr: 17,
 };
 
 // ---------------------------------------------------------------------------------------------------
@@ -407,20 +410,25 @@ const KEEP_TAIL = "Keep the person's face, hair, body and clothes exactly the sa
 export const ANCHOR_WORDS = "The reference image is a still from another shot of this same video: match its place, its light and the person's outfit exactly.";
 /** What the model is told for one shot (or one piece of a move). `anchored`: a still of an earlier shot with the same
  *  look is sent as the reference image. */
-export const FIRM_WORDS = "This is a different camera, not the camera that filmed <<<video_1>>>: by the last frame the camera is somewhere clearly different from where it was in the first frame, and it never stays where <<<video_1>>> was filmed from.";
+export const FIRM_WORDS = "The camera travels the whole time: by the last frame it stands somewhere clearly different from where it stood in the first frame.";
 export function promptFor(s: Change, e: Engine, piece?: { k: number; n: number; chained: boolean; firm?: boolean }, anchored = false): string {
   const look = [LIGHT_WORDS[s.light], s.place ? `The place is now: ${s.place}, with the person in the same pose in it.` : "", s.outfit ? `The person now wears: ${s.outfit}.` : ""].filter(Boolean).join(" ");
   const keepAlso = `${s.light === "same" ? " Keep the same light." : ""}${s.place ? "" : " Keep the same place."}${s.outfit ? "" : " Keep the same clothes."}`;
   if (e === "seedance_move") {
     const k = piece?.k ?? 0, n = piece?.n ?? 1;
     // a first piece gets one picture (how the person looks); a later one opens on the last picture of the one before
-    // (image 1) and is told how the person looks with image 2
-    // Worded as a new shot whose only difference is the camera (the wording that orbited in the Nov 14 test). Long
-    // "keep everything the same" lists read to the platform as an edit: it then refuses the duration and shape, or
-    // renders the source's own camera path (the first live orbit, job 161c4b44).
-    const move = MOVE_WORDS[s.move as Exclude<Move, "none">](k, n), also = look ? ` Also: ${look}` : "", firm = piece?.firm ? ` ${FIRM_WORDS}` : "";
-    if (piece?.chained) return `The video opens exactly on <<<image_1>>>. From that first frame, ${move}. The person does exactly the same movements with exactly the same timing as in <<<video_1>>>; only the camera differs from <<<video_1>>>. The same person, clothes, place and light throughout, as in <<<image_2>>>.${also}${firm}`.replace(/\s+/g, " ").trim();
-    return `Recreate <<<video_1>>> exactly: the same person doing exactly the same movements with exactly the same timing as in <<<video_1>>>. The only difference is the camera: ${move}. <<<image_1>>> shows how the person looks.${also}${firm}`.replace(/\s+/g, " ").trim();
+    // (image 1) and is told how the person looks with image 2.
+    // Worded as a NEW video that takes only the person's movements from the clip. The platform reads the words and
+    // decides between generating and editing; an edit keeps the clip's own camera. The Nov 14 2026 one-render test
+    // ("Recreate <<<video_1>>> exactly ...", 8 s asked) was refused with "Your prompt was interpreted as video editing";
+    // with 4 s pieces the length and shape matched the clip, so the same reading went through silently and rendered on
+    // the take's fixed camera: the stuck pieces of the test orbit and of live jobs 161c4b44 and 58da68c7. Nothing here
+    // may read as an edit: no "recreate", "re-film", "exactly", "only the camera differs", "is now".
+    const move = MOVE_WORDS[s.move as Exclude<Move, "none">](k, n), firm = piece?.firm ? ` ${FIRM_WORDS}` : "";
+    const setting = [s.light === "same" ? "the same light" : LIGHT_WORDS[s.light].replace(/^Relit (as |with )?/, "lit as ").replace(/\.$/, "").toLowerCase(), s.place ? `the place is ${s.place}` : "the same place", s.outfit ? `they wear ${s.outfit}` : "the same clothes"].join("; ");
+    const tail = `<<<video_1>>> is only the reference for the person's movements; the camera is a new, moving camera that never stops travelling.`;
+    if (piece?.chained) return `Generate a new video that opens on <<<image_1>>>. From that first frame, ${move}. The person performs the same movements, gestures and timing as the person in <<<video_1>>> and looks as in <<<image_2>>>: ${setting}. ${tail}${firm}`.replace(/\s+/g, " ").trim();
+    return `Generate a new video. The person from <<<image_1>>> performs the same movements, gestures and timing as the person in <<<video_1>>>: ${setting}. The camera: ${move}. ${tail}${firm}`.replace(/\s+/g, " ").trim();
   }
   const anchor = anchored ? ` ${ANCHOR_WORDS}` : "";
   if (e === "wan") return `Recreate the reference video <<<video_1>>> shot for shot, filmed from a new camera position: ${ANGLE_WORDS[s.angle]}. ${look} ${KEEP_TAIL}${keepAlso} Only what is asked changes.${anchor}`.replace(/\s+/g, " ").trim();
@@ -487,6 +495,8 @@ export const parsePsnr = (log: string): number | null => { const m = log.match(/
 /** A result is a copy of its source when the two pictures are nearly the same; a real new angle, light or place is
  *  far below (13 to 18 dB measured on Nov 14 2026; the copies another engine sent back measured 29 and 31). */
 export const isCopy = (psnr: number | null) => psnr != null && psnr >= RESHOOT_LIMITS.same_psnr;
+/** A move's piece that kept to the take's own camera path: close to its stretch of the take, though re-rendered. */
+export const followedTake = (psnr: number | null) => psnr != null && psnr >= RESHOOT_LIMITS.path_psnr;
 async function defaultLikeness(source: string, result: string): Promise<number | null> {
   try {
     const log = await ffmpeg(["-v", "info", "-nostdin", "-i", source, "-i", result, "-filter_complex", "[0:v]fps=10,scale=180:-2,setsar=1,format=yuv420p[a];[1:v]fps=10,scale=180:-2,setsar=1,format=yuv420p[b];[a][b]psnr", "-f", "null", "-"], { timeoutMs: 120_000 });
@@ -702,7 +712,10 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
           const firm = r > 0, key = `${job.id}:${i}:${t}:${k}${firm ? `:r${r}` : ""}`;
           got = await render({ job: job.id, user: u, engine, key, prompt: promptFor(s, engine, { k, n: parts.length, chained: k > 0, firm }), videoUrl: pcUrl, imageUrls: opener ? [opener, lookUrl] : [lookUrl], seconds: p.seconds, aspect, requestId: requests[key] ?? null, onSubmit: (id) => remember(key, id), dir: d,
             ...(cinema ? { endpoint: CINEMA_ENDPOINT, camera: cinemaMove(move, env), usdPerSecond: renderUsdPerSecond(engine, env) } : {}) });
-          const seen = deps.pieceCheck ? await deps.pieceCheck({ result: got.file, move, piece: k, firm, user: u }) : test ? { moved: true, note: "" } : await defaultPieceCheck(deps, { result: got.file, move, user: u }, d);
+          // first the free measure (a render that kept to the take's camera stays close to it), then the look by Claude
+          const near = deps.likeness ? await deps.likeness(pc, got.file) : test ? null : await defaultLikeness(pc, got.file);
+          const seen = followedTake(near) ? { moved: false, note: `followed the take's camera (${near} dB)` }
+            : deps.pieceCheck ? await deps.pieceCheck({ result: got.file, move, piece: k, firm, user: u }) : test ? { moved: true, note: "" } : await defaultPieceCheck(deps, { result: got.file, move, user: u }, d);
           log(`[reshoot] shot ${i + 1} piece ${k + 1}/${parts.length} try ${r + 1} of ${job.id}: ${seen.moved ? "moved" : "did not move"}${seen.note ? ` (${seen.note})` : ""}`);
           moveLog.push({ shot: i, piece: k, try: r + 1, moved: seen.moved, note: seen.note ?? "" });
           if (seen.moved) break;
