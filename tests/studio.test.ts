@@ -110,6 +110,18 @@ test("subscription and invoice shapes from the 2026 API are read correctly", () 
   delete process.env.STRIPE_PRICE_CREATOR_MONTH;
 });
 
+test("a cancel made in the billing portal (cancel_at at the period end) is read as not renewing", () => {
+  assert.equal(subscriptionSnapshot(sub()).cancel_at_period_end, false);
+  assert.equal(subscriptionSnapshot(sub({ cancel_at_period_end: true })).cancel_at_period_end, true);
+  // the 2026 portal: cancel_at = period end, cancel_at_period_end stays false
+  assert.equal(subscriptionSnapshot(sub({ cancel_at: 1764115200 })).cancel_at_period_end, true);
+  assert.equal(subscriptionSnapshot(sub({ cancel_at: 1764115200 + 60 })).cancel_at_period_end, true);
+  // a custom date after this period: the plan renews once more first
+  assert.equal(subscriptionSnapshot(sub({ cancel_at: 1764115200 + 10 * 86400 })).cancel_at_period_end, false);
+  // undone in the portal: cancel_at back to null
+  assert.equal(subscriptionSnapshot(sub({ cancel_at: null })).cancel_at_period_end, false);
+});
+
 test("checkout links the customer, subscription events mirror the plan, paid invoices grant credits once", async () => {
   process.env.STRIPE_PRICE_CREATOR_MONTH = "price_cm";
   const tables: Record<string, any[]> = { studio_customers: [] };

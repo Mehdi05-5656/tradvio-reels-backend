@@ -336,6 +336,18 @@ export class StudioError extends Error { constructor(public code: string, messag
 // ---------------------------------------------------------------------------------------------------
 const iso = (unix: any) => (Number.isFinite(Number(unix)) && Number(unix) > 0 ? new Date(Number(unix) * 1000).toISOString() : null);
 
+/**
+ * Whether the subscription will not renew. Stripe's billing portal (API 2026) records a cancel as `cancel_at` = the
+ * period end and leaves `cancel_at_period_end` false, so both are read. A `cancel_at` later than this period's end
+ * (a custom date) is not counted: the plan still renews once before it.
+ */
+export function endsThisPeriod(sub: any, item: any = sub?.items?.data?.[0]): boolean {
+  if (sub?.cancel_at_period_end) return true;
+  const cancelAt = Number(sub?.cancel_at), end = Number(item?.current_period_end ?? sub?.current_period_end);
+  if (!Number.isFinite(cancelAt) || cancelAt <= 0) return false;
+  return !(Number.isFinite(end) && end > 0) || cancelAt <= end + 3600;
+}
+
 export function subscriptionSnapshot(sub: any) {
   // the plan's item (a subscription may also carry an "extra social account" item)
   const items: any[] = sub?.items?.data ?? [];
@@ -351,7 +363,7 @@ export function subscriptionSnapshot(sub: any) {
     interval: match?.interval ?? ((item?.price?.recurring?.interval === "year" ? "year" : "month") as Interval),
     period_start: iso(item?.current_period_start ?? sub?.current_period_start),
     period_end: iso(item?.current_period_end ?? sub?.current_period_end),
-    cancel_at_period_end: !!sub?.cancel_at_period_end,
+    cancel_at_period_end: endsThisPeriod(sub, item),
     user_id: (sub?.metadata?.user_id as string | undefined) ?? null,
     social_extra: seatsOf(sub),
   };
