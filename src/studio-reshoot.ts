@@ -568,7 +568,8 @@ async function defaultPieceCheck(deps: ReshootDeps, ctx: { result: string; move:
   try {
     const made = await stillsOf(ctx.result, [0.05, 0.35, 0.65, 0.95], dir);
     const img = (b: Buffer) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b.toString("base64") } });
-    const out = await claudeJson(deps, { model: env.STUDIO_RESHOOT_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 600, system: PIECE_SYSTEM, output_config: { format: { type: "json_schema", schema: PIECE_SCHEMA } }, messages: [{ role: "user", content: made.flatMap((b, n) => [{ type: "text", text: `Still ${n + 1}:` }, img(b)]) }] }, "reshoot_piece_check", ctx.user);
+    // 600 tokens was too few: the first live answer came back at 608 and was cut off (job 3a8f09f6)
+    const out = await claudeJson(deps, { model: env.STUDIO_RESHOOT_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 2000, system: PIECE_SYSTEM, output_config: { format: { type: "json_schema", schema: PIECE_SCHEMA } }, messages: [{ role: "user", content: made.flatMap((b, n) => [{ type: "text", text: `Still ${n + 1}:` }, img(b)]) }] }, "reshoot_piece_check", ctx.user);
     const seen: CameraSeen[] = (Array.isArray(out?.stills) ? out.stills : []).filter((x: any) => (BACKGROUNDS as readonly string[]).includes(x?.background) && (SIZES as readonly string[]).includes(x?.size));
     if (seen.length !== made.length - 1) return { moved: true, note: "check unreadable" };
     const r = pieceMoved(ctx.move, seen);
