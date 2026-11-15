@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { accountAccess, selfAuthenticatedPost } from "../src/account-access.js";
-import { registerStudio, quote, lightCredits, planForPrice, priceIdFor, subscriptionSnapshot, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, studioOverview, PLANS, COSTS } from "../src/studio.js";
+import { registerStudio, quote, lightCredits, planForPrice, priceIdFor, subscriptionSnapshot, cancelChange, invoiceSubscriptionId, applyStripeEvent, downloadBase, billableSeconds, studioOverview, PLANS, COSTS } from "../src/studio.js";
 
 const ANN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ASSET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -120,6 +120,19 @@ test("a cancel made in the billing portal (cancel_at at the period end) is read 
   assert.equal(subscriptionSnapshot(sub({ cancel_at: 1764115200 + 10 * 86400 })).cancel_at_period_end, false);
   // undone in the portal: cancel_at back to null
   assert.equal(subscriptionSnapshot(sub({ cancel_at: null })).cancel_at_period_end, false);
+});
+
+test("cancel, its reason, an undo and the end are told apart from Stripe's update events", () => {
+  const upd = (obj: any, prev: any) => ({ type: "customer.subscription.updated", data: { object: sub(obj), previous_attributes: prev } });
+  const blank = { reason: null, feedback: null, comment: null };
+  // the two updates the 2026 portal sends for one cancel (shapes as recorded live on Nov 9 2026)
+  const c = cancelChange(upd({ cancel_at: 1764115200, cancellation_details: { ...blank, reason: "cancellation_requested" } }, { cancel_at: null, canceled_at: null, cancellation_details: { reason: null } }));
+  assert.equal(c?.name, "plan_cancel"); assert.equal(c?.props.ends_at, "2025-11-26T00:00:00.000Z");
+  const r = cancelChange(upd({ cancel_at: 1764115200, cancellation_details: { ...blank, reason: "cancellation_requested", feedback: "unused" } }, { cancellation_details: { feedback: null } }));
+  assert.deepEqual([r?.name, r?.props.feedback], ["plan_cancel_reason", "unused"]);
+  assert.equal(cancelChange(upd({ cancel_at: null }, { cancel_at: 1764115200 }))?.name, "plan_cancel_undone");
+  assert.equal(cancelChange(upd({}, { items: {} })), null);
+  assert.equal(cancelChange({ type: "customer.subscription.deleted", data: { object: sub({ status: "canceled", cancellation_details: { ...blank, feedback: "too_expensive" } }) } })?.props.feedback, "too_expensive");
 });
 
 test("checkout links the customer, subscription events mirror the plan, paid invoices grant credits once", async () => {

@@ -348,6 +348,28 @@ export function endsThisPeriod(sub: any, item: any = sub?.items?.data?.[0]): boo
   return !(Number.isFinite(end) && end > 0) || cancelAt <= end + 3600;
 }
 
+/**
+ * What a customer.subscription.* event changed about cancelling, for studio_events (kind "feature", also sent to PostHog): "plan_cancel" when a
+ * cancel was scheduled, "plan_cancel_undone" when it was taken back, "plan_cancel_reason" when the portal's reason arrived (Stripe
+ * sends it in a second update right after the cancel), "plan_ended" when the subscription is over. Null when none of these.
+ */
+export function cancelChange(event: any): { name: string; props: Record<string, any> } | null {
+  const obj = event?.data?.object ?? {}, prev = event?.data?.previous_attributes ?? {};
+  const d = obj?.cancellation_details ?? {};
+  const why = { feedback: d.feedback ?? null, comment: typeof d.comment === "string" ? d.comment.slice(0, 500) : null };
+  if (event?.type === "customer.subscription.deleted") return { name: "plan_ended", props: { ...why, reason: d.reason ?? null } };
+  if (event?.type !== "customer.subscription.updated") return null;
+  const ends = endsThisPeriod(obj);
+  if ("cancel_at" in prev || "cancel_at_period_end" in prev) {
+    const before = endsThisPeriod({ ...obj, ...prev, items: obj.items });
+    if (ends && !before) return { name: "plan_cancel", props: { ...why, ends_at: iso(obj.cancel_at) } };
+    if (!ends && before) return { name: "plan_cancel_undone", props: {} };
+  }
+  const prevDetails = prev?.cancellation_details;
+  if (prevDetails && (why.feedback || why.comment) && (prevDetails.feedback !== why.feedback || prevDetails.comment !== why.comment)) return { name: "plan_cancel_reason", props: why };
+  return null;
+}
+
 export function subscriptionSnapshot(sub: any) {
   // the plan's item (a subscription may also carry an "extra social account" item)
   const items: any[] = sub?.items?.data ?? [];
@@ -476,6 +498,8 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     const userId = (s.user_id && UUID_RE.test(s.user_id) ? s.user_id : null) ?? (await userForCustomer(sb, s.customer));
     if (!userId) return "subscription for unknown customer";
     await applySubscription(sb, userId, obj);
+    const cancel = cancelChange(event);
+    if (cancel) recordEvent({ user_id: userId, kind: "feature", name: cancel.name, props: { ...cancel.props, plan: s.plan?.id ?? null, interval: s.interval, subscription: s.id, started: iso(obj?.start_date) } });
     // A plan that has ended frees its self-serve posting profile (linked network tokens and a provider plan slot).
     let social = "";
     if (["canceled", "incomplete_expired"].includes(String(s.status))) {
