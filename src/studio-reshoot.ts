@@ -441,8 +441,9 @@ export function aspectFor(w: number, h: number): string {
   return options.reduce((b, o) => (Math.abs(Math.log(o[1] / r)) < Math.abs(Math.log(b[1] / r)) ? o : b))[0];
 }
 type ShotCtx = { job: string; user: string; engine: Engine; key: string; prompt: string; videoUrl: string; imageUrls: string[]; seconds: number; aspect: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void>; dir: string;
-  /** a move sent to Cinema Studio: its endpoint, its named camera move and its rate */ endpoint?: string; camera?: string | null; usdPerSecond?: number };
-const POLL_MS = 8000, MAX_WAIT_MS = 25 * 60_000;
+  /** a move sent to Cinema Studio: its endpoint, its named camera move and its rate */ endpoint?: string; camera?: string | null; usdPerSecond?: number;
+  /** called on every poll while the platform renders: keeps the job's lease alive (throws when the lease is lost) */ onWait?: () => Promise<void> };
+const POLL_MS = 8000, MAX_WAIT_MS = 25 * 60_000, HEARTBEAT_MS = 120_000;
 /** A move's piece is made at most twice: once, and once more with firmer words if the camera stayed put. */
 export const PIECE_TRIES = 2;
 /** The request body for one shot (or one piece of a move), exactly as sent. */
@@ -482,6 +483,7 @@ async function defaultRender(deps: ReshootDeps, c: ShotCtx): Promise<{ file: str
       return { file, requestId };
     }
     if (["failed", "nsfw", "canceled", "cancelled"].includes(status)) throw new RecastError(status === "nsfw" ? "recast_nsfw" : "recast_failed", JSON.stringify(st.body).slice(0, 200));
+    await c.onWait?.();
     await sleep(POLL_MS);
   }
 }
@@ -679,7 +681,12 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
     const requests: Record<string, string> = { ...(job.progress?.requests ?? {}) };
     const moveLog: Array<{ shot: number; piece: number; try: number; moved: boolean; note: string }> = [];
     const remember = async (key: string, id: string) => { requests[key] = id; await renew({ requests: { ...requests } }).catch(() => undefined); };
-    const render = (c: ShotCtx) => (deps.render ? deps.render(c) : defaultRender(deps, c));
+    // A render can take longer than the 10 min lease (one 8 s move took over 10 min on Nov 14 2026, job 3a8f09f6, and
+    // another worker took the job over): while the platform renders, the lease is renewed every two minutes. A lost
+    // lease stops this run before it can record the delivery a second time.
+    let beatAt = Date.now();
+    const heartbeat = async () => { if (Date.now() - beatAt < HEARTBEAT_MS) return; beatAt = Date.now(); await renew({}); };
+    const render = (c: ShotCtx) => { const ctx = { ...c, onWait: heartbeat }; return deps.render ? deps.render(ctx) : defaultRender(deps, ctx); };
     const cut = (from: number, to: number, target: string) => (deps.cut ? deps.cut(source, from, to, target) : defaultCut(source, from, to, target));
     const retime = (file: string, secs: number, target: string) => (deps.retime ? deps.retime(file, secs, size, target) : defaultRetime(file, secs, size, target));
 
@@ -770,6 +777,7 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
           try { file = await attempt(s, i, t, piece, anchorUrl); }
           catch (e: any) {
             if (e instanceof RecastError && ["recast_auth", "recast_balance", "recast_not_configured"].includes(e.code)) throw e; // ours to fix, not this shot's fault
+            if (e instanceof ReshootError && e.code === "lease_lost") throw e; // another worker has the job now
             report[i].tries = t; report[i].note = e instanceof RecastError ? e.code : "error";
             log(`[reshoot] shot ${i + 1} try ${t} of ${job.id}: ${String(e?.message ?? e).slice(0, 160)}`);
             if (e instanceof RecastError && e.code === "recast_nsfw") break; // refused: the platform will refuse it again

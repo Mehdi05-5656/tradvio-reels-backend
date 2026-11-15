@@ -502,3 +502,26 @@ test("a run: a piece that stayed on the take's camera is made again on its own; 
   assert.equal(await runReshootJob(c.sb, base(sentC, () => false, { STUDIO_RESHOOT_MOVE_ENGINE: "cinema", STUDIO_RESHOOT_MOVE_PIECE: "12" }) as any, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 30, { keep: true })]) as any), "done");
   assert.deepEqual(sentC.map((x) => [x.key, x.endpoint, x.camera]), [[`${J}:0:1:0`, CINEMA_ENDPOINT, "arc-right"]]);
 });
+
+test("a run: the lease is kept alive while a render waits, and a lost lease stops the run without a second delivery", async () => {
+  resetCostsForTests(); resetCutGate();
+  // a render that polls for a long time: the run's heartbeat renews the lease (time moved on by the fake clock)
+  const realNow = Date.now; let clock = realNow();
+  Date.now = () => clock;
+  try {
+    const a = fakeSb();
+    const base: any = { env: {}, log: () => undefined, prepare: async (_u: string, t: string) => writeFile(t, "s"), cut: async (_s: string, _f: number, _t: number, t: string) => writeFile(t, "c"),
+      retime: async (_f: string, _s: number, _z: any, t: string) => writeFile(t, "r"), likeness: async () => 14, check: async () => ({ verdict: "good" }), pieceCheck: async () => ({ moved: true }), join: async (c: any) => writeFile(c.target, "e") };
+    let polls = 0;
+    const out = await runReshootJob(a.sb, { ...base, render: async (c: any) => { for (let i = 0; i < 20; i++) { clock += 60_000; polls++; await c.onWait?.(); } const f = join(c.dir, "m.mp4"); await writeFile(f, "m"); return { file: f, requestId: "q" }; } }, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 30, { keep: true })]) as any);
+    assert.equal(out, "done");
+    assert.equal(polls, 40, "two 4 s pieces, twenty polls each");
+    assert.ok(a.rpc.filter((r) => r.name === "studio_renew").length >= 20, "renewed about every two minutes over forty minutes of rendering");
+    // the lease is lost while waiting: the run stops quietly, nothing is completed or failed, no shot is blamed
+    const b = fakeSb(); let n = 0;
+    b.sb.rpc = async (name: string, args: any) => { b.rpc.push({ name, args }); if (name === "studio_renew") { n++; return { data: n < 4, error: null }; } return { data: { ok: true }, error: null }; };
+    const lost = await runReshootJob(b.sb, { ...base, render: async (c: any) => { for (let i = 0; i < 20; i++) { clock += 60_000; await c.onWait?.(); } throw new Error("must not get here"); } }, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 30, { keep: true })]) as any);
+    assert.equal(lost, "lease_lost");
+    assert.ok(!b.rpc.some((r) => r.name === "studio_complete" || r.name === "studio_fail"));
+  } finally { Date.now = realNow; }
+});
