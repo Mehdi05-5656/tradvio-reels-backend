@@ -43,24 +43,21 @@ await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000000_s
 {
   for (const u of [MONTHLY, FREE, INFLIGHT]) {
     const lots = await q("SELECT kind, remaining, expires_at FROM public.studio_credit_lots WHERE user_id = $1", [u]);
-    assert.equal(lots.length, 1); assert.equal(lots[0].kind, "legacy"); assert.equal(await daysFromNow(lots[0].expires_at), 60); await inStep(u, "switch-on");
+    assert.equal(lots.length, 1); assert.equal(lots[0].kind, "legacy"); assert.equal(lots[0].expires_at, null, "credits held at the switch-on never expire"); await inStep(u, "switch-on");
   }
-  assert.equal(await bal(MONTHLY), 5000, "nobody's balance changes at the switch-on, outside yearly plans");
-  ok("what people hold today becomes one batch with a fresh 60 days; balances unchanged");
+  assert.equal(await bal(MONTHLY), 5000, "nobody's balance changes at the switch-on");
+  ok("what people hold at the switch-on becomes one batch that never expires; balances unchanged");
 }
 {
-  assert.equal(await bal(YEARLY), 3500, "a yearly plan keeps one month's credits now");
-  const s = await q("SELECT amount, release_at FROM public.studio_credit_schedule WHERE user_id = $1 ORDER BY release_at", [YEARLY]);
-  assert.equal(s.reduce((a, r) => a + r.amount, 0), 35664 - 3500, "and the rest of the balance is held, not lost");
-  assert.ok(s.every((r) => r.amount <= 3500), "never more than a month's credits at a time");
-  const due = await one("SELECT period_start + interval '1 month' AS at FROM public.studio_customers WHERE user_id = $1", [YEARLY]);
-  assert.equal(new Date(s[0].release_at).getTime(), new Date(due.at).getTime(), "the first on the plan's next monthly date");
-  const adj = await one("SELECT delta, note FROM public.studio_credit_ledger WHERE user_id = $1 AND reason = 'adjust'", [YEARLY]);
-  assert.equal(adj.delta, -(35664 - 3500)); assert.match(adj.note, /coming months of your yearly plan/);
-  await inStep(YEARLY, "yearly switch-on");
-  assert.equal(await bal(YEARLY_SMALL), 8000, "holding less than a month's: nothing is held back");
-  assert.equal(Number((await one("SELECT count(*) AS c FROM public.studio_credit_schedule WHERE user_id = $1", [YEARLY_SMALL])).c), 0);
-  ok("a yearly plan keeps one month's credits now and the rest arrives on its monthly dates");
+  for (const u of [YEARLY, YEARLY_SMALL]) {
+    const lot = await one("SELECT l.expires_at, c.period_end FROM public.studio_credit_lots l JOIN public.studio_customers c USING (user_id) WHERE l.user_id = $1", [u]);
+    assert.equal(new Date(lot.expires_at).getTime(), new Date(lot.period_end).getTime(), "a yearly plan's credits last until the end of the year paid for");
+    assert.equal(Number((await one("SELECT count(*) AS c FROM public.studio_credit_schedule WHERE user_id = $1", [u])).c), 0, "nothing is held back");
+    await inStep(u, "yearly switch-on");
+  }
+  assert.equal(await bal(YEARLY), 35664, "a yearly plan's balance is untouched");
+  assert.equal(Number((await one("SELECT count(*) AS c FROM public.studio_credit_ledger WHERE reason = 'adjust'")).c), 0, "no adjustment for anyone");
+  ok("a yearly plan's credits at the switch-on stay whole and last until the end of the year paid for");
 }
 // ---- spending, refunds
 {
@@ -72,21 +69,21 @@ await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000000_s
   assert.equal(await daysFromNow(kinds[1].expires_at), 365, "bought on the website: 12 months"); assert.equal(kinds[2].expires_at, null, "bought in the iPhone app: never");
   const j = await one("SELECT (public.studio_create_job($1, 'swap', NULL, '{}', 5500)).id AS id", [u]);
   const left = await q("SELECT kind, remaining FROM public.studio_credit_lots WHERE user_id = $1 ORDER BY id", [u]);
-  assert.deepEqual(left.map((l) => [l.kind, l.remaining]), [["legacy", 0], ["topup", 500], ["apple_pack", 700]], "the soonest-expiring credits go first, never-expiring ones last");
+  assert.deepEqual(left.map((l) => [l.kind, l.remaining]), [["legacy", 500], ["topup", 0], ["apple_pack", 700]], "credits with a date go first, never-expiring ones last");
   await inStep(u, "after a reservation");
   await q("UPDATE public.studio_jobs SET status = 'running', lease_token = '22222222-2222-4222-8222-222222222222' WHERE id = $1", [j.id]);
   await q("SELECT public.studio_complete($1, '22222222-2222-4222-8222-222222222222', '[]', 5200)", [j.id]);
   const back = await q("SELECT kind, remaining FROM public.studio_credit_lots WHERE user_id = $1 ORDER BY id", [u]);
-  assert.deepEqual(back.map((l) => [l.kind, l.remaining]), [["legacy", 0], ["topup", 800], ["apple_pack", 700]], "an unused part goes back to the batch it came from");
+  assert.deepEqual(back.map((l) => [l.kind, l.remaining]), [["legacy", 800], ["topup", 0], ["apple_pack", 700]], "an unused part goes back to a batch it came from, the longest-lasting first");
   await inStep(u, "after a partial refund");
   ok("credits are spent soonest-expiring first, and refunds go back to the batches they came from");
 }
 {
-  // a video running at the switch-on reserved before batches existed: its refund is a batch of its own, 60 days
+  // a video running at the switch-on reserved before batches existed: its credits were held before the rule, so they come back never expiring
   await q("SELECT public.studio_fail($1, '11111111-1111-4111-8111-111111111111', 'render_failed', false)", [inflight.id]);
-  const r = await one("SELECT kind, amount, expires_at FROM public.studio_credit_lots WHERE user_id = $1 AND kind = 'refund'", [INFLIGHT]);
-  assert.equal(r.amount, 500); assert.equal(await daysFromNow(r.expires_at), 60); await inStep(INFLIGHT, "refund of a pre-switch-on video");
-  ok("a video reserved before the switch-on is refunded as its own 60-day batch");
+  const r = await one("SELECT kind, amount, expires_at FROM public.studio_credit_lots WHERE user_id = $1 AND ref = 'refund'", [INFLIGHT]);
+  assert.equal(r.amount, 500); assert.equal(r.kind, "legacy"); assert.equal(r.expires_at, null); await inStep(INFLIGHT, "refund of a pre-switch-on video");
+  ok("a video reserved before the switch-on is refunded as never-expiring credits, like everything held then");
 }
 // ---- expiry
 {

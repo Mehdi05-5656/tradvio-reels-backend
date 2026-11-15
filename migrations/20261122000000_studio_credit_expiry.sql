@@ -3,9 +3,9 @@
 --   plan credits (monthly, each month of a yearly plan, Apple plan periods), gifts, promo codes, referrals: 60 days
 --   credits bought outright on the website (top-ups, packs): 12 months
 --   credits bought in the iPhone app (Apple packs): never (App Store Review Guideline 3.1.1)
--- Credits already held when this runs get a fresh 60 days from today. A yearly plan's credits arrive month by month
--- (each month's credits then last 60 days); people on a yearly plan today keep one month's worth now and the rest of
--- their balance is held and released on their plan's monthly dates. Credits refunded from a failed or canceled video go
+-- Credits already held when this runs are not affected: they never expire, except on a yearly plan, where they last
+-- until the end of the year paid for. From now on a yearly plan's credits arrive month by month (each month's credits
+-- then last 60 days). Credits refunded from a failed or canceled video go
 -- back to the batches they came from and keep those batches' dates.
 --
 -- How: the ledger (studio_credit_ledger) stays the one source of the balance (studio_balance is unchanged). Beside it,
@@ -96,10 +96,11 @@ BEGIN
         need := need - take;
       END LOOP;
     END IF;
-    -- a video that reserved its credits before batches existed: what comes back is a batch of its own
+    -- a video that reserved its credits before batches existed (before the switch-on): what comes back was held before
+    -- the rule, so, like everything held then, it never expires
     IF need > 0 THEN
       INSERT INTO public.studio_credit_lots (user_id, kind, amount, remaining, received_at, expires_at, ref, ledger_id)
-        VALUES (NEW.user_id, 'refund', need, need, NEW.created_at, public.studio_credit_expiry('refund', NEW.created_at), 'refund', NEW.id);
+        VALUES (NEW.user_id, 'legacy', need, need, NEW.created_at, NULL, 'refund', NEW.id);
     END IF;
     RETURN NEW;
   END IF;
@@ -209,36 +210,20 @@ $$;
 DROP TRIGGER IF EXISTS studio_credit_lots_follow ON public.studio_credit_ledger;
 CREATE TRIGGER studio_credit_lots_follow AFTER INSERT ON public.studio_credit_ledger FOR EACH ROW EXECUTE FUNCTION public.studio_credit_lots_follow();
 
--- ---- the switch-on: what everyone holds today becomes one batch with a fresh 60 days; on a yearly plan, one month's
--- credits now and the rest held for the plan's coming monthly dates (released by the hourly run, 60 days each)
+-- ---- the switch-on: nothing gets worse for anyone who is already a customer (owner, Nov 14 2026: no notice emails, so
+-- the rule only reaches credits received from now on). What everyone holds today becomes one batch that never expires,
+-- except on a yearly plan, where it lasts until the end of the year paid for (today's rule there: the year's credits
+-- last until the next yearly invoice).
 DO $$
-DECLARE r record; hold integer; now_amt integer; k integer; at timestamptz; amt integer; left_ integer; lot bigint;
+DECLARE r record;
 BEGIN
-  FOR r IN SELECT b.user_id, b.bal, c.billing_interval, c.status, c.period_start, c.period_end, coalesce(c.credits_per_period, 0) AS credits_per_period, c.plan_id
+  FOR r IN SELECT b.user_id, b.bal, c.billing_interval, c.status, c.period_end
            FROM (SELECT user_id, sum(delta)::integer AS bal FROM public.studio_credit_ledger GROUP BY user_id HAVING sum(delta) > 0) b
            LEFT JOIN public.studio_customers c ON c.user_id = b.user_id LOOP
     INSERT INTO public.studio_credit_lots (user_id, kind, amount, remaining, received_at, expires_at, ref)
-      VALUES (r.user_id, 'legacy', r.bal, r.bal, now(), now() + interval '60 days', 'switch-on') RETURNING id INTO lot;
-    IF r.billing_interval = 'year' AND r.status IN ('active', 'trialing', 'past_due') AND r.period_end > now() AND r.credits_per_period > 0 AND r.bal > r.credits_per_period THEN
-      -- the plan's monthly dates still to come in this year, one month's credits each, as far as the balance goes
-      hold := 0; left_ := r.bal - r.credits_per_period; k := 1;
-      LOOP
-        at := r.period_start + make_interval(months => k);
-        EXIT WHEN at >= r.period_end OR left_ <= 0 OR k > 12;
-        IF at > now() THEN
-          amt := least(r.credits_per_period, left_);
-          INSERT INTO public.studio_credit_schedule (user_id, amount, release_at, ref, note)
-            VALUES (r.user_id, amt, at, 'in_switch-on:' || r.user_id || ':m' || (k + 1), initcap(coalesce(r.plan_id, 'plan')) || ' yearly · month ' || (k + 1));
-          hold := hold + amt; left_ := left_ - amt;
-        END IF;
-        k := k + 1;
-      END LOOP;
-      IF hold > 0 THEN
-        -- (taken from the switch-on batch by the trigger: what is left of it is this month's credits and anything bought)
-        INSERT INTO public.studio_credit_ledger(user_id, delta, reason, ref, note)
-          VALUES (r.user_id, -hold, 'adjust', 'switch-on-hold', 'Held for the coming months of your yearly plan: they arrive on your plan''s monthly date');
-      END IF;
-    END IF;
+      VALUES (r.user_id, 'legacy', r.bal, r.bal, now(),
+              CASE WHEN r.billing_interval = 'year' AND r.status IN ('active', 'trialing', 'past_due') AND r.period_end > now() THEN r.period_end ELSE NULL END,
+              'switch-on');
   END LOOP;
 END $$;
 
