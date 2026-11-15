@@ -38,6 +38,7 @@ const inflight = await one("SELECT (public.studio_create_job($1, 'swap', NULL, '
 await q("UPDATE public.studio_jobs SET status = 'running', lease_token = '11111111-1111-4111-8111-111111111111' WHERE id = $1", [inflight.id]);
 
 await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000000_studio_credit_expiry.sql"), "utf8"));
+await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000200_studio_grant_until.sql"), "utf8"));
 
 // ---- the switch-on
 {
@@ -156,6 +157,19 @@ await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000000_s
   const empty = (await one("SELECT public.studio_credit_summary($1) AS s", [U(3)])).s; assert.equal(empty.expiring, null); assert.equal(empty.upcoming, null);
   await inStep(u, "promo and summary");
   ok("promo codes last 60 days; the summary gives the next expiry, what never expires, and the next month to come");
+}
+{
+  // owner, Nov 15 2026: a yearly plan's credits all at once, lasting until the end of the year paid for
+  const u = U(10); await q("INSERT INTO auth.users (id) VALUES ($1)", [u]);
+  const g = await one("SELECT public.studio_grant_until($1, 42000, 'in_year10', now() + interval '12 months', 'Creator annual') AS r", [u]);
+  assert.equal(g.r.granted, true); assert.equal(await bal(u), 42000, "the whole year at once");
+  const lot = await one("SELECT kind, expires_at FROM public.studio_credit_lots WHERE user_id = $1", [u]);
+  assert.equal(lot.kind, "plan"); assert.ok([364, 365, 366].includes(await daysFromNow(lot.expires_at)), "lasting the year paid for");
+  assert.equal((await one("SELECT public.studio_grant_until($1, 42000, 'in_year10', now() + interval '12 months', 'x') AS r", [u])).r.granted, false, "the same invoice twice grants once");
+  await q("SELECT public.studio_grant_until($1, 500, 'in_short', now() + interval '3 days', 'x')", [u]);
+  const short = await one("SELECT expires_at FROM public.studio_credit_lots WHERE user_id = $1 AND ref = 'in_short'", [u]); assert.equal(await daysFromNow(short.expires_at), 60, "never less than 60 days");
+  await inStep(u, "yearly grant");
+  ok("a yearly plan's credits arrive at once and last until the end of the year paid for (never less than 60 days)");
 }
 {
   // the rule as a whole: every person, batches = balance

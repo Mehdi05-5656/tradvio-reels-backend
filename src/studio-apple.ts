@@ -11,6 +11,7 @@
 // Credits follow the same rules as Stripe: a plan period grants its credits and replaces what was left of the last
 // period's (grant refs "in_apple_<transaction>" so studio_grant treats them as plan grants, like Stripe's "in_..."
 // invoices); a pack adds on top and never expires; a refund takes back what that purchase gave, never below zero.
+import { grantForYear } from "./studio-credits.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readdirSync, readFileSync } from "node:fs";
@@ -108,11 +109,11 @@ export async function applyAppleTransaction(sb: SupabaseClient, user: string, tx
   });
   if (s.error) throw s.error;
   if (!active) return { user, plan: plan.id, note: `${plan.id} ${kind.interval} lapsed` };
-  // each period's transaction grants that period's credits (as Stripe's invoices do); a year's arrive month by month
-  // (studio_grant_spread), since every batch of plan credits expires 60 days after it arrives
+  // each period's transaction grants that period's credits (as Stripe's invoices do); a year's all at once, lasting until
+  // the year ends (grantForYear), since other plan credits last 60 days
   const credits = plan.credits * (kind.interval === "year" ? 12 : 1); const note = `${plan.name} ${kind.interval === "year" ? "annual " : ""}Apple period`;
   const g = kind.interval === "year"
-    ? await sb.rpc("studio_grant_spread", { p_user: user, p_total: credits, p_ref: `in_apple_${txid}`, p_until: iso(expires), p_note: note })
+    ? await grantForYear(sb, { user, credits, ref: `in_apple_${txid}`, until: iso(expires), note })
     : await sb.rpc("studio_grant", { p_user: user, p_credits: credits, p_ref: `in_apple_${txid}`, p_expire_previous: true, p_note: note });
   if (g.error) throw g.error;
   return { user, plan: plan.id, credits, note: `${plan.id} ${kind.interval} ${g.data?.granted ? "granted" : "already granted"} ${credits}` };

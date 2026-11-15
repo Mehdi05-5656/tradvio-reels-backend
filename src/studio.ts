@@ -4,6 +4,7 @@
 // grants credits (studio_apply_subscription, studio_grant). Tools cost credits that are reserved when a
 // job is created and settled by the worker that runs it. Every route here is for the signed-in person
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
+import { grantForYear } from "./studio-credits.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { registerPlanChange, ensurePortalConfig, missingPrices, isNoSuchPrice, upgradeCredits } from "./studio-plan-change.js";
@@ -535,17 +536,16 @@ export async function applyStripeEvent(sb: SupabaseClient, stripe: StripeLike, e
     if (reason === "subscription_update" && !invoiceChargesPlan(obj)) return `invoice.paid → extra social accounts only (${s.social_extra}), no credits`;
     // A new period replaces what was left; a mid-cycle upgrade adds its credits on top.
     const expire = reason === "subscription_cycle" || reason === "subscription_create" || reason === "";
-    // Credits are priced per month. An annual invoice pays for twelve of them, which arrive one month at a time (the
-    // first now, then on each monthly date: studio_grant_spread), because every batch of credits expires 60 days after it
-    // arrives (migrations/20261122000000_studio_credit_expiry.sql). A mid-period upgrade buys the new plan's credits for
-    // the time left, less the old plan's unused share, as Stripe prorates the price; on a yearly plan they too arrive
-    // over the months left. Nothing expires at renewal any more (p_expire_previous is ignored).
+    // Credits are priced per month. An annual invoice pays for twelve of them, granted at once and lasting until the end
+    // of the year paid for (grantForYear; other plan credits last 60 days: migrations/20261122000000_studio_credit_expiry.sql).
+    // A mid-period upgrade buys the new plan's credits for the time left, less the old plan's unused share, as Stripe
+    // prorates the price; on a yearly plan they last to the same date. Nothing expires at renewal any more.
     const prorated = reason === "subscription_update" ? upgradeCredits(obj) : null;
     const credits = prorated ?? s.plan.credits * (s.interval === "year" ? 12 : 1);
     if (credits <= 0) return `invoice.paid → upgrade with no credits to add (${reason})`;
     const note = `${s.plan.name} ${s.interval === "year" ? "annual " : ""}${reason || "invoice"}`;
     const g = s.interval === "year" && s.period_end
-      ? await sb.rpc("studio_grant_spread", { p_user: userId, p_total: credits, p_ref: String(obj.id), p_until: s.period_end, p_note: note })
+      ? await grantForYear(sb, { user: userId, credits, ref: String(obj.id), until: s.period_end, note })
       : await sb.rpc("studio_grant", { p_user: userId, p_credits: credits, p_ref: String(obj.id), p_expire_previous: expire, p_note: note });
     if (g.error) throw g.error;
     // The first paid invoice of a referred person credits both sides, once; the function is a no-op otherwise.
