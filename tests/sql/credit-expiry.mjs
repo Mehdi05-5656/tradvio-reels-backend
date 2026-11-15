@@ -39,6 +39,7 @@ await q("UPDATE public.studio_jobs SET status = 'running', lease_token = '111111
 
 await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000000_studio_credit_expiry.sql"), "utf8"));
 await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000200_studio_grant_until.sql"), "utf8"));
+await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000300_studio_apple_plan_credits.sql"), "utf8"));
 
 // ---- the switch-on
 {
@@ -170,6 +171,17 @@ await db.exec(fs.readFileSync(path.join(here, "../../migrations/20261122000200_s
   const short = await one("SELECT expires_at FROM public.studio_credit_lots WHERE user_id = $1 AND ref = 'in_short'", [u]); assert.equal(await daysFromNow(short.expires_at), 60, "never less than 60 days");
   await inStep(u, "yearly grant");
   ok("a yearly plan's credits arrive at once and last until the end of the year paid for (never less than 60 days)");
+}
+{
+  // owner, Nov 15 2026: credits from a plan bought in the iPhone app never expire; website plans keep their 60 days
+  const u = U(11); await q("INSERT INTO auth.users (id) VALUES ($1)", [u]);
+  await q("SELECT public.studio_grant($1, 3500, 'in_apple_2000000999', true, 'Creator Apple period')", [u]);
+  await q("SELECT public.studio_grant($1, 3500, 'in_web1', true, 'Creator invoice')", [u]);
+  const k = await q("SELECT kind, expires_at FROM public.studio_credit_lots WHERE user_id = $1 ORDER BY id", [u]);
+  assert.deepEqual(k.map((x) => x.kind), ["apple_plan", "plan"]); assert.equal(k[0].expires_at, null, "iPhone plan credits: never"); assert.equal(await daysFromNow(k[1].expires_at), 60, "website plan credits: 60 days");
+  await q("SELECT (public.studio_create_job($1, 'swap', NULL, '{}', 100)).id", [u]).catch(() => undefined);
+  await inStep(u, "iPhone plan");
+  ok("credits from a plan bought in the iPhone app never expire; website plan credits keep their 60 days");
 }
 {
   // the rule as a whole: every person, batches = balance

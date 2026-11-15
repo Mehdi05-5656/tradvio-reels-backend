@@ -65,12 +65,13 @@ test("apple: a plan purchase sets the plan and grants the period's credits as a 
   assert.deepEqual([link.billing_source, link.apple_original_transaction_id], ["apple", "2000000100"]);
 });
 
-test("apple: a yearly plan's twelve months arrive at once and last the year (studio_grant_until)", async () => {
+test("apple: a yearly plan's twelve months arrive at once, as a plain grant (iPhone credits never expire)", async () => {
   const sb = fakeSb(); const expires = Date.now() + 360 * DAY;
   const out = await applyAppleTransaction(sb, U, tx({ productId: "io.clone8.app.starter.year", expiresDate: expires }) as any);
   assert.equal(out.credits, PLANS.find((p) => p.id === "starter")!.credits * 12);
-  const year = sb.calls.find((c: any) => c.name === "studio_grant_until")!.args;
-  assert.deepEqual([year.p_credits, year.p_until], [out.credits, new Date(expires).toISOString()]); assert.equal(sb.calls.some((c: any) => c.name === "studio_grant"), false);
+  const year = sb.calls.find((c: any) => c.name === "studio_grant")!.args;
+  assert.deepEqual([year.p_credits, year.p_ref.startsWith("in_apple_")], [out.credits, true], "the in_apple_ ref is what keeps them from expiring");
+  assert.equal(sb.calls.some((c: any) => c.name === "studio_grant_until"), false);
 });
 
 test("apple: a lapsed period updates the plan row but grants nothing", async () => {
