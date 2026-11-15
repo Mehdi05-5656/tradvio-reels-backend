@@ -11,6 +11,7 @@ import { RecastError } from "../src/studio-recast.js";
 import {
   RESHOOT_LIMITS, ReshootError, aspectFor, autoCuts, billedSeconds, bodyFor, cleanShots, creditsPerSecondFor, defaultShots, describe, engineFor, engineUsdPerSecond, isCopy, joinGraph, mergePlan, movePieces,
   parsePsnr, planFor, priceShots, promptFor, quoteReshoot, reshootConfig, reshootEnabled, reshootOpen, retimeFactor, runReshootJob, NO_CHANGE,
+  CINEMA_ENDPOINT, FIRM_WORDS, PIECE_TRIES, cinemaMove, endpointFor, movePieceSeconds, pieceMoved, renderUsdPerSecond,
 } from "../src/studio-reshoot.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", J = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -412,4 +413,76 @@ test("the migration adds 'reshoot' and keeps every job type the live rule has", 
   for (const t of ["blueprint", "blueprint_plus", "recast", "swap", "restyle", "trend", "character", "instrument", "clips", "import", "captions", "kage", "kage_motion", "longform", "stunts", "splitscreen", "reshoot"]) assert.ok(sql.includes(`'${t}'`), t);
   assert.ok(!/IF EXISTS/i.test(sql.replace(/^--.*$/gm, "")), "no IF EXISTS: the Supabase tool declines those");
   assert.equal((sql.replace(/^--.*$/gm, "").match(/;/g) ?? []).length, 1, "one statement, so the rule is never absent");
+});
+
+test("a move's piece: the camera counts as moved only when the background shows it somewhere else", () => {
+  const bg = (...b: string[]) => b.map((background) => ({ background, size: "same" })) as any;
+  // the live re-run 58da68c7: the first piece went round behind; in the second the person turned on the car, the pump stayed put
+  assert.equal(pieceMoved("orbit", bg("other_side", "other_side", "other_side")).moved, true);
+  assert.equal(pieceMoved("orbit", bg("same", "same", "shifted")).moved, false, "a drift or a pan is not an orbit");
+  assert.equal(pieceMoved("orbit", bg("shifted", "other_side", "same")).moved, true, "a whole circle in one piece ends where it began; the stills between show it");
+  const sized = (...z: string[]) => z.map((size) => ({ background: "same", size })) as any;
+  assert.equal(pieceMoved("push_in", sized("same", "bigger", "bigger")).moved, true);
+  assert.equal(pieceMoved("push_in", sized("bigger", "same", "same")).moved, false, "judged on the last still");
+  assert.equal(pieceMoved("orbit", []).moved, true, "nothing to judge: never costs the person their shot");
+  assert.equal(PIECE_TRIES, 2);
+});
+
+test("switches for moves: the piece length, and Cinema Studio with a named camera move", () => {
+  assert.equal(movePieceSeconds({}), 4);
+  assert.equal(movePieceSeconds({ STUDIO_RESHOOT_MOVE_PIECE: "12" }), 12);
+  assert.equal(movePieceSeconds({ STUDIO_RESHOOT_MOVE_PIECE: "40" }), 4, "out of range falls back");
+  assert.deepEqual(movePieces(18, 26, 12).map((p) => [p.start, p.end, p.seconds]), [[18, 26, 8]], "one render for the whole 8 s move");
+  assert.equal(billedSeconds({ start: 18, end: 26 }, "seedance_move", { STUDIO_RESHOOT_MOVE_PIECE: "12" }), 8, "the same seconds billed either way");
+  assert.equal(endpointFor("seedance_move", {}), "bytedance/seedance-2.5/reference-to-video");
+  const C = { STUDIO_RESHOOT_MOVE_ENGINE: "cinema" };
+  assert.equal(endpointFor("seedance_move", C), CINEMA_ENDPOINT);
+  assert.equal(endpointFor("seedance_edit", C), "bytedance/seedance-2.5/video-edit", "only moves go there");
+  assert.equal(cinemaMove("orbit", {}), "arc-right"); assert.equal(cinemaMove("push_in", {}), "dolly-in");
+  assert.equal(cinemaMove("orbit", { STUDIO_RESHOOT_CINEMA_ORBIT: "drone-orbit" }), "drone-orbit");
+  assert.equal(renderUsdPerSecond("seedance_move", C), 0.206);
+  assert.equal(renderUsdPerSecond("seedance_move", {}), engineUsdPerSecond("seedance_move", {}));
+  assert.equal(creditsPerSecondFor("seedance_move", PLANS, C), 45, "the customer's price does not move until a real cost is read");
+  const body = bodyFor({ engine: "seedance_move", prompt: "p", videoUrl: "v", imageUrls: ["a"], seconds: 8, aspect: "9:16", endpoint: CINEMA_ENDPOINT, camera: "arc-right" });
+  assert.deepEqual(body, { prompt: "p", video_urls: ["v"], image_urls: ["a"], duration: 8, resolution: "720p", aspect_ratio: "9:16", generate_audio: false, camera_movement: "arc-right" });
+  assert.ok(!("camera_movement" in bodyFor({ engine: "seedance_move", prompt: "p", videoUrl: "v", imageUrls: ["a"], seconds: 4, aspect: "9:16" })));
+  const firm = promptFor({ ...NO_CHANGE, move: "orbit" }, "seedance_move", { k: 1, n: 2, chained: true, firm: true });
+  assert.ok(firm.endsWith(FIRM_WORDS));
+  assert.ok(!promptFor({ ...NO_CHANGE, move: "orbit" }, "seedance_move", { k: 1, n: 2, chained: true }).includes(FIRM_WORDS));
+});
+
+test("a run: a piece that stayed on the take's camera is made again on its own; stuck twice, the shot keeps the original, uncharged", async () => {
+  const base = (sent: any[], stuck: (k: number, firm: boolean) => boolean, env: Record<string, string> = {}) => ({
+    env, log: () => undefined, prepare: async (_u: string, t: string) => writeFile(t, "s"), cut: async (_s: string, _f: number, _t: number, t: string) => writeFile(t, "c"),
+    retime: async (_f: string, _s: number, _z: any, t: string) => writeFile(t, "r"), likeness: async () => 15, check: async () => ({ verdict: "good" as const }),
+    join: async (c: any) => writeFile(c.target, "edit"),
+    render: async (c: any) => { sent.push({ key: c.key, prompt: c.prompt, endpoint: c.endpoint, camera: c.camera }); const f = join(c.dir, `${c.key.replace(/:/g, "_")}.mp4`); await writeFile(f, "m"); return { file: f, requestId: `q-${c.key}` }; },
+    pieceCheck: async (c: any) => ({ moved: !stuck(c.piece, c.firm), note: "seen" }),
+  });
+  // the second piece stays put once, then moves with the firmer words
+  resetCostsForTests(); resetCutGate();
+  const a = fakeSb(), sentA: any[] = [];
+  const outA = await runReshootJob(a.sb, base(sentA, (k, firm) => k === 1 && !firm) as any, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 30, { keep: true })]) as any);
+  assert.equal(outA, "done");
+  assert.deepEqual(sentA.map((x) => x.key), [`${J}:0:1:0`, `${J}:0:1:1`, `${J}:0:1:1:r1`], "only the piece that stayed put is made again, not the whole move");
+  assert.ok(sentA[2].prompt.endsWith(FIRM_WORDS));
+  assert.match(sentA[1].prompt, /^The video opens exactly on <<<image_1>>>/);
+  const doneA = a.rpc.find((r) => r.name === "studio_complete")!;
+  assert.equal(doneA.args.p_credits_charged, 8 * 45, "the extra piece is ours, not the person's");
+  const checks = a.rpc.filter((r) => r.name === "studio_renew").map((r) => r.args.p_progress?.move_checks).filter(Boolean).pop();
+  assert.deepEqual(checks.map((m: any) => [m.piece, m.try, m.moved]), [[0, 1, true], [1, 1, false], [1, 2, true]]);
+  // stuck twice: no third piece, no whole-shot retry; the original stays and nothing is charged for it
+  resetCostsForTests(); resetCutGate();
+  const b = fakeSb(), sentB: any[] = [];
+  const outB = await runReshootJob(b.sb, base(sentB, (k) => k === 1) as any, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 14, { angle: "closeup" }), shot(14, 30, { keep: true })]) as any);
+  assert.equal(outB, "partial");
+  assert.deepEqual(sentB.filter((x) => x.key.startsWith(`${J}:0:`)).map((x) => x.key), [`${J}:0:1:0`, `${J}:0:1:1`, `${J}:0:1:1:r1`]);
+  const doneB = b.rpc.find((r) => r.name === "studio_complete")!;
+  assert.deepEqual(doneB.args.p_outputs[0].shots.map((s: any) => s.made), [false, true, false]);
+  assert.equal(doneB.args.p_credits_charged, 6 * 45, "only the close-up is charged");
+  // the whole move in one render on Cinema Studio: one request, its endpoint and named move
+  resetCostsForTests(); resetCutGate();
+  const c = fakeSb(), sentC: any[] = [];
+  assert.equal(await runReshootJob(c.sb, base(sentC, () => false, { STUDIO_RESHOOT_MOVE_ENGINE: "cinema", STUDIO_RESHOOT_MOVE_PIECE: "12" }) as any, jobOf([shot(0, 8, { move: "orbit" }), shot(8, 30, { keep: true })]) as any), "done");
+  assert.deepEqual(sentC.map((x) => [x.key, x.endpoint, x.camera]), [[`${J}:0:1:0`, CINEMA_ENDPOINT, "arc-right"]]);
 });

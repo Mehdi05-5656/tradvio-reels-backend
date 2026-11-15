@@ -12,7 +12,12 @@
 //        - a wide or overhead shot: Wan 3.0 reference-to-video. Same body and place, a tenth of the price; its timing is
 //          a few tenths of a second loose, which only shows where the mouth is small.
 //        - a camera move (orbit, push-in): Seedance 2.5 reference-to-video in 4 s pieces, each piece opened on the last
-//          frame of the one before (edit mode never moves the camera; unchained pieces jump at the join).
+//          frame of the one before (edit mode never moves the camera; unchained pieces jump at the join). Each piece is
+//          checked as soon as it is made (did the background show the camera somewhere else?) and, stuck on the take's
+//          camera, made once more with firmer words; stuck twice, the shot keeps its original footage. Two switches try
+//          to make that rarer: STUDIO_RESHOOT_MOVE_PIECE=12 (the whole move in one render: the first piece has always
+//          moved, the chained ones are the ones that fall back) and STUDIO_RESHOOT_MOVE_ENGINE=cinema (Cinema Studio 4.0,
+//          which takes a named camera move as a field).
 //   3. Before a shot counts it is checked: it really changed (a near copy of the source, which another engine returned
 //      twice and still billed, is caught by comparing pictures), the platform did not refuse it, and a look by Claude
 //      says it is the same person with the change made. A failed shot is made once more; failed again, or refused, the
@@ -193,8 +198,11 @@ export function cleanShots(raw: unknown, seconds: number): Shot[] {
 }
 
 /** How many 4 s pieces a move is rendered in, and how long each is (equal, never under 4 s). */
-export function movePieces(start: number, end: number): Array<{ start: number; end: number; seconds: number }> {
-  const len = end - start, n = Math.max(1, Math.floor(len / RESHOOT_LIMITS.move_piece + 1e-6)), each = len / n;
+/** How long one piece of a move is: 4 s (the length that moved in the tests) unless STUDIO_RESHOOT_MOVE_PIECE says
+ *  otherwise (4 to 12; 12 makes every move one render, with no second piece that can fall back to the take's camera). */
+export const movePieceSeconds = (env: Env = process.env) => { const n = Math.round(Number(env.STUDIO_RESHOOT_MOVE_PIECE)); return n >= 4 && n <= 12 ? n : RESHOOT_LIMITS.move_piece; };
+export function movePieces(start: number, end: number, piece = movePieceSeconds()): Array<{ start: number; end: number; seconds: number }> {
+  const len = end - start, n = Math.max(1, Math.floor(len / piece + 1e-6)), each = len / n;
   return Array.from({ length: n }, (_, k) => ({ start: round2(start + k * each), end: round2(k + 1 === n ? end : start + (k + 1) * each), seconds: Math.max(RESHOOT_LIMITS.move_piece, Math.round(each)) }));
 }
 
@@ -202,6 +210,23 @@ export function movePieces(start: number, end: number): Array<{ start: number; e
 // Price
 // ---------------------------------------------------------------------------------------------------
 export const ENDPOINTS: Record<Engine, string> = { seedance_edit: "bytedance/seedance-2.5/video-edit", wan: "alibaba/wan-3.0/reference-to-video", seedance_move: "bytedance/seedance-2.5/reference-to-video" };
+/** Where a move is rendered. STUDIO_RESHOOT_MOVE_ENGINE=cinema sends it to Cinema Studio 4.0, which takes the same
+ *  references plus a camera_movement field (a named camera move, not only words); untested for a person's timing until
+ *  the owner's test, so off by default. The price per credit stays Seedance's until a cost row is read. */
+export const CINEMA_ENDPOINT = "higgsfield/cinema-studio/4.0";
+export const moveOnCinema = (env: Env = process.env) => env.STUDIO_RESHOOT_MOVE_ENGINE === "cinema";
+/** The named camera move Cinema Studio is given (STUDIO_RESHOOT_CINEMA_ORBIT / _PUSH override). */
+export function cinemaMove(m: Move, env: Env = process.env): string | null {
+  if (m === "orbit") return env.STUDIO_RESHOOT_CINEMA_ORBIT || "arc-right";
+  if (m === "push_in") return env.STUDIO_RESHOOT_CINEMA_PUSH || "dolly-in";
+  return null;
+}
+export const endpointFor = (e: Engine, env: Env = process.env) => (e === "seedance_move" && moveOnCinema(env) ? CINEMA_ENDPOINT : ENDPOINTS[e]);
+/** What one render second costs us (the move on Cinema Studio at its list rate, STUDIO_RESHOOT_CINEMA_USD). */
+export function renderUsdPerSecond(e: Engine, env: Env = process.env): number {
+  if (e === "seedance_move" && moveOnCinema(env)) { const n = Number(env.STUDIO_RESHOOT_CINEMA_USD); return n > 0 ? n : 0.206; }
+  return engineUsdPerSecond(e, env);
+}
 /** What one second costs us at 720p (list; STUDIO_RESHOOT_SEEDANCE_USD / _WAN_USD follow the platform if it changes). */
 export function engineUsdPerSecond(e: Engine, env: Env = process.env): number {
   const n = Number(e === "wan" ? env.STUDIO_RESHOOT_WAN_USD : env.STUDIO_RESHOOT_SEEDANCE_USD);
@@ -216,8 +241,8 @@ export function creditsPerSecondFor(e: Engine, plans: PlanLike[], env: Env = pro
 }
 /** Seconds the platform bills for a shot: the source rounded up for an edit, whole pieces for a move, the asked
  *  duration (whole seconds) for the cheap engine. */
-export function billedSeconds(s: Pick<Shot, "start" | "end">, e: Engine): number {
-  if (e === "seedance_move") return movePieces(s.start, s.end).reduce((t, p) => t + p.seconds, 0);
+export function billedSeconds(s: Pick<Shot, "start" | "end">, e: Engine, env: Env = process.env): number {
+  if (e === "seedance_move") return movePieces(s.start, s.end, movePieceSeconds(env)).reduce((t, p) => t + p.seconds, 0);
   const len = s.end - s.start;
   return e === "wan" ? Math.max(2, Math.ceil(len - 0.05)) : Math.max(4, Math.ceil(len - 0.02));
 }
@@ -230,7 +255,7 @@ export type ReshootQuote = { tool: "reshoot"; credits: number; options: Record<s
 export function priceShots(shots: Shot[], plans: PlanLike[], env: Env = process.env): PricedShot[] {
   return shots.map((s) => {
     if (s.keep) return { ...s, engine: null, seconds: 0, credits: 0, cost_usd: 0 };
-    const engine = engineFor(s), seconds = billedSeconds(s, engine);
+    const engine = engineFor(s), seconds = billedSeconds(s, engine, env);
     return { ...s, engine, seconds, credits: seconds * creditsPerSecondFor(engine, plans, env), cost_usd: Math.round(seconds * engineUsdPerSecond(engine, env) * 10000) / 10000 };
   });
 }
@@ -306,6 +331,8 @@ type ReshootDeps = ClipsDeps & {
   /** one shot re-filmed: the cut piece (and for a move, the picture it opens on) in, the result file out */
   render?: (ctx: ShotCtx) => Promise<{ file: string; requestId: string }>;
   check?: (ctx: { source: string; result: string; asked: string; user: string }) => Promise<{ verdict: Verdict; note?: string }>;
+  /** one piece of a move: did the camera move as asked (tests replace the look by Claude) */
+  pieceCheck?: (ctx: { result: string; move: Move; piece: number; firm: boolean; user: string }) => Promise<{ moved: boolean; note?: string }>;
   /** how alike a result is to its source (PSNR, dB); tests replace the ffmpeg measure */
   likeness?: (source: string, result: string) => Promise<number | null>;
   join?: (ctx: JoinCtx) => Promise<void>;
@@ -379,7 +406,8 @@ const KEEP_TAIL = "Keep the person's face, hair, body and clothes exactly the sa
 export const ANCHOR_WORDS = "The reference image is a still from another shot of this same video: match its place, its light and the person's outfit exactly.";
 /** What the model is told for one shot (or one piece of a move). `anchored`: a still of an earlier shot with the same
  *  look is sent as the reference image. */
-export function promptFor(s: Change, e: Engine, piece?: { k: number; n: number; chained: boolean }, anchored = false): string {
+export const FIRM_WORDS = "This is a different camera, not the camera that filmed <<<video_1>>>: by the last frame the camera is somewhere clearly different from where it was in the first frame, and it never stays where <<<video_1>>> was filmed from.";
+export function promptFor(s: Change, e: Engine, piece?: { k: number; n: number; chained: boolean; firm?: boolean }, anchored = false): string {
   const look = [LIGHT_WORDS[s.light], s.place ? `The place is now: ${s.place}, with the person in the same pose in it.` : "", s.outfit ? `The person now wears: ${s.outfit}.` : ""].filter(Boolean).join(" ");
   const keepAlso = `${s.light === "same" ? " Keep the same light." : ""}${s.place ? "" : " Keep the same place."}${s.outfit ? "" : " Keep the same clothes."}`;
   if (e === "seedance_move") {
@@ -389,9 +417,9 @@ export function promptFor(s: Change, e: Engine, piece?: { k: number; n: number; 
     // Worded as a new shot whose only difference is the camera (the wording that orbited in the Nov 14 test). Long
     // "keep everything the same" lists read to the platform as an edit: it then refuses the duration and shape, or
     // renders the source's own camera path (the first live orbit, job 161c4b44).
-    const move = MOVE_WORDS[s.move as Exclude<Move, "none">](k, n), also = look ? ` Also: ${look}` : "";
-    if (piece?.chained) return `The video opens exactly on <<<image_1>>>. From that first frame, ${move}. The person does exactly the same movements with exactly the same timing as in <<<video_1>>>; only the camera differs from <<<video_1>>>. The same person, clothes, place and light throughout, as in <<<image_2>>>.${also}`.replace(/\s+/g, " ").trim();
-    return `Recreate <<<video_1>>> exactly: the same person doing exactly the same movements with exactly the same timing as in <<<video_1>>>. The only difference is the camera: ${move}. <<<image_1>>> shows how the person looks.${also}`.replace(/\s+/g, " ").trim();
+    const move = MOVE_WORDS[s.move as Exclude<Move, "none">](k, n), also = look ? ` Also: ${look}` : "", firm = piece?.firm ? ` ${FIRM_WORDS}` : "";
+    if (piece?.chained) return `The video opens exactly on <<<image_1>>>. From that first frame, ${move}. The person does exactly the same movements with exactly the same timing as in <<<video_1>>>; only the camera differs from <<<video_1>>>. The same person, clothes, place and light throughout, as in <<<image_2>>>.${also}${firm}`.replace(/\s+/g, " ").trim();
+    return `Recreate <<<video_1>>> exactly: the same person doing exactly the same movements with exactly the same timing as in <<<video_1>>>. The only difference is the camera: ${move}. <<<image_1>>> shows how the person looks.${also}${firm}`.replace(/\s+/g, " ").trim();
   }
   const anchor = anchored ? ` ${ANCHOR_WORDS}` : "";
   if (e === "wan") return `Recreate the reference video <<<video_1>>> shot for shot, filmed from a new camera position: ${ANGLE_WORDS[s.angle]}. ${look} ${KEEP_TAIL}${keepAlso} Only what is asked changes.${anchor}`.replace(/\s+/g, " ").trim();
@@ -403,10 +431,14 @@ export function aspectFor(w: number, h: number): string {
   const r = w / h, options: Array<[string, number]> = [["9:16", 9 / 16], ["3:4", 3 / 4], ["1:1", 1], ["4:3", 4 / 3], ["16:9", 16 / 9]];
   return options.reduce((b, o) => (Math.abs(Math.log(o[1] / r)) < Math.abs(Math.log(b[1] / r)) ? o : b))[0];
 }
-type ShotCtx = { job: string; user: string; engine: Engine; key: string; prompt: string; videoUrl: string; imageUrls: string[]; seconds: number; aspect: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void>; dir: string };
+type ShotCtx = { job: string; user: string; engine: Engine; key: string; prompt: string; videoUrl: string; imageUrls: string[]; seconds: number; aspect: string; requestId?: string | null; onSubmit?: (id: string) => Promise<void>; dir: string;
+  /** a move sent to Cinema Studio: its endpoint, its named camera move and its rate */ endpoint?: string; camera?: string | null; usdPerSecond?: number };
 const POLL_MS = 8000, MAX_WAIT_MS = 25 * 60_000;
+/** A move's piece is made at most twice: once, and once more with firmer words if the camera stayed put. */
+export const PIECE_TRIES = 2;
 /** The request body for one shot (or one piece of a move), exactly as sent. */
-export function bodyFor(c: Pick<ShotCtx, "engine" | "prompt" | "videoUrl" | "imageUrls" | "seconds" | "aspect">): Record<string, any> {
+export function bodyFor(c: Pick<ShotCtx, "engine" | "prompt" | "videoUrl" | "imageUrls" | "seconds" | "aspect" | "endpoint" | "camera">): Record<string, any> {
+  if (c.endpoint === CINEMA_ENDPOINT) return { prompt: c.prompt, video_urls: [c.videoUrl], image_urls: c.imageUrls, duration: c.seconds, resolution: "720p", aspect_ratio: c.aspect, generate_audio: false, ...(c.camera ? { camera_movement: c.camera } : {}) };
   const images = c.imageUrls.length ? { image_urls: c.imageUrls } : {};
   if (c.engine === "seedance_edit") return { prompt: c.prompt, video_url: c.videoUrl, ...images, resolution: "720p", generate_audio: false };
   if (c.engine === "wan") return { prompt: c.prompt, video_urls: [c.videoUrl], ...images, duration: c.seconds, resolution: "720p", aspect_ratio: c.aspect, generate_audio: false };
@@ -416,7 +448,7 @@ async function defaultRender(deps: ReshootDeps, c: ShotCtx): Promise<{ file: str
   const env = deps.env ?? process.env, sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   let requestId = c.requestId ?? null;
   if (!requestId) {
-    const r = await hf(deps, `/${ENDPOINTS[c.engine]}`, { method: "POST", body: JSON.stringify(bodyFor(c)), idempotency: c.key });
+    const r = await hf(deps, `/${c.endpoint ?? ENDPOINTS[c.engine]}`, { method: "POST", body: JSON.stringify(bodyFor(c)), idempotency: c.key });
     if (![200, 201, 202].includes(r.status) || !r.body?.request_id) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
     requestId = String(r.body.request_id);
     await c.onSubmit?.(requestId);
@@ -431,7 +463,7 @@ async function defaultRender(deps: ReshootDeps, c: ShotCtx): Promise<{ file: str
     if (status === "completed") {
       // the cost is written when a render is delivered, at the list rate: a failed or refused one is refunded by the
       // platform (the first live jobs wrote it when sent, which counted a refused render as paid)
-      recordCost({ job_id: c.job, user_id: c.user, tool: "reshoot", provider: "higgsfield", product: ENDPOINTS[c.engine], source: `reshoot_${c.engine}`, units: { seconds: c.seconds }, usd: Math.round(c.seconds * engineUsdPerSecond(c.engine, env) * 10000) / 10000, basis: "list", ref: requestId });
+      recordCost({ job_id: c.job, user_id: c.user, tool: "reshoot", provider: "higgsfield", product: c.endpoint ?? ENDPOINTS[c.engine], source: `reshoot_${c.engine}`, units: { seconds: c.seconds }, usd: Math.round(c.seconds * (c.usdPerSecond ?? engineUsdPerSecond(c.engine, env)) * 10000) / 10000, basis: "list", ref: requestId });
       const url = outputUrls(st.body).videos[0];
       if (!url) throw new RecastError("recast_bad_output", "completed without a video");
       const dl = await (deps.fetch ?? fetch)(url, { signal: AbortSignal.timeout(300_000) });
@@ -489,6 +521,46 @@ async function defaultCheck(deps: ReshootDeps, ctx: { source: string; result: st
     const out = await claudeJson(deps, { model: env.STUDIO_RESHOOT_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 1200, system: CHECK_SYSTEM, output_config: { format: { type: "json_schema", schema: CHECK_SCHEMA } }, messages: [{ role: "user", content }] }, "reshoot_check", ctx.user);
     return { verdict: out?.verdict === "broken" ? "broken" : out?.verdict === "weak" ? "weak" : "good", note: text(out?.note, 200) };
   } catch (e: any) { deps.log?.(`[reshoot] check skipped: ${String(e?.message ?? e).slice(0, 120)}`); return { verdict: "good", note: "check skipped" }; } // a check that cannot run never costs the person their shot
+}
+// ---------------------------------------------------------------------------------------------------
+// A move's pieces: did the camera really move
+// ---------------------------------------------------------------------------------------------------
+// The platform's reference mode sometimes renders a piece on the take's own fixed camera (about half the pieces on
+// Nov 14 2026: the second half of the test orbit and of the live re-run 58da68c7), and a look at the whole shot passes
+// it when another piece did move. So every piece is looked at on its own, as soon as it is made: Claude only reports
+// what the background does across four stills, each against the first, and the code decides. The background, not the
+// person: in the stuck piece of 58da68c7 the person turns round on the car while the camera stays put, so the side of
+// the person in view changes without any camera move. A measure of the pictures could not tell either: the first and
+// last frames of the take itself, filmed on a fixed camera, differ by 13 to 16 dB because the person moves.
+export const BACKGROUNDS = ["same", "shifted", "other_side"] as const;
+export const SIZES = ["same", "bigger", "smaller"] as const;
+export type CameraSeen = { background: typeof BACKGROUNDS[number]; size: typeof SIZES[number] };
+/** Did the camera move as asked? `seen`: each still after the first, against the first. An orbit: the scene is seen
+ *  from another side in at least one still. A push in: things are bigger in the last still. */
+export function pieceMoved(move: Move, seen: CameraSeen[]): { moved: boolean; why: string } {
+  if (!seen.length) return { moved: true, why: "too few stills to judge" };
+  if (move === "orbit") return { moved: seen.some((x) => x.background === "other_side"), why: `background ${seen.map((x) => x.background).join(", ")}` };
+  if (move === "push_in") return { moved: seen[seen.length - 1].size === "bigger", why: `size ${seen.map((x) => x.size).join(", ")}` };
+  return { moved: true, why: "no move asked" };
+}
+const PIECE_SYSTEM = `You see four stills from one short video, in order. Say where the camera went, judged from the background only: walls, objects, lights, vehicles, the horizon. The person in it may turn round, walk or gesture by themselves; ignore what the person does when judging where the camera is.
+For each of stills 2, 3 and 4, against still 1:
+- background: "same" (the background sits in the same place in the frame, perhaps a slight drift), "shifted" (it has slid or panned, but we still look at it from the same side), or "other_side" (we now see the scene from a clearly different side: what was behind the camera or to one side is now in view, or the background seen is a different part of the place).
+- size: "bigger" if the camera is clearly closer (the person and things near them fill more of the frame), "smaller" if clearly farther, otherwise "same".
+Three entries, for stills 2, 3 and 4 in that order.`;
+const PIECE_SCHEMA = { type: "object", additionalProperties: false, required: ["stills"], properties: { stills: { type: "array", items: { type: "object", additionalProperties: false, required: ["background", "size"], properties: { background: { type: "string", enum: [...BACKGROUNDS] }, size: { type: "string", enum: [...SIZES] } } } } } };
+async function defaultPieceCheck(deps: ReshootDeps, ctx: { result: string; move: Move; user: string }, dir: string): Promise<{ moved: boolean; note: string }> {
+  const env = deps.env ?? process.env;
+  if (env.STUDIO_RESHOOT_PIECE_CHECK === "off") return { moved: true, note: "not checked" };
+  try {
+    const made = await stillsOf(ctx.result, [0.05, 0.35, 0.65, 0.95], dir);
+    const img = (b: Buffer) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b.toString("base64") } });
+    const out = await claudeJson(deps, { model: env.STUDIO_RESHOOT_CHECK_MODEL || "claude-haiku-5-5", max_tokens: 600, system: PIECE_SYSTEM, output_config: { format: { type: "json_schema", schema: PIECE_SCHEMA } }, messages: [{ role: "user", content: made.flatMap((b, n) => [{ type: "text", text: `Still ${n + 1}:` }, img(b)]) }] }, "reshoot_piece_check", ctx.user);
+    const seen: CameraSeen[] = (Array.isArray(out?.stills) ? out.stills : []).filter((x: any) => (BACKGROUNDS as readonly string[]).includes(x?.background) && (SIZES as readonly string[]).includes(x?.size));
+    if (seen.length !== made.length - 1) return { moved: true, note: "check unreadable" };
+    const r = pieceMoved(ctx.move, seen);
+    return { moved: r.moved, note: r.why };
+  } catch (e: any) { deps.log?.(`[reshoot] piece check skipped: ${String(e?.message ?? e).slice(0, 120)}`); return { moved: true, note: "check skipped" }; } // a check that cannot run never costs the person their shot
 }
 /** A short label of what a shot asks for, for the check, the page and the report. */
 export function describe(s: Change): string {
@@ -594,6 +666,7 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
       return s.data.signedUrl as string;
     };
     const requests: Record<string, string> = { ...(job.progress?.requests ?? {}) };
+    const moveLog: Array<{ shot: number; piece: number; try: number; moved: boolean; note: string }> = [];
     const remember = async (key: string, id: string) => { requests[key] = id; await renew({ requests: { ...requests } }).catch(() => undefined); };
     const render = (c: ShotCtx) => (deps.render ? deps.render(c) : defaultRender(deps, c));
     const cut = (from: number, to: number, target: string) => (deps.cut ? deps.cut(source, from, to, target) : defaultCut(source, from, to, target));
@@ -611,17 +684,31 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
         return out;
       }
       // a move: 4 s pieces one after another, each opened on the last picture of the one before
-      const parts = movePieces(s.start, s.end), files: string[] = [];
+      const parts = movePieces(s.start, s.end, movePieceSeconds(env)), files: string[] = [];
       const firstStill = join(d, `shot-${i}-look.jpg`);
       if (!test) await extractFrame(source, firstStill, s.start + 0.1); else await writeFile(firstStill, "");
       const lookUrl = await publish(firstStill, `shot-${i}-look.jpg`, "image/jpeg");
       let opener: string | null = null;
+      const cinema = moveOnCinema(env), move = s.move;
       for (let k = 0; k < parts.length; k++) {
         const p = parts[k], pc = join(d, `shot-${i}-p${k}.mp4`);
         await cut(p.start, p.end, pc);
         const pcUrl = await publish(pc, `shot-${i}-p${k}.mp4`, "video/mp4");
-        const key = `${job.id}:${i}:${t}:${k}`;
-        const got = await render({ job: job.id, user: u, engine, key, prompt: promptFor(s, engine, { k, n: parts.length, chained: k > 0 }), videoUrl: pcUrl, imageUrls: opener ? [opener, lookUrl] : [lookUrl], seconds: p.seconds, aspect, requestId: requests[key] ?? null, onSubmit: (id) => remember(key, id), dir: d });
+        // a piece that came back on the take's own camera is made once more with firmer words; twice still, the shot
+        // gives up (its original footage stays, uncharged) instead of joining a move that stops halfway
+        let got: { file: string; requestId: string } | null = null;
+        for (let r = 0; r < PIECE_TRIES; r++) {
+          const firm = r > 0, key = `${job.id}:${i}:${t}:${k}${firm ? `:r${r}` : ""}`;
+          got = await render({ job: job.id, user: u, engine, key, prompt: promptFor(s, engine, { k, n: parts.length, chained: k > 0, firm }), videoUrl: pcUrl, imageUrls: opener ? [opener, lookUrl] : [lookUrl], seconds: p.seconds, aspect, requestId: requests[key] ?? null, onSubmit: (id) => remember(key, id), dir: d,
+            ...(cinema ? { endpoint: CINEMA_ENDPOINT, camera: cinemaMove(move, env), usdPerSecond: renderUsdPerSecond(engine, env) } : {}) });
+          const seen = deps.pieceCheck ? await deps.pieceCheck({ result: got.file, move, piece: k, firm, user: u }) : test ? { moved: true, note: "" } : await defaultPieceCheck(deps, { result: got.file, move, user: u }, d);
+          log(`[reshoot] shot ${i + 1} piece ${k + 1}/${parts.length} try ${r + 1} of ${job.id}: ${seen.moved ? "moved" : "did not move"}${seen.note ? ` (${seen.note})` : ""}`);
+          moveLog.push({ shot: i, piece: k, try: r + 1, moved: seen.moved, note: seen.note ?? "" });
+          if (seen.moved) break;
+          got = null;
+          if (r + 1 < PIECE_TRIES) await say(i, "again");
+        }
+        if (!got) throw new RecastError("recast_static", `piece ${k + 1} of ${parts.length} stayed on the take's camera`);
         const out = join(d, `shot-${i}-${t}-p${k}.mp4`);
         await retime(got.file, round2(p.end - p.start), out);
         files.push(out);
@@ -672,6 +759,7 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
             report[i].tries = t; report[i].note = e instanceof RecastError ? e.code : "error";
             log(`[reshoot] shot ${i + 1} try ${t} of ${job.id}: ${String(e?.message ?? e).slice(0, 160)}`);
             if (e instanceof RecastError && e.code === "recast_nsfw") break; // refused: the platform will refuse it again
+            if (e instanceof RecastError && e.code === "recast_static") break; // its pieces already had their second try
             if (t < RESHOOT_LIMITS.tries) await say(i, "again");
             continue;
           }
@@ -717,11 +805,11 @@ export async function runReshootJob(sb: SupabaseClient, deps: ReshootDeps, job: 
     const outputs = [{ index: 1, key: `${base}.mp4`, poster_key: posterOk ? `${base}.jpg` : undefined, kind: "video", bytes, duration: round2(seconds), tool: "reshoot", shots: shotReport }];
     const charged = Math.min(job.credits_reserved, shotReport.reduce((t, s) => t + s.credits, 0));
     const outcome = made.length < todo.length ? "partial" : "done";
-    await renew({ stage: "done", outcome, made_count: made.length, charged, shots: shotReport }).catch(() => undefined);
+    await renew({ stage: "done", outcome, made_count: made.length, charged, shots: shotReport, ...(moveLog.length ? { move_checks: moveLog } : {}) }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
     if (done.error) throw done.error;
     const tries = report.reduce((t, r) => t + r.tries, 0);
-    recordEvent({ user_id: u, kind: "feature", name: "reshoot_done", props: { job: job.id, asked: todo.length, made: made.length, tries, credits: charged, seconds: round2(seconds), moves: todo.filter(({ s }) => s.engine === "seedance_move").length } });
+    recordEvent({ user_id: u, kind: "feature", name: "reshoot_done", props: { job: job.id, asked: todo.length, made: made.length, tries, credits: charged, seconds: round2(seconds), moves: todo.filter(({ s }) => s.engine === "seedance_move").length, move_pieces: moveLog.length, move_static: moveLog.filter((m) => !m.moved).length, move_engine: moveOnCinema(env) ? "cinema" : "seedance" } });
     log(`[reshoot] made ${JSON.stringify({ job: job.id, asked: todo.length, made: made.length, tries, seconds: round2(seconds), charged })}`);
     return outcome;
   } catch (e: any) {
