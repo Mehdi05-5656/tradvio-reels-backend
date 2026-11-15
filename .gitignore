@@ -6,3 +6,4 @@ dist
 rehearsal/
 scripts/__pycache__/
 .venv-learning/
+.lean-build/

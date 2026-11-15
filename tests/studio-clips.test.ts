@@ -389,6 +389,46 @@ test("a YouTube run: the video fetched once, every word and laugh heard, moments
   assert.ok(last.stage_at && last.clip_at, "each stage and clip has its clock, for the time left");
 });
 
+test("lean (STUDIO_CLIPS_LEAN): the sound alone is heard, each clip is cut from its own stretch with its offset, the whole video is never fetched", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  const cut: any[] = [], asked: any[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: () => {}, meta: META,
+    download: async () => { throw new Error("a lean run never fetches the whole video"); },
+    sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
+    stretch: async (_u: string, a: number, b: number, t: string, o: any) => { asked.push([a, b, o.maxHeight, o.sharp]); await writeFile(`${t}.webm`, "vp9"); return { file: `${t}.webm`, t0: a - 0.7 }; },
+    extractAudio: async (src: any, target: string) => { assert.ok(String(src.video).endsWith("lean-sound.webm"), "heard from the sound alone"); await writeStub(src, target); },
+    loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose,
+    cut: async (ctx: any, m: any) => { cut.push({ rank: m.rank, start: m.start, src: ctx.src }); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
+  assert.equal(cut.length, 2);
+  for (const c of cut) {
+    assert.ok(String(c.src.video).includes(`lean-${c.rank}.webm`) && String(c.src.audio).endsWith("lean-sound.webm"), "the clip's own stretch, under the whole sound track");
+    assert.ok(c.src.offset < c.start && c.start - c.src.offset < 2, "the stretch's first frame time, so the cut seeks inside it");
+  }
+  assert.ok(asked.every(([a, b, h, sharp]) => b - a > 10 && h === 1080 && sharp === false), "a second either side, the same lines as the whole download");
+  // inputArgs: the picture seeks into its stretch, the sound to the moment itself
+  const args = inputArgs({ video: "s.webm", audio: "a.webm", proxy: null, width: 0, height: 0, fps: null, offset: 597.867 }, 600, 30);
+  assert.deepEqual(args.slice(0, 4), ["-ss", "2.133", "-i", "s.webm"]);
+  assert.deepEqual(args.slice(4, 8), ["-ss", "600.000", "-i", "a.webm"]);
+});
+
+test("lean: a stretch YouTube refuses twice switches the rest of the run to the whole video, fetched once; no clip is lost", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  let whole = 0, tries = 0; const from: string[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: () => {}, meta: META,
+    download: async (_u: string, target: string) => { whole++; await writeFile(target, "mp4"); },
+    sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
+    stretch: async () => { tries++; throw new LinkError("link_blocked", "403"); },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose,
+    cut: async (ctx: any, m: any) => { from.push(ctx.src.video); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
+  assert.equal(whole, 1, "the whole video once");
+  assert.ok(tries >= 2, "each stretch is tried twice before giving up");
+  assert.equal(from.length, 2); assert.ok(from.every((f) => f.endsWith("youtube.mp4")));
+});
+
 test("YouTube refusing our servers: chosen from its captions, only choosing is charged, the collection asks for the file; the upload then cuts them", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
   const deps: any = { env: ENV, plans: PLANS, log: () => {}, meta: META,

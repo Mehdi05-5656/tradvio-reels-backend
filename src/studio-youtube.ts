@@ -200,9 +200,13 @@ export async function youtubeSection(url: string, start: number, end: number, ta
 /** The format list for a whole-video download: at most `h` lines and 30 fps (a 1080p60 vlog came down at 338 kB/s and
  *  cut twice as slowly, Nov 1 2026), never AV1 (slow to decode here), with the ~70 kb/s Opus sound when there is one.
  *  `language`: a dubbed track to prefer (YouTube's auto-dubs), else the video's own original track (see downloadSort). */
-export const downloadFormat = (h: number, language?: string | null) => {
+/** The sound track the whole download takes: a dubbed track when asked for, else small Opus (sorted to the original). */
+export const soundFormat = (language?: string | null) => {
   const lang = language && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(language) ? language : null;
-  const audio = lang ? `ba[language^=${lang}][acodec=opus]/ba[language^=${lang}]/ba[acodec=opus][abr<=100]/ba` : "ba[acodec=opus][abr<=100]/ba";
+  return lang ? `ba[language^=${lang}][acodec=opus]/ba[language^=${lang}]/ba[acodec=opus][abr<=100]/ba` : "ba[acodec=opus][abr<=100]/ba";
+};
+export const downloadFormat = (h: number, language?: string | null) => {
+  const audio = soundFormat(language);
   return `bv*[height<=${h}][fps<=30][vcodec!^=av01]+${audio}/bv*[height<=${h}][vcodec!^=av01]+${audio}/b[height<=${h}]/b`;
 };
 /** How yt-dlp ranks what matches: the original audio track first (lang = YouTube's own default track, never an
@@ -222,6 +226,42 @@ export async function youtubeDownload(url: string, target: string, o: { fetch?: 
 export async function youtubeAudio(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined> } = {}): Promise<void> {
   await runYtDlp(["-f", "ba[abr<=96]/ba/b", "-o", target, url], { ...o, timeoutMs: 20 * 60_000 });
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The sound of the video could not be fetched"); }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Clips without the whole video (STUDIO_CLIPS_LEAN, Nov 15 2026): the sound alone to hear and choose the moments, then
+// only the stretches that become clips. The proxy bills by the gigabyte and the whole video was ~78 % of a run's cost.
+// ---------------------------------------------------------------------------------------------------
+/** The sound of a YouTube video for Clips: heard for speech-to-text and laid under every clip. `target` has no
+ *  extension; resolves with the file written (.webm or .m4a). */
+export async function youtubeSound(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; language?: string | null; signal?: AbortSignal } = {}): Promise<string> {
+  await runYtDlp(["-f", soundFormat(o.language), "-S", "lang,+size,+br", "-o", `${target}.%(ext)s`, url], { ...o, timeoutMs: 20 * 60_000 });
+  for (const ext of ["webm", "m4a", "opus", "mp4", "mp3"]) { try { await access(`${target}.${ext}`); return `${target}.${ext}`; } catch { /* next */ } }
+  throw new LinkError("link_fetch_failed", "The sound of the video could not be fetched");
+}
+/** The picture track for stretches: the whole download's choice (at most `h` lines, 30 fps first, never AV1), or with
+ *  `sharp` the most lines up to `h` at any frame rate (a 60 fps video's 1080 lines instead of its 720 at 30 fps; clips
+ *  render at 30 either way). Only the stretches come down, so the bigger track costs little. */
+export const stretchFormat = (h: number, sharp: boolean) => sharp
+  ? `bv*[height<=${h}][vcodec!^=av01]`
+  : `bv*[height<=${h}][fps<=30][vcodec!^=av01]/bv*[height<=${h}][vcodec!^=av01]`;
+export const stretchSort = (h: number, sharp: boolean) => (sharp ? `res:${h},+size` : `res:${h},fps:30,+size`);
+/** One stretch of the picture (no sound), copied as YouTube sends it from the keyframe before `start`, with the video's
+ *  own timestamps kept (-copyts): the file starts at that keyframe's time, which `t0` reports, so a cut seeks exactly.
+ *  yt-dlp fetches it itself (only its download-stage addresses are accepted: the ones it prints without downloading
+ *  were refused with 403, even locally, Nov 15 2026). */
+export async function youtubeStretch(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; sharp?: boolean; signal?: AbortSignal; probe: (file: string) => Promise<number | null> }): Promise<{ file: string; t0: number }> {
+  const h = o.maxHeight ?? 1080, sharp = !!o.sharp;
+  await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", "ffmpeg_i:-copyts",
+    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, timeoutMs: 8 * 60_000 });
+  for (const ext of ["webm", "mp4", "mkv"]) {
+    const file = `${target}.${ext}`;
+    try { await access(file); } catch { continue; }
+    const t0 = await o.probe(file);
+    if (t0 == null || !(t0 <= start + 0.05) || t0 < start - 30) throw new LinkError("link_fetch_failed", `the stretch does not start where it should (${t0} for ${start.toFixed(2)})`);
+    return { file, t0 };
+  }
+  throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched");
 }
 
 /** The 11-character video id, for a clean name when there is no title. */
