@@ -99,7 +99,8 @@ export const LIGHT_WORDS: Record<Light, string> = {
 };
 export const MOVE_WORDS: Record<Exclude<Move, "none">, (k: number, n: number) => string> = {
   // a full circle over the pieces: front, right side, behind, left side, front again
-  orbit: (k, n) => { const stops = ["in front of the person", "at the person's right side", "behind the person", "at the person's left side", "in front of the person"]; const at = (i: number) => stops[Math.min(4, Math.round((i * 4) / n))]; return `the camera keeps orbiting around the person clockwise at chest height, travelling from ${at(k)} to ${at(k + 1)}, keeping them centred`; },
+  // one piece is the whole circle: "from in front to in front" alone reads as staying put
+  orbit: (k, n) => { if (n === 1) return "the camera orbits all the way around the person clockwise at chest height, from in front of them, round their right side, behind them, round their left side and back to the front, keeping them centred"; const stops = ["in front of the person", "at the person's right side", "behind the person", "at the person's left side", "in front of the person"]; const at = (i: number) => stops[Math.min(4, Math.round((i * 4) / n))]; return `the camera keeps orbiting around the person clockwise at chest height, travelling from ${at(k)} to ${at(k + 1)}, keeping them centred`; },
   push_in: (k, n) => `the camera pushes in slowly and smoothly toward the person's face, from ${k === 0 ? "the source's framing" : "where it was"} to ${k + 1 === n ? "a close-up of the face" : "closer"}`,
 };
 

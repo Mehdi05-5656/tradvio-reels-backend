@@ -448,6 +448,7 @@ test("switches for moves: the piece length, and Cinema Studio with a named camer
   assert.ok(!("camera_movement" in bodyFor({ engine: "seedance_move", prompt: "p", videoUrl: "v", imageUrls: ["a"], seconds: 4, aspect: "9:16" })));
   const firm = promptFor({ ...NO_CHANGE, move: "orbit" }, "seedance_move", { k: 1, n: 2, chained: true, firm: true });
   assert.ok(firm.endsWith(FIRM_WORDS));
+  assert.match(promptFor({ ...NO_CHANGE, move: "orbit" }, "seedance_move", { k: 0, n: 1, chained: false }), /all the way around .* behind them/, "one piece is the whole circle, never 'from in front to in front'");
   assert.ok(!promptFor({ ...NO_CHANGE, move: "orbit" }, "seedance_move", { k: 1, n: 2, chained: true }).includes(FIRM_WORDS));
 });
 
