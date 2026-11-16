@@ -172,7 +172,9 @@ async function main() {
   });
   // A deploy or restart (Render: SIGTERM about a minute after the new server is live, then 30 s): no more jobs taken,
   // requests in flight finish, every Studio job held goes back to the queue at once, buffers are written (studio-leases.ts)
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => {
+  // (process.on, not once: Render signals the whole process group, so this server gets SIGTERM twice, from Render
+  //  and again from npm; with once, the second one killed it before the first had run. A repeat is ignored inside.)
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => {
     void stopGracefully({ signal, sb: getSb, server: http, flush: [flushEvents, flushCosts, flushPosthog], waitMs: 10_000 });
   });
 }
