@@ -107,3 +107,21 @@ test("a stretch's ceiling: 3 minutes, more for long stretches", async () => {
   assert.equal(stretchTimeoutMs(42), 180_000);
   assert.equal(stretchTimeoutMs(182), 728_000, "a 3-minute clip gets 4 s a second");
 });
+
+test("a yt-dlp past its ceiling is killed with the ffmpeg it started; the call ends within seconds, not when ffmpeg finishes", { skip: process.platform === "win32" }, async () => {
+  const { writeFile, chmod, mkdtemp, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const { youtubeSound } = await import("../src/studio-youtube.js");
+  const dir = await mkdtemp(join(tmpdir(), "ytkill-"));
+  // a stand-in yt-dlp: starts a long "ffmpeg" (a child that keeps the pipes open, as ffmpeg does), writes its pid, waits
+  const fake = join(dir, "yt-dlp"), pidFile = join(dir, "child.pid");
+  await writeFile(fake, `#!/bin/sh\nsleep 300 &\necho $! > ${pidFile}\nwait\n`); await chmod(fake, 0o755);
+  const began = Date.now();
+  // (the sound's ceiling is 20 minutes; an abort after 1 s takes the same kill path)
+  const ac = new AbortController(); setTimeout(() => ac.abort(), 1000);
+  await assert.rejects(youtubeSound("https://www.youtube.com/watch?v=x", join(dir, "s"), { env: { YT_DLP_PATH: fake }, signal: ac.signal }), /stopped/);
+  assert.ok(Date.now() - began < 8000, `ended in ${Date.now() - began} ms`);
+  const pid = Number(await readFile(pidFile, "utf8"));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.throws(() => process.kill(pid, 0), "the child it started is gone too");
+});

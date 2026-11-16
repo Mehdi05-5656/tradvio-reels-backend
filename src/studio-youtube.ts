@@ -51,6 +51,21 @@ export function classifyYtDlpError(stderr: string): LinkError {
   return new LinkError("link_fetch_failed", `The video could not be downloaded: ${stderr.replace(/\s+/g, " ").trim().slice(-200)}`);
 }
 
+/** Kills a yt-dlp started in its own process group, and everything it started (ffmpeg); the process alone if that fails. */
+export function killTree(child: { pid?: number; kill: (s?: NodeJS.Signals) => boolean }) {
+  try { if (child.pid) { process.kill(-child.pid, "SIGKILL"); return; } } catch { /* already gone, or no group */ }
+  try { child.kill("SIGKILL"); } catch { /* gone */ }
+}
+/** yt-dlp runs in their own process groups, so they no longer end with the server: every one still running is killed
+ *  when the server exits (a deploy, after the graceful stop has handed the jobs back). */
+const liveGroups = new Set<{ pid?: number; kill: (s?: NodeJS.Signals) => boolean }>();
+let exitHook = false;
+function track(child: ReturnType<typeof spawn>) {
+  liveGroups.add(child); child.once("close", () => liveGroups.delete(child));
+  if (!exitHook) { exitHook = true; process.once("exit", () => { for (const c of liveGroups) killTree(c); }); }
+  return child;
+}
+
 /** yt-dlp's arguments: best MP4 up to 1080p with sound, merged with ffmpeg, capped in size and length, no playlists.
  *  Node serves as the JavaScript runtime YouTube's challenges need (the official build carries the solver scripts).
  *  STUDIO_YT_PROXY (an http(s):// or socks5:// URL, ideally residential) and a cookies file are passed when given. */
@@ -85,9 +100,9 @@ export async function downloadYouTube(url: string, target: string, o: DownloadOp
   const env = o.env ?? process.env;
   const args = [...ytDlpArgs(url, target, { ...o, proxy: youtubeProxy(env).proxy, cookies: await cookiesFile(env) }), "--print", "after_move:title"];
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = track(spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], detached: true }));
     let stdout = "", stderr = "", killed = false;
-    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, o.timeoutMs ?? 600_000);
+    const timer = setTimeout(() => { killed = true; killTree(child); }, o.timeoutMs ?? 600_000);
     child.stdout.on("data", (b) => { stdout += b.toString(); if (stdout.length > 65536) stdout = stdout.slice(-65536); });
     child.stderr.on("data", (b) => { stderr += b.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
@@ -129,9 +144,9 @@ export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env
   const proxy = youtubeProxy(env).proxy;
   const args = streamArgs(url, { proxy, cookies: await cookiesFile(env) });
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = track(spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], detached: true }));
     let stdout = "", stderr = "", killed = false;
-    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, o.timeoutMs ?? 120_000);
+    const timer = setTimeout(() => { killed = true; killTree(child); }, o.timeoutMs ?? 120_000);
     child.stdout.on("data", (b) => { stdout += b.toString(); if (stdout.length > 65536) stdout = stdout.slice(-65536); });
     child.stderr.on("data", (b) => { stderr += b.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
@@ -178,16 +193,22 @@ async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<
     ...args,
   ];
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(bin, full, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "", killed = false, stopped = false;
-    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, o.timeoutMs ?? 8 * 60_000);
+    // its own process group, so a kill reaches the ffmpeg it starts too (killing yt-dlp alone left ffmpeg downloading
+    // and holding the pipes: tries ran 4-20 minutes past their ceiling in the Nov 15 2026 stress test)
+    const child = track(spawn(bin, full, { stdio: ["ignore", "pipe", "pipe"], detached: true }));
+    let stdout = "", stderr = "", killed = false, stopped = false, settled = false;
+    const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); o.signal?.removeEventListener("abort", stop); fn(); };
+    const end = () => finish(() => stopped ? reject(new LinkError("link_stopped", "The download was stopped")) : reject(new LinkError("link_fetch_failed", "YouTube took too long to send the video")));
+    // killed: settled when it closes, or 5 s later whatever is still holding on
+    const kill = () => { killTree(child); setTimeout(end, 5_000).unref?.(); };
+    const timer = setTimeout(() => { killed = true; kill(); }, o.timeoutMs ?? 8 * 60_000);
     // the run that asked for it is gone (its lease went to another attempt): stop paying for the download now
-    const stop = () => { stopped = true; child.kill("SIGKILL"); };
+    const stop = () => { stopped = true; kill(); };
     if (o.signal?.aborted) stop(); else o.signal?.addEventListener("abort", stop, { once: true });
     child.stdout.on("data", (b) => { stdout += b.toString(); if (stdout.length > 65536) stdout = stdout.slice(-65536); });
     child.stderr.on("data", (b) => { stderr += b.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
-    child.on("error", (e) => { clearTimeout(timer); reject(e); });
-    child.on("close", (code) => { clearTimeout(timer); o.signal?.removeEventListener("abort", stop); if (stopped) reject(new LinkError("link_stopped", "The download was stopped")); else if (killed) reject(new LinkError("link_fetch_failed", "YouTube took too long to send the video")); else resolve({ code, stdout, stderr }); });
+    child.on("error", (e) => finish(() => reject(e)));
+    child.on("close", (code) => { if (stopped || killed) end(); else finish(() => resolve({ code, stdout, stderr })); });
   });
   if (out.code !== 0) {
     const said = redactProxy(`${out.stderr}\n${out.stdout}`).split("\n").filter((l) => l.trim() && !/^\[(download|youtube|info|hlsnative)\]/.test(l)).slice(-12).join(" | ");
