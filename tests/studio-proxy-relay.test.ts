@@ -101,3 +101,9 @@ test("one relay per proxy session: a fresh session gets its own, the first keeps
   for (const r of [a!, b!]) assert.equal(await connect(r, "example.com:443"), "HTTP/1.1 403 Forbidden", "both still answer");
   assert.equal(relayStats().relays, 2);
 });
+
+test("a stretch's ceiling: 3 minutes, more for long stretches", async () => {
+  const { stretchTimeoutMs } = await import("../src/studio-youtube.js");
+  assert.equal(stretchTimeoutMs(42), 180_000);
+  assert.equal(stretchTimeoutMs(182), 728_000, "a 3-minute clip gets 4 s a second");
+});

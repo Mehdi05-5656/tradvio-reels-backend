@@ -274,9 +274,10 @@ export const stretchSort = (h: number, sharp: boolean) => (sharp ? `res:${h},+si
 /** ffmpeg's limit on a read or write that gets nothing back (microseconds). Without it ffmpeg waits forever on a tunnel
  *  that went silent: the first live lean run sat 8 minutes on one stretch (Nov 15 2026). */
 export const STRETCH_STALL_US = 30_000_000;
-/** The most one stretch may take (a 40 s stretch took 47-68 s through the real proxy, page read included, Nov 15 2026);
- *  then the next try, on a fresh session. */
+/** The most one stretch may take: 3 minutes, or 4 s per second of stretch for long clips (a 40 s stretch took 47-68 s
+ *  through the real proxy, page read included, Nov 15 2026); then the next try, on a fresh session. */
 export const STRETCH_TIMEOUT_MS = 3 * 60_000;
+export const stretchTimeoutMs = (seconds: number) => Math.max(STRETCH_TIMEOUT_MS, Math.ceil(seconds) * 4_000);
 /** One stretch of the picture (no sound), copied as YouTube sends it from the keyframe before `start`, with the video's
  *  own timestamps kept (-copyts): the file starts at that keyframe's time, which `t0` reports, so a cut seeks exactly.
  *  yt-dlp fetches it itself (only its download-stage addresses are accepted: the ones it prints without downloading
@@ -290,7 +291,7 @@ export async function youtubeStretch(url: string, start: number, end: number, ta
   const chosen = youtubeProxy(env, !!o.fresh);
   const proxy = await ffmpegProxy(chosen.proxy);
   await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", `ffmpeg_i:-copyts -rw_timeout ${STRETCH_STALL_US}`,
-    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: STRETCH_TIMEOUT_MS });
+    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: stretchTimeoutMs(end - Math.max(0, start)) });
   for (const ext of ["webm", "mp4", "mkv"]) {
     const file = `${target}.${ext}`;
     try { await access(file); } catch { continue; }
