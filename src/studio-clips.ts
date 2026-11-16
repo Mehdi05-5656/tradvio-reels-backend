@@ -73,6 +73,16 @@ export const LEAN = { call_bytes: 1_000_000, ahead: 3,
   sound_bytes_per_second: 7_000, stretch_extra_seconds: 7, stretch_bytes_per_second: 150_000 };
 /** Whether YouTube runs fetch the sound and each clip's stretch instead of the whole video (STUDIO_CLIPS_LEAN). */
 export const leanOn = (env: Record<string, string | undefined>) => env.STUDIO_CLIPS_LEAN === "on";
+/** STUDIO_CLIPS_LEAN: "on" for everyone, "off" (or unset) for nobody, or a list of account ids (comma separated) for
+ *  those accounts only: lean is proven on live runs of our own accounts before customers get it (Nov 15 2026). */
+export function leanFor(env: Record<string, string | undefined>, userId?: string | null): boolean {
+  const v = String(env.STUDIO_CLIPS_LEAN ?? "").trim();
+  if (v === "on") return true;
+  if (!v || v === "off") return false;
+  return !!userId && v.split(/[\s,]+/).includes(userId);
+}
+/** The environment as one account's run and quote see it (STUDIO_CLIPS_LEAN resolved to "on" or "off"). */
+export const leanEnv = (env: Record<string, string | undefined>, userId?: string | null): Record<string, string | undefined> => ({ ...env, STUDIO_CLIPS_LEAN: leanFor(env, userId) ? "on" : "off" });
 /** Framing, per second of clip: one still a second plus the words to the framing model (~250 tokens a still). */
 export function frameUsdPerSecond(env: Record<string, string | undefined> = process.env): number {
   const m = String(env.STUDIO_CLIPS_FRAME_MODEL || FRAME_MODEL);
@@ -282,6 +292,7 @@ export type YtMeta = { id: string | null; url: string; title: string | null; cha
 export type Segment = { start: number; end: number; text: string };
 export type ClipsDeps = {
   env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; plans?: PlanLike[];
+  /** whose quote this is (STUDIO_CLIPS_LEAN may name accounts) */ userId?: string | null;
   meta?: (url: string) => Promise<YtMeta>;
   transcript?: (url: string) => Promise<Segment[] | null>;
   /** speech-to-text: the words (with speakers), and the sounds that are not speech when the service gives them */
@@ -981,7 +992,7 @@ const youtubeUrl = (v: unknown): string | null => {
 const LENGTH_WORDS: Record<ClipLength, string> = { short: "short", standard: "30-second", long: "long", minute: "one-minute" };
 /** Prices a run before it starts: reading the video, plus each clip asked for. The run is charged for the clips it makes. */
 export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id: string; kind: string; name?: string | null; bytes?: number | null; probe?: any } | null, options: any): Promise<ClipsQuote> {
-  const env = deps.env ?? process.env;
+  const env = leanEnv(deps.env ?? process.env, deps.userId);
   const o = options && typeof options === "object" ? options : {};
   const length = lengthOf(o.length), format = formatOf(o.format);
   let platform: "youtube" | "upload", seconds: number, source: Record<string, any>, url: string | null = null;
@@ -1149,7 +1160,7 @@ function priceOf(o: any, plans: PlanLike[], env: Record<string, string | undefin
   return o?.plan_from ? { ...fresh, analysis: 0, lite: 0 } : fresh;
 }
 export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job): Promise<string> {
-  const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
+  const env = leanEnv(deps.env ?? process.env, job.user_id), log = deps.log ?? ((l: string) => console.log(l));
   const plans = deps.plans ?? [];
   const o = job.options ?? {}, u = job.user_id;
   const collectionId: string = o.collection_id;

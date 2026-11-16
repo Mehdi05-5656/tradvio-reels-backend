@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { access, chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
+import { ffmpegProxy } from "./studio-proxy-relay.js";
 
 export const YT_DLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 export type DownloadOpts = { maxBytes: number; maxSeconds: number; timeoutMs?: number; fetch?: typeof fetch; env?: Record<string, string | undefined> };
@@ -141,7 +142,7 @@ export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env
 }
 
 /** yt-dlp run with our usual settings (proxy, cookies, Node for YouTube's challenges); its complaint becomes a LinkError. */
-async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number; signal?: AbortSignal }): Promise<string> {
+async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number; signal?: AbortSignal; proxy?: string | null }): Promise<string> {
   const bin = await ensureYtDlp(o);
   const env = o.env ?? process.env;
   const cookies = await cookiesFile(env);
@@ -149,7 +150,7 @@ async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<
     // not --quiet: when ffmpeg fails inside yt-dlp, its own words are the only clue, and --quiet swallows them
     "--no-playlist", "--no-warnings", "--no-progress", "--force-ipv4", "--socket-timeout", "30", "--retries", "3",
     "--no-js-runtimes", "--js-runtimes", `node:${process.execPath}`,
-    ...(env.STUDIO_YT_PROXY ? ["--proxy", env.STUDIO_YT_PROXY] : []),
+    ...((o.proxy !== undefined ? o.proxy : env.STUDIO_YT_PROXY) ? ["--proxy", (o.proxy !== undefined ? o.proxy : env.STUDIO_YT_PROXY)!] : []),
     ...(cookies ? ["--cookies", cookies] : []),
     ...args,
   ];
@@ -252,8 +253,12 @@ export const stretchSort = (h: number, sharp: boolean) => (sharp ? `res:${h},+si
  *  were refused with 403, even locally, Nov 15 2026). */
 export async function youtubeStretch(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; sharp?: boolean; signal?: AbortSignal; probe: (file: string) => Promise<number | null> }): Promise<{ file: string; t0: number }> {
   const h = o.maxHeight ?? 1080, sharp = !!o.sharp;
+  // ffmpeg fetches the stretch and only uses an http:// proxy: an https:// one goes through the local relay
+  // (studio-proxy-relay.ts), or YouTube sees our server's own address and refuses it (403 on Render, Nov 15 2026)
+  const env = o.env ?? process.env;
+  const proxy = await ffmpegProxy(env.STUDIO_YT_PROXY || null);
   await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", "ffmpeg_i:-copyts",
-    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, timeoutMs: 8 * 60_000 });
+    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: 8 * 60_000 });
   for (const ext of ["webm", "mp4", "mkv"]) {
     const file = `${target}.${ext}`;
     try { await access(file); } catch { continue; }

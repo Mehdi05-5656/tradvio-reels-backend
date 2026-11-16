@@ -1210,7 +1210,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "reshoot") return quoteReshoot(env, PLANS, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
     const asset = await loadAsset(sb, u, body?.asset_id);
     if (String(body?.tool ?? "") === "clips") {
-      const q = await quoteClips({ env, log }, PLANS, asset, body?.options);
+      const q = await quoteClips({ env, log, userId: u }, PLANS, asset, body?.options);
       // how long it would take if started now, counting the runs already waiting (the page says "ready in about...")
       try {
         const [queue, timing] = await Promise.all([clipsQueue(sb), clipsTiming(sb)]);
