@@ -118,10 +118,18 @@ test("a yt-dlp past its ceiling is killed with the ffmpeg it started; the call e
   await writeFile(fake, `#!/bin/sh\nsleep 300 &\necho $! > ${pidFile}\nwait\n`); await chmod(fake, 0o755);
   const began = Date.now();
   // (the sound's ceiling is 20 minutes; an abort after 1 s takes the same kill path)
-  const ac = new AbortController(); setTimeout(() => ac.abort(), 1000);
-  await assert.rejects(youtubeSound("https://www.youtube.com/watch?v=x", join(dir, "s"), { env: { YT_DLP_PATH: fake }, signal: ac.signal }), /stopped/);
-  assert.ok(Date.now() - began < 8000, `ended in ${Date.now() - began} ms`);
-  const pid = Number(await readFile(pidFile, "utf8"));
-  await new Promise((r) => setTimeout(r, 200));
-  assert.throws(() => process.kill(pid, 0), "the child it started is gone too");
+  const ac = new AbortController();
+  const call = youtubeSound("https://www.youtube.com/watch?v=x", join(dir, "s"), { env: { YT_DLP_PATH: fake }, signal: ac.signal });
+  // stopped once the "ffmpeg" is running (under a busy test run the script can take a while to start it)
+  let pid = 0;
+  for (let k = 0; k < 200 && !pid; k++) { pid = Number(await readFile(pidFile, "utf8").catch(() => "0")) || 0; if (!pid) await new Promise((r) => setTimeout(r, 50)); }
+  assert.ok(pid > 0, "the stand-in started its child");
+  const stoppedAt = Date.now(); ac.abort();
+  await assert.rejects(call, /stopped/);
+  assert.ok(Date.now() - stoppedAt < 7000, `ended ${Date.now() - stoppedAt} ms after the stop (the child sleeps 300 s)`);
+  // gone (a killed process can take a moment to be reaped)
+  let alive = true;
+  for (let k = 0; k < 60 && alive; k++) { try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); } catch { alive = false; } }
+  assert.equal(alive, false, "the child it started is gone too");
+  void began;
 });
