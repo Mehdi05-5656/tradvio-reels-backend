@@ -431,6 +431,24 @@ test("lean: a stretch YouTube refuses twice switches the rest of the run to the 
   assert.equal(from.length, 2); assert.ok(from.every((f) => f.endsWith("youtube.mp4")));
 });
 
+test("lean: a sound YouTube refuses three times sends the run to the whole video (heard and cut from it), never to 'upload the file'", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  let whole = 0, soundTries = 0, stretches = 0; const from: string[] = [], soundFresh: boolean[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: () => {}, meta: META,
+    download: async (_u: string, target: string) => { whole++; await writeFile(target, "mp4"); },
+    sound: async (_u: string, _t: string, _l: any, _s: any, fresh?: boolean) => { soundTries++; soundFresh.push(!!fresh); throw new LinkError("link_fetch_failed", "504"); },
+    stretch: async () => { stretches++; throw new Error("no stretch once the sound has failed"); },
+    extractAudio: async (src: any, target: string) => { assert.ok(String(src.video).endsWith("youtube.mp4"), "heard from the whole video"); await writeStub(src, target); },
+    loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose,
+    cut: async (ctx: any, m: any) => { from.push(ctx.src.video); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
+  assert.equal(soundTries, 3); assert.deepEqual(soundFresh, [false, true, true], "its retries on fresh proxy sessions");
+  assert.equal(whole, 1, "the whole video once"); assert.equal(stretches, 0);
+  assert.equal(from.length, 2); assert.ok(from.every((f) => f.endsWith("youtube.mp4")));
+  assert.notEqual(sb.t.studio_collections[0].status, "needs_file");
+});
+
 test("lean prices (owner, Nov 15 2026: the same margins as before, the saving to the person): 2 credits a minute to read, 5 a clip, captions 2 more; the old prices with the switch off", () => {
   const base = { STUDIO_YT_PROXY: "p", STUDIO_YT_PROXY_USD_PER_GB: "6.25", ELEVENLABS_API_KEY: "k" }, lean = { ...base, STUDIO_CLIPS_LEAN: "on" };
   const p = clipsPrice(PLANS, { seconds: 1500, platform: "youtube", length: "standard", env: lean });

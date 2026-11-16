@@ -3,7 +3,7 @@
 // temp directory, and run with a size and length cap. YouTube sometimes refuses cloud addresses ("confirm you're not a
 // bot"); that becomes a plain failure the person can act on (upload the file), never a hang or a retry storm.
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ffmpegProxy, freshProxySession } from "./studio-proxy-relay.js";
@@ -290,13 +290,20 @@ export async function youtubeStretch(url: string, start: number, end: number, ta
   const env = o.env ?? process.env;
   const chosen = youtubeProxy(env, !!o.fresh);
   const proxy = await ffmpegProxy(chosen.proxy);
-  await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", `ffmpeg_i:-copyts -rw_timeout ${STRETCH_STALL_US}`,
-    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: stretchTimeoutMs(end - Math.max(0, start)) });
-  for (const ext of ["webm", "mp4", "mkv"]) {
+  // nothing left from an earlier try (a part file or another format's file) can be taken for this try's stretch
+  const exts = ["webm", "mp4", "mkv"];
+  await Promise.all(exts.flatMap((x) => [`${target}.${x}`, `${target}.${x}.part`]).map((f) => rm(f, { force: true })));
+  const said = await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", `ffmpeg_i:-copyts -rw_timeout ${STRETCH_STALL_US}`,
+    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "--print", "after_move:%(format_id)s %(protocol)s %(ext)s",
+    "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: stretchTimeoutMs(end - Math.max(0, start)) });
+  const format = said.trim().split("\n").pop()?.slice(0, 60) ?? "?";
+  for (const ext of exts) {
     const file = `${target}.${ext}`;
     try { await access(file); } catch { continue; }
     const t0 = await o.probe(file);
-    if (t0 == null || !(t0 <= start + 0.05) || t0 < start - 30) throw new LinkError("link_fetch_failed", `the stretch does not start where it should (${t0} for ${start.toFixed(2)})`);
+    // (Nov 15 2026 on Render: two stretches came back starting at 2.72 s instead of ~521 and ~1081; the format is now
+    //  in the message so the next one can be traced)
+    if (t0 == null || !(t0 <= start + 0.05) || t0 < start - 30) throw new LinkError("link_fetch_failed", `the stretch does not start where it should (${t0} for ${start.toFixed(2)}; format ${format})`);
     if (chosen.fresh) pinYoutubeProxy(env, chosen.proxy);
     return { file, t0 };
   }

@@ -1273,6 +1273,19 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const sharp = env.STUDIO_CLIPS_LEAN_SHARP === "on";
   let soundFile: string | null = null;
   const leanStat = { bytes: 0, sound_bytes: 0, calls: 0, sound_s: 0, stretch_s: 0, wait_s: 0, fallback: false };
+  // lean: the sound could not be fetched after its tries; the run goes on the whole video (another route, its own tries)
+  // rather than asking the person for the file
+  let soundFailed = false;
+  const soundOrWhole = async (seconds: number): Promise<string> => {
+    try { return await fetchSound(); } catch (e: any) {
+      if (!blockedByYouTube(e) || job.signal?.aborted) throw e;
+      soundFailed = true; leanStat.fallback = true;
+      log(`[clips] lean sound of ${job.id} failed (${e.code}); the whole video instead`);
+      await renew(sb, job, { message: "Fetching the video" });
+      await fetchYouTube(seconds);
+      return ytFile!;
+    }
+  };
   const leanSpent = (bytes: number, part: "sound" | "stretch") => {
     leanStat.bytes += bytes + LEAN.call_bytes; leanStat.calls++;
     const usd = ((bytes + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env);
@@ -1335,7 +1348,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
           log(`[clips] heard before ${JSON.stringify({ job: job.id, key: hkey })}`);
         } else try {
           await renew(sb, job, { message: lean ? "Fetching the sound" : "Fetching the video" });
-          if (lean) heard = await listen({ video: await fetchSound(), audio: null, proxy: null, width: 0, height: 0, fps: null });
+          if (lean) heard = await listen({ video: await soundOrWhole(seconds), audio: null, proxy: null, width: 0, height: 0, fps: null });
           else { await fetchYouTube(seconds); heard = await listen({ video: ytFile!, audio: null, proxy: null, width: 0, height: 0, fps: null }); }
           if (heard && hkey && words) await saveHeard(sb, hkey, { words, events, language: heardLanguage, excess }).catch((e: any) => log(`[clips] heard not kept ${job.id}: ${String(e?.message ?? e).slice(0, 120)}`));
         } catch (e: any) {
@@ -1394,9 +1407,9 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     let src: SourceInput;
     if (youtube) {
       try {
-        if (lean) { if (!soundFile && todo.length) { await renew(sb, job, { message: "Fetching the sound" }); await fetchSound(); } }
+        if (lean && !soundFailed) { if (!soundFile && todo.length) { await renew(sb, job, { message: "Fetching the sound" }); await soundOrWhole(p.seconds); } }
         else if (!ytFile && todo.length) { await renew(sb, job, { message: "Fetching the video" }); await fetchYouTube(p.seconds); }
-        src = lean ? { video: "", audio: soundFile, proxy: null, width: 0, height: 0, fps: null } : { video: ytFile ?? join(dir, "youtube.mp4"), audio: null, proxy: null, width: 0, height: 0, fps: null };
+        src = lean && !soundFailed ? { video: "", audio: soundFile, proxy: null, width: 0, height: 0, fps: null } : { video: ytFile ?? join(dir, "youtube.mp4"), audio: null, proxy: null, width: 0, height: 0, fps: null };
       } catch (e: any) {
         if (!blockedByYouTube(e)) throw e;
         // YouTube refused our servers: keep the chosen moments, charge for choosing only, ask for the file.
@@ -1426,7 +1439,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     };
     const queue = [...todo];
     // lean: each clip's stretch (a second either side), fetched a few clips ahead; null when it could not be fetched
-    let leanOff = !lean;
+    let leanOff = !lean || soundFailed;
     const stretchHeight = sharp ? 1080 : p.seconds > CLIP_COST.long_after_seconds || format === "original" ? 720 : 1080;
     const stretches = new Map<number, Promise<{ file: string; t0: number } | null>>();
     const stretchOf = (m: Moment) => {
@@ -1467,7 +1480,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       if (!ytFile) { whole ??= fetchYouTube(p.seconds); await whole; }
       return { video: ytFile!, audio: null, proxy: null, width: 0, height: 0, fps: null };
     };
-    if (lean) for (const m of queue.slice(0, LEAN.ahead + 1)) void stretchOf(m);
+    if (!leanOff) for (const m of queue.slice(0, LEAN.ahead + 1)) void stretchOf(m);
     const skipped: number[] = [];
     const madeNow: number[] = [];
     const clipTimes: Array<[number, number]> = [];
