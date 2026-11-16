@@ -7,3 +7,4 @@ rehearsal/
 scripts/__pycache__/
 .venv-learning/
 .lean-build/
+.env.proxy

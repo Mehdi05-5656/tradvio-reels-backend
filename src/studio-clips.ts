@@ -1200,7 +1200,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const language = o.language && o.language !== "original" ? String(o.language) : null;
     const began = Date.now();
     const once = () => (deps.sound ?? ((x, t, l, sig) => youtubeSound(x, t, { env, fetch: deps.fetch, language: l, signal: sig })))(o.url, join(dir!, "lean-sound"), language, job.signal);
-    const file = await once().catch(async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, 3000)); return once(); });
+    const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(); };
+    const file = await once().catch(again(3000)).catch(again(8000));
     const bytes = await stat(file).then((x) => x.size).catch(() => 0);
     leanSpent(bytes, "sound"); leanStat.sound_s += (Date.now() - began) / 1000;
     log(`[clips] lean sound ${JSON.stringify({ job: job.id, mb: Math.round(bytes / 1e5) / 10, seconds: Math.round((Date.now() - began) / 1000) })}`);
@@ -1350,11 +1351,13 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       if (!pr) {
         pr = (async () => {
           const began = Date.now();
-          // (YouTube refuses a request now and then and lets the same one through seconds later: one more try first)
+          // (YouTube refuses a request now and then and lets the same one through seconds later: through the real proxy
+          // on Nov 15 2026, 4 of ~30 calls were refused once and every retry went through; two more tries, 3 s and 8 s apart)
           const once = () => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeLocal(f).then((i) => i.start).catch(() => null) })))(
             o.url, Math.max(0, m.start - 1), m.end + 1, join(dir!, `lean-${m.rank}`), { maxHeight: stretchHeight, sharp, signal: job.signal });
           try {
-            const r = await once().catch(async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, 3000)); return once(); });
+            const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(); };
+            const r = await once().catch(again(3000)).catch(again(8000));
             leanSpent(await stat(r.file).then((x) => x.size).catch(() => 0), "stretch"); leanStat.stretch_s += (Date.now() - began) / 1000;
             return r;
           } catch (e: any) {

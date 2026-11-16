@@ -28,7 +28,9 @@ const PLANS = [{ id: "starter", monthly_usd: 29, annual_usd_per_month: 24, credi
 // ---- the counting proxy (CONNECT), optionally capped per connection ----
 async function startProxy(port: number, rate: number) {
   const file = join(OUT, `proxy-${port}.json`);
-  const child = spawn(process.execPath, [resolve(process.cwd(), "scripts/clips-count-proxy.mjs"), String(port), file, String(rate)], { stdio: "ignore" });
+  // the real proxy (STUDIO_YT_PROXY in .env.proxy, gitignored) behind the counter, when the file is there; never printed
+  const real = existsSync(resolve(process.cwd(), ".env.proxy")) ? (readFileSync(resolve(process.cwd(), ".env.proxy"), "utf8").match(/^STUDIO_YT_PROXY=(.*)$/m)?.[1]?.trim() ?? "") : "";
+  const child = spawn(process.execPath, [resolve(process.cwd(), "scripts/clips-count-proxy.mjs"), String(port), file, String(rate)], { stdio: "ignore", env: { ...process.env, ...(real && process.env.LEAN_REAL_PROXY === "on" ? { UPSTREAM_PROXY: real } : {}) } });
   await new Promise((r) => setTimeout(r, 600));
   return { child, read: () => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return { down: 0 }; } } };
 }
