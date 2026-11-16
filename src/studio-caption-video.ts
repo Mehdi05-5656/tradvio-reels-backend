@@ -22,7 +22,7 @@ import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import type { LibraryHelpers } from "./studio-library.js";
 
-export const CAPTION_LIMITS = { max_seconds: 900, max_items: 50, max_words: 6000, words_per_day: 40, seconds_per_credit: 5, min_credits: 5, clips_per_clip: 3 };
+export const CAPTION_LIMITS = { max_seconds: 900, max_items: 50, max_words: 6000, words_per_day: 40, seconds_per_credit: 5, min_credits: 5, clips_per_clip: 3 }; // (the Clips page's captions switch: studio-clips.ts captionsPerClip, 2 a clip on lean runs)
 export const captionsEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_CAPTIONS_ENABLED !== "false" && !!env.ELEVENLABS_API_KEY;
 /** Credits for one video: a credit per 5 seconds, at least 5. */
 export const captionCredits = (seconds: number) => Math.max(CAPTION_LIMITS.min_credits, Math.ceil(Math.max(0, seconds) / CAPTION_LIMITS.seconds_per_credit));

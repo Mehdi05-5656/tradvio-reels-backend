@@ -65,7 +65,13 @@ export const FRAME_MODEL = "claude-haiku-5-5";
 /** Lean runs (STUDIO_CLIPS_LEAN): what each yt-dlp call pulls through the proxy besides the media (the watch page and
  *  the player's answers), measured through a counting proxy on Nov 15 2026 at about 1 MB; and how many clips' stretches
  *  are fetched ahead of the cutter. */
-export const LEAN = { call_bytes: 1_000_000, ahead: 3 };
+export const LEAN = { call_bytes: 1_000_000, ahead: 3,
+  // what comes through the proxy in a lean run (Nov 15 2026, three videos through the real proxy): the sound at
+  // ~6.3 kB/s of video (kept at 7), and per clip its stretch, the clip plus ~7 s (a second either side and the keyframe
+  // before it) at ~120-150 kB/s for 1080 lines at 30 fps (kept at 150, the busy end)
+  sound_bytes_per_second: 7_000, stretch_extra_seconds: 7, stretch_bytes_per_second: 150_000 };
+/** Whether YouTube runs fetch the sound and each clip's stretch instead of the whole video (STUDIO_CLIPS_LEAN). */
+export const leanOn = (env: Record<string, string | undefined>) => env.STUDIO_CLIPS_LEAN === "on";
 /** Framing, per second of clip: one still a second plus the words to the framing model (~250 tokens a still). */
 export function frameUsdPerSecond(env: Record<string, string | undefined> = process.env): number {
   const m = String(env.STUDIO_CLIPS_FRAME_MODEL || FRAME_MODEL);
@@ -76,7 +82,16 @@ export function frameUsdPerSecond(env: Record<string, string | undefined> = proc
  *  the cheapest credit we sell, whatever the vendors charge. */
 export const CLIP_RATES = { youtube_per_minute: 5, upload_per_minute: 2, lite_per_minute: 1, analysis_min: 10, lite_min: 5, captions_per_clip: 3,
   per_clip: { short: 5, standard: 5, long: 8, minute: 8 } as Record<ClipLength, number> };
-export const CLIPS_SAFETY_MARGIN = { analysis: 0.35, clip: 0.5 };
+/** Lean runs' prices (owner's decision, Nov 15 2026: "keep the same margins as before; the goal was cheaper for them,
+ *  more credits to keep spending"). The whole download was most of a run's cost; lean cut a typical run's cost from
+ *  ~$1.60 to ~$0.85, so reading a YouTube video drops from 5 to 2 credits a minute and the captions add-on from 3 to 2 a
+ *  clip; clips stay at 5 (8 long). A 25-min, 10-clip run with captions: 205 -> 120 credits, each plan's margin within
+ *  1-2 points of before (Starter monthly ~71 %, Studio yearly ~50 %). With the switch off the old prices stand. */
+export const LEAN_RATES = { youtube_per_minute: 2, captions_per_clip: 2 };
+export const captionsPerClip = (env: Record<string, string | undefined>) => (leanOn(env) ? LEAN_RATES.captions_per_clip : CLIP_RATES.captions_per_clip);
+export const CLIPS_SAFETY_MARGIN = { analysis: 0.35, clip: 0.5,
+  // lean: a clip carries its own download now (most of its cost), so it takes the reading's floor
+  lean_clip: 0.35 };
 /** What the proxy charges per GB (0 without one: then YouTube refuses us and nothing is read through it). */
 export const proxyUsdPerGb = (env: Record<string, string | undefined>) => (env.STUDIO_YT_PROXY ? (Number(env.STUDIO_YT_PROXY_USD_PER_GB) > 0 ? Number(env.STUDIO_YT_PROXY_USD_PER_GB) : 3) : 0);
 /** About how many strong clips of a length a video holds: one per ~2 minutes (a 22-minute vlog held 7, a 14-minute talk
@@ -94,11 +109,15 @@ export function analysisUsd(p: { seconds: number; platform: "youtube" | "upload"
   let usd = 0;
   if (p.choose) usd += hours * CLIP_COST.choose_usd_per_hour;
   if (p.transcribe) usd += hours * CLIP_COST.transcribe_usd_per_hour;
-  if (p.platform === "youtube") usd += CLIP_COST.lookup_usd + (p.download ? (p.seconds * (p.bytesPerSecond ?? (p.seconds > CLIP_COST.long_after_seconds ? CLIP_COST.full_bytes_per_second_long : CLIP_COST.full_bytes_per_second)) / 1e9) * proxyUsdPerGb(p.env) : 0);
+  // (lean: the download is the sound alone, plus one call; each clip's stretch is in perClipUsd)
+  const bps = p.bytesPerSecond ?? (leanOn(p.env) ? LEAN.sound_bytes_per_second : p.seconds > CLIP_COST.long_after_seconds ? CLIP_COST.full_bytes_per_second_long : CLIP_COST.full_bytes_per_second);
+  if (p.platform === "youtube") usd += CLIP_COST.lookup_usd + (p.download ? ((p.seconds * bps + (leanOn(p.env) && p.bytesPerSecond == null ? LEAN.call_bytes : 0)) / 1e9) * proxyUsdPerGb(p.env) : 0);
   return usd;
 }
 /** One clip, in dollars: framing at its goal's upper end, rendering and storing. */
-export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env) => frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip;
+export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env, youtube = false) => frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip
+  // lean YouTube runs: the clip's own stretch through the proxy
+  + (youtube && leanOn(env) ? (((CLIP_LENGTHS[length].target + LEAN.stretch_extra_seconds) * LEAN.stretch_bytes_per_second + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env) : 0);
 const credits = (usd: number, floor: number, margin: number) => Math.ceil(usd / ((1 - margin) * floor) - 1e-9);
 /** A run's price: `analysis` once (reading the video), `per_clip` for each clip made; `lite` is reading without the
  *  download (YouTube refused our servers: the moments are chosen from YouTube's captions and the file is asked for). */
@@ -109,10 +128,11 @@ export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "y
   const transcribe = p.platform === "upload" || !!p.env.ELEVENLABS_API_KEY;
   const usd = analysisUsd({ seconds: p.seconds, platform: p.platform, download, transcribe: transcribe && (p.platform === "upload" || download), choose: true, env: p.env, bytesPerSecond: p.bytesPerSecond });
   const lite = analysisUsd({ seconds: p.seconds, platform: p.platform, download: false, transcribe: false, choose: true, env: p.env });
-  const rate = p.platform === "youtube" && download ? CLIP_RATES.youtube_per_minute : p.platform === "youtube" ? CLIP_RATES.lite_per_minute : CLIP_RATES.upload_per_minute;
+  const lean = p.platform === "youtube" && download && leanOn(p.env);
+  const rate = p.platform === "youtube" && download ? (lean ? LEAN_RATES.youtube_per_minute : CLIP_RATES.youtube_per_minute) : p.platform === "youtube" ? CLIP_RATES.lite_per_minute : CLIP_RATES.upload_per_minute;
   return {
     analysis: Math.max(minutes * rate, credits(usd, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.analysis_min),
-    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env), floor, CLIPS_SAFETY_MARGIN.clip)),
+    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env, lean), floor, lean ? CLIPS_SAFETY_MARGIN.lean_clip : CLIPS_SAFETY_MARGIN.clip)),
     lite: Math.max(minutes * CLIP_RATES.lite_per_minute, credits(lite, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.lite_min),
   };
 }
@@ -992,7 +1012,7 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
   const price = clipsPrice(plans, { seconds, platform, length, env, download: youtube_direct });
   // captions burned into every clip: the words are already heard, so a small add-on per clip
   const captions = o.captions && typeof o.captions === "object" ? o.captions : null;
-  if (captions) price.per_clip += CLIP_RATES.captions_per_clip;
+  if (captions) price.per_clip += captionsPerClip(env);
   const credits = youtube_direct ? clipsCharge(price, count) : price.lite;
   const what = LENGTH_WORDS[length];
   const warning = Number.isFinite(asked) && asked > cap
@@ -1190,7 +1210,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const lean = youtube && env.STUDIO_CLIPS_LEAN === "on";
   const sharp = env.STUDIO_CLIPS_LEAN_SHARP === "on";
   let soundFile: string | null = null;
-  const leanStat = { bytes: 0, calls: 0, sound_s: 0, stretch_s: 0, wait_s: 0, fallback: false };
+  const leanStat = { bytes: 0, sound_bytes: 0, calls: 0, sound_s: 0, stretch_s: 0, wait_s: 0, fallback: false };
   const leanSpent = (bytes: number, part: "sound" | "stretch") => {
     leanStat.bytes += bytes + LEAN.call_bytes; leanStat.calls++;
     const usd = ((bytes + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env);
@@ -1203,7 +1223,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(); };
     const file = await once().catch(again(3000)).catch(again(8000));
     const bytes = await stat(file).then((x) => x.size).catch(() => 0);
-    leanSpent(bytes, "sound"); leanStat.sound_s += (Date.now() - began) / 1000;
+    leanSpent(bytes, "sound"); leanStat.sound_bytes += bytes + LEAN.call_bytes; leanStat.sound_s += (Date.now() - began) / 1000;
     log(`[clips] lean sound ${JSON.stringify({ job: job.id, mb: Math.round(bytes / 1e5) / 10, seconds: Math.round((Date.now() - began) / 1000) })}`);
     soundFile = file;
     return file;
@@ -1423,7 +1443,9 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     //    clips not made, or for a bigger video than this one, goes back.
     // (lean: what came through the proxy, the sound and the stretches, plus the whole video if it had to be fetched)
     const wholeBytes = ytFile ? await stat(ytFile).then((x) => x.size).catch(() => 0) : 0;
-    const settled = youtube && (ytFile || lean) && plans.length ? { ...price, analysis: settledAnalysis(plans, price, { seconds: p.seconds, length, env, videoBytes: lean ? leanStat.bytes + wholeBytes : wholeBytes }) } : price;
+    // (the stretches are priced in each clip, so the reading settles on the sound, plus the whole video if a fallback
+    //  fetched it: never more than was reserved, so a fallback costs us, not the person)
+    const settled = youtube && (ytFile || lean) && plans.length ? { ...price, analysis: settledAnalysis(plans, price, { seconds: p.seconds, length, env, videoBytes: lean ? leanStat.sound_bytes + wholeBytes : wholeBytes }) } : price;
     const charged = Math.min(job.credits_reserved, clipsCharge(settled, made.length, { analysis: !o.plan_from }));
     const asked = Number(o.count ?? o.max_clips) || p.moments.length;
     const word = (n: number) => `${n} ${n === 1 ? "clip" : "clips"}`;

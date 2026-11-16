@@ -6,7 +6,7 @@ import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, settledAnalysis, clipsPrice, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
-  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING,
+  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, captionsPerClip, LEAN_RATES,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError, downloadFormat, downloadSort } from "../src/studio-youtube.js";
@@ -427,6 +427,26 @@ test("lean: a stretch YouTube refuses twice switches the rest of the run to the 
   assert.equal(whole, 1, "the whole video once");
   assert.ok(tries >= 2, "each stretch is tried twice before giving up");
   assert.equal(from.length, 2); assert.ok(from.every((f) => f.endsWith("youtube.mp4")));
+});
+
+test("lean prices (owner, Nov 15 2026: the same margins as before, the saving to the person): 2 credits a minute to read, 5 a clip, captions 2 more; the old prices with the switch off", () => {
+  const base = { STUDIO_YT_PROXY: "p", STUDIO_YT_PROXY_USD_PER_GB: "6.25", ELEVENLABS_API_KEY: "k" }, lean = { ...base, STUDIO_CLIPS_LEAN: "on" };
+  const p = clipsPrice(PLANS, { seconds: 1500, platform: "youtube", length: "standard", env: lean });
+  assert.deepEqual([p.analysis, p.per_clip], [25 * LEAN_RATES.youtube_per_minute, 5], "25 minutes, a standard clip");
+  assert.equal(clipsCharge({ ...p, per_clip: p.per_clip + captionsPerClip(lean) }, 10), 120, "a 25-min, 10-clip run with captions: 120 credits (205 before)");
+  assert.equal(clipsPrice(PLANS, { seconds: 600, platform: "youtube", length: "long", env: lean }).per_clip, 8, "long clips stay at 8");
+  assert.equal(captionsPerClip(base), 3);
+  const old = clipsPrice(PLANS, { seconds: 1500, platform: "youtube", length: "standard", env: base });
+  assert.ok(old.analysis >= 125, "the switch off keeps the old reading price");
+  // the safety floors still hold on lean costs: every price at least 35 % over cost at the cheapest credit
+  const floor = creditValueFloor(PLANS);
+  for (const length of ["short", "standard", "long", "minute"] as const) {
+    const q = clipsPrice(PLANS, { seconds: 3 * 3600, platform: "youtube", length, env: lean });
+    assert.ok(q.per_clip * floor * 0.65 >= perClipUsd(length, lean, true) - 1e-9, `${length} clip covers its stretch`);
+    assert.ok(q.analysis * floor * 0.65 >= analysisUsd({ seconds: 3 * 3600, platform: "youtube", download: true, transcribe: true, choose: true, env: lean }) - 1e-9, "reading covers the sound, hearing and choosing");
+  }
+  // upload runs are untouched
+  assert.equal(clipsPrice(PLANS, { seconds: 1500, platform: "upload", length: "standard", env: lean }).analysis, clipsPrice(PLANS, { seconds: 1500, platform: "upload", length: "standard", env: base }).analysis);
 });
 
 test("YouTube refusing our servers: chosen from its captions, only choosing is charged, the collection asks for the file; the upload then cuts them", async () => {
