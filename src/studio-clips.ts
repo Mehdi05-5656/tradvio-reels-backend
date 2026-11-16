@@ -335,7 +335,7 @@ export type ClipsDeps = {
   choose?: (input: ChooseInput) => Promise<RawMoment[]>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<CutResult>;
   frame?: (input: TrackInput) => Promise<TrackRead[]>;
-  download?: (url: string, target: string, maxHeight: number, signal?: AbortSignal) => Promise<void>;
+  download?: (url: string, target: string, maxHeight: number, signal?: AbortSignal, fresh?: boolean) => Promise<void>;
   /** the height in lines of a local video file (ffprobe) */
   lines?: (file: string) => Promise<number>;
   /** where downloaded YouTube videos are kept for reuse (default: a folder in the temp directory) */
@@ -344,8 +344,8 @@ export type ClipsDeps = {
   room?: (env: Record<string, string | undefined>) => Promise<{ ok: boolean; why?: string }>;
   ytAudio?: (url: string, target: string) => Promise<void>;
   /** lean runs (STUDIO_CLIPS_LEAN): the sound alone (resolves with the file), and one stretch of the picture */
-  sound?: (url: string, target: string, language: string | null, signal?: AbortSignal) => Promise<string>;
-  stretch?: (url: string, start: number, end: number, target: string, o: { maxHeight: number; sharp: boolean; signal?: AbortSignal }) => Promise<{ file: string; t0: number }>;
+  sound?: (url: string, target: string, language: string | null, signal?: AbortSignal, fresh?: boolean) => Promise<string>;
+  stretch?: (url: string, start: number, end: number, target: string, o: { maxHeight: number; sharp: boolean; signal?: AbortSignal; fresh?: boolean }) => Promise<{ file: string; t0: number }>;
 };
 const metaCache = new Map<string, { at: number; meta: YtMeta }>();
 async function sc(deps: ClipsDeps, path: string): Promise<any> {
@@ -1228,7 +1228,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         // failed every clip after three attempts) counts as a refusal and is tried again too.
         for (let attempt = 1; ; attempt++) {
           try {
-            await (deps.download ?? ((x, t, h, sig) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language, signal: sig })))(o.url, file, height, job.signal);
+            await (deps.download ?? ((x, t, h, sig, fresh) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language, signal: sig, fresh })))(o.url, file, height, job.signal, attempt > 1);
             if ((await hasPicture(file, deps)) === false) { await rm(file, { force: true }); throw new LinkError("link_fetch_failed", "YouTube sent the sound without the picture"); }
             break;
           } catch (e: any) {
@@ -1281,8 +1281,9 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const fetchSound = async (): Promise<string> => {
     const language = o.language && o.language !== "original" ? String(o.language) : null;
     const began = Date.now();
-    const once = () => (deps.sound ?? ((x, t, l, sig) => youtubeSound(x, t, { env, fetch: deps.fetch, language: l, signal: sig })))(o.url, join(dir!, "lean-sound"), language, job.signal);
-    const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(); };
+    const once = (fresh = false) => (deps.sound ?? ((x, t, l, sig, f) => youtubeSound(x, t, { env, fetch: deps.fetch, language: l, signal: sig, fresh: f })))(o.url, join(dir!, "lean-sound"), language, job.signal, fresh);
+    // (a retry asks the proxy for a fresh session: the one that failed may be a bad home connection)
+    const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(true); };
     const file = await once().catch(again(3000)).catch(again(8000));
     const bytes = await stat(file).then((x) => x.size).catch(() => 0);
     leanSpent(bytes, "sound"); leanStat.sound_bytes += bytes + LEAN.call_bytes; leanStat.sound_s += (Date.now() - began) / 1000;
@@ -1435,10 +1436,11 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
           const began = Date.now();
           // (YouTube refuses a request now and then and lets the same one through seconds later: through the real proxy
           // on Nov 15 2026, 4 of ~30 calls were refused once and every retry went through; two more tries, 3 s and 8 s apart)
-          const once = () => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeLocal(f).then((i) => i.start).catch(() => null) })))(
-            o.url, Math.max(0, m.start - 1), m.end + 1, join(dir!, `lean-${m.rank}`), { maxHeight: stretchHeight, sharp, signal: job.signal });
+          const once = (fresh = false) => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeLocal(f).then((i) => i.start).catch(() => null) })))(
+            o.url, Math.max(0, m.start - 1), m.end + 1, join(dir!, `lean-${m.rank}`), { maxHeight: stretchHeight, sharp, signal: job.signal, fresh });
           try {
-            const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(); };
+            // (each retry on a fresh proxy session, Nov 15 2026: the first live run's session went bad and every retry on it failed)
+            const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(true); };
             const r = await once().catch(again(3000)).catch(again(8000));
             leanSpent(await stat(r.file).then((x) => x.size).catch(() => 0), "stretch"); leanStat.stretch_s += (Date.now() - began) / 1000;
             return r;

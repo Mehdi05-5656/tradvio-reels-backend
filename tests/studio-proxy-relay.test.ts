@@ -61,3 +61,43 @@ test("STUDIO_CLIPS_LEAN: on, off, or only the accounts listed", () => {
   assert.equal(leanEnv({ STUDIO_CLIPS_LEAN: a, X: "1" }, b).STUDIO_CLIPS_LEAN, "off");
   assert.equal(leanEnv({ STUDIO_CLIPS_LEAN: a, X: "1" }, b).X, "1", "the rest of the environment untouched");
 });
+
+test("freshProxySession: a new sticky session id, everything else kept; a login without one is left alone", async () => {
+  const { freshProxySession } = await import("../src/studio-proxy-relay.js");
+  const ip = "https://user1:pw_country-us_session-abcd1234_lifetime-30m@geo.example.com:12321";
+  const a = freshProxySession(ip)!, b = freshProxySession(ip)!;
+  const pass = (x: string) => decodeURIComponent(new URL(x).password);
+  assert.match(pass(a), /^pw_country-us_session-[a-z0-9]{8}_lifetime-30m$/);
+  assert.notEqual(pass(a), "pw_country-us_session-abcd1234_lifetime-30m"); assert.notEqual(a, b, "a different one each time");
+  assert.equal(new URL(a).username, "user1"); assert.equal(new URL(a).host, "geo.example.com:12321"); assert.equal(new URL(a).protocol, "https:");
+  // the id in the username (Bright Data style)
+  const bd = freshProxySession("http://brd-customer-x-zone-res-session-r4nd0m:secret@brd.example.com:22225")!;
+  assert.match(decodeURIComponent(new URL(bd).username), /^brd-customer-x-zone-res-session-[a-z0-9]{8}$/); assert.equal(new URL(bd).password, "secret");
+  // nothing to rotate: unchanged; nothing at all: null
+  assert.equal(freshProxySession("https://u:plain@p.example.com:1"), "https://u:plain@p.example.com:1");
+  assert.equal(freshProxySession(null), null); assert.equal(freshProxySession(""), null);
+});
+
+test("the server keeps a fresh session once it has worked; a different proxy setting ignores it", async () => {
+  const { youtubeProxy, pinYoutubeProxy, resetYoutubeProxy } = await import("../src/studio-youtube.js");
+  resetYoutubeProxy();
+  const env = { STUDIO_YT_PROXY: "https://u:pw_session-aaaaaaaa_lifetime-30m@geo.example.com:12321" };
+  assert.deepEqual(youtubeProxy(env), { proxy: env.STUDIO_YT_PROXY, fresh: false }, "as set until something fails");
+  const f = youtubeProxy(env, true);
+  assert.equal(f.fresh, true); assert.notEqual(f.proxy, env.STUDIO_YT_PROXY);
+  pinYoutubeProxy(env, f.proxy);
+  assert.equal(youtubeProxy(env).proxy, f.proxy, "the fresh one that worked is used from then on");
+  assert.equal(youtubeProxy({ STUDIO_YT_PROXY: "https://u:other_session-bbbbbbbb@x.example.com:1" }).proxy, "https://u:other_session-bbbbbbbb@x.example.com:1", "a changed setting wins over the pin");
+  assert.deepEqual(youtubeProxy({}), { proxy: null, fresh: false });
+  resetYoutubeProxy();
+});
+
+test("one relay per proxy session: a fresh session gets its own, the first keeps serving", async (t) => {
+  t.after(() => closeRelay());
+  const a = await ffmpegProxy("https://u:pw_session-aaaaaaaa@127.0.0.1:9", () => {});
+  const b = await ffmpegProxy("https://u:pw_session-bbbbbbbb@127.0.0.1:9", () => {});
+  assert.notEqual(a, b);
+  assert.equal(await ffmpegProxy("https://u:pw_session-aaaaaaaa@127.0.0.1:9"), a, "the same session, the same relay");
+  for (const r of [a!, b!]) assert.equal(await connect(r, "example.com:443"), "HTTP/1.1 403 Forbidden", "both still answer");
+  assert.equal(relayStats().relays, 2);
+});

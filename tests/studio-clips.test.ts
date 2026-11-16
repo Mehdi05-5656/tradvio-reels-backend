@@ -416,16 +416,18 @@ test("lean (STUDIO_CLIPS_LEAN): the sound alone is heard, each clip is cut from 
 test("lean: a stretch YouTube refuses twice switches the rest of the run to the whole video, fetched once; no clip is lost", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
   const { writeFile } = await import("node:fs/promises");
-  let whole = 0, tries = 0; const from: string[] = [];
+  let whole = 0, tries = 0; const from: string[] = [], fresh: boolean[] = [];
   const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: () => {}, meta: META,
     download: async (_u: string, target: string) => { whole++; await writeFile(target, "mp4"); },
     sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
-    stretch: async () => { tries++; throw new LinkError("link_blocked", "403"); },
+    stretch: async (_u: string, _a: number, _b: number, _t: string, o: any) => { tries++; fresh.push(!!o.fresh); throw new LinkError("link_blocked", "403"); },
     extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose,
     cut: async (ctx: any, m: any) => { from.push(ctx.src.video); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
   assert.equal(whole, 1, "the whole video once");
   assert.ok(tries >= 2, "each stretch is tried twice before giving up");
+  const firsts = fresh.filter((f) => !f).length;
+  assert.equal(fresh.filter(Boolean).length, 2 * firsts, "every retry asks the proxy for a fresh session; first tries use the usual one");
   assert.equal(from.length, 2); assert.ok(from.every((f) => f.endsWith("youtube.mp4")));
 });
 
@@ -454,17 +456,20 @@ test("a refused download is tried three times before asking for the file; a down
   const { writeFile } = await import("node:fs/promises");
   const run = async (answers: Array<"refuse" | "sound-only" | "ok">) => {
     const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
-    let n = 0; const lines: number[] = [];
+    let n = 0; const lines: number[] = [], fresh: boolean[] = [];
     const deps: any = { env: ENV, plans: PLANS, log: () => {}, meta: META, transcript: async () => segs, choose,
-      download: async (_u: string, target: string) => { const a = answers[n++] ?? "refuse"; if (a === "refuse") throw new LinkError("link_blocked", "YouTube refused"); await writeFile(target, "mp4"); lines.push(a === "sound-only" ? 0 : 1080); },
+      download: async (_u: string, target: string, _h: number, _s: any, f?: boolean) => { fresh.push(!!f); const a = answers[n++] ?? "refuse"; if (a === "refuse") throw new LinkError("link_blocked", "YouTube refused"); await writeFile(target, "mp4"); lines.push(a === "sound-only" ? 0 : 1080); },
       lines: async () => lines[lines.length - 1] ?? 0,
       extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }),
       cut: async (_c: any, m: any) => ({ asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }) };
     const out = await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any);
-    return { out, tries: n };
+    return { out, tries: n, fresh };
   };
-  assert.deepEqual(await run(["refuse", "refuse", "ok"]), { out: "done", tries: 3 }, "two refusals, then through: the clips are made");
-  assert.deepEqual(await run(["sound-only", "ok"]), { out: "done", tries: 2 }, "the sound without the picture is fetched again");
+  const through = await run(["refuse", "refuse", "ok"]);
+  assert.deepEqual([through.out, through.tries], ["done", 3], "two refusals, then through: the clips are made");
+  assert.deepEqual(through.fresh, [false, true, true], "the second and third tries on a fresh proxy session");
+  const again = await run(["sound-only", "ok"]);
+  assert.deepEqual([again.out, again.tries], ["done", 2], "the sound without the picture is fetched again");
   const gaveUp = await run(["refuse", "refuse", "refuse"]);
   assert.equal(gaveUp.tries, 6, "three tries while reading, three more when cutting");
   assert.equal(gaveUp.out, "needs_file", "only after every try does the person get asked for the file");
@@ -473,7 +478,8 @@ test("a refused download is tried three times before asking for the file; a down
 
 test("lean's safety switch: two fallbacks in the last ten lean runs pause lean for an hour, for quotes and runs; then it comes back", () => {
   resetLeanBreaker();
-  const t0 = Date.parse("2026-11-16T03:00:00Z"), env = { STUDIO_CLIPS_LEAN: "on" };
+  // (the real clock: leanEnv reads Date.now(), so a fixed date made this pass only within the hour it was written)
+  const t0 = Date.now(), env = { STUDIO_CLIPS_LEAN: "on" };
   for (let k = 0; k < 8; k++) noteLeanOutcome(false, () => {}, t0);
   noteLeanOutcome(true, () => {}, t0);
   assert.equal(leanPaused(t0), false, "one fallback in ten: still on");

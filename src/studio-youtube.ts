@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { access, chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
-import { ffmpegProxy } from "./studio-proxy-relay.js";
+import { ffmpegProxy, freshProxySession } from "./studio-proxy-relay.js";
 
 export const YT_DLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 export type DownloadOpts = { maxBytes: number; maxSeconds: number; timeoutMs?: number; fetch?: typeof fetch; env?: Record<string, string | undefined> };
@@ -83,7 +83,7 @@ async function cookiesFile(env: Record<string, string | undefined>): Promise<str
 export async function downloadYouTube(url: string, target: string, o: DownloadOpts): Promise<{ title: string | null }> {
   const bin = await ensureYtDlp(o);
   const env = o.env ?? process.env;
-  const args = [...ytDlpArgs(url, target, { ...o, proxy: env.STUDIO_YT_PROXY || null, cookies: await cookiesFile(env) }), "--print", "after_move:title"];
+  const args = [...ytDlpArgs(url, target, { ...o, proxy: youtubeProxy(env).proxy, cookies: await cookiesFile(env) }), "--print", "after_move:title"];
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", killed = false;
@@ -126,7 +126,7 @@ export function parseStreams(stdout: string, proxy: string | null): YouTubeStrea
 export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number } = {}): Promise<YouTubeStreams> {
   const bin = await ensureYtDlp(o);
   const env = o.env ?? process.env;
-  const proxy = env.STUDIO_YT_PROXY || null;
+  const proxy = youtubeProxy(env).proxy;
   const args = streamArgs(url, { proxy, cookies: await cookiesFile(env) });
   const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -141,16 +141,39 @@ export async function youtubeStreams(url: string, o: { fetch?: typeof fetch; env
   return parseStreams(out.stdout, proxy);
 }
 
+/** The proxy session this server uses for YouTube: STUDIO_YT_PROXY as set, until a call fails and its retry works on a
+ *  fresh session (freshProxySession); from then on every call uses that one, so the rest of a run (and the next runs)
+ *  do not each lose a try on the session that went bad. A restart goes back to the one set. */
+let pinned: { base: string; proxy: string } | null = null;
+export function youtubeProxy(env: Record<string, string | undefined>, fresh = false): { proxy: string | null; fresh: boolean } {
+  const base = env.STUDIO_YT_PROXY || null;
+  if (!base) return { proxy: null, fresh: false };
+  if (fresh) return { proxy: freshProxySession(base), fresh: true };
+  return { proxy: pinned && pinned.base === base ? pinned.proxy : base, fresh: false };
+}
+/** A fresh session worked: keep it. */
+export function pinYoutubeProxy(env: Record<string, string | undefined>, proxy: string | null) {
+  const base = env.STUDIO_YT_PROXY || null;
+  if (!base || !proxy || proxy === base) return;
+  if (!pinned || pinned.proxy !== proxy) console.log("[youtube] the proxy session was replaced (a fresh one worked after a failure)");
+  pinned = { base, proxy };
+}
+/** For tests. */
+export function resetYoutubeProxy() { pinned = null; }
+
 /** yt-dlp run with our usual settings (proxy, cookies, Node for YouTube's challenges); its complaint becomes a LinkError. */
-async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number; signal?: AbortSignal; proxy?: string | null }): Promise<string> {
+async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number; signal?: AbortSignal; proxy?: string | null; fresh?: boolean }): Promise<string> {
   const bin = await ensureYtDlp(o);
   const env = o.env ?? process.env;
   const cookies = await cookiesFile(env);
+  // a retry asks the proxy for a different home connection (freshProxySession): the one that failed may be bad
+  const chosen = o.proxy !== undefined ? { proxy: o.proxy, fresh: false } : youtubeProxy(env, !!o.fresh);
+  const proxy = chosen.proxy;
   const full = [
     // not --quiet: when ffmpeg fails inside yt-dlp, its own words are the only clue, and --quiet swallows them
     "--no-playlist", "--no-warnings", "--no-progress", "--force-ipv4", "--socket-timeout", "30", "--retries", "3",
     "--no-js-runtimes", "--js-runtimes", `node:${process.execPath}`,
-    ...((o.proxy !== undefined ? o.proxy : env.STUDIO_YT_PROXY) ? ["--proxy", (o.proxy !== undefined ? o.proxy : env.STUDIO_YT_PROXY)!] : []),
+    ...(proxy ? ["--proxy", proxy] : []),
     ...(cookies ? ["--cookies", cookies] : []),
     ...args,
   ];
@@ -171,6 +194,7 @@ async function runYtDlp(args: string[], o: { fetch?: typeof fetch; env?: Record<
     console.log(`[youtube] yt-dlp failed: ${said.slice(-900)}`);
     throw classifyYtDlpError(out.stderr || out.stdout);
   }
+  if (chosen.fresh) pinYoutubeProxy(env, chosen.proxy);
   return out.stdout;
 }
 /** Any proxy address with a password in a line of text, the password blanked. */
@@ -215,7 +239,7 @@ export const downloadFormat = (h: number, language?: string | null) => {
 export const downloadSort = (h: number) => `lang,res:${h},fps:30,+size,+br`;
 /** The whole video, downloaded by yt-dlp's own downloader (no ffmpeg reading YouTube: through the proxy on Render every
  *  ffmpeg read of a YouTube address got 403, Oct 31 2026); at most `maxHeight` lines (1080, or 720 for long videos). */
-export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; language?: string | null; signal?: AbortSignal } = {}): Promise<void> {
+export async function youtubeDownload(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; language?: string | null; signal?: AbortSignal; fresh?: boolean } = {}): Promise<void> {
   const h = o.maxHeight ?? 1080;
   await runYtDlp([
     "-f", downloadFormat(h, o.language), "-S", downloadSort(h),
@@ -235,7 +259,7 @@ export async function youtubeAudio(url: string, target: string, o: { fetch?: typ
 // ---------------------------------------------------------------------------------------------------
 /** The sound of a YouTube video for Clips: heard for speech-to-text and laid under every clip. `target` has no
  *  extension; resolves with the file written (.webm or .m4a). */
-export async function youtubeSound(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; language?: string | null; signal?: AbortSignal } = {}): Promise<string> {
+export async function youtubeSound(url: string, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; language?: string | null; signal?: AbortSignal; fresh?: boolean } = {}): Promise<string> {
   await runYtDlp(["-f", soundFormat(o.language), "-S", "lang,+size,+br", "-o", `${target}.%(ext)s`, url], { ...o, timeoutMs: 20 * 60_000 });
   for (const ext of ["webm", "m4a", "opus", "mp4", "mp3"]) { try { await access(`${target}.${ext}`); return `${target}.${ext}`; } catch { /* next */ } }
   throw new LinkError("link_fetch_failed", "The sound of the video could not be fetched");
@@ -247,23 +271,32 @@ export const stretchFormat = (h: number, sharp: boolean) => sharp
   ? `bv*[height<=${h}][vcodec!^=av01]`
   : `bv*[height<=${h}][fps<=30][vcodec!^=av01]/bv*[height<=${h}][vcodec!^=av01]`;
 export const stretchSort = (h: number, sharp: boolean) => (sharp ? `res:${h},+size` : `res:${h},fps:30,+size`);
+/** ffmpeg's limit on a read or write that gets nothing back (microseconds). Without it ffmpeg waits forever on a tunnel
+ *  that went silent: the first live lean run sat 8 minutes on one stretch (Nov 15 2026). */
+export const STRETCH_STALL_US = 30_000_000;
+/** The most one stretch may take (a 40 s stretch took 47-68 s through the real proxy, page read included, Nov 15 2026);
+ *  then the next try, on a fresh session. */
+export const STRETCH_TIMEOUT_MS = 3 * 60_000;
 /** One stretch of the picture (no sound), copied as YouTube sends it from the keyframe before `start`, with the video's
  *  own timestamps kept (-copyts): the file starts at that keyframe's time, which `t0` reports, so a cut seeks exactly.
  *  yt-dlp fetches it itself (only its download-stage addresses are accepted: the ones it prints without downloading
  *  were refused with 403, even locally, Nov 15 2026). */
-export async function youtubeStretch(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; sharp?: boolean; signal?: AbortSignal; probe: (file: string) => Promise<number | null> }): Promise<{ file: string; t0: number }> {
+export async function youtubeStretch(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; sharp?: boolean; signal?: AbortSignal; fresh?: boolean; probe: (file: string) => Promise<number | null> }): Promise<{ file: string; t0: number }> {
   const h = o.maxHeight ?? 1080, sharp = !!o.sharp;
   // ffmpeg fetches the stretch and only uses an http:// proxy: an https:// one goes through the local relay
-  // (studio-proxy-relay.ts), or YouTube sees our server's own address and refuses it (403 on Render, Nov 15 2026)
+  // (studio-proxy-relay.ts), or YouTube sees our server's own address and refuses it (403 on Render, Nov 15 2026).
+  // yt-dlp itself goes through the same relay, so the address YouTube signs its stream links for is the one ffmpeg uses.
   const env = o.env ?? process.env;
-  const proxy = await ffmpegProxy(env.STUDIO_YT_PROXY || null);
-  await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", "ffmpeg_i:-copyts",
-    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: 8 * 60_000 });
+  const chosen = youtubeProxy(env, !!o.fresh);
+  const proxy = await ffmpegProxy(chosen.proxy);
+  await runYtDlp(["-f", stretchFormat(h, sharp), "-S", stretchSort(h, sharp), "--downloader-args", `ffmpeg_i:-copyts -rw_timeout ${STRETCH_STALL_US}`,
+    "--download-sections", `*${Math.max(0, start).toFixed(2)}-${end.toFixed(2)}`, "-o", `${target}.%(ext)s`, url], { ...o, proxy, timeoutMs: STRETCH_TIMEOUT_MS });
   for (const ext of ["webm", "mp4", "mkv"]) {
     const file = `${target}.${ext}`;
     try { await access(file); } catch { continue; }
     const t0 = await o.probe(file);
     if (t0 == null || !(t0 <= start + 0.05) || t0 < start - 30) throw new LinkError("link_fetch_failed", `the stretch does not start where it should (${t0} for ${start.toFixed(2)})`);
+    if (chosen.fresh) pinYoutubeProxy(env, chosen.proxy);
     return { file, t0 };
   }
   throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched");

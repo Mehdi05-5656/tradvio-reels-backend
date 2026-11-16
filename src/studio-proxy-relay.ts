@@ -42,20 +42,46 @@ export function tunnel(up: URL, target: string, timeoutMs = 30_000): Promise<net
   });
 }
 
-let relay: { upstream: string; url: Promise<string>; server: http.Server } | null = null;
-const stats = { tunnels: 0, refused: 0, failed: 0, bytes_in: 0, hosts: new Set<string>() };
-/** What the relay has carried since the server started (YouTube's bytes in, through the paid proxy). */
-export const relayStats = () => ({ tunnels: stats.tunnels, refused: stats.refused, failed: stats.failed, bytes_in: stats.bytes_in, hosts: [...stats.hosts] });
+/** A different sticky session of the same proxy login: the session id in the username or password (IPRoyal
+ *  `_session-XXXX`, Bright Data/Oxylabs style `-session-XXXX` / `sessid-XXXX`) swapped for a new random one, so the
+ *  proxy hands out a different home connection. Unchanged when the address has no session id (a rotating login).
+ *  Why (Nov 15 2026, first live lean run): the session Render was pinned to went bad mid-run (the proxy answered 504
+ *  to every tunnel, then YouTube asked that address for a bot check, then a tunnel went silent); the same login with
+ *  a fresh session worked at once. A retry that reuses the bad session fails the same way. */
+export function freshProxySession(proxy: string | null | undefined): string | null {
+  if (!proxy) return null;
+  let u: URL; try { u = new URL(proxy); } catch { return proxy; }
+  const re = /((?:^|[-_])(?:session|sessid)[-_])([A-Za-z0-9]+)/i;
+  const swap = (part: string) => { const raw = decodeURIComponent(part); const m = raw.match(re); if (!m) return null;
+    const id = Array.from({ length: Math.max(8, Math.min(16, m[2].length)) }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join("");
+    return raw.replace(re, `$1${id}`); };
+  const pw = swap(u.password), un = pw == null ? swap(u.username) : null;
+  if (pw == null && un == null) return proxy;
+  if (pw != null) u.password = encodeURIComponent(pw); else u.username = encodeURIComponent(un!);
+  return u.toString().replace(/\/$/, "");
+}
 
-/** The proxy address to hand ffmpeg: the upstream itself when it is already http://, else the local relay (started once,
- *  on a free port on 127.0.0.1). Null without a proxy. */
+/** A tunnel that carries nothing either way for this long is closed (a peer that went silent; ffmpeg has its own
+ *  30 s limit, this is the backstop for anything else that reads through the relay). */
+export const TUNNEL_IDLE_MS = 90_000;
+/** Relays kept listening at once: one per proxy session in use (each retry may ask for a fresh one). */
+const MAX_RELAYS = 6;
+const relays = new Map<string, { url: Promise<string>; server: http.Server }>();
+const stats = { tunnels: 0, refused: 0, failed: 0, idle: 0, bytes_in: 0, hosts: new Set<string>() };
+/** What the relays have carried since the server started (YouTube's bytes in, through the paid proxy). */
+export const relayStats = () => ({ tunnels: stats.tunnels, refused: stats.refused, failed: stats.failed, idle: stats.idle, bytes_in: stats.bytes_in, hosts: [...stats.hosts], relays: relays.size });
+
+/** The proxy address to hand ffmpeg: the upstream itself when it is already http://, else a local relay for that exact
+ *  upstream (started once per upstream, on a free port on 127.0.0.1). Null without a proxy. */
 export async function ffmpegProxy(upstream: string | null | undefined, log: (l: string) => void = (l) => console.log(l)): Promise<string | null> {
   if (!upstream) return null;
   const up = new URL(upstream);
   if (up.protocol === "http:") return upstream;
   if (up.protocol !== "https:") return upstream; // (socks5 and others: ffmpeg cannot use them either way; left as they were)
-  if (relay && relay.upstream === upstream) return relay.url;
-  if (relay) { relay.server.close(); relay = null; }
+  const have = relays.get(upstream);
+  if (have) return have.url;
+  // the oldest relay stops taking new tunnels (the ones it carries go on to their end)
+  while (relays.size >= MAX_RELAYS) { const [k, r] = relays.entries().next().value!; r.server.close(); relays.delete(k); }
   const server = http.createServer((_req, res) => { res.writeHead(405); res.end(); });
   server.on("connect", (req: http.IncomingMessage, client: net.Socket, head: Buffer) => {
     const target = String(req.url ?? "");
@@ -64,10 +90,16 @@ export async function ffmpegProxy(upstream: string | null | undefined, log: (l: 
     client.on("error", () => undefined);
     tunnel(up, target).then((remote) => {
       stats.tunnels++; stats.hosts.add(host.replace(/^[^.]+\.(?=googlevideo\.com$)/, "*."));
-      remote.on("data", (b: Buffer) => { stats.bytes_in += b.length; });
+      let idle: ReturnType<typeof setTimeout> | null = null;
+      const close = () => { if (idle) clearTimeout(idle); idle = null; remote.destroy(); client.destroy(); };
+      const touch = () => { if (idle) clearTimeout(idle); idle = setTimeout(() => { stats.idle++; log(`[relay] ${host}: nothing for ${TUNNEL_IDLE_MS / 1000} s, closed`); close(); }, TUNNEL_IDLE_MS); idle.unref?.(); };
+      touch();
+      remote.on("data", (b: Buffer) => { stats.bytes_in += b.length; touch(); });
+      client.on("data", touch);
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head?.length) remote.write(head);
-      remote.on("error", () => client.destroy()); client.on("error", () => remote.destroy());
+      remote.on("error", close); client.on("error", close);
+      remote.on("close", close); client.on("close", close);
       remote.pipe(client); client.pipe(remote);
     }, (e) => { stats.failed++; log(`[relay] ${host}: ${String(e?.message ?? e).slice(0, 120)}`); client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"); });
   });
@@ -77,9 +109,9 @@ export async function ffmpegProxy(upstream: string | null | undefined, log: (l: 
     server.listen(0, "127.0.0.1", () => { const a = server.address() as net.AddressInfo; resolve(`http://127.0.0.1:${a.port}`); });
   });
   server.unref(); // (never keeps the process alive on its own)
-  relay = { upstream, url, server };
-  url.catch(() => { relay = null; });
+  relays.set(upstream, { url, server });
+  url.catch(() => { relays.delete(upstream); });
   return url;
 }
 /** For tests. */
-export function closeRelay() { relay?.server.close(); relay = null; }
+export function closeRelay() { for (const r of relays.values()) r.server.close(); relays.clear(); }
