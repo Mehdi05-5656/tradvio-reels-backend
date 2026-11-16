@@ -66,6 +66,13 @@ export const FRAME_MODEL = "claude-haiku-5-5";
 /** Lean runs (STUDIO_CLIPS_LEAN): what each yt-dlp call pulls through the proxy besides the media (the watch page and
  *  the player's answers), measured through a counting proxy on Nov 15 2026 at about 1 MB; and how many clips' stretches
  *  are fetched ahead of the cutter. */
+/** The waits before the second and third try of a refused download (ms). */
+export const DOWNLOAD_TRIES = [3_000, 10_000];
+/** Whether a downloaded file has a picture: false only when ffprobe read it and found none (a file it cannot read is
+ *  left to the cutter, as before). */
+async function hasPicture(file: string, deps: ClipsDeps): Promise<boolean | null> {
+  try { return (deps.lines ? await deps.lines(file) : (await probeLocal(file)).h) > 0; } catch { return null; }
+}
 export const LEAN = { call_bytes: 1_000_000, ahead: 3,
   // what comes through the proxy in a lean run (Nov 15 2026, three videos through the real proxy): the sound at
   // ~6.3 kB/s of video (kept at 7), and per clip its stretch, the clip plus ~7 s (a second either side and the keyframe
@@ -82,7 +89,33 @@ export function leanFor(env: Record<string, string | undefined>, userId?: string
   return !!userId && v.split(/[\s,]+/).includes(userId);
 }
 /** The environment as one account's run and quote see it (STUDIO_CLIPS_LEAN resolved to "on" or "off"). */
-export const leanEnv = (env: Record<string, string | undefined>, userId?: string | null): Record<string, string | undefined> => ({ ...env, STUDIO_CLIPS_LEAN: leanFor(env, userId) ? "on" : "off" });
+export const leanEnv = (env: Record<string, string | undefined>, userId?: string | null): Record<string, string | undefined> => ({ ...env, STUDIO_CLIPS_LEAN: leanFor(env, userId) && !leanPaused() ? "on" : "off" });
+/** Lean's safety switch (Nov 15 2026: the first live lean runs all fell back to the whole video, priced lean): when 2
+ *  of the last 10 lean runs fell back, lean pauses itself for an hour, for quotes and runs alike, and says so in the
+ *  log and the event record. The runs themselves never fail on it: they take the whole download, priced as before. */
+export const LEAN_BREAKER = { window: 10, trip: 2, pause_ms: 3600_000 };
+const breaker = { recent: [] as boolean[], pausedUntil: 0, loaded: false };
+export const leanPaused = (now = Date.now()) => breaker.pausedUntil > now;
+export function noteLeanOutcome(fellBack: boolean, log: (l: string) => void = (l) => console.log(l), now = Date.now()) {
+  breaker.recent = [...breaker.recent, fellBack].slice(-LEAN_BREAKER.window);
+  if (fellBack && breaker.recent.filter(Boolean).length >= LEAN_BREAKER.trip && !leanPaused(now)) {
+    breaker.pausedUntil = now + LEAN_BREAKER.pause_ms;
+    log(`[clips] lean paused for an hour: ${breaker.recent.filter(Boolean).length} of the last ${breaker.recent.length} lean runs fell back to the whole video`);
+    recordEvent({ kind: "feature", name: "clips_lean_paused", props: { fell_back: breaker.recent.filter(Boolean).length, of: breaker.recent.length, until: new Date(breaker.pausedUntil).toISOString() } });
+  }
+}
+/** The switch's memory survives a restart: the last lean runs' outcomes, read once from the event record. */
+export async function loadLeanHistory(sb: SupabaseClient, now = Date.now()) {
+  if (breaker.loaded) return; breaker.loaded = true;
+  const r = await sb.from("studio_events").select("props,created_at").eq("kind", "feature").eq("name", "clips_done").gte("created_at", new Date(now - 24 * 3600_000).toISOString()).order("created_at", { ascending: true }).limit(200);
+  if (r.error) return;
+  const lean = ((r.data ?? []) as any[]).filter((x) => x.props?.timing?.lean);
+  breaker.recent = lean.map((x) => !!x.props.timing.lean.fallback).slice(-LEAN_BREAKER.window);
+  const last = lean.filter((x) => x.props.timing.lean.fallback).pop();
+  if (breaker.recent.filter(Boolean).length >= LEAN_BREAKER.trip && last) breaker.pausedUntil = Math.max(0, Date.parse(last.created_at) + LEAN_BREAKER.pause_ms);
+}
+/** For tests. */
+export function resetLeanBreaker() { breaker.recent = []; breaker.pausedUntil = 0; breaker.loaded = false; }
 /** Framing, per second of clip: one still a second plus the words to the framing model (~250 tokens a still). */
 export function frameUsdPerSecond(env: Record<string, string | undefined> = process.env): number {
   const m = String(env.STUDIO_CLIPS_FRAME_MODEL || FRAME_MODEL);
@@ -1188,7 +1221,24 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     if (other) { log(`[clips] waiting for the download another run started ${JSON.stringify({ job: job.id, key })}`); await other.catch(() => undefined); if (await reuse()) { ytFile = file; fetched = { s: 0, bytes: 0 }; return file; } }
     const began = Date.now();
     const run = (async () => {
-      try { await (deps.download ?? ((x, t, h, sig) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language, signal: sig })))(o.url, file, height, job.signal); }
+      try {
+        // YouTube refuses a request now and then and lets the same one through seconds later (about 1 call in 8 through
+        // the proxy, Nov 15 2026; 4 of the last 38 runs asked for the file after one refusal): three tries before
+        // giving up. A download that came back without a picture (YouTube sent the sound only: two runs on Nov 12 2026
+        // failed every clip after three attempts) counts as a refusal and is tried again too.
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await (deps.download ?? ((x, t, h, sig) => youtubeDownload(x, t, { env, fetch: deps.fetch, maxHeight: h, language, signal: sig })))(o.url, file, height, job.signal);
+            if ((await hasPicture(file, deps)) === false) { await rm(file, { force: true }); throw new LinkError("link_fetch_failed", "YouTube sent the sound without the picture"); }
+            break;
+          } catch (e: any) {
+            const again = e instanceof LinkError && (e.code === "link_blocked" || e.code === "link_fetch_failed") && attempt < DOWNLOAD_TRIES.length + 1 && !job.signal?.aborted;
+            if (!again) throw e;
+            log(`[clips] download try ${attempt} of ${job.id} refused (${e.code}: ${String(e.message).slice(0, 80)}); trying again`);
+            await new Promise((ok) => setTimeout(ok, DOWNLOAD_TRIES[attempt - 1]));
+          }
+        }
+      }
       catch (e) {
         // a download that stopped part way still came through the proxy (and was not counted before Nov 7 2026)
         const part = await partialBytes(dir!);
@@ -1487,6 +1537,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
     if (done.error) throw done.error;
     recordEvent({ user_id: u, kind: "feature", name: "clips_done", props: { job: job.id, platform: o.platform, length, clips: made.length, asked, planned: p.moments.length, minutes: Math.round(p.seconds / 60), credits: charged, reserved: job.credits_reserved, timing } });
+    // (a lean run that cut at least one clip from a stretch, or fell back: the safety switch counts it)
+    if (lean && (leanStat.calls > 1 || leanStat.fallback)) noteLeanOutcome(leanStat.fallback, log);
     return "done";
   } catch (e: any) {
     const code = e instanceof ClipsError ? e.code : e instanceof LinkError ? e.code : "clips_failed";
@@ -1518,6 +1570,8 @@ export function startClipsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {},
   const env = deps.env ?? process.env;
   if (!clipsEnabled(env)) return null;
   const log = deps.log ?? ((l: string) => console.log(l));
+  // the lean safety switch remembers the last lean runs across restarts
+  try { void loadLeanHistory(sbFn()).catch(() => undefined); } catch { /* no database configured */ }
   const worker = `clips-${randomUUID()}`;
   // several runs at once (capacity().runs); their cutting shares the cutter (cutGate), so the CPU is never asked for
   // more than it has. A new run is only taken on while memory and disk have room.

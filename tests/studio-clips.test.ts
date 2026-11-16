@@ -6,7 +6,7 @@ import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, settledAnalysis, clipsPrice, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
-  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, captionsPerClip, LEAN_RATES,
+  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError, downloadFormat, downloadSort } from "../src/studio-youtube.js";
@@ -447,6 +447,44 @@ test("lean prices (owner, Nov 15 2026: the same margins as before, the saving to
   }
   // upload runs are untouched
   assert.equal(clipsPrice(PLANS, { seconds: 1500, platform: "upload", length: "standard", env: lean }).analysis, clipsPrice(PLANS, { seconds: 1500, platform: "upload", length: "standard", env: base }).analysis);
+});
+
+test("a refused download is tried three times before asking for the file; a download without a picture counts as refused", async () => {
+  DOWNLOAD_TRIES.splice(0, DOWNLOAD_TRIES.length, 1, 1);
+  const { writeFile } = await import("node:fs/promises");
+  const run = async (answers: Array<"refuse" | "sound-only" | "ok">) => {
+    const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+    let n = 0; const lines: number[] = [];
+    const deps: any = { env: ENV, plans: PLANS, log: () => {}, meta: META, transcript: async () => segs, choose,
+      download: async (_u: string, target: string) => { const a = answers[n++] ?? "refuse"; if (a === "refuse") throw new LinkError("link_blocked", "YouTube refused"); await writeFile(target, "mp4"); lines.push(a === "sound-only" ? 0 : 1080); },
+      lines: async () => lines[lines.length - 1] ?? 0,
+      extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }),
+      cut: async (_c: any, m: any) => ({ asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }) };
+    const out = await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any);
+    return { out, tries: n };
+  };
+  assert.deepEqual(await run(["refuse", "refuse", "ok"]), { out: "done", tries: 3 }, "two refusals, then through: the clips are made");
+  assert.deepEqual(await run(["sound-only", "ok"]), { out: "done", tries: 2 }, "the sound without the picture is fetched again");
+  const gaveUp = await run(["refuse", "refuse", "refuse"]);
+  assert.equal(gaveUp.tries, 6, "three tries while reading, three more when cutting");
+  assert.equal(gaveUp.out, "needs_file", "only after every try does the person get asked for the file");
+  DOWNLOAD_TRIES.splice(0, DOWNLOAD_TRIES.length, 3_000, 10_000);
+});
+
+test("lean's safety switch: two fallbacks in the last ten lean runs pause lean for an hour, for quotes and runs; then it comes back", () => {
+  resetLeanBreaker();
+  const t0 = Date.parse("2026-11-16T03:00:00Z"), env = { STUDIO_CLIPS_LEAN: "on" };
+  for (let k = 0; k < 8; k++) noteLeanOutcome(false, () => {}, t0);
+  noteLeanOutcome(true, () => {}, t0);
+  assert.equal(leanPaused(t0), false, "one fallback in ten: still on");
+  const logs: string[] = [];
+  noteLeanOutcome(true, (l) => logs.push(l), t0 + 1000);
+  assert.equal(leanPaused(t0 + 2000), true);
+  assert.match(logs[0], /lean paused for an hour: 2 of the last 10/);
+  assert.equal(leanEnv(env, "anyone").STUDIO_CLIPS_LEAN, "off", "quotes and runs take the whole download, priced as before");
+  assert.equal(leanPaused(t0 + 1000 + LEAN_BREAKER.pause_ms + 1), false, "an hour later it tries again");
+  resetLeanBreaker();
+  assert.equal(leanEnv(env, "anyone").STUDIO_CLIPS_LEAN, "on");
 });
 
 test("YouTube refusing our servers: chosen from its captions, only choosing is charged, the collection asks for the file; the upload then cuts them", async () => {
