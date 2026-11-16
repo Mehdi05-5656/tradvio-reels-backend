@@ -197,26 +197,39 @@ export const clipsCharge = (price: ClipsPrice, made: number, o: { analysis?: boo
 // ---------------------------------------------------------------------------------------------------
 /** Seconds per stage, as rates: fetching and listening scale with the video's length; choosing has a fixed part plus a
  *  part per second of video; cutting has a fixed part per clip plus a part per second of clip (framing, rendering). */
-export type ClipTiming = { fetch_per_s: number; listen_per_s: number; choose_base: number; choose_per_s: number; cut_base: number; cut_per_s: number; runs: number };
+export type ClipTiming = { fetch_per_s: number; listen_per_s: number; choose_base: number; choose_per_s: number; cut_base: number; cut_per_s: number; runs: number;
+  /** lean runs (STUDIO_CLIPS_LEAN): reading is the sound alone, and cutting includes each clip's stretch */ lean_fetch_per_s: number; lean_cut_per_s: number };
 /** Before runs are measured, the two TED runs (844 s video, Oct 31-Nov 1 2026): the download took 60 s and 177 s
  *  through the proxy (its speed varies; kept between), hearing and choosing about 70 s, and each clip, cut one at a
  *  time, 45-118 s: 527 s for 270 s of clips, about 1.9 s per second of clip. */
-export const DEFAULT_TIMING: ClipTiming = { fetch_per_s: 0.15, listen_per_s: 0.03, choose_base: 25, choose_per_s: 0.02, cut_base: 5, cut_per_s: 1.85, runs: 0 };
+export const DEFAULT_TIMING: ClipTiming = { fetch_per_s: 0.15, listen_per_s: 0.03, choose_base: 25, choose_per_s: 0.02, cut_base: 5, cut_per_s: 1.85, runs: 0,
+  // the first clean lean run on Render (afd95664, Nov 16 2026: a 43-min video, 5 clips): the sound in 32 s (0.0125 s per
+  // second of video, kept at 0.015) and each clip 1.0-1.5 s per second of clip with its stretch fetched ahead (median
+  // 1.22, kept at 1.3). Whole-video timing had been applied to it: the page said 14 min 45 s for a 7 min 9 s run.
+  lean_fetch_per_s: 0.015, lean_cut_per_s: 1.3 };
 const median = (xs: number[]) => { const v = xs.filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : NaN; };
 /** The timing model from recorded runs (each run's own rates, the median of each); the default fills what is missing. */
 export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
-  const t = runs.map((r) => r?.timing).filter((x) => x && Number(x.video_s) > 0);
-  if (!t.length) return DEFAULT_TIMING;
+  const all = runs.map((r) => r?.timing).filter((x) => x && Number(x.video_s) > 0);
+  if (!all.length) return DEFAULT_TIMING;
   const pick = (vals: number[], fallback: number) => { const m = median(vals); return Number.isFinite(m) ? m : fallback; };
+  // lean runs fetch the sound, not the video, and cut from stretches: their own rates. A lean run that fell back to the
+  // whole video mixes both, so it counts for neither's fetching and cutting (its hearing and choosing still count).
+  const isLean = (x: any) => !!x.lean && !x.lean.fallback, mixed = (x: any) => !!x.lean && !!x.lean.fallback;
+  const t = all.filter((x) => !isLean(x) && !mixed(x)), lt = all.filter(isLean);
+  const perClipOf = (rs: any[], base: number) => rs.flatMap((x) => (Array.isArray(x.cuts) ? x.cuts : [])).filter((c: any) => Array.isArray(c) && c[0] > 5 && c[1] > 0).map((c: number[]) => Math.max(0.3, (c[1] - base) / c[0]));
   const fetch = pick(t.filter((x) => x.fetch_s > 0).map((x) => x.fetch_s / x.video_s), DEFAULT_TIMING.fetch_per_s);
-  const listen = pick(t.filter((x) => x.listen_s > 0).map((x) => x.listen_s / x.video_s), DEFAULT_TIMING.listen_per_s);
+  const leanFetch = pick(lt.filter((x) => x.fetch_s > 0).map((x) => x.fetch_s / x.video_s), DEFAULT_TIMING.lean_fetch_per_s);
+  const leanCut = pick(perClipOf(lt, DEFAULT_TIMING.cut_base), DEFAULT_TIMING.lean_cut_per_s);
+  const listen = pick(all.filter((x) => x.listen_s > 0).map((x) => x.listen_s / x.video_s), DEFAULT_TIMING.listen_per_s);
   // choosing: the fixed part stays at the default; the rest scales with the video
-  const choose = pick(t.filter((x) => x.choose_s > 0).map((x) => Math.max(0, x.choose_s - DEFAULT_TIMING.choose_base) / x.video_s), DEFAULT_TIMING.choose_per_s);
+  const choose = pick(all.filter((x) => x.choose_s > 0).map((x) => Math.max(0, x.choose_s - DEFAULT_TIMING.choose_base) / x.video_s), DEFAULT_TIMING.choose_per_s);
   // cutting: per second of clip, after each clip's fixed part; each clip measured on its own when the run kept them
-  const perClip = t.flatMap((x) => (Array.isArray(x.cuts) ? x.cuts : [])).filter((c: any) => Array.isArray(c) && c[0] > 5 && c[1] > 0).map((c: number[]) => Math.max(0.3, (c[1] - DEFAULT_TIMING.cut_base) / c[0]));
+  const perClip = perClipOf(t, DEFAULT_TIMING.cut_base);
   const whole = t.filter((x) => !Array.isArray(x.cuts) && x.cut_s > 0 && x.clip_s > 0 && x.clips > 0).map((x) => Math.max(0.3, (x.cut_s - x.clips * DEFAULT_TIMING.cut_base) / x.clip_s));
   const cut = pick([...perClip, ...whole], DEFAULT_TIMING.cut_per_s);
-  return { fetch_per_s: fetch, listen_per_s: listen, choose_base: DEFAULT_TIMING.choose_base, choose_per_s: choose, cut_base: DEFAULT_TIMING.cut_base, cut_per_s: cut, runs: t.length };
+  return { fetch_per_s: fetch, listen_per_s: listen, choose_base: DEFAULT_TIMING.choose_base, choose_per_s: choose, cut_base: DEFAULT_TIMING.cut_base, cut_per_s: cut, runs: all.length,
+    lean_fetch_per_s: leanFetch, lean_cut_per_s: leanCut };
 }
 let timingCache: { at: number; timing: ClipTiming } | null = null;
 /** The current model: the last 30 finished runs, read at most every 10 minutes. */
@@ -229,6 +242,9 @@ export async function clipsTiming(sb: SupabaseClient): Promise<ClipTiming> {
 }
 export const resetClipsTiming = () => { timingCache = null; };
 type EtaJob = { options: any; progress?: any; status?: string };
+/** The time one clip takes to cut (a lean run's includes fetching its stretch). */
+const clipSecondsEach = (o: any, timing: ClipTiming, length: ClipLength) =>
+  timing.cut_base + (o?.platform === "youtube" && !o?.plan_from && o?.lean === true ? timing.lean_cut_per_s : timing.cut_per_s) * CLIP_LENGTHS[length].target;
 /** Seconds a run still needs, from where it is (a queued run needs all of it). Each stage's own clock (`stage_at`) takes
  *  off what has already passed; a cut in progress uses the clips already made when there are some. */
 export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now()): number {
@@ -237,9 +253,10 @@ export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now
   const length = lengthOf(o.length);
   const youtube = o.platform === "youtube" && !o.plan_from;
   const planned = Math.max(1, Number(p.total) || Number(o.count ?? o.max_clips) || likelyClips(video, length));
-  const perClip = timing.cut_base + timing.cut_per_s * CLIP_LENGTHS[length].target;
+  const lean = youtube && o.lean === true;
+  const perClip = clipSecondsEach(o, timing, length);
   const stages: Array<[string, number]> = [
-    ["reading", youtube ? timing.fetch_per_s * video : 3],
+    ["reading", youtube ? (lean ? timing.lean_fetch_per_s : timing.fetch_per_s) * video : 3],
     ["transcribing", o.plan_from ? 0 : timing.listen_per_s * video + 5],
     ["choosing", o.plan_from ? 0 : timing.choose_base + timing.choose_per_s * video],
     ["cutting", planned * perClip],
@@ -255,7 +272,7 @@ export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now
     if (Number.isFinite(sLeft) && Number.isFinite(sAll) && sAll > 0) {
       // the chosen clips' own lengths are known: seconds of clip still to cut, at this run's measured pace once it has one
       const cutSoFar = sAll - sLeft;
-      const pace = cutSoFar > 0 && since > 0 ? since / cutSoFar : timing.cut_per_s + timing.cut_base / Math.max(5, sAll / Math.max(1, total));
+      const pace = cutSoFar > 0 && since > 0 ? since / cutSoFar : (lean ? timing.lean_cut_per_s : timing.cut_per_s) + timing.cut_base / Math.max(5, sAll / Math.max(1, total));
       left += sLeft * pace;
       const sinceClip = p.clip_at ? (now - Date.parse(p.clip_at)) / 1000 : since;
       left -= Math.min(Math.max(0, sinceClip), (sAll / Math.max(1, total)) * pace * 0.9);
@@ -283,7 +300,7 @@ export function remainingParts(job: EtaJob, timing: ClipTiming, now = Date.now()
   const o = job.options ?? {};
   const video = Math.max(60, Number(o.seconds) || Number(o.source?.seconds) || 600), length = lengthOf(o.length);
   const planned = Math.max(1, Number(p.total) || Number(o.count ?? o.max_clips) || likelyClips(video, length));
-  const cut = Math.min(total, planned * (timing.cut_base + timing.cut_per_s * CLIP_LENGTHS[length].target));
+  const cut = Math.min(total, planned * clipSecondsEach(o, timing, length));
   return { pre: Math.max(0, total - cut), cut };
 }
 /** How long until a run is done (seconds) and how many runs it waits behind before it can start. Up to `cap.runs`
@@ -1103,7 +1120,9 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
       ? `A ${minutes}-minute video usually holds about ${likely} strong ${what} ${likely === 1 ? "clip" : "clips"}. We'll make as many as it really has, up to ${count}, and you're only charged for the clips we make.`
       : null;
   const language = typeof o.language === "string" && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(o.language) ? o.language : "original";
-  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, price, warning, language, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
+  // lean (the sound, then each clip's stretch) runs about twice as fast as the whole download: the estimate needs to know
+  const lean = platform === "youtube" && youtube_direct && leanOn(env);
+  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, ...(lean ? { lean: true } : {}), price, warning, language, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
     summary: `${minutes} min · up to ${count} ${count === 1 ? "clip" : "clips"}` };
 }
 /** The re-run that cuts moments already chosen, from an uploaded copy of the same video: each clip, no reading. */
@@ -1432,6 +1451,10 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         }
       }
       if (!moments.length) throw new ClipsError("clips_none_found", "No moment in this video stands out enough to be a clip", 422);
+      // every moment Claude offered (kept or not), where it sits and its score: what the picker had to choose from, so a
+      // run whose clips bunch in one part of the video can be checked (Nov 16 2026: 4 of 5 came from one 11-minute scene)
+      { const at = new Map(lines.map((l) => [l.i, l.start]));
+        log(`[clips] candidates ${JSON.stringify({ job: job.id, video_s: Math.round(seconds), kept: moments.map((m) => Math.round(m.start)), offered: picks.map((r) => [Math.round(at.get(Number(r.start_line)) ?? -1), Math.round(Number(r.score))]).sort((a, b) => a[0] - b[0]) })}`); }
       plan = { moments, seconds, transcribed, title: meta.title ?? o.source?.title ?? null, downloaded: !blocked, language: heardLanguage };
       if (heardLanguage) log(`[clips] language ${JSON.stringify({ job: job.id, heard: heardLanguage, asked: o.language ?? "original" })}`);
       const up = await sb.storage.from("studio-outputs").upload(planKey(u, collectionId), Buffer.from(JSON.stringify(plan)), { contentType: "text/plain", upsert: true });

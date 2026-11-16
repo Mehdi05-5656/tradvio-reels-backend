@@ -279,6 +279,38 @@ test("time left: learned from past runs, by video length, clip count and length,
   assert.ok(k >= 170 && k <= 190, `180 s of clip left at 1 s per second measured (120 s for 120 s): ${k}`);
 });
 
+test("time left for a lean run: its own rates (the sound, not the video; cuts with their stretches), learned apart", () => {
+  // the first clean lean run on Render (afd95664, Nov 16 2026), with whole-video runs beside it
+  const leanRun = { timing: { video_s: 2565, fetch_s: 32, listen_s: 93, choose_s: 34, cuts: [[35.5, 41.1], [27.6, 46.7], [27, 40.1], [33.4, 45.9], [36, 48.9]], lean: { fallback: false } } };
+  const whole = { timing: { video_s: 1514, fetch_s: 343, listen_s: 38, choose_s: 40, cuts: [[33.5, 40.5], [35.4, 42.7], [38.2, 44.4]] } };
+  const fellBack = { timing: { video_s: 1230, fetch_s: 49, listen_s: 31, choose_s: 31, cuts: [[47.7, 300], [33.6, 300]], lean: { fallback: true } } };
+  const t = timingFrom([leanRun, whole, fellBack]);
+  assert.ok(Math.abs(t.lean_fetch_per_s - 32 / 2565) < 1e-9, `lean fetch from the lean run: ${t.lean_fetch_per_s}`);
+  assert.ok(Math.abs(t.fetch_per_s - 343 / 1514) < 1e-9, `whole fetch from the whole run only: ${t.fetch_per_s}`);
+  assert.ok(t.lean_cut_per_s > 1.1 && t.lean_cut_per_s < 1.4, `lean cut ~1.22: ${t.lean_cut_per_s}`);
+  assert.ok(t.cut_per_s < 1.2, `the fallen-back run's slow cuts count for neither: ${t.cut_per_s}`);
+  assert.equal(t.runs, 3);
+  // the run itself, quoted: 43 min, 5 clips, about 30 s each; it took 429 s, the old estimate said 885
+  const o = { platform: "youtube", seconds: 2565, length: "standard", count: 5 };
+  const leanEta = remainingSeconds({ options: { ...o, lean: true }, status: "queued" }, timingFrom([leanRun, whole]));
+  const wholeEta = remainingSeconds({ options: o, status: "queued" }, timingFrom([leanRun, whole]));
+  assert.ok(leanEta >= 300 && leanEta <= 500, `lean: ${leanEta}`);
+  assert.ok(wholeEta > leanEta * 1.5, `a whole download still takes its own time: ${wholeEta}`);
+  // before any lean run is measured: the defaults
+  assert.ok(Math.abs(remainingSeconds({ options: { ...o, lean: true }, status: "queued" }, DEFAULT_TIMING) - (0.015 * 2565 + 0.03 * 2565 + 5 + 25 + 0.02 * 2565 + 5 * (5 + 1.3 * 32))) < 2, "a standard clip's target is 32 s");
+});
+
+test("a quote says when the run will be lean (the estimate needs it), and only then", async () => {
+  const meta = async () => ({ id: "abcdefghijk", url: "", title: "T", channel: "C", description: "", seconds: 1500, thumbnail_url: null, chapters: [], replay: [] });
+  const base = { ANTHROPIC_API_KEY: "k", ELEVENLABS_API_KEY: "e", STUDIO_YT_PROXY: "http://p:1" };
+  const on = await quoteClips({ env: { ...base, STUDIO_CLIPS_LEAN: "on" }, meta }, PLANS, null, { url: "https://youtu.be/abcdefghijk" });
+  const off = await quoteClips({ env: { ...base, STUDIO_CLIPS_LEAN: "off" }, meta }, PLANS, null, { url: "https://youtu.be/abcdefghijk" });
+  const someone = await quoteClips({ env: { ...base, STUDIO_CLIPS_LEAN: "acct-1" }, meta, userId: "acct-2" }, PLANS, null, { url: "https://youtu.be/abcdefghijk" });
+  assert.equal(on.options.lean, true);
+  assert.equal(off.options.lean, undefined);
+  assert.equal(someone.options.lean, undefined);
+});
+
 test("the Clips email: how many, what was charged and what went back, the link to the run; or the one step left", () => {
   const base = { id: "j1", tool: "clips", status: "done", credits_reserved: 125, credits_charged: 110, options: { collection_id: "col9", count: 10, source: { title: "Inside the Mind of a Master Procrastinator" } } };
   const m = jobsNotice([{ ...base, progress: { outcome: "fewer", made_count: 7, asked: 10 } }], { DASHBOARD_URL: "https://app.clone8.io" }, U);
