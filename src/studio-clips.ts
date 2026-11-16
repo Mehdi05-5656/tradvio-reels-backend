@@ -26,7 +26,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, logClaudeCost, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { transcribeWords, type AudioEvent, type TimedWord } from "./studio-eleven.js";
-import { youtubeAudio, youtubeDownload, youtubeId, youtubeSound, youtubeStretch, LinkError } from "./studio-youtube.js";
+import { youtubeAudio, youtubeDownload, youtubeId, youtubeInfo, youtubeSound, youtubeStretch, LinkError } from "./studio-youtube.js";
+import { noteScrapeCreators } from "./vendor-alerts.js";
 import { checkUpload } from "./studio-limits.js";
 import { claimJob } from "./studio-leases.js";
 
@@ -327,6 +328,8 @@ export type ClipsDeps = {
   env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; plans?: PlanLike[];
   /** whose quote this is (STUDIO_CLIPS_LEAN may name accounts) */ userId?: string | null;
   meta?: (url: string) => Promise<YtMeta>;
+  /** yt-dlp's listing of a video (youtubeInfo), when ScrapeCreators cannot answer */
+  info?: (url: string) => Promise<any>;
   transcript?: (url: string) => Promise<Segment[] | null>;
   /** speech-to-text: the words (with speakers), and the sounds that are not speech when the service gives them */
   words?: (audio: Buffer) => Promise<TimedWord[] | { words: TimedWord[]; events: AudioEvent[]; language?: string | null }>;
@@ -354,10 +357,28 @@ async function sc(deps: ClipsDeps, path: string): Promise<any> {
   const r = await (deps.fetch ?? fetch)(`https://api.scrapecreators.com${path}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(90_000) }).catch(() => null);
   recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: path.split("?")[0], status: r?.status ?? 0, use: "clips" } });
   if (!r) throw new ClipsError("link_fetch_failed", "YouTube's listing could not be read; try again", 502, true);
+  const body = await r.json().catch(() => null);
+  noteScrapeCreators(r.status, body, { env, fetch: deps.fetch, where: `a Clips link read (${path.split("?")[0]})` });
   if (r.status === 403) throw new ClipsError("link_no_media", "That video cannot be read (age-restricted or private)", 400);
   if (r.status === 404) throw new ClipsError("link_no_media", "No video was found at that link", 400);
   if (!r.ok) throw new ClipsError("link_fetch_failed", `YouTube's listing could not be read (${r.status})`, 502, r.status >= 500 || r.status === 429);
-  return r.json().catch(() => null);
+  return body;
+}
+/** What a person sees when neither ScrapeCreators nor yt-dlp could read the link: ours, not theirs, and passing. */
+export const LINK_READ_DOWN = "Reading YouTube links is briefly unavailable on our side; please try again in a few minutes";
+/** ScrapeCreators failed for its own reasons (out of credits, key, its outage, no answer, not configured), not because
+ *  of the video: 403 and 404 are about the video and stand. */
+const vendorFailure = (e: any) => e instanceof ClipsError && (e.code === "link_fetch_failed" || e.code === "clips_unavailable");
+/** yt-dlp's listing (youtubeInfo) in ScrapeCreators' shape, for parseMeta. A live or upcoming stream has no length. */
+export function infoToSc(i: any): any {
+  const live = i?.live_status === "is_live" || i?.live_status === "is_upcoming";
+  return {
+    title: i?.title ?? null, channel: { title: i?.channel ?? i?.uploader ?? null }, description: i?.description ?? "",
+    lengthSeconds: live ? null : Number(i?.duration) || null, thumbnail: typeof i?.thumbnail === "string" ? i.thumbnail : null,
+    chapters: (Array.isArray(i?.chapters) ? i.chapters : []).map((c: any) => ({ title: c?.title, startSeconds: Number(c?.start_time) })),
+    // yt-dlp's heatmap is the same "most replayed" curve (0-1 per stretch)
+    most_replayed: { markers: (Array.isArray(i?.heatmap) ? i.heatmap : []).map((h: any) => ({ startMillis: Number(h?.start_time) * 1000, durationMillis: (Number(h?.end_time) - Number(h?.start_time)) * 1000, intensityScoreNormalized: Number(h?.value) })) },
+  };
 }
 /** Seconds from "1:02:03", "12:30" or "45". */
 export const clockSeconds = (s: string): number => String(s ?? "").split(":").map(Number).reduce((a, b) => a * 60 + (Number.isFinite(b) ? b : 0), 0);
@@ -380,7 +401,20 @@ export async function youtubeMeta(deps: ClipsDeps, url: string): Promise<YtMeta>
   const id = youtubeId(url) ?? url;
   const hit = metaCache.get(id);
   if (hit && Date.now() - hit.at < 30 * 60_000) return hit.meta;
-  const body = await sc(deps, `/v1/youtube/video?url=${encodeURIComponent(url)}&cache_max_age=1d`);
+  let body: any;
+  try { body = await sc(deps, `/v1/youtube/video?url=${encodeURIComponent(url)}&cache_max_age=1d`); }
+  catch (e: any) {
+    if (!vendorFailure(e)) throw e;
+    // ScrapeCreators is out (credits, key, outage): yt-dlp reads the same listing through our proxy
+    const log = deps.log ?? ((l: string) => console.log(l));
+    log(`[clips] ScrapeCreators could not read ${id} (${String(e?.message ?? e).slice(0, 80)}); yt-dlp instead`);
+    try { body = infoToSc(await (deps.info ?? ((x) => youtubeInfo(x, { env: deps.env, fetch: deps.fetch })))(url)); }
+    catch (e2: any) {
+      if (e2 instanceof LinkError && e2.code === "link_no_media") throw new ClipsError("link_no_media", e2.message, 400);
+      log(`[clips] yt-dlp could not read ${id} either: ${String(e2?.message ?? e2).slice(0, 160)}`);
+      throw new ClipsError("link_read_down", LINK_READ_DOWN, 503, true);
+    }
+  }
   const meta = parseMeta(url, body);
   metaCache.set(id, { at: Date.now(), meta });
   if (metaCache.size > 500) metaCache.delete(metaCache.keys().next().value as string);
@@ -393,8 +427,11 @@ export function parseTranscript(b: any): Segment[] | null {
     .filter((s: Segment) => Number.isFinite(s.start) && s.text);
   return segs.length ? segs : null;
 }
+/** YouTube's own captions (only used when the video itself could not be fetched). ScrapeCreators being out counts as
+ *  no captions, so the run goes on to fetch and hear the sound instead of failing. */
 async function youtubeTranscript(deps: ClipsDeps, url: string): Promise<Segment[] | null> {
-  return parseTranscript(await sc(deps, `/v1/youtube/video/transcript?url=${encodeURIComponent(url)}&cache_max_age=7d`));
+  try { return parseTranscript(await sc(deps, `/v1/youtube/video/transcript?url=${encodeURIComponent(url)}&cache_max_age=7d`)); }
+  catch (e: any) { if (!vendorFailure(e)) throw e; (deps.log ?? console.log)(`[clips] captions not read (${String(e?.message ?? e).slice(0, 80)})`); return null; }
 }
 
 // ---------------------------------------------------------------------------------------------------

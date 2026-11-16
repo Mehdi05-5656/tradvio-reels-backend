@@ -274,6 +274,23 @@ export async function youtubeAudio(url: string, target: string, o: { fetch?: typ
   try { await access(target); } catch { throw new LinkError("link_fetch_failed", "The sound of the video could not be fetched"); }
 }
 
+/** A video's listing (title, channel, length, chapters, most-replayed heat) read by yt-dlp itself through our proxy,
+ *  nothing downloaded: the stand-in when ScrapeCreators cannot answer (its credits ran out on Nov 16 2026 and every
+ *  pasted link failed for 8 hours with "listing could not be read (402)"). One fresh-session retry. Only the fields
+ *  Clips uses are printed (the full -J listing is hundreds of kB, past what runYtDlp keeps). */
+export const INFO_FIELDS = "%(.{id,title,channel,uploader,description,duration,thumbnail,chapters,heatmap,live_status})j";
+export async function youtubeInfo(url: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number } = {}): Promise<Record<string, any>> {
+  const once = (fresh: boolean) => runYtDlp(["--skip-download", "--ignore-no-formats-error", "--print", INFO_FIELDS, url], { ...o, fresh, timeoutMs: o.timeoutMs ?? 60_000 });
+  let out: string;
+  try { out = await once(false); } catch (e: any) {
+    if (e instanceof LinkError && e.code === "link_no_media") throw e;
+    out = await once(true);
+  }
+  const line = out.split("\n").map((s) => s.trim()).filter((s) => s.startsWith("{")).pop();
+  try { if (line) return JSON.parse(line); } catch { /* below */ }
+  throw new LinkError("link_fetch_failed", "YouTube's listing could not be read");
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Clips without the whole video (STUDIO_CLIPS_LEAN, Nov 15 2026): the sound alone to hear and choose the moments, then
 // only the stretches that become clips. The proxy bills by the gigabyte and the whole video was ~78 % of a run's cost.

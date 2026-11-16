@@ -140,6 +140,7 @@ async function main() {
   startKageLoop(getSb); // Kage remixes (Claude plans, the platform renders every shot at once); off until STUDIO_KAGE_ENABLED=true
   void import("./studio-youtube.js").then((m) => m.ffmpegReport()).then((r) => console.log(`[clips] ffmpeg: ${r}`)).catch(() => undefined); // Clips from long videos, one run at a time; needs ANTHROPIC_API_KEY plus ScrapeCreators or ElevenLabs
   startImportLoop(getSb, { plans: PLANS }); // bulk link imports into the library; needs SCRAPECREATORS_API_KEY
+  void import("./vendor-alerts.js").then((m) => m.startScrapeCreatorsWatch()).catch(() => undefined); // emails the owner when ScrapeCreators' credits run low or out (src/vendor-alerts.ts)
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
   startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week
