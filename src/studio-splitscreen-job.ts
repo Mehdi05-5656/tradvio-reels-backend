@@ -28,6 +28,7 @@ import { keyStills, prepareSource } from "./studio-stunts.js";
 import { autoClipBox, autoSeam, cleanLayout, gameWindow, halves, readSubjects, settleSubject, splitArgs, splitscreenEnabled, splitscreenOpen, SPLIT_LIMITS, SPLIT_OUT, type Layout, type Subject } from "./studio-splitscreen.js";
 import { KINDS, LIBRARY, LIBRARY_BUCKET, loopById, loopKey, pickLoop, posterKey, type Kind, type Loop } from "./studio-splitscreen-library.js";
 import type { LibraryHelpers } from "./studio-library.js";
+import { claimJob } from "./studio-leases.js";
 
 type Env = Record<string, string | undefined>;
 export class SplitError extends ClipsError {}
@@ -214,7 +215,7 @@ export function startSplitLoop(sbFn: () => SupabaseClient, deps: SplitDeps = {},
       const sb = sbFn();
       const room = await roomForAnother(env);
       if (!room.ok) return;
-      const r = await sb.rpc("studio_claim", { p_tool: "splitscreen", p_worker: worker });
+      const r = await claimJob(sb, "splitscreen", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;

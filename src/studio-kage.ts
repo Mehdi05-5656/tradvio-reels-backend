@@ -17,6 +17,7 @@ import { claudeJson, type ClipsDeps } from "./studio-clips.js";
 import { PREMIUM_MARGIN, creditsForCost, studioCosts, type PlanLike } from "./studio-pricing.js";
 import type { LibraryHelpers } from "./studio-library.js";
 import { KAGE_REFERENCES, kageReferenceById, kageReferencePosterUrl, kageReferenceVideoUrl } from "./studio-kage-references.js";
+import { claimJob } from "./studio-leases.js";
 
 export class KageError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 
@@ -442,7 +443,7 @@ export function startKageLoop(sbFn: () => SupabaseClient, deps: KageDeps = {}, i
     if (running >= maxParallel) return;
     try {
       const sb = sbFn();
-      const r = await sb.rpc("studio_claim", { p_tool: "kage", p_worker: worker });
+      const r = await claimJob(sb, "kage", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;

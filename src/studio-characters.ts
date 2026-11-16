@@ -12,6 +12,7 @@ import { PLANS } from "./studio.js";
 import { studioCosts } from "./studio-pricing.js";
 import { higgsfieldAuth, RecastError, HF_BASE } from "./studio-recast.js";
 import { PHOTO_ENDPOINT } from "./studio-influencer.js";
+import { claimJob } from "./studio-leases.js";
 
 export const SOUL_ENDPOINT = "higgsfield-ai/soul/standard";
 const POLL_MS = 5_000, MAX_WAIT_MS = 10 * 60_000, IMAGE_LIMIT = 33_554_432;
@@ -174,7 +175,7 @@ export function startCharacterLoop(sbFn: () => SupabaseClient, deps: CharacterDe
     if (running >= maxParallel) return;
     try {
       const sb = sbFn();
-      const r = await sb.rpc("studio_claim", { p_tool: "character", p_worker: worker });
+      const r = await claimJob(sb, "character", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;

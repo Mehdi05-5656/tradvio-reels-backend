@@ -21,6 +21,7 @@ import { transcribeWords } from "./studio-eleven.js";
 import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import type { LibraryHelpers } from "./studio-library.js";
+import { claimJob } from "./studio-leases.js";
 
 export const CAPTION_LIMITS = { max_seconds: 900, max_items: 50, max_words: 6000, words_per_day: 40, seconds_per_credit: 5, min_credits: 5, clips_per_clip: 3 }; // (the Clips page's captions switch: studio-clips.ts captionsPerClip, 2 a clip on lean runs)
 export const captionsEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_CAPTIONS_ENABLED !== "false" && !!env.ELEVENLABS_API_KEY;
@@ -302,7 +303,7 @@ export function startCaptionsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = 
       if (active.size < capacity(env).captionsRuns) {
         const room = await (deps.room ?? roomForAnother)(env);
         if (!room.ok) return;
-        const r = await sb.rpc("studio_claim", { p_tool: "captions", p_worker: worker });
+        const r = await claimJob(sb, "captions", worker);
         if (r.error) throw r.error;
         const job = r.data as Job | null;
         if (!job || !job.id) return;

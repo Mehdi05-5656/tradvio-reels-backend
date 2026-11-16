@@ -31,6 +31,7 @@ import { hf, outputUrls } from "./studio-instruments.js";
 import { creditValueFloor, creditsForCost, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
 import { extractFrame, makePoster, probeDimensions, probeSeconds, probeStream, RecastError } from "./studio-recast.js";
 import type { LibraryHelpers } from "./studio-library.js";
+import { claimJob } from "./studio-leases.js";
 
 type Env = Record<string, string | undefined>;
 export class StuntsError extends ClipsError {}
@@ -532,7 +533,7 @@ export function startStuntsLoop(sbFn: () => SupabaseClient, deps: StuntDeps = {}
       const sb = sbFn();
       const room = await (deps.room ?? roomForAnother)(env);
       if (!room.ok) return;
-      const r = await sb.rpc("studio_claim", { p_tool: "stunts", p_worker: worker });
+      const r = await claimJob(sb, "stunts", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;

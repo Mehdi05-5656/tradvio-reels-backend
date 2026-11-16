@@ -43,6 +43,7 @@ import { creditValueFloor, creditsForCost, marginForSecond, SEEDANCE_EDIT_RATES,
 import { extractFrame, makePoster, probeDimensions, probeSeconds, probeStream, RecastError } from "./studio-recast.js";
 import { keyStills, prepareSource, workingSize } from "./studio-stunts.js";
 import type { LibraryHelpers } from "./studio-library.js";
+import { claimJob } from "./studio-leases.js";
 
 type Env = Record<string, string | undefined>;
 export class ReshootError extends ClipsError {}
@@ -862,7 +863,7 @@ export function startReshootLoop(sbFn: () => SupabaseClient, deps: ReshootDeps =
       const sb = sbFn();
       const room = await (deps.room ?? roomForAnother)(env);
       if (!room.ok) return;
-      const r = await sb.rpc("studio_claim", { p_tool: "reshoot", p_worker: worker });
+      const r = await claimJob(sb, "reshoot", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;

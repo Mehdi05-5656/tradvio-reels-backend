@@ -53,10 +53,12 @@ import { registerVoices } from "./studio-eleven.js";
 import { startNoticesLoop } from "./studio-notices.js";
 import { startPushLoop } from "./studio-push.js";
 import { startNudgesLoop } from "./studio-nudges.js";
-import { initEvents } from "./studio-events.js";
+import { flushEvents, initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
 import { registerCommunity } from "./studio-community.js";
-import { initCosts, registerStudioCosts } from "./studio-costs.js";
+import { flushCosts, initCosts, registerStudioCosts } from "./studio-costs.js";
+import { stopGracefully } from "./studio-leases.js";
+import { flushPosthog } from "./posthog.js";
 import { registerStoryExam } from "./studio-story-exam.js";
 import compression from "compression";
 import WebSocket from "ws";
@@ -167,6 +169,11 @@ async function main() {
   const port = Number(process.env.PORT || 10000);
   http.listen(port, "0.0.0.0", () => {
     console.log(`[server] listening on :${port}`);
+  });
+  // A deploy or restart (Render: SIGTERM about a minute after the new server is live, then 30 s): no more jobs taken,
+  // requests in flight finish, every Studio job held goes back to the queue at once, buffers are written (studio-leases.ts)
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => {
+    void stopGracefully({ signal, sb: getSb, server: http, flush: [flushEvents, flushCosts, flushPosthog], waitMs: 10_000 });
   });
 }
 

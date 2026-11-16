@@ -21,6 +21,7 @@ import { elevenEnabled, runElevenJob } from "./studio-eleven.js";
 import { HF_BASE, higgsfieldAuth, RecastError, makePoster, probeSeconds } from "./studio-recast.js";
 import { toJpeg } from "./studio-characters.js";
 import { creditValueFloor, creditsForCost, higgsfieldDiscount, marginForSecond, seedanceDiscount, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
+import { claimJob } from "./studio-leases.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -466,7 +467,7 @@ export function startInstrumentLoop(sbFn: () => SupabaseClient, deps: Instrument
     if (running >= maxParallel) return;
     try {
       const sb = sbFn();
-      const r = await sb.rpc("studio_claim", { p_tool: "instrument", p_worker: worker });
+      const r = await claimJob(sb, "instrument", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;

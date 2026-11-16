@@ -14,6 +14,7 @@ import { PLANS, WINDOW, billableSeconds, quote, windowSeconds } from "./studio.j
 import { PREMIUM_MARGIN, RECAST_RESOLUTION, creditsForCost, higgsfieldCostPerSecond, higgsfieldListPerSecond, seedanceEditCostPerSecond, seedanceListPerSecond, studioCosts } from "./studio-pricing.js";
 import { trendById, trendClipUrl } from "./studio-trends.js";
 import { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, ANCHOR_SECONDS, planPieces, refineJoins, shotPieces, planLongPath, planAnchor, anchorMode, lightPieceMax } from "./studio-longpath.js";
+import { claimJob } from "./studio-leases.js";
 export { MAX_SECONDS, PIECE_SECONDS, MIN_SECONDS, JOIN_OVERLAP, MAX_SHOT_PIECES, ANCHOR_SECONDS, planPieces, refineJoins, shotPieces, planLongPath, planAnchor, anchorMode, lightPieceMax };
 
 export const HF_BASE = "https://api.higgsfield.ai";
@@ -820,7 +821,7 @@ export function startRecastLoop(sbFn: () => SupabaseClient, deps: RecastDeps = {
       let job: Job | null = null;
       for (const tool of SUITE_TOOLS) {
         if (tool !== "recast" && env[`STUDIO_${tool.toUpperCase()}_ENABLED`] === "false") continue;
-        const r = await sb.rpc("studio_claim", { p_tool: tool, p_worker: worker });
+        const r = await claimJob(sb, tool, worker);
         if (r.error) throw r.error;
         const j = r.data as Job | null;
         if (j && j.id) { job = { ...j, tool: j.tool ?? tool }; break; }

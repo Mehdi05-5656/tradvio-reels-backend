@@ -28,6 +28,7 @@ import { recordEvent } from "./studio-events.js";
 import { transcribeWords, type AudioEvent, type TimedWord } from "./studio-eleven.js";
 import { youtubeAudio, youtubeDownload, youtubeId, youtubeSound, youtubeStretch, LinkError } from "./studio-youtube.js";
 import { checkUpload } from "./studio-limits.js";
+import { claimJob } from "./studio-leases.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Rules and prices
@@ -1520,7 +1521,7 @@ export function startClipsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {},
       if (active.size < capacity(env).runs) {
         const room = await (deps.room ?? roomForAnother)(env);
         if (!room.ok) { if (Date.now() - lastHeld > 5 * 60_000) { lastHeld = Date.now(); log(`[clips] holding new runs: ${room.why} (${active.size} running)`); } return; }
-        const r = await sb.rpc("studio_claim", { p_tool: "clips", p_worker: worker });
+        const r = await claimJob(sb, "clips", worker);
         if (r.error) throw r.error;
         const job = r.data as Job | null;
         if (!job || !job.id) return;

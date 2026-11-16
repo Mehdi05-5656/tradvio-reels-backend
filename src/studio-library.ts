@@ -19,6 +19,7 @@ import { checkUpload } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import { listProfilePage } from "./studio-profile-import.js";
 import { ClipsError, CLIP_COST, clipsQueue, clipsCapacity, clipsTiming, etaFor, lengthOf, proxyUsdPerGb, quoteCut } from "./studio-clips.js";
+import { claimJob } from "./studio-leases.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const MAX_IMPORT_LINKS = 500;
@@ -547,7 +548,7 @@ export function startImportLoop(sbFn: () => SupabaseClient, deps: ImportDeps = {
     if (running) return;
     try {
       const sb = sbFn();
-      const r = await sb.rpc("studio_claim", { p_tool: "import", p_worker: worker });
+      const r = await claimJob(sb, "import", worker);
       if (r.error) throw r.error;
       const job = r.data as Job | null;
       if (!job || !job.id) return;
