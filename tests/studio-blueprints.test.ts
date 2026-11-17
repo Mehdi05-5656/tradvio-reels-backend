@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BLUEPRINT_OUT, blueprintsV2Enabled, blueprintsV2Open, bodyStretches, buildTimeline, lookById, LOOKS, overlayAss, planVersion, sfxFor, slotFor, wrapTitle, type Hook } from "../src/studio-blueprints.js";
+import { BLUEPRINT_OUT, bodyStretches, buildTimeline, lookById, LOOKS, overlayAss, planVersion, sfxFor, slotFor, wrapTitle, type Hook } from "../src/studio-blueprints.js";
 import type { CapWord } from "../src/caption-engine.js";
 
 // A 20 s talk: four sentences, one long pause at 9-11 s.
@@ -15,12 +15,6 @@ const DUR = 20;
 const HOOK: Hook = { id: "fat", title: "I wasn't ready for this *KitKat* aisle", start: 6.4, end: 8.9 };
 const OWN: Hook = { id: "own", title: "Japan's *KitKat* aisle", start: null, end: null };
 const look = (id: string) => lookById(id)!;
-
-test("switches default off; open needs enabled", () => {
-  assert.equal(blueprintsV2Enabled({}), false);
-  assert.equal(blueprintsV2Open({ STUDIO_BLUEPRINTS_V2_OPEN: "true" }), false);
-  assert.equal(blueprintsV2Open({ STUDIO_BLUEPRINTS_V2_ENABLED: "true", STUDIO_BLUEPRINTS_V2_OPEN: "true" }), true);
-});
 
 test("five looks, unique ids, sane values", () => {
   assert.deepEqual(LOOKS.map((l) => l.id), ["clean", "card", "editorial", "loud", "split"]);

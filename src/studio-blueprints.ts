@@ -5,13 +5,11 @@
 // A hook is a cold open: a line from later in the video played first, with a title card over it, then the video from
 // the top. A look is everything else that changes the picture and sound: framing (fill, card, split), punch-ins,
 // pace (pauses cut or kept), captions style, grade, music bed and sound effects.
-// Behind STUDIO_BLUEPRINTS_V2_ENABLED (owner only) and STUDIO_BLUEPRINTS_V2_OPEN (customers); both default off.
+// The switches, routes and storage are in studio-blueprints-routes.ts.
 import { FONTS, assSize, presetById, type CapWord, type FontInfo, type Frame } from "./caption-engine.js";
 import { captionAss, serverMeasure } from "./studio-caption-video.js";
 
 type Env = Record<string, string | undefined>;
-export const blueprintsV2Enabled = (env: Env = process.env) => env.STUDIO_BLUEPRINTS_V2_ENABLED === "true";
-export const blueprintsV2Open = (env: Env = process.env) => blueprintsV2Enabled(env) && env.STUDIO_BLUEPRINTS_V2_OPEN === "true";
 
 export const BLUEPRINT_OUT = { w: 1080, h: 1920, fps: 30 } as const;
 export const BLUEPRINT_LIMITS = { min_seconds: 5, max_seconds: 180, max_versions: 50, max_hooks: 10, max_looks: 5, hook_min: 1, hook_max: 6 } as const;
