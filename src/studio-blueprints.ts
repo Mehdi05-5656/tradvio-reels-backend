@@ -208,6 +208,9 @@ export type Edl = {
   music: { key: string; db: number; duck: boolean } | null;
   sfx: Array<{ key: string; at: number; db: number }>;
   game: { key: string; start: number } | null;
+  /** the video already has captions burned in: no new captions, and the worker shows the whole picture in every look
+   *  (no punch-ins, the card and the split fit it whole over a blurred copy) so the person's captions are never cut */
+  keep_frame?: boolean;
 };
 
 export function slotFor(look: Look, out: Frame): Rect {
@@ -233,7 +236,8 @@ export function sfxFor(look: Look, tl: Timeline): Edl["sfx"] {
   return out;
 }
 
-export type PlanInput = { words: CapWord[]; duration: number; hook: Hook; look: Look; focus?: { cx: number; cy: number }; focusTrack?: Edl["focus_track"]; game?: { key: string; start: number } | null; env?: Env };
+export type PlanInput = { words: CapWord[]; duration: number; hook: Hook; look: Look; focus?: { cx: number; cy: number }; focusTrack?: Edl["focus_track"]; game?: { key: string; start: number } | null; env?: Env;
+  /** false when the video already has captions of its own (default true) */ captions?: boolean };
 export function planVersion(p: PlanInput): Edl {
   const out = BLUEPRINT_OUT, fr: Frame = { w: out.w, h: out.h };
   const tl = buildTimeline(p.words, p.duration, p.hook, p.look);
@@ -241,7 +245,8 @@ export function planVersion(p: PlanInput): Edl {
   const style = { ...preset, ...(p.look.captionY != null ? { y: p.look.captionY } : {}) };
   // captions only after the cold open: the title card has the screen during the hook
   const body = tl.words.filter((w) => w.start >= tl.hookEnd - 0.01);
-  const captions = captionAss(body, { style, keywords: true, fillers: true, censor: false }, fr, p.env);
+  const own = p.captions === false;
+  const captions = captionAss(own ? [] : body, { style, keywords: true, fillers: true, censor: false }, fr, p.env);
   const titleTo = p.look.title.persist ? tl.duration : Math.max(tl.hookEnd + 0.5, Math.min(tl.duration, 2.6));
   const overlay = overlayAss(p.hook.title, p.look.title, fr, 0, titleTo, tl.hookEnd > 0 ? tl.hookEnd : null, serverMeasure(p.env));
   return {
@@ -252,5 +257,6 @@ export function planVersion(p: PlanInput): Edl {
     music: p.look.music ? { key: p.look.music.mood, db: p.look.music.db, duck: true } : null,
     sfx: sfxFor(p.look, tl),
     game: p.look.layout === "split" ? (p.game ?? null) : null,
+    ...(own ? { keep_frame: true } : {}),
   };
 }

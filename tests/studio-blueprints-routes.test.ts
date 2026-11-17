@@ -83,10 +83,10 @@ function fakeSb() {
 }
 
 test("read: openings with their lines and the face track, kept; read again from the kept file; fresh adds new ones", async () => {
-  const sb = fakeSb(); let calls = 0, faceCalls = 0;
+  const sb = fakeSb(); let calls = 0, faceCalls = 0, capCalls = 0;
   const deps: any = { env: ON, words: async () => WORDS, stills: async () => [{ at: 1, jpeg: Buffer.from("x") }],
     hooks: async () => { calls++; return calls === 1 ? [HOOK("h1", 13.8, 15.3)] : [HOOK("h1", 13.8, 15.3), HOOK("h2", 23, 26)]; },
-    faces: async () => { faceCalls++; return [{ t: 1, cx: 0.5, cy: 0.4, h: 0.5 }]; } };
+    faces: async () => { faceCalls++; return [{ t: 1, cx: 0.5, cy: 0.4, h: 0.5 }]; }, captionsCheck: async () => { capCalls++; return true; } };
   const first = await readFor(sb, deps, U, A);
   assert.equal(first.cached, false);
   assert.equal(first.doc.hooks.length, 1);
@@ -99,6 +99,8 @@ test("read: openings with their lines and the face track, kept; read again from 
   assert.match(fresh.added[0].id, /^h2-/);
   assert.equal(fresh.doc.hooks.length, 2);
   assert.equal(faceCalls, 1, "the face track is read once");
+  assert.equal(first.doc.has_captions, true);
+  assert.equal(capCalls, 1, "the captions check runs once and is kept");
   await assert.rejects(readFor(sb, deps, U, A, { fresh: true, allowNew: false }), /a lot of reading/);
 });
 
@@ -115,3 +117,34 @@ test("writePlan: the plan is uploaded as text under the person's folder and its 
   assert.equal(plan.versions.length, 2);
   assert.equal(plan.asset_id, A);
 });
+
+test("read: a read kept before the captions check gets it once; Clone8 Captions videos skip the call", async () => {
+  const sb = fakeSb(); let capCalls = 0;
+  sb.files.set(`studio-outputs/${readKey(U, A)}`, JSON.stringify({ v: 1, at: "x", seconds: 36, hooks: [{ ...HOOK(), line: "w" }], focus: [] }));
+  const deps: any = { env: ON, stills: async () => [{ at: 1, jpeg: Buffer.from("x") }], captionsCheck: async () => { capCalls++; return false; }, hooks: async () => { throw new Error("no new openings expected"); } };
+  const a = await readFor(sb, deps, U, A);
+  assert.equal(a.cached, true); assert.equal(a.doc.has_captions, false); assert.equal(capCalls, 1);
+  const b = await readFor(sb, deps, U, A);
+  assert.equal(b.doc.has_captions, false); assert.equal(capCalls, 1, "kept");
+  // a video Clone8 captioned: known without a look
+  const sb2 = fakeSb(); const from = sb2.from;
+  sb2.from = (t: string) => t === "studio_assets" ? { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { id: A, kind: "video", name: "x.mp4", object_key: `${U}/${A}.mp4`, status: "ready", probe: { duration: 36, captions: true } }, error: null }) }) }) }) } : from(t);
+  const c = await readFor(sb2, { ...deps, words: async () => WORDS, hooks: async () => [HOOK()], faces: async () => [] }, U, A);
+  assert.equal(c.doc.has_captions, true); assert.equal(capCalls, 1, "no look needed");
+});
+
+test("captions off: the quote keeps it, the plan adds no captions and keeps the whole frame", () => {
+  const q = quoteBlueprints(ON, PLANS, ASSET, { hooks: [HOOK()], looks: ["clean"], captions: false }, { owner: true });
+  assert.equal(q.options.captions, false);
+  assert.equal(quoteBlueprints(ON, PLANS, ASSET, { hooks: [HOOK()], looks: ["clean"] }, { owner: true }).options.captions, true, "on by default");
+  const off = buildPlan(A, 36, WORDS, [], [HOOK()], ["clean", "card"], {}, false);
+  for (const v of off.versions) {
+    assert.equal(v.edl.keep_frame, true);
+    assert.doesNotMatch(v.edl.captions_ass, /Dialogue:/, "no caption events");
+    assert.match(v.edl.overlay_ass, /Dialogue:/, "the title card stays");
+  }
+  const on = buildPlan(A, 36, WORDS, [], [HOOK()], ["clean"], {});
+  assert.equal(on.versions[0].edl.keep_frame, undefined);
+  assert.match(on.versions[0].edl.captions_ass, /Dialogue:/);
+});
+

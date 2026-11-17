@@ -86,3 +86,20 @@ export function focusTrack(reads: Array<Subject & { t: number }>): Array<{ t: nu
     t: r.t, cx: c(r.x), cy: c(r.kind === "face" ? r.y - (r.h ?? 0) * 0.2 : r.y), h: r.kind === "face" ? c(r.h ?? 0) : 0,
   }));
 }
+
+/** Captions already burned into the picture (a clip from Clips with captions, an edited upload): one look at a few
+ *  stills by the small model. A version would otherwise carry two sets of captions. */
+export const CAPTION_CHECK_SCHEMA = { type: "object", additionalProperties: false, required: ["captions"], properties: { captions: { type: "boolean" } } };
+export const CAPTION_CHECK_PROMPT = `These are stills from one short video, a few seconds apart. Are there captions burned into the picture: words that follow what is being said, shown over the video (subtitles, word-by-word captions, a line of text that changes from still to still)? Logos, shop signs, product labels, a channel name or one fixed title do not count. Answer true only if speech captions show in at least two of the stills.`;
+export async function hasBurnedCaptions(deps: ClipsDeps, frames: Array<{ t: number; jpg: Buffer }>, userId?: string): Promise<boolean> {
+  const env = deps.env ?? process.env;
+  const pick = frames.length <= 6 ? frames : Array.from({ length: 6 }, (_, i) => frames[Math.round((i * (frames.length - 1)) / 5)]);
+  if (!pick.length) return false;
+  const out = await claudeJson(deps, {
+    model: env.STUDIO_BLUEPRINTS_CAPTION_MODEL || "claude-haiku-5-5", max_tokens: 200,
+    output_config: { effort: "low", format: { type: "json_schema", schema: CAPTION_CHECK_SCHEMA } },
+    messages: [{ role: "user", content: [...pick.map((f) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.jpg.toString("base64") } })), { type: "text", text: CAPTION_CHECK_PROMPT }] }],
+  }, "blueprints_caption_check", userId);
+  return out?.captions === true;
+}
+

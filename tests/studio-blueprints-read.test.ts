@@ -64,3 +64,16 @@ test("focusTrack: faces nudged up by a fifth of their height, subjects as they a
   ]);
   assert.deepEqual(t, [{ t: 0, cx: 0.5, cy: 0.4, h: 0.5 }, { t: 1, cx: 0.3, cy: 0.6, h: 0 }, { t: 3, cx: 1, cy: 0, h: 0.4 }]);
 });
+
+test("hasBurnedCaptions: at most six stills, the schema, a cost line; true only when the model says so", async () => {
+  const { hasBurnedCaptions, CAPTION_CHECK_SCHEMA } = await import("../src/studio-blueprints-read.js");
+  let body: any = null; const logs: string[] = [];
+  const fetch = (async (_u: string, init: any) => { body = JSON.parse(init.body); return new Response(JSON.stringify({ model: body.model, stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 5 }, content: [{ type: "text", text: JSON.stringify({ captions: true }) }] }), { status: 200 }); }) as any;
+  const frames = Array.from({ length: 20 }, (_, i) => ({ t: i, jpg: Buffer.from(`f${i}`) }));
+  assert.equal(await hasBurnedCaptions({ env: { ANTHROPIC_API_KEY: "k" }, fetch, log: (l) => logs.push(l) }, frames), true);
+  assert.equal(body.messages[0].content.filter((c: any) => c.type === "image").length, 6);
+  assert.deepEqual(body.output_config.format.schema, CAPTION_CHECK_SCHEMA);
+  assert.equal(body.model, "claude-haiku-5-5");
+  assert.ok(logs.some((l) => l.includes("blueprints_caption_check")));
+  assert.equal(await hasBurnedCaptions({ env: { ANTHROPIC_API_KEY: "k" }, fetch: (() => { throw new Error("no call"); }) as any }, []), false);
+});
