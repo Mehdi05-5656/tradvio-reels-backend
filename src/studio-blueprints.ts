@@ -200,6 +200,9 @@ export type Edl = {
   slot: Rect;
   /** the framing centre in the source (share of width and height), from the face read */
   focus: { cx: number; cy: number };
+  /** where the face (or main subject) is over time, in source seconds; the worker frames each stretch on the median
+   *  of the reads inside it and falls back to `focus` */
+  focus_track: Array<{ t: number; cx: number; cy: number }>;
   segments: Segment[];
   grade: Grade;
   captions_ass: string;
@@ -232,7 +235,7 @@ export function sfxFor(look: Look, tl: Timeline): Edl["sfx"] {
   return out;
 }
 
-export type PlanInput = { words: CapWord[]; duration: number; hook: Hook; look: Look; focus?: { cx: number; cy: number }; game?: { key: string; start: number } | null; env?: Env };
+export type PlanInput = { words: CapWord[]; duration: number; hook: Hook; look: Look; focus?: { cx: number; cy: number }; focusTrack?: Edl["focus_track"]; game?: { key: string; start: number } | null; env?: Env };
 export function planVersion(p: PlanInput): Edl {
   const out = BLUEPRINT_OUT, fr: Frame = { w: out.w, h: out.h };
   const tl = buildTimeline(p.words, p.duration, p.hook, p.look);
@@ -246,7 +249,7 @@ export function planVersion(p: PlanInput): Edl {
   return {
     v: 1, version: `${p.hook.id}-${p.look.id}`, look: p.look.id, hook: p.hook.id,
     out: { ...out }, duration: tl.duration, layout: p.look.layout, slot: slotFor(p.look, fr),
-    focus: p.focus ?? { cx: 0.5, cy: 0.42 }, segments: tl.segments, grade: p.look.grade,
+    focus: p.focus ?? { cx: 0.5, cy: 0.42 }, focus_track: p.focusTrack ?? [], segments: tl.segments, grade: p.look.grade,
     captions_ass: captions, overlay_ass: overlay,
     music: p.look.music ? { key: p.look.music.mood, db: p.look.music.db, duck: true } : null,
     sfx: sfxFor(p.look, tl),
