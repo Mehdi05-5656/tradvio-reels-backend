@@ -31,6 +31,7 @@ import { registerMcp } from "./studio-mcp.js";
 import { registerByo } from "./studio-byo.js";
 import { registerByoReport } from "./studio-byo-report.js";
 import { registerClipsHealth, startClipsWatch } from "./clips-watch.js";
+import { registerFailures, startFailureWatch } from "./failure-watch.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
 import { startInstrumentLoop, instrumentLoopSettings } from "./studio-instruments.js";
@@ -118,6 +119,7 @@ async function main() {
   registerStudio(app, getSb);
   registerByo(app, getSb);
   registerClipsHealth(app, getSb); // the owner's Clips health numbers (src/clips-watch.ts)
+  registerFailures(app, getSb); // the owner's failure list, every tool (src/failure-watch.ts)
   registerByoReport(app, getSb); // the owner's cost-vs-price card for films written in a chat (src/studio-byo-report.ts) // Signature written in the person's own chat: the scene tools' routes (src/studio-byo.ts)
   registerMcp(app, getSb); // the Clone8 connector for Claude/ChatGPT (docs/mcp/PLAN.md); off unless STUDIO_MCP_ENABLED, owner-only unless STUDIO_MCP_OPEN
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
@@ -144,6 +146,7 @@ async function main() {
   startImportLoop(getSb, { plans: PLANS }); // bulk link imports into the library; needs SCRAPECREATORS_API_KEY
   void import("./vendor-alerts.js").then((m) => m.startScrapeCreatorsWatch()).catch(() => undefined); // emails the owner when ScrapeCreators' credits run low or out (src/vendor-alerts.ts)
   startClipsWatch(getSb); // emails the owner when a Clips run fails on our side, falls back, loses margin or sticks; a daily summary at 07:00 PT
+  startFailureWatch(getSb); // emails the owner about every customer failure in any tool (with the full reason and repeats); a daily summary at 07:30 PT
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
   startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week

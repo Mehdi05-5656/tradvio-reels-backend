@@ -193,7 +193,7 @@ export async function runSplitJob(sb: SupabaseClient, deps: SplitDeps, job: Job,
     if (code === "lease_lost") return code;
     const retry = e instanceof ClipsError ? e.retry : true;
     log(`[splitscreen] ${code} ${JSON.stringify({ job: job.id, detail: String(e?.message ?? e).slice(0, 200) })}`);
-    const f = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry });
+    const f = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
     if (f.error) log(`[splitscreen] could not record the failure of ${job.id}: ${f.error.message}`);
     return code;
   } finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }

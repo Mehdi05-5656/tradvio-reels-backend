@@ -195,8 +195,8 @@ export async function runElevenJob(sb: SupabaseClient, deps: ElevenDeps, job: Jo
     if (r.data !== true) throw new RecastError("lease_lost");
     job.progress = { ...(job.progress ?? {}), ...progress };
   };
-  const fail = async (code: string, retry: boolean) => {
-    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry }); if (r.error) throw r.error; }
+  const fail = async (code: string, retry: boolean, detail?: unknown) => {
+    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
     catch { return "failure_unconfirmed"; }
     return retry && job.attempts < 3 ? "requeued" : "failed";
   };
@@ -270,7 +270,7 @@ export async function runElevenJob(sb: SupabaseClient, deps: ElevenDeps, job: Jo
     const code = e instanceof RecastError ? e.code : "worker_error";
     const retry = e instanceof RecastError ? e.retry : true;
     log(`[audio] ${code} ${JSON.stringify({ job: job.id, detail: String(e?.message ?? e).slice(0, 200) })}`);
-    return fail(code, retry);
+    return fail(code, retry, e);
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

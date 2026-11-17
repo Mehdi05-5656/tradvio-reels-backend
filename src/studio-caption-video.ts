@@ -279,7 +279,7 @@ export async function runCaptionsJob(sb: SupabaseClient, deps: ClipsDeps, job: J
       await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
       return "partial";
     }
-    const f = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry });
+    const f = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
     if (f.error) log(`[captions] could not record the failure of ${job.id}: ${f.error.message}`);
     return code;
   } finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }

@@ -372,8 +372,8 @@ async function characterUrls(sb: SupabaseClient, deps: RecastDeps, job: Job, opt
 /** One claimed job, start to finish. Returns a status word; a lost lease or an uncertain completion never becomes a refund. */
 export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Job): Promise<string> {
   const log = deps.log ?? (() => undefined), sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))), now = deps.now ?? Date.now;
-  const fail = async (code: string, retry: boolean) => {
-    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry }); if (r.error) throw r.error; }
+  const fail = async (code: string, retry: boolean, detail?: unknown) => {
+    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
     catch { return "failure_unconfirmed"; }
     return retry && job.attempts < 3 ? "requeued" : "failed";
   };
@@ -800,7 +800,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     const code = e instanceof RecastError ? e.code : "worker_error";
     const retry = e instanceof RecastError ? e.retry : true;
     log(`[recast] ${code} ${JSON.stringify({ job: job.id, detail: String(e?.message ?? e).slice(0, 200) })}`);
-    return fail(code, retry);
+    return fail(code, retry, e);
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

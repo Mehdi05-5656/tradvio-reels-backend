@@ -1632,7 +1632,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       if (done.error) log(`[clips] could not settle ${job.id}: ${done.error.message}`);
       return "partial";
     }
-    const failed = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry });
+    const failed = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
     if (failed.error) log(`[clips] could not record the failure of ${job.id}: ${failed.error.message}`);
     return code;
   } finally {
