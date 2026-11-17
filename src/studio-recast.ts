@@ -3,6 +3,7 @@
 // original sound back (the full model returns silent video), stores the result in studio-outputs and
 // charges the exact seconds. Runs inside the web service as a timer loop, like the intake loop: Higgsfield
 // does the heavy work, we only wait. Nothing here is reachable from HTTP.
+import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -373,7 +374,7 @@ async function characterUrls(sb: SupabaseClient, deps: RecastDeps, job: Job, opt
 export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Job): Promise<string> {
   const log = deps.log ?? (() => undefined), sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))), now = deps.now ?? Date.now;
   const fail = async (code: string, retry: boolean, detail?: unknown) => {
-    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
+    try { const r = await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
     catch { return "failure_unconfirmed"; }
     return retry && job.attempts < 3 ? "requeued" : "failed";
   };

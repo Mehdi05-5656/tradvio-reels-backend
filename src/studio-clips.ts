@@ -16,6 +16,7 @@
 //  - Price: reading the video (by its length) plus a price per clip, reserved for the clips asked for. A run is charged
 //    for the clips it makes; what it does not make goes back. About 2-2.5x OpusClip per video (CLIP_RATES), with
 //    safety nets so a vendor price change can never sell a run at a loss.
+import { studioFail } from "./studio-fail.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -1632,7 +1633,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       if (done.error) log(`[clips] could not settle ${job.id}: ${done.error.message}`);
       return "partial";
     }
-    const failed = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
+    const failed = await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
     if (failed.error) log(`[clips] could not record the failure of ${job.id}: ${failed.error.message}`);
     return code;
   } finally {

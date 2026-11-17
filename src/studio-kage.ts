@@ -4,6 +4,7 @@
 // the hero's photo, and the shots are cut together on the reference's own rhythm with its sound. One job on the
 // queue (tool "kage"), the plan and every shot's state on the job, nothing new in the database beyond the tool name.
 // Not a shot-for-shot copy: new scenes, same cuts, same energy. Switched on by STUDIO_KAGE_ENABLED=true.
+import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -245,7 +246,7 @@ const mediaTypeOf = (b: Buffer) => (b[0] === 0x89 && b[1] === 0x50 ? "image/png"
 export async function runKageJob(sb: SupabaseClient, deps: KageDeps, job: Job): Promise<string> {
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l)), sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))), now = deps.now ?? Date.now;
   const fail = async (code: string, retry: boolean, detail?: unknown) => {
-    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
+    try { const r = await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
     catch { return "failure_unconfirmed"; }
     return retry && job.attempts < 3 ? "requeued" : "failed";
   };

@@ -3,6 +3,7 @@
 // and transcripts. Each is one row in src/data/eleven-catalog.json and runs through the same `instrument` job as the
 // video models; this module is the client and the runner. Sound comes back as MP3, transcripts as .txt and .srt,
 // and anything applied to a clip is muxed back onto the untouched picture with ffmpeg.
+import { studioFail } from "./studio-fail.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -196,7 +197,7 @@ export async function runElevenJob(sb: SupabaseClient, deps: ElevenDeps, job: Jo
     job.progress = { ...(job.progress ?? {}), ...progress };
   };
   const fail = async (code: string, retry: boolean, detail?: unknown) => {
-    try { const r = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
+    try { const r = await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: detail == null ? null : String((detail as any)?.message ?? detail).slice(0, 4000) }); if (r.error) throw r.error; }
     catch { return "failure_unconfirmed"; }
     return retry && job.attempts < 3 ? "requeued" : "failed";
   };

@@ -7,6 +7,7 @@
 //   2. A job renders each video: the person's words (edited or as heard) -> ASS -> ffmpeg -> a new library video.
 //   3. Price: 1 credit per 5 seconds of video, at least 5 a video (owner's call, Nov 1 2026). In Clips, captions add 3
 //      credits a clip (the words are already heard there). Charged per video made; the rest goes back.
+import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -279,7 +280,7 @@ export async function runCaptionsJob(sb: SupabaseClient, deps: ClipsDeps, job: J
       await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
       return "partial";
     }
-    const f = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
+    const f = await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: code, p_retry: retry, p_detail: String(e?.message ?? e).slice(0, 4000) });
     if (f.error) log(`[captions] could not record the failure of ${job.id}: ${f.error.message}`);
     return code;
   } finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }

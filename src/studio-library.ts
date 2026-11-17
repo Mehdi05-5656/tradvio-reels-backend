@@ -3,6 +3,7 @@
 // uploads. Imports bring many short videos in at once: files and zips go straight from the browser to storage (the zip
 // is opened in the browser, never uploaded whole); links (pasted, or read from a spreadsheet or a public Google Sheet)
 // are fetched here by a background job, priced per link and refunded per link that fails.
+import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { createWriteStream } from "node:fs";
@@ -533,7 +534,7 @@ export async function runImportJob(sb: SupabaseClient, deps: ImportDeps, job: Jo
     log(`[import] failed ${job.id}: ${String(e?.message ?? e).slice(0, 200)}`);
     const last = (job.attempts ?? 1) >= 3;
     if (last) await sb.from("studio_collections").update({ status: "failed", note: "The import could not be finished; the credits were refunded.", updated_at: new Date().toISOString() }).eq("id", collectionId).eq("user_id", u);
-    const failed = await sb.rpc("studio_fail", { p_job: job.id, p_token: job.lease_token, p_reason: "import_failed", p_retry: true, p_detail: String(e?.message ?? e).slice(0, 4000) });
+    const failed = await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: "import_failed", p_retry: true, p_detail: String(e?.message ?? e).slice(0, 4000) });
     if (failed.error) log(`[import] could not record the failure of ${job.id}: ${failed.error.message}`);
     return "failed";
   }

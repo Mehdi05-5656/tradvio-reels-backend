@@ -64,3 +64,13 @@ test("a look: new rows are emailed once, then marked so they are never emailed a
   const r2 = await failureTick(sb, { env, fetch: fetchFn, log: () => undefined } as any);
   assert.deepEqual(r2, { looked: 0, emailed: 0 }); assert.equal(sent.length, 1);
 });
+
+test("studio_fail before the migration: the old call is made, so the job still fails and refunds", async () => {
+  const { studioFail } = await import("../src/studio-fail.js");
+  const calls: any[] = [];
+  const sb: any = { rpc: async (_fn: string, a: any) => { calls.push(a); return "p_detail" in a ? { error: { code: "PGRST202", message: "Could not find the function public.studio_fail(p_detail, ...)" } } : { data: { status: "failed" }, error: null }; } };
+  const r = await studioFail(sb, { p_job: "j", p_token: "t", p_reason: "x", p_retry: false, p_detail: "why" });
+  assert.equal(r.error, null); assert.equal(calls.length, 2); assert.deepEqual(Object.keys(calls[1]).sort(), ["p_job", "p_reason", "p_retry", "p_token"]);
+  const other: any = { rpc: async () => ({ error: { message: "lease_lost" } }) };
+  assert.equal((await studioFail(other, { p_job: "j", p_token: "t", p_reason: "x", p_retry: false, p_detail: "d" })).error.message, "lease_lost", "any other error is returned as is, with no second call");
+});
