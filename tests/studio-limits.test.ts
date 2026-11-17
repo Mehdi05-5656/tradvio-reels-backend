@@ -54,3 +54,13 @@ test("limits: reads fail open, never closed", async () => {
   assert.equal((await checkJobRate(sbWith({ studio_customers: { data: { plan_id: "starter", status: "active" } }, studio_jobs: { count: 20 } }), u))?.code, "rate_limited");
   assert.equal(await checkJobRate(sbWith({ studio_customers: { data: { plan_id: "starter", status: "active" } }, studio_jobs: { count: 19 } }), u), null);
 });
+
+test("limits: no plan is not an hourly limit (the job step answers subscription_required, which opens the plans)", async () => {
+  const u = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  assert.equal(await checkJobRate(sbWith({ studio_customers: { data: { plan_id: null, status: "none" } }, studio_jobs: { count: 0 } }), u), null);
+  assert.equal(await checkJobRate(sbWith({ studio_customers: { data: null }, studio_jobs: { count: 3 } }), u), null);
+  assert.equal(await checkJobRate(sbWith({ studio_customers: { data: { plan_id: "creator", status: "canceled" } }, studio_jobs: { count: 0 } }), u), null);
+  // the owner pass still has no practical cap; a real plan still has its own
+  assert.equal(await checkJobRate(sbWith({ studio_customers: { data: { plan_id: null, status: "none", owner_pass: true } }, studio_jobs: { count: 500 } }), u), null);
+  assert.equal((await checkJobRate(sbWith({ studio_customers: { data: { plan_id: "creator", status: "trialing" } }, studio_jobs: { count: 40 } }), u))?.code, "rate_limited");
+});

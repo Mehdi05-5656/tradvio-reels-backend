@@ -84,6 +84,9 @@ export async function checkJobRate(sb: any, user: string, now = new Date()): Pro
       sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("user_id", user).gte("created_at", since),
     ]);
     if (cust.error || jobs.error) return null;
+    // No plan: say nothing here. studio_create_job refuses with subscription_required, which the app and the site turn
+    // into the plans screen; answering first with "up to 0 jobs an hour" hid that (owner's phone, Nov 16 2026).
+    if (!hasPlanAccess(cust.data)) return null;
     return jobAllowance(limitsFor(cust.data), Number(jobs.count ?? 0));
   } catch { return null; }
 }
