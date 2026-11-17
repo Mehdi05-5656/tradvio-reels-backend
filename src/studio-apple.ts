@@ -92,12 +92,19 @@ export async function applyAppleTransaction(sb: SupabaseClient, user: string, tx
   const expires = Number(tx.expiresDate ?? 0);
   const active = expires > Date.now();
   // a person holds one plan: a live website (Stripe) subscription is never doubled by an Apple one
-  const cur = await sb.from("studio_customers").select("stripe_subscription_id,status,billing_source").eq("user_id", user).maybeSingle();
+  const cur = await sb.from("studio_customers").select("stripe_subscription_id,status,billing_source,apple_original_transaction_id,period_end").eq("user_id", user).maybeSingle();
   if (cur.error) throw cur.error;
   const c = cur.data as any;
   if (c?.stripe_subscription_id && ["active", "trialing", "past_due"].includes(c.status) && c.billing_source !== "apple") {
     console.error(`[apple] ALERT ${user} bought ${tx.productId} through Apple while a website plan is live (${c.stripe_subscription_id}); recorded, plan left as is`);
     return { user, note: "website plan already live; not applied" };
+  }
+  // An older period of the same subscription never overwrites a newer one. The app hands over every unfinished
+  // transaction at once (and a restore hands over all of them), in no set order; an expired period arriving after the
+  // live one used to set the plan to canceled (owner's TestFlight account, Nov 16 2026 18:00 PT).
+  const recordedEnd = c?.period_end ? Date.parse(c.period_end) : 0;
+  if (c?.billing_source === "apple" && String(c.apple_original_transaction_id ?? "") === String(tx.originalTransactionId) && recordedEnd > expires) {
+    return { user, plan: plan.id, note: `${plan.id} ${kind.interval} older period, ignored` };
   }
   const link = await sb.from("studio_customers").upsert({ user_id: user, billing_source: "apple", apple_original_transaction_id: String(tx.originalTransactionId), updated_at: new Date().toISOString() }, { onConflict: "user_id" });
   if (link.error) throw link.error;

@@ -82,6 +82,28 @@ test("apple: a lapsed period updates the plan row but grants nothing", async () 
   assert.match(out.note, /lapsed/);
 });
 
+test("apple: an older period arriving after a newer one changes nothing (the owner's 'canceled' TestFlight plan)", async () => {
+  const liveEnd = new Date(Date.now() + 20 * DAY).toISOString();
+  const recorded = { billing_source: "apple", apple_original_transaction_id: "2000000100", status: "active", period_end: liveEnd };
+  // the expired period lands second: no plan change, no grant
+  const late = fakeSb({ customer: recorded });
+  const out = await applyAppleTransaction(late, U, tx({ transactionId: "2000000105", expiresDate: Date.now() - DAY }) as any);
+  assert.match(out.note, /older period, ignored/);
+  assert.equal(late.calls.length, 0);
+  assert.equal(late.writes.length, 0);
+  // a newer period still applies, and so does an older one from a different subscription (a re-subscribe)
+  const next = fakeSb({ customer: recorded });
+  assert.match((await applyAppleTransaction(next, U, tx({ transactionId: "2000000120", expiresDate: Date.now() + 40 * DAY }) as any)).note, /granted/);
+  const other = fakeSb({ customer: { ...recorded, apple_original_transaction_id: "1999999999" } });
+  assert.equal(other.calls.length, 0);
+  await applyAppleTransaction(other, U, tx({ expiresDate: Date.now() + 10 * DAY }) as any);
+  assert.equal(other.calls.find((c: any) => c.name === "studio_apply_subscription")!.args.p_status, "active");
+  // the same period sent again (a restore) still applies, idempotently
+  const same = fakeSb({ customer: recorded });
+  await applyAppleTransaction(same, U, tx({ expiresDate: Date.parse(liveEnd) }) as any);
+  assert.equal(same.calls.find((c: any) => c.name === "studio_apply_subscription")!.args.p_status, "active");
+});
+
 test("apple: never doubles a live website plan", async () => {
   const sb = fakeSb({ customer: { stripe_subscription_id: "sub_1", status: "active", billing_source: "stripe" } });
   const out = await applyAppleTransaction(sb, U, tx() as any);
