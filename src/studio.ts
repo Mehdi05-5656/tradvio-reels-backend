@@ -606,6 +606,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError || e instanceof MotivationError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
+    // the no-plan answer carries words too: build 12 of the iPhone app shows `detail` under the button as it is
+    if (named?.[1] === "subscription_required") return res.status(409).json({ error: named[1], detail: "Making videos comes with a Clone8 plan. Pick a plan to start." });
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
     if (/relation .* does not exist|function .* does not exist/i.test(msg)) return res.status(503).json({ error: "studio_unavailable", detail: "The Studio migration has not been applied" });
     if (isNoSuchPrice(e)) { console.error(`[studio] ALERT a STRIPE_PRICE_* setting is not a price in this Stripe account: ${msg.slice(0, 160)}`); return res.status(503).json({ error: "billing_misconfigured", detail: "That plan is not set up in billing yet. We have been alerted." }); }
