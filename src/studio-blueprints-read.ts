@@ -77,11 +77,12 @@ export async function writeHooks(deps: ClipsDeps, words: CapWord[], opts: { n: n
 }
 
 /** The face reads as a framing track. A face's crop centre is nudged up by a fifth of the face's height, so the eyes
- *  sit above the middle of the frame and the chin clears the captions. A subject is centred as it is.
+ *  sit above the middle of the frame and the chin clears the captions. A subject is centred as it is. `h` is the
+ *  face's height share (0 for a subject): the worker caps a punch-in so a face never fills more than 70 % of the crop.
  *  Screens and empty frames give no read (the worker keeps the plan's centre there). */
-export function focusTrack(reads: Array<Subject & { t: number }>): Array<{ t: number; cx: number; cy: number }> {
+export function focusTrack(reads: Array<Subject & { t: number }>): Array<{ t: number; cx: number; cy: number; h: number }> {
   const c = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 1000) / 1000;
   return reads.filter((r) => r.kind === "face" || r.kind === "subject").map((r) => ({
-    t: r.t, cx: c(r.x), cy: c(r.kind === "face" ? r.y - (r.h ?? 0) * 0.2 : r.y),
+    t: r.t, cx: c(r.x), cy: c(r.kind === "face" ? r.y - (r.h ?? 0) * 0.2 : r.y), h: r.kind === "face" ? c(r.h ?? 0) : 0,
   }));
 }

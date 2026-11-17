@@ -202,7 +202,7 @@ export type Edl = {
   focus: { cx: number; cy: number };
   /** where the face (or main subject) is over time, in source seconds; the worker frames each stretch on the median
    *  of the reads inside it and falls back to `focus` */
-  focus_track: Array<{ t: number; cx: number; cy: number }>;
+  focus_track: Array<{ t: number; cx: number; cy: number; h?: number }>;
   segments: Segment[];
   grade: Grade;
   captions_ass: string;

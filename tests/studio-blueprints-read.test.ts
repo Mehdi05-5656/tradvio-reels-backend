@@ -62,5 +62,5 @@ test("focusTrack: faces nudged up by a fifth of their height, subjects as they a
     { t: 2, kind: "screen", x: 0.5, y: 0.5, h: 0 },
     { t: 3, kind: "face", x: 1.2, y: 0.05, h: 0.4 },
   ]);
-  assert.deepEqual(t, [{ t: 0, cx: 0.5, cy: 0.4 }, { t: 1, cx: 0.3, cy: 0.6 }, { t: 3, cx: 1, cy: 0 }]);
+  assert.deepEqual(t, [{ t: 0, cx: 0.5, cy: 0.4, h: 0.5 }, { t: 1, cx: 0.3, cy: 0.6, h: 0 }, { t: 3, cx: 1, cy: 0, h: 0.4 }]);
 });
