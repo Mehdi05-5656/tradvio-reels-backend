@@ -32,7 +32,7 @@ import { KageError, kageEnabled, quoteKage, registerKage } from "./studio-kage.j
 import { KageMotionError, kageMotionEnabled, kageMotionMaterialOn, quoteKageMotion } from "./studio-kage-motion.js";
 import { KAGE_MAX_VARIANTS, KAGE_PRESET_CATEGORIES, KAGE_PRESETS } from "./studio-kage-presets.js";
 import { MCP_PATH, mcpEnabled, mcpOpen } from "./studio-mcp.js";
-import { StoryError, storiesEnabled, storyExplainerOpen, storyPremiumOpen, quoteStory } from "./studio-stories.js";
+import { StoryError, storiesEnabled, storyExplainerOpen, storyPremiumOpen, storyStylesOpen, quoteStory } from "./studio-stories.js";
 import { byoBusy } from "./studio-byo.js";
 import { LongformError, longformEnabled, longformOpen, quoteLongform } from "./studio-longform.js";
 import { MotivationError, motivationEnabled, motivationOpen, quoteMotivation } from "./studio-motivation.js";
@@ -136,6 +136,8 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     stunts: stuntsOpen(env),
     // Stories built from scratch (the premium way of making a no-character story): open to everyone only when its own switch says so.
     story_premium: storiesEnabled(env) && kageMotionEnabled(env) && storyExplainerOpen(env) && storyPremiumOpen(env),
+    // Story styles (Block Town): open to everyone only when its own switch says so.
+    story_styles: storiesEnabled(env) && kageMotionEnabled(env) && storyStylesOpen(env),
     // Split screen: the person's clip over a gameplay loop; open to everyone only when its own switch says so.
     splitscreen: splitscreenOpen(env),
     // Reshoot: a one-camera take re-filmed as a multi-camera edit; open to everyone only when its own switch says so.

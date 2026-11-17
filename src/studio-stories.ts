@@ -51,6 +51,15 @@ export const storyByoMargin = (env: Record<string, string | undefined>) => { con
 /** The least margin a film may end at (STUDIO_STORY_BYO_MIN_MARGIN, default 45 %, the owner's floor): the worker is
  *  handed the cost ceiling that follows from it (options.cost_cap_usd) and skips anything optional that would pass it. */
 export const storyByoMinMargin = (env: Record<string, string | undefined>) => { const raw = String(env.STUDIO_STORY_BYO_MIN_MARGIN ?? "").trim(); const m = Number(raw); return raw !== "" && Number.isFinite(m) && m >= 0 && m < 0.9 ? m : 0.45; };
+/** Story styles (docs/story-styles/PLAN.md): "worlds" is the house look (the cut-open dioramas, every story so far);
+ *  "blocky" is Block Town (toy-brick people acting out a short story in a town), made only as Signature: by our author,
+ *  or written in the person's own chat (byo). A Block Town story may be the person's own script, kept word for word.
+ *  Its own switches: STUDIO_STORY_STYLES_ENABLED (the owner's account only), STUDIO_STORY_STYLES_OPEN (customers too). */
+export const STORY_STYLES = ["worlds", "blocky"] as const;
+export const STORY_BLOCKY_LENGTHS = [30, 45, 60] as const;
+export const STORY_SCRIPT_LIMITS = { wordsMin: 12, wordsMax: 400, charsMax: 4000 };
+export const storyStylesEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_STORY_STYLES_ENABLED === "true";
+export const storyStylesOpen = (env: Record<string, string | undefined> = process.env) => storyStylesEnabled(env) && env.STUDIO_STORY_STYLES_OPEN === "true";
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -79,11 +88,34 @@ export type StoryOptions = {
   engine?: "premium";
   /** premium only: the scene is written by the person's own AI in their chat (the connector), not by ours */
   byo?: true;
+  /** the look: "blocky" is Block Town (always premium); unset: the house look (worlds) */
+  style?: "blocky";
+  /** Block Town only: the person's own script, read word for word (the length follows from it) */
+  script?: string;
 };
 
 const pick = <T extends readonly string[]>(list: T, v: unknown, d: T[number]): T[number] => ((list as readonly string[]).includes(String(v)) ? (String(v) as T[number]) : d);
 
+/** Block Town: a topic or the person's own script, a length (or the script's own), always Signature. */
+function parseBlockyOptions(raw: any): StoryOptions {
+  const script = String(raw?.script ?? "").replace(/\s+/g, " ").trim(); const n = script ? script.split(" ").length : 0;
+  if (script && n < STORY_SCRIPT_LIMITS.wordsMin) throw new StoryError("story_script", "A script needs a few sentences at least");
+  if (script && (n > STORY_SCRIPT_LIMITS.wordsMax || script.length > STORY_SCRIPT_LIMITS.charsMax)) throw new StoryError("story_script", `Keep the script under ${STORY_SCRIPT_LIMITS.wordsMax} words (about two minutes)`);
+  let topic = String(raw?.topic ?? "").replace(/\s+/g, " ").trim(); if (!topic && script) topic = script.slice(0, 120);
+  if (topic.length < STORY_LIMITS.topicMin) throw new StoryError("story_topic", "Say what the story is about (for example: a town where nobody is ever late)");
+  if (topic.length > STORY_LIMITS.topicMax) throw new StoryError("story_topic", `Keep the topic under ${STORY_LIMITS.topicMax} characters`);
+  const engine = raw?.engine == null || raw.engine === "" ? "premium" : raw.engine;
+  if (engine !== "premium") throw new StoryError("story_engine", "Block Town stories are made with Signature");
+  const s = Number(raw?.seconds);
+  // a script sets its own length (about 3.2 words a second); otherwise the nearest offered length
+  const seconds = (script ? Math.max(15, Math.min(100, Math.round(n / 3.2))) : Number.isFinite(s) ? STORY_BLOCKY_LENGTHS.reduce<number>((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), STORY_BLOCKY_LENGTHS[0]) : 45) as StoryOptions["seconds"];
+  return { topic, seconds, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, style: "blocky", engine: "premium", ...(raw?.byo === true ? { byo: true as const } : {}), ...(script ? { script } : {}) };
+}
+
 export function parseStoryOptions(raw: any): StoryOptions {
+  // a style we do not know is refused, never guessed at; "worlds" (or none) is the house look below
+  if (raw?.style != null && raw.style !== "" && !(STORY_STYLES as readonly unknown[]).includes(raw.style)) throw new StoryError("story_style", "Pick one of the story styles");
+  if (raw?.style === "blocky") return parseBlockyOptions(raw);
   const topic = String(raw?.topic ?? "").replace(/\s+/g, " ").trim();
   if (topic.length < STORY_LIMITS.topicMin) throw new StoryError("story_topic", "Say what the story is about (for example: building a bridge across a river)");
   if (topic.length > STORY_LIMITS.topicMax) throw new StoryError("story_topic", `Keep the topic under ${STORY_LIMITS.topicMax} characters`);
@@ -116,6 +148,21 @@ export type StoryQuote = { tool: "kage_motion"; credits: number; options: Record
 export function quoteStory(env: Record<string, string | undefined>, plans: PlanLike[], raw: any, who: { owner?: boolean } = {}): StoryQuote {
   if (!storiesEnabled(env)) throw new StoryError("story_off", "Stories are not switched on yet", 403);
   const o = parseStoryOptions(raw);
+  if (o.style === "blocky") {
+    if (!storyStylesEnabled(env)) throw new StoryError("story_style_off", "Block Town stories are not switched on yet", 403);
+    if (!storyStylesOpen(env) && !who.owner) throw new StoryError("story_style_off", "Block Town stories are not open yet", 403);
+    if (!storyPremiumEnabled(env)) throw new StoryError("story_engine_off", "Signature stories are not switched on yet", 403);
+    const byo = o.byo === true;
+    if (byo && !storyByoEnabled(env)) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not switched on yet", 403);
+    if (byo && !storyByoOpen(env) && !who.owner) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not open yet", 403);
+    const cost = byo ? storyByoCostUsd(env) : storyPremiumCostUsd(env);
+    const price = byo ? credits(env, plans, cost, storyByoMargin(env)) : storyPremiumCredits(env, plans);
+    const floor = studioCosts(env, plans).credit_floor;
+    const cap = byo && floor ? { cost_cap_usd: Math.floor(price * floor * (1 - storyByoMinMargin(env)) * 100) / 100 } : {};
+    const story = { topic: o.topic, seconds: o.seconds, style: "blocky", engine: "premium", ...(byo ? { byo: true } : {}), ...(o.script ? { script: o.script } : {}) };
+    const options = { story, brief: o.topic, style: "story", aspect: "9:16", voice: "jesse", seconds: o.seconds, cost_usd: cost, ...cap };
+    return { tool: "kage_motion", credits: price, options, summary: `${o.script ? "Your script as a" : `${o.seconds} s`} Block Town story · Signature${byo ? ", the scene written in your own chat" : ""} · vertical 9:16 · narrated` };
+  }
   if (o.kind === "explainer") {
     if (!storyExplainerEnabled(env)) throw new StoryError("story_kind_off", "Stories without a character are not switched on yet", 403);
     if (!storyExplainerOpen(env) && !who.owner) throw new StoryError("story_kind_off", "Stories without a character are not open yet", 403);
