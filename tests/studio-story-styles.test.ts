@@ -35,12 +35,12 @@ test("Block Town is always Signature, priced as Signature; in a chat, as in-chat
   assert.deepEqual(byo.options.story, { topic: ask.topic, seconds: 45, style: "blocky", engine: "premium", byo: true });
   assert.equal(byo.options.cost_usd, storyByoCostUsd(OPEN)); assert.ok(byo.credits < q.credits, "cheaper written in the person's chat"); assert.ok(byo.options.cost_cap_usd > 0, "with its cost ceiling");
   assert.equal(code(() => quoteStory({ ...OPEN, STUDIO_STORY_BYO_OPEN: "" }, PLANS, { ...ask, byo: true })), "story_byo_off", "in-chat refused while closed, never made by our model instead");
-  assert.equal(parseStoryOptions({ ...ask, seconds: 50 }).seconds, 45, "the nearest Block Town length"); assert.equal(parseStoryOptions({ ...ask, seconds: 90 }).seconds, 60);
+  assert.equal(parseStoryOptions({ ...ask, seconds: 50 }).seconds, 45, "the nearest Block Town length"); assert.equal(parseStoryOptions({ ...ask, seconds: 90 }).seconds, 90); assert.equal(parseStoryOptions({ ...ask, seconds: 200 }).seconds, 120);
 });
 
 test("a person's own script: kept, its length its own, a topic made from it when none is given", () => {
   const o = parseStoryOptions({ style: "blocky", script: `  ${SCRIPT}\n\n` });
-  assert.equal(o.script, SCRIPT); assert.equal(o.topic, SCRIPT.slice(0, 120)); assert.equal(o.seconds, Math.max(15, Math.round(SCRIPT.split(" ").length / 3.2)), "a short script still makes at least 15 s"); assert.equal(parseStoryOptions({ style: "blocky", script: "word ".repeat(200) }).seconds, 63);
+  assert.equal(o.script, SCRIPT); assert.equal(o.topic, SCRIPT.slice(0, 120)); assert.equal(o.seconds, Math.max(15, Math.round(SCRIPT.split(" ").length / 3)), "a short script still makes at least 15 s"); assert.equal(parseStoryOptions({ style: "blocky", script: "word ".repeat(200) }).seconds, 67);
   const q = quoteStory(OPEN, PLANS, { style: "blocky", script: SCRIPT, topic: "The last light" });
   assert.equal(q.options.story.script, SCRIPT); assert.match(q.summary, /^Your script as a Block Town story/);
   assert.equal(code(() => parseStoryOptions({ style: "blocky", script: "Too short to tell." })), "story_script");
@@ -73,4 +73,16 @@ test("the connector's catalog lists Block Town only when it is open", async () =
   const on = await runTool("clone8_catalog", {}, call({ story_explainer: true, story_premium: true, story_styles: true }));
   const text = (r: any) => JSON.stringify(r);
   assert.doesNotMatch(text(off), /Block Town/); assert.match(text(on), /Block Town/);
+});
+
+test("templates: a known id sets the length and reaches the job; an unknown one is refused; the connector passes it", async () => {
+  const { STORY_TEMPLATES } = await import("../src/studio-story-templates.ts");
+  assert.ok(STORY_TEMPLATES.length >= 6); assert.ok(STORY_TEMPLATES.every((t) => /^[a-z-]+$/.test(t.id) && t.name && t.example));
+  const q = quoteStory(OPEN, PLANS, { style: "blocky", topic: "In this town, you must never look up", template: "one-rule" });
+  assert.equal(q.options.story.template, "one-rule"); assert.equal(q.options.story.seconds, 120); assert.match(q.summary, /\(The One Rule\)/);
+  assert.equal(quoteStory(OPEN, PLANS, { style: "blocky", topic: "In this town, your shoe size decides your job", template: "number-decides" }).options.story.seconds, 90);
+  assert.equal(quoteStory(OPEN, PLANS, { style: "blocky", topic: "In this town, you must never look up", template: "one-rule", seconds: 60 }).options.story.seconds, 60, "the person's own length wins");
+  assert.equal(code(() => parseStoryOptions({ style: "blocky", topic: "In this town, you must never look up", template: "nope" })), "story_template");
+  assert.deepEqual((studioRequest("clone8_make_story", { topic: "In this town, nobody has ever heard music", style: "blocky", template: "never-seen" }) as any).options, { topic: "In this town, nobody has ever heard music", style: "blocky", engine: "premium", seconds: 120, template: "never-seen" });
+  const chat = BYO_MCP_TOOLS.find((t) => t.name === "clone8_make_signature_in_chat")!; assert.deepEqual((chat.inputSchema as any).properties.template.enum, STORY_TEMPLATES.map((t) => t.id));
 });
