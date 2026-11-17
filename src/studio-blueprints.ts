@@ -12,7 +12,8 @@ import { captionAss, serverMeasure } from "./studio-caption-video.js";
 type Env = Record<string, string | undefined>;
 
 export const BLUEPRINT_OUT = { w: 1080, h: 1920, fps: 30 } as const;
-export const BLUEPRINT_LIMITS = { min_seconds: 5, max_seconds: 180, max_versions: 50, max_hooks: 10, max_looks: 5, hook_min: 1, hook_max: 6 } as const;
+// max_versions 10 (owner, Nov 17 2026): one CPU makes a version in about 3.3 min, so a run stays under about 35 min
+export const BLUEPRINT_LIMITS = { min_seconds: 5, max_seconds: 180, max_versions: 10, max_hooks: 10, max_looks: 5, hook_min: 1, hook_max: 6 } as const;
 
 // ---------------------------------------------------------------------------------------------------
 // Looks

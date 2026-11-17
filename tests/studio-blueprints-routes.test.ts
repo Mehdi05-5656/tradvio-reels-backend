@@ -47,8 +47,10 @@ test("options: bad openings and looks are refused with words for the page", () =
   assert.throws(() => cleanOptions({ ...ok, hooks: [{ ...HOOK(), title: " ** " }] }, 36), /needs a title/);
   assert.throws(() => cleanOptions({ ...ok, hooks: [HOOK("H 1")] }, 36), /not valid/);
   assert.throws(() => cleanOptions({ hooks: Array.from({ length: 11 }, (_, i) => HOOK(`h${i}`)), looks: ["clean"] }, 36), /At most 10 openings/);
-  // the most a run can ask for: 10 openings x 5 looks = the 50-version cap exactly
-  assert.equal(cleanOptions({ hooks: Array.from({ length: 10 }, (_, i) => HOOK(`h${i}`)), looks: ["clean", "card", "editorial", "loud", "split", "x"] }, 36).looks.length, 5);
+  // the most a run can make is 10 versions: 2 openings x 5 looks fits, 3 x 4 does not, 10 openings x 1 look fits
+  assert.equal(cleanOptions({ hooks: [HOOK("h1"), HOOK("h2", 23, 26)], looks: ["clean", "card", "editorial", "loud", "split", "x"] }, 36).looks.length, 5);
+  assert.throws(() => cleanOptions({ hooks: [HOOK("h1"), HOOK("h2", 23, 26), HOOK("h3", 23, 26)], looks: ["clean", "card", "editorial", "loud"] }, 36), /At most 10 versions/);
+  assert.equal(cleanOptions({ hooks: Array.from({ length: 10 }, (_, i) => HOOK(`h${i}`)), looks: ["clean"] }, 36).hooks.length, 10);
   assert.equal(cleanOptions({ ...ok, hooks: [{ ...HOOK(), title: "*a* *b* *c*" }] }, 36).hooks[0].title, "a b c");
   assert.throws(() => quoteBlueprints(ON, PLANS, { ...ASSET, probe: { duration: 400 } }, ok, { owner: true }), /up to 3 minutes/);
   assert.throws(() => quoteBlueprints(ON, PLANS, { ...ASSET, probe: { duration: 3 } }, ok, { owner: true }), /at least 5 seconds/);
