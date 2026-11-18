@@ -75,8 +75,11 @@ await probeFetch("kick_public_api", "https://api.kick.com/public/v1/categories?q
 await probeFetch("kick_web_lookup", "https://kick.com/api/v2/channels/xqc", { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", Accept: "application/json" });
 // 4b. the same Kick web lookup through curl (Node's own TLS is refused by Cloudflare even from a home address; curl's
 // fingerprint passed from the Mac on Nov 18 2026)
-{ const r = await run("curl", ["-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code} %{time_total}", "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131 Safari/537.36", "-H", "Accept: application/json", "https://kick.com/api/v2/channels/xqc"], 30_000);
-  out({ test: "kick_web_lookup_curl", code: r.code, result: r.so.trim().slice(0, 40), stderr: r.code === 0 ? null : r.se.slice(0, 160) }); }
+let kickPlaylist = process.env.KICK_PLAYLIST || null;
+{ const r = await run("curl", ["-sS", "-m", "20", "-w", "\n%{http_code}", "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131 Safari/537.36", "-H", "Accept: application/json", "https://kick.com/api/v2/channels/xqc"], 30_000);
+  const lines = r.so.trim().split("\n"); const status = lines.pop(); const body = lines.join("\n");
+  let live = null; try { const j = JSON.parse(body); live = !!j.livestream; if (j.playback_url) kickPlaylist = j.playback_url; } catch { /* not json */ }
+  out({ test: "kick_web_lookup_curl", code: r.code, status, live, got_playlist: !!kickPlaylist, body_head: live == null ? body.replace(/\s+/g, " ").slice(0, 120) : null }); }
 // 5. Kick IVS playlist handed in (the bytes come from Amazon IVS, not from kick.com)
-await pull("kick_pull_20s", process.env.KICK_PLAYLIST || null);
+await pull("kick_pull_20s", kickPlaylist);
 out({ test: "done" });
