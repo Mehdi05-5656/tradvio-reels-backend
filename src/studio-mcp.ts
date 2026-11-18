@@ -36,6 +36,7 @@ const STORY_SECONDS = [30, 50] as const;
 const BLOCKY_SECONDS = [30, 45, 60, 90, 120] as const;
 const TEMPLATE = { type: "string", enum: STORY_TEMPLATES.map((t) => t.id), description: `blocky only: a ready story shape; give your twist as the topic. ${STORY_TEMPLATES.map((t) => `${t.id}: ${t.name} (${t.hook})`).join("; ")}` };
 const STYLE = { type: "string", enum: ["worlds", "blocky"], default: "worlds", description: "story only. worlds: the house look, a cut-open 3D scene with no character (the default). blocky: Block Town, toy-brick characters acting out a short story in a town; always made with Signature; may be the person's own script." };
+const MUSIC = { type: "boolean", description: "story only: background music on (true) or off (false). Leave it out for the style's default: Block Town has music, Worlds has none. Ask the person if they have not said." };
 const SCRIPT = { type: "string", maxLength: 4000, description: "Block Town only: the person's own story script, read word for word (12 to 400 words); its length sets the video's" };
 const MOTIVATION_SECONDS = [30, 45, 60, 90] as const;
 // Films (studio-longform.ts): the Films page's own choices, in the words a person would use in chat
@@ -49,13 +50,13 @@ export const MCP_TOOLS = [
   { name: "clone8_catalog", title: "What Clone8 can make", description: "What Clone8 can make right now from this chat, with each kind's length choices. Free to call. Use clone8_quote for a price.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
   {
     name: "clone8_quote", title: "Price a video", description: "The price in credits of a video before making it, and the person's balance. Free to call; spends nothing.",
-    inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["story", "motivation", "film"] }, seconds: { type: "integer", description: "story: 30 or 50; motivation: 30, 45, 60 or 90" }, minutes: { type: "integer", enum: [...FILM_MINUTES], description: "film only: 2, 5 or 10" }, engine: { type: "string", enum: ["express", "signature"], description: "story only. express: the default, faster and cheaper. signature: built from scratch for the idea, takes longer, costs more." }, style: STYLE, script: SCRIPT } , required: ["kind"] },
+    inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["story", "motivation", "film"] }, seconds: { type: "integer", description: "story: 30 or 50; motivation: 30, 45, 60 or 90" }, minutes: { type: "integer", enum: [...FILM_MINUTES], description: "film only: 2, 5 or 10" }, engine: { type: "string", enum: ["express", "signature"], description: "story only. express: the default, faster and cheaper. signature: built from scratch for the idea, takes longer, costs more." }, style: STYLE, music: MUSIC, script: SCRIPT } , required: ["kind"] },
     annotations: { readOnlyHint: true },
   },
   {
     name: "clone8_make_story", title: "Make a story video",
     description: "Make a narrated vertical 3D story video about a topic. Style worlds (the default): a cut-open 3D scene with no character, e.g. \"How does a hot air balloon fly?\". Style blocky (Block Town): toy-brick characters acting out a short story in a town, e.g. \"a town where nobody is ever late\"; always Signature; may be the person's own script (script). SPENDS CREDITS. Without confirm: true it only returns the price; tell the person the price and call again with confirm: true once they agree. Takes about 15 minutes (Express) or 30 minutes (Signature); follow it with clone8_job.",
-    inputSchema: { type: "object", properties: { topic: { type: "string", minLength: 6, maxLength: 600 }, seconds: { type: "integer", enum: [...new Set([...STORY_SECONDS, ...BLOCKY_SECONDS])].sort((a, b) => a - b), default: 50, description: "worlds: 30 or 50; blocky: 30, 45, 60, 90 or 120 (a template or a script sets its own)" }, engine: { type: "string", enum: ["express", "signature"], default: "express" }, style: STYLE, script: SCRIPT, template: TEMPLATE, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["topic"] },
+    inputSchema: { type: "object", properties: { topic: { type: "string", minLength: 6, maxLength: 600 }, seconds: { type: "integer", enum: [...new Set([...STORY_SECONDS, ...BLOCKY_SECONDS])].sort((a, b) => a - b), default: 50, description: "worlds: 30 or 50; blocky: 30, 45, 60, 90 or 120 (a template or a script sets its own)" }, engine: { type: "string", enum: ["express", "signature"], default: "express" }, style: STYLE, music: MUSIC, script: SCRIPT, template: TEMPLATE, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["topic"] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
@@ -82,7 +83,7 @@ export const BYO_MCP_TOOLS = [
   {
     name: "clone8_make_signature_in_chat", title: "Make a Signature story, written by you",
     description: "Make a Signature 3D story video (vertical, narrated) where YOU, in this chat, write its 3D scene as code with the scene tools, instead of Clone8's own AI: the person pays far fewer credits. Clone8 writes the script, records the narrator, renders and checks every line. Takes 30-60 minutes of your work in this chat. SPENDS CREDITS. Without confirm: true it only returns the price; tell the person (and that you will write the scene here), then call again with confirm: true once they agree. Then read the brief with clone8_scene_brief.",
-    inputSchema: { type: "object", properties: { topic: { type: "string", minLength: 6, maxLength: 600, description: "what the story is about, e.g. \"Want a treehouse in your backyard?\" (worlds) or \"a town where nobody is ever late\" (blocky)" }, style: STYLE, script: SCRIPT, template: TEMPLATE, seconds: { type: "integer", enum: [...BLOCKY_SECONDS], description: "blocky only: 30, 45, 60, 90 or 120 (a template or a script sets its own)" }, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["topic"] },
+    inputSchema: { type: "object", properties: { topic: { type: "string", minLength: 6, maxLength: 600, description: "what the story is about, e.g. \"Want a treehouse in your backyard?\" (worlds) or \"a town where nobody is ever late\" (blocky)" }, style: STYLE, music: MUSIC, script: SCRIPT, template: TEMPLATE, seconds: { type: "integer", enum: [...BLOCKY_SECONDS], description: "blocky only: 30, 45, 60, 90 or 120 (a template or a script sets its own)" }, confirm: { type: "boolean", description: "true only after the person agreed to the price" } }, required: ["topic"] },
     annotations: SCENE,
   },
   { name: "clone8_scene_brief", title: "Read the scene brief", description: "The brief for writing the film's scene: the rules, the kit (your manual, as source code) and an example film, in parts. Read every part, in order, before writing. Free.", inputSchema: { type: "object", properties: { ...JOB, part: { type: "integer", minimum: 1 } }, required: ["job_id"] }, annotations: { readOnlyHint: true } },
@@ -115,8 +116,11 @@ const refusal = (r: { status: number; json: any }) => {
 const blockyOptions = (topic: string, a: any): Record<string, unknown> => {
   const script = String(a?.script ?? "").trim();
   const tpl = STORY_TEMPLATES.find((t) => t.id === a?.template);
-  return { topic, style: "blocky", engine: "premium", seconds: nearest(a?.seconds ?? tpl?.seconds, BLOCKY_SECONDS, 45), ...(script ? { script } : {}), ...(tpl ? { template: tpl.id } : {}) };
+  return { topic, style: "blocky", engine: "premium", seconds: nearest(a?.seconds ?? tpl?.seconds, BLOCKY_SECONDS, 45), ...(script ? { script } : {}), ...(tpl ? { template: tpl.id } : {}), ...musicOf(a) };
 };
+
+/** The person's music switch, when the chat gave one (a boolean only; anything else is left to the style's default). */
+const musicOf = (a: any): { music?: boolean } => (typeof a?.music === "boolean" ? { music: a.music } : {});
 
 /** The Studio request each make/quote tool stands for. */
 export function studioRequest(name: string, a: any): { tool: string; options: Record<string, unknown> } | { invalid: string } {
@@ -125,13 +129,13 @@ export function studioRequest(name: string, a: any): { tool: string; options: Re
     if (name === "clone8_make_story" && topic.length < 6) return { invalid: "The topic needs at least 6 characters." };
     if (a?.style === "blocky") return { tool: "story", options: blockyOptions(topic, a) };
     const signature = a?.engine === "signature";
-    return { tool: "story", options: { topic, seconds: nearest(a?.seconds, STORY_SECONDS, 50), kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", ...(signature ? { engine: "premium" } : {}) } };
+    return { tool: "story", options: { topic, seconds: nearest(a?.seconds, STORY_SECONDS, 50), kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", ...(signature ? { engine: "premium" } : {}), ...musicOf(a) } };
   }
   if (name === "clone8_make_signature_in_chat") {
     const topic = String(a?.topic ?? "").trim();
     if (topic.length < 6) return { invalid: "The topic needs at least 6 characters." };
     if (a?.style === "blocky") return { tool: "story", options: { ...blockyOptions(topic, a), byo: true } };
-    return { tool: "story", options: { topic, seconds: 50, kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", engine: "premium", byo: true } };
+    return { tool: "story", options: { topic, seconds: 50, kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", engine: "premium", byo: true, ...musicOf(a) } };
   }
   if (name === "clone8_make_motivation" || (name === "clone8_quote" && a?.kind === "motivation")) {
     const script = String(a?.script ?? "").trim(), topic = String(a?.topic ?? "").trim();

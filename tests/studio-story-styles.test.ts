@@ -88,3 +88,18 @@ test("templates: a known id sets the length and reaches the job; an unknown one 
   assert.deepEqual((studioRequest("clone8_make_story", { topic: "In this town, nobody has ever heard music", style: "blocky", template: "never-seen" }) as any).options, { topic: "In this town, nobody has ever heard music", style: "blocky", engine: "premium", seconds: 120, template: "never-seen" });
   const chat = BYO_MCP_TOOLS.find((t) => t.name === "clone8_make_signature_in_chat")!; assert.deepEqual((chat.inputSchema as any).properties.template.enum, STORY_TEMPLATES.map((t) => t.id));
 });
+
+test("the music switch: on or off on every story kind, unset leaves the job as before, anything else refused", () => {
+  const story = (env: any, a: any) => (quoteStory(env, PLANS, a, { owner: true }).options as any).story;
+  assert.equal(story(OPEN, { ...ask, music: false }).music, false, "Block Town without music");
+  assert.equal(story(OPEN, { ...ask, music: "on" }).music, true);
+  assert.ok(!("music" in story(OPEN, ask)), "no choice: the job is as it was (the style's default)");
+  assert.equal(story(LIVE, { topic: "Building a treehouse in a garden", kind: "explainer", seconds: 50, music: true }).music, true, "a Worlds film with music");
+  assert.equal(story(LIVE, { topic: "Building a treehouse in a garden", kind: "explainer", seconds: 50, engine: "premium", music: false }).music, false);
+  assert.equal(code(() => parseStoryOptions({ ...ask, music: "loud" })), "story_music");
+  const r = studioRequest("clone8_make_story", { topic: "A town where nobody is ever late", style: "blocky", music: false }) as any;
+  assert.equal(r.options.music, false, "the connector passes it");
+  assert.equal((studioRequest("clone8_make_signature_in_chat", { topic: "Building a treehouse in a garden", music: true }) as any).options.music, true);
+  assert.ok(!("music" in (studioRequest("clone8_make_story", { topic: "A town where nobody is ever late", style: "blocky", music: "yes" }) as any).options), "not a boolean: left to the default");
+  assert.ok(MCP_TOOLS.find((t: any) => t.name === "clone8_make_story")?.inputSchema.properties.music, "the tool shows the switch");
+});

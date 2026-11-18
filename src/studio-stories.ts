@@ -100,6 +100,8 @@ export type StoryOptions = {
   script?: string;
   /** Block Town only: a template id (studio-story-templates.ts); its length unless the person picks one */
   template?: string;
+  /** background music on or off (the person's switch, Nov 17 2026); unset: the style's default (Block Town on, Worlds off) */
+  music?: boolean;
 };
 
 const pick = <T extends readonly string[]>(list: T, v: unknown, d: T[number]): T[number] => ((list as readonly string[]).includes(String(v)) ? (String(v) as T[number]) : d);
@@ -122,7 +124,20 @@ function parseBlockyOptions(raw: any): StoryOptions {
   return { topic, seconds, min_seconds: 0, format: "auto", world: "auto", sidekick: "", captions: "auto", stage: "all", scene: null, style: "blocky", engine: "premium", ...(raw?.byo === true ? { byo: true as const } : {}), ...(script ? { script } : {}), ...(tpl ? { template: tpl.id } : {}) };
 }
 
+/** The music switch: true/false (or "on"/"off"); unset leaves each style as it was; anything else is refused. */
+function parseMusic(v: unknown): boolean | undefined {
+  if (v == null || v === "") return undefined;
+  if (v === true || v === "on") return true;
+  if (v === false || v === "off") return false;
+  throw new StoryError("story_music", "Music is on or off");
+}
+
 export function parseStoryOptions(raw: any): StoryOptions {
+  const music = parseMusic(raw?.music); const o = parseStoryOptionsBase(raw);
+  return music === undefined ? o : { ...o, music };
+}
+
+function parseStoryOptionsBase(raw: any): StoryOptions {
   // a style we do not know is refused, never guessed at; "worlds" (or none) is the house look below
   if (raw?.style != null && raw.style !== "" && !(STORY_STYLES as readonly unknown[]).includes(raw.style)) throw new StoryError("story_style", "Pick one of the story styles");
   if (raw?.style === "blocky") return parseBlockyOptions(raw);
@@ -170,7 +185,7 @@ export function quoteStory(env: Record<string, string | undefined>, plans: PlanL
     const price = byo ? credits(env, plans, cost, storyByoMargin(env)) : credits(env, plans, cost);
     const floor = studioCosts(env, plans).credit_floor;
     const cap = byo && floor ? { cost_cap_usd: Math.floor(price * floor * (1 - storyByoMinMargin(env)) * 100) / 100 } : {};
-    const story = { topic: o.topic, seconds: o.seconds, style: "blocky", engine: "premium", ...(byo ? { byo: true } : {}), ...(o.script ? { script: o.script } : {}), ...(o.template ? { template: o.template } : {}) };
+    const story = { topic: o.topic, seconds: o.seconds, style: "blocky", engine: "premium", ...(byo ? { byo: true } : {}), ...(o.script ? { script: o.script } : {}), ...(o.template ? { template: o.template } : {}), ...(o.music !== undefined ? { music: o.music } : {}) };
     const options = { story, brief: o.topic, style: "story", aspect: "9:16", voice: "jesse", seconds: o.seconds, cost_usd: cost, ...cap };
     return { tool: "kage_motion", credits: price, options, summary: `${o.script ? "Your script as a" : `${o.seconds} s`} Block Town story${o.template ? ` (${storyTemplate(o.template)?.name})` : ""} · Signature${byo ? ", the scene written in your own chat" : ""} · vertical 9:16 · narrated` };
   }
@@ -190,7 +205,7 @@ export function quoteStory(env: Record<string, string | undefined>, plans: PlanL
     // the most the film may cost us: what its credits earn at the cheapest credit, less the lowest margin accepted
     const floor = studioCosts(env, plans).credit_floor;
     const cap = byo && floor ? { cost_cap_usd: Math.floor(price * floor * (1 - storyByoMinMargin(env)) * 100) / 100 } : {};
-    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}), ...(byo ? { byo: true } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost, ...cap };
+    const options = { story: { topic: o.topic, seconds: o.seconds, kind: "explainer", ...(premium ? { engine: "premium" } : {}), ...(byo ? { byo: true } : {}), ...(o.music !== undefined ? { music: o.music } : {}) }, brief: o.topic, style: "story", aspect: "9:16", voice: "henry", seconds: o.seconds, cost_usd: cost, ...cap };
     return { tool: "kage_motion", credits: price, options, summary: `${o.seconds} s 3D story · no character${byo ? " · Signature, the scene written in your own chat" : premium ? " · built from scratch" : ""} · vertical 9:16 · narrated` };
   }
   const cost = o.stage === "script" ? storyScriptCostUsd(env) : o.stage === "film" ? storyFilmCostUsd(env, o.seconds) : storyCostUsd(env, o.seconds);
