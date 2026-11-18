@@ -3,7 +3,7 @@
 // look's requests are untouched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { StoryError, parseStoryOptions, quoteStory, storyByoCostUsd, storyPremiumCostUsd, storyPremiumCredits, storyStylesOpen } from "../src/studio-stories.ts";
+import { StoryError, parseStoryOptions, quoteStory, storyBlockyByoCostUsd, storyBlockyCostUsd, storyStylesOpen } from "../src/studio-stories.ts";
 import { studioRequest, MCP_TOOLS, BYO_MCP_TOOLS, runTool, type StudioCall } from "../src/studio-mcp.ts";
 import { toolsEnabled } from "../src/studio.ts";
 
@@ -28,12 +28,14 @@ test("styles: off by default, then the owner only, then everyone", () => {
 test("Block Town is always Signature, priced as Signature; in a chat, as in-chat Signature with its cost ceiling", () => {
   const q = quoteStory(OPEN, PLANS, ask);
   assert.deepEqual(q.options.story, { topic: ask.topic, seconds: 45, style: "blocky", engine: "premium" });
-  assert.equal(q.credits, storyPremiumCredits(OPEN, PLANS)); assert.equal(q.options.cost_usd, storyPremiumCostUsd(OPEN)); assert.equal(q.options.voice, "jesse");
+  assert.equal(q.options.cost_usd, storyBlockyCostUsd(OPEN, 45)); assert.equal(q.options.cost_usd, 3.5); assert.equal(q.options.voice, "jesse");
+  const at = (sec: number) => quoteStory(OPEN, PLANS, { ...ask, seconds: sec });
+  assert.equal(at(120).options.cost_usd, 6.02); assert.ok(at(60).credits < at(90).credits && at(90).credits < at(120).credits, "longer films cost more credits");
   assert.equal(q.summary, "45 s Block Town story · Signature · vertical 9:16 · narrated");
   assert.equal(code(() => parseStoryOptions({ ...ask, engine: "standard" })), "story_engine", "never made by the engine");
   const byo = quoteStory(OPEN, PLANS, { ...ask, byo: true });
   assert.deepEqual(byo.options.story, { topic: ask.topic, seconds: 45, style: "blocky", engine: "premium", byo: true });
-  assert.equal(byo.options.cost_usd, storyByoCostUsd(OPEN)); assert.ok(byo.credits < q.credits, "cheaper written in the person's chat"); assert.ok(byo.options.cost_cap_usd > 0, "with its cost ceiling");
+  assert.equal(byo.options.cost_usd, storyBlockyByoCostUsd(OPEN, 45)); assert.ok(byo.credits < q.credits, "cheaper written in the person's chat"); assert.ok(byo.options.cost_cap_usd > 0, "with its cost ceiling");
   assert.equal(code(() => quoteStory({ ...OPEN, STUDIO_STORY_BYO_OPEN: "" }, PLANS, { ...ask, byo: true })), "story_byo_off", "in-chat refused while closed, never made by our model instead");
   assert.equal(parseStoryOptions({ ...ask, seconds: 50 }).seconds, 45, "the nearest Block Town length"); assert.equal(parseStoryOptions({ ...ask, seconds: 90 }).seconds, 90); assert.equal(parseStoryOptions({ ...ask, seconds: 200 }).seconds, 120);
 });

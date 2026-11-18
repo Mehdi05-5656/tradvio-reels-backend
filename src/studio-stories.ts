@@ -61,6 +61,11 @@ export const STORY_BLOCKY_LENGTHS = [30, 45, 60, 90, 120] as const;
 export const STORY_SCRIPT_LIMITS = { wordsMin: 12, wordsMax: 400, charsMax: 4000 };
 export const storyStylesEnabled = (env: Record<string, string | undefined> = process.env) => env.STUDIO_STORY_STYLES_ENABLED === "true";
 export const storyStylesOpen = (env: Record<string, string | undefined> = process.env) => storyStylesEnabled(env) && env.STUDIO_STORY_STYLES_OPEN === "true";
+/** What a Block Town film costs us by length (measured Nov 17 2026: about $3.5 up to 60 s, $6 at 120 s: the author is
+ *  most of it). STUDIO_STORY_BLOCKY_COST_USD is the 60 s figure; longer films add STUDIO_STORY_BLOCKY_COST_PER_S a second. */
+export const storyBlockyCostUsd = (env: Record<string, string | undefined>, seconds: number) => Math.round((usd(env, "STUDIO_STORY_BLOCKY_COST_USD", 3.5) + Math.max(0, seconds - 60) * usd(env, "STUDIO_STORY_BLOCKY_COST_PER_S", 0.042)) * 100) / 100;
+/** The same written in the person's own chat (our script, voice, music, renders and line check; their AI writes the scene). */
+export const storyBlockyByoCostUsd = (env: Record<string, string | undefined>, seconds: number) => Math.round((usd(env, "STUDIO_STORY_BLOCKY_BYO_COST_USD", 1.2) + Math.max(0, seconds - 60) * usd(env, "STUDIO_STORY_BLOCKY_BYO_COST_PER_S", 0.012)) * 100) / 100;
 export const STORY_LIMITS = { topicMin: 6, topicMax: 600, secondsDefault: 65, sidekickMax: 20, sceneMaxBytes: 120_000 };
 
 const usd = (env: Record<string, string | undefined>, key: string, d: number) => { const v = Number(env[key]); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -160,8 +165,9 @@ export function quoteStory(env: Record<string, string | undefined>, plans: PlanL
     const byo = o.byo === true;
     if (byo && !storyByoEnabled(env)) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not switched on yet", 403);
     if (byo && !storyByoOpen(env) && !who.owner) throw new StoryError("story_byo_off", "Writing a Signature story in your own chat is not open yet", 403);
-    const cost = byo ? storyByoCostUsd(env) : storyPremiumCostUsd(env);
-    const price = byo ? credits(env, plans, cost, storyByoMargin(env)) : storyPremiumCredits(env, plans);
+    // priced by length at the house margin (the owner's rule: same margin, Nov 13 2026); in a chat at the in-chat margin
+    const cost = byo ? storyBlockyByoCostUsd(env, o.seconds) : storyBlockyCostUsd(env, o.seconds);
+    const price = byo ? credits(env, plans, cost, storyByoMargin(env)) : credits(env, plans, cost);
     const floor = studioCosts(env, plans).credit_floor;
     const cap = byo && floor ? { cost_cap_usd: Math.floor(price * floor * (1 - storyByoMinMargin(env)) * 100) / 100 } : {};
     const story = { topic: o.topic, seconds: o.seconds, style: "blocky", engine: "premium", ...(byo ? { byo: true } : {}), ...(o.script ? { script: o.script } : {}), ...(o.template ? { template: o.template } : {}) };
