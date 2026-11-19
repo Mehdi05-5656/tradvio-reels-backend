@@ -408,8 +408,13 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const relStart = ls ? ls.start : lines[cut.s]?.start ?? 0, relEnd = le ? le.end : lines[cut.e]?.end ?? 0;
       let a = relStart, z = relEnd;
       for (const ev of heard.events) if (/laugh|applause|cheer/i.test(ev.text) && ev.start >= z - 0.6 && ev.start <= z + 1.5) z = Math.max(z, Math.min(ev.end + 0.35, a + len.max));
+      // the model's cut under the length's floor grows to the next closing thoughts (then earlier opening ones),
+      // never past the ceiling: a 16 s clip of a 30 s moment was kept on Nov 18 2026 before this
+      const closesAfter = (t: number) => lines.find((l) => l.start >= t - 0.05 && l.closes && l.end - a <= len.max);
+      for (let guard = 0; z - a < len.min && guard < 6; guard++) { const n = closesAfter(z + 0.05); if (!n) break; z = n.end; }
+      for (let guard = 0; z - a < len.min && guard < 6; guard++) { const prev = [...lines].reverse().find((l) => l.end <= a + 0.05 && l.opens && z - l.start <= len.max); if (!prev) break; a = prev.start; }
       const d = z - a;
-      const keep = v.keep && v.standalone && v.score >= bar && d >= len.min - 3 && d <= len.max + 3;
+      const keep = v.keep && v.standalone && v.score >= bar && d >= len.min && d <= len.max + 3;
       log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score: v.score, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), why_not: keep ? undefined : v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
       if (!keep) continue;
       const absStart = round2(start + a), absEnd = round2(start + z);
