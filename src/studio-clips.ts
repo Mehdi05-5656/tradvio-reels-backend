@@ -956,7 +956,8 @@ export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; s
 // ---------------------------------------------------------------------------------------------------
 export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: string; src: SourceInput; format: ClipFormat; collectionId: string; sourceTitle: string | null; jobId: string; length?: ClipLength;
   /** captions burned in, in this style (the Clips page's "Captions" switch) */ captions?: any | null;
-  /** an ffmpeg filter appended after the captions (Live Clips burns the streamer's name in: studio-live-clips.ts attributionFilter) */ overlay?: string | null };
+  /** an ffmpeg filter appended after the captions (Live Clips burns the streamer's name in: studio-live-clips.ts attributionFilter) */ overlay?: string | null;
+  /** the whole filter graph ([0:v] to [v]) in place of the usual crop or fit (Live Clips' stacked facecam-over-game framing) */ layout?: ((info: { w: number; h: number; fps: number | null }) => string) | null };
 /** One clip run and one captions run never render at once on a server (one CPU, 2 GB). */
 export const busy = { clips: false, captions: false };
 export type CutResult = { asset_id: string; bytes: number; seconds: number };
@@ -1019,9 +1020,9 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   if (ctx.length === "minute" && dur < CLIP_LENGTHS.minute.min - 0.5) throw new ClipsError("clip_too_short", `the cut came out at ${dur.toFixed(1)} s, under a minute`, 502);
   // 2. framing: only needed when a wide picture becomes a tall one
   let segs: Seg[] = [{ start: 0, end: dur, mode: "crop", x0: 0.5, x1: 0.5 }];
-  if (ctx.format === "vertical" && info.w / Math.max(1, info.h) > 0.75 && info.h / Math.max(1, info.w) < 1.7) segs = await frameClip(ctx, m, mezz, dur);
+  if (ctx.format === "vertical" && !ctx.layout && info.w / Math.max(1, info.h) > 0.75 && info.h / Math.max(1, info.w) < 1.7) segs = await frameClip(ctx, m, mezz, dur);
   // 3. the clip: framed, 720x1280 (or the original shape), loudness evened out, soft edges on the sound
-  let graph = buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
+  let graph = ctx.layout ? ctx.layout({ w: info.w, h: info.h, fps: info.fps }) : buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
   // the clip's own words, from its start: kept for Captions, and burned in now when the switch is on
   const rel = (m.words ?? []).map(([text, a, b, speaker]) => ({ text, start: Math.round((a - m.start) * 100) / 100, end: Math.round((b - m.start) * 100) / 100, speaker })).filter((w) => w.end > 0 && w.start < dur);
   let keys: number[] = [];

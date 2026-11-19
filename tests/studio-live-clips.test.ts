@@ -177,3 +177,14 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   const out3 = await runStreamClipsJob(fakeSb().sb, { ...deps, chat: async () => msgs.filter((x) => x.t % 10 === 0).slice(0, 100) }, { ...job, progress: {} });
   assert.equal(out3, "chat_too_quiet");
 });
+
+test("stacked framing: the facecam box on top at its own shape, the game under it, 1280 lines in all", async () => {
+  const { stackedFilter, cleanFacecam } = await import("../src/studio-live-clips.js");
+  const g = stackedFilter({ w: 1920, h: 1080, fps: 60 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 });
+  assert.match(g, /crop=480:302:38:756,scale=720:454:force_original_aspect_ratio=increase,crop=720:454\[cam\]/);
+  assert.match(g, /scale=-2:826,crop=720:826:\(iw-720\)\/2:0\[game\]/);
+  assert.match(g, /vstack,setsar=1,fps=30,format=yuv420p\[v\]$/);
+  assert.equal(cleanFacecam({ present: false, x: 0, y: 0, w: 0, h: 0 }), null);
+  assert.equal(cleanFacecam({ present: true, x: 0, y: 0, w: 0.9, h: 0.9 }), null, "the whole frame is not a corner camera");
+  assert.deepEqual(cleanFacecam({ present: true, x: 0.02, y: 0.7, w: 0.25, h: 0.28 }), { x: 0.02, y: 0.7, w: 0.25, h: 0.28 });
+});

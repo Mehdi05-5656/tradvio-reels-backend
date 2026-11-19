@@ -267,6 +267,7 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   fetchStretch?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<{ asset_id: string; bytes: number; seconds: number }>;
   /** for tests: whether ffmpeg has drawtext, without asking it */ drawtext?: boolean;
+  facecam?: (jpg: Buffer) => Promise<FacecamBox | null>;
 };
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
   const next = { ...progress };
@@ -315,6 +316,44 @@ async function verifyWithClaude(deps: StreamDeps, input: { lines: Line[]; stills
     ] }],
   }, "live_clips_verify", userId);
   return { keep: !!out?.keep, score: Number(out?.score) || 0, standalone: !!out?.standalone, start_line: Number(out?.start_line), end_line: Number(out?.end_line), title: String(out?.title ?? ""), hook: String(out?.hook ?? ""), why: String(out?.why ?? ""), why_not: String(out?.why_not ?? ""), tags: Array.isArray(out?.tags) ? out.tags.map((x: any) => String(x)) : [] };
+}
+// ---------------------------------------------------------------------------------------------------
+// Stacked framing (RESEARCH.md 4.5): the facecam on top, the game under it. Clips' own framing labels a game with a
+// small facecam "screen" and shows the whole picture on a blurred fill, which leaves the streamer a thumbnail
+// (the first live run, Nov 18 2026). One look at a still finds the facecam box; the graph stacks the two.
+// ---------------------------------------------------------------------------------------------------
+export type FacecamBox = { x: number; y: number; w: number; h: number };
+export const FACECAM_SCHEMA = { type: "object", additionalProperties: false, required: ["present", "x", "y", "w", "h"],
+  properties: { present: { type: "boolean" }, x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } } };
+export const FACECAM_PROMPT = `This is a frame from a live stream. Is there a webcam box (the streamer's camera feed, a rectangle showing a person, usually in a corner over the game or the screen)? If yes, give its box as fractions of the frame: x and y are the top-left corner (0-1 from the left and from the top), w and h its width and height (0-1). Be exact about the edges of the box, including any border. If the whole frame is the person (no game or screen), or there is no camera box, answer present false with zeros.`;
+/** The facecam box on a still, by Haiku; null when there is none or the answer is not a box worth stacking. */
+export async function findFacecam(deps: ClipsDeps, jpg: Buffer, userId?: string): Promise<FacecamBox | null> {
+  const env = deps.env ?? process.env;
+  const out = await claudeJson(deps, {
+    model: env.STUDIO_CLIPS_FRAME_MODEL || "claude-haiku-5-5", max_tokens: 400,
+    output_config: { effort: "low", format: { type: "json_schema", schema: FACECAM_SCHEMA } },
+    messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpg.toString("base64") } }, { type: "text", text: FACECAM_PROMPT }] }],
+  }, "live_clips_facecam", userId);
+  return cleanFacecam(out);
+}
+export function cleanFacecam(out: any): FacecamBox | null {
+  if (!out?.present) return null;
+  const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
+  const b = { x: n(out.x), y: n(out.y), w: n(out.w), h: n(out.h) };
+  if ([b.x, b.y, b.w, b.h].some((v) => !Number.isFinite(v))) return null;
+  // a corner camera: between a tenth and six tenths of the width, at most seven tenths of the height, inside the frame
+  if (b.w < 0.1 || b.w > 0.6 || b.h < 0.1 || b.h > 0.7 || b.x < 0 || b.y < 0 || b.x + b.w > 1.02 || b.y + b.h > 1.02) return null;
+  return { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(b.w, 1 - Math.max(0, b.x)), h: Math.min(b.h, 1 - Math.max(0, b.y)) };
+}
+const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+/** The 720x1280 graph: the facecam box scaled to the full width on top (its own shape, 300-520 lines), the game
+ *  scaled to the rest and cropped to the middle, frame rate capped at 30. */
+export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox): string {
+  const cw = even(cam.w * info.w), ch = even(cam.h * info.h), cx = even(cam.x * info.w), cy = even(cam.y * info.h);
+  const camH = even(Math.max(300, Math.min(520, 720 * ch / Math.max(1, cw))));
+  const gameH = 1280 - camH;
+  const fps = info.fps && info.fps > 30.5 ? ",fps=30" : "";
+  return `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=720:${camH}:force_original_aspect_ratio=increase,crop=720:${camH}[cam];[g]scale=-2:${gameH},crop=720:${gameH}:(iw-720)/2:0[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
 }
 /** Whether this server's ffmpeg has the drawtext filter (Render's Debian build does; a Homebrew build may not). Read once. */
 let drawtextOk: Promise<boolean> | null = null;
@@ -437,6 +476,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: attribution };
     const stretchOf = deps.fetchStretch ?? fetchStretchCopy;
     const skipped: number[] = [];
+    let facecam: FacecamBox | null | undefined; // (looked for once per run: a stream's camera box stays where it is)
     for (const m of todo) {
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
       const from = Math.max(0, m.start - 2), file = join(dir, `st${m.rank}.mp4`);
@@ -444,7 +484,17 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       try {
         await stretchOf(pl.video, from, m.end + 2 - from, file);
         const src: SourceInput = { video: file, audio: null, proxy: null, width: 0, height: 0, fps: null, offset: from };
-        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src }, m);
+        // framing: "person" = Clips' own; "stacked" or "auto" = the facecam on top when one is found on the stretch
+        let layout: CutCtx["layout"] = null;
+        if (format === "vertical" && framingOf(st.framing) !== "person") {
+          if (facecam === undefined) {
+            const still = (await stills(file, [Math.min(3, Math.max(0.5, m.start - from + 1))], dir, `fc${m.rank}`))[0];
+            facecam = still ? await (deps.facecam ?? ((jpg) => findFacecam(deps, jpg, u)))(still.jpg).catch(() => null) : null;
+            log(`[live] facecam ${JSON.stringify({ job: job.id, found: !!facecam, box: facecam })}`);
+          }
+          if (facecam) { const box = facecam; layout = (info) => stackedFilter(info, box); }
+        }
+        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout }, m);
         made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds }); cutTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - tc) / 100) / 10]);
         await renew(sb, job, { clip_at: new Date().toISOString(), done: made.length, total: kept.length, message: made.length < kept.length ? `Cutting clip ${made.length + 1} of ${kept.length}` : "Finishing", made });
       } catch (err: any) {
