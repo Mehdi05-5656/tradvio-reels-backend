@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
-import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR } from "../src/studio-live-clips.js";
+import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { PLANS } from "../src/studio.js";
@@ -304,4 +304,39 @@ test("the edge: a cut that ends where the window ends hears 30 s more and closes
   assert.ok(starts[0] < 60 && starts[1] < 60, `the first hour's strongest two first: ${starts}`);
   assert.ok(starts[2] > 60, `the first hour went cold after two misses, so the second hour came third: ${starts}`);
   assert.ok(starts[3] < 60, `the deferred one was still checked: ${starts}`);
+});
+
+test("the hybrid: the strongest hours are heard whole and read by Clips' picker; its moments join the checks, a chat moment nearby takes its cut, and a check inside a read hour needs no fetch", async () => {
+  const mk = (from: number, n = 48) => { const w: any[] = []; let t = from; for (let i = 0; i < n; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; } return w; };
+  const graded = (input: any) => ({ keep: true, score: 80, standalone: true, grades: { hook: 8, standalone: 8, payoff: 8, reaction: 7, quotable: 6, length: 8 }, hard_fail: "", start_line: input.lines[0].i, end_line: input.lines[Math.min(input.lines.length - 1, 7)].i, title: "T", hook: "", hook_line: "", caption: "", why: "", why_not: "", tags: [] });
+  const job = (count: number, seconds: number): any => ({ id: "job-h", user_id: U, lease_token: "t", asset_id: null, credits_reserved: 200, attempts: 1, progress: {},
+    options: { platform: "twitch", url: "https://www.twitch.tv/videos/1", stream: { platform: "twitch", vod_id: "1", login: "x", channel_id: "1", started_at: "2026-11-18T03:01:21Z", strictness: "balanced" }, source: { title: "T", channel: "x" }, seconds, count, length: "standard", format: "vertical", price: { analysis: 30, per_clip: 10, lite: 0 }, collection_id: "col-1" } });
+  // hour 0 (the burst's) has talk at the burst and, with no burst, at 1500 s; the picker finds the latter
+  const hourWords = [...mk(880), ...mk(1500)];
+  let hears = 0, picks = 0; const hourReads: number[] = []; const heads: string[] = []; const cutH: any[] = [];
+  const base: any = { env: ENV, log: () => undefined, plans: PLANS, drawtext: true, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), fetchWindow: async () => undefined, fetchStretch: async () => undefined, stills: async () => [],
+    hear: async () => { hears++; const w = mk(30); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
+    hearHour: async (_f: string, sec: number) => { hourReads.push(sec); return { words: hourWords, events: [], language: "en" }; },
+    pick: async (ls: any[]) => { picks++; const s = ls.find((l) => l.start >= 1500); const e = [...ls].reverse().find((l) => l.end <= 1530); return s && e ? [{ start_line: s.i, end_line: e.i, title: "Car talk", hook: "so", why: "talk", score: 70, tags: ["irl"] }] : []; },
+    verify: async (i: any) => { heads.push(i.head); return graded(i); }, cut: async (ctx: any, m: any) => { cutH.push(m); return { asset_id: "h", bytes: 1, seconds: m.end - m.start }; } };
+  const out = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => chatWith(900, 7200) }, job(2, 7200));
+  assert.equal(out, "done"); assert.deepEqual(hourReads, [3600], "hour 0 (the burst's) heard whole; hour 1, with no candidate, not");
+  assert.ok(picks >= 1, "the picker read the hour"); assert.equal(hears, 0, "both windows sit inside the read hour: nothing fetched or heard again");
+  assert.equal(cutH.length, 2, `the chat's moment and the picker's: ${cutH.map((m) => m.start)}`);
+  assert.ok(cutH.some((m) => m.start > 1450 && m.start < 1520), `the picker's moment was cut: ${cutH.map((m) => m.start)}`);
+  assert.ok(heads.some((h) => /found in the words/.test(h)), "the verifier is told where the moment came from");
+  // the picker marks the burst's own minute: no second candidate, the chat's takes the picker's cut
+  const heads2: string[] = []; const cut2: any[] = []; hears = 0;
+  const out2 = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => chatWith(900, 7200),
+    pick: async (ls: any[]) => { const s = ls.find((l) => l.start >= 884); const e = [...ls].reverse().find((l) => l.end <= 912); return s && e ? [{ start_line: s.i, end_line: e.i, title: "Same minute", hook: "so", why: "talk", score: 70, tags: [] }] : []; },
+    verify: async (i: any) => { heads2.push(i.head); return graded(i); }, cut: async (ctx: any, m: any) => { cut2.push(m); return { asset_id: "h2", bytes: 1, seconds: m.end - m.start }; } }, job(1, 7200));
+  assert.equal(out2, "done"); assert.equal(cut2.length, 1); assert.equal(heads2.length, 1, "one candidate, not two"); assert.match(heads2[0], /picker of the words proposed/); assert.equal(hears, 0);
+  // off: nothing read, the window fetched and heard as before
+  const out3 = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, STUDIO_LIVE_HYBRID: "off" }, chat: async () => chatWith(900, 7200), hearHour: async () => { throw new Error("must not read"); } }, job(1, 7200));
+  assert.equal(out3, "done"); assert.equal(hears, 1);
+  // the hours: by the chat's strength, muted hours skipped, at most three, in stream order
+  const c = (t_event: number, score: number) => ({ t_event, score });
+  assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9), c(8000, 1), c(12000, 7), c(16000, 8)], 18000, () => 0), [1, 3, 4]);
+  assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9)], 18000, (a) => (a === 3600 ? 0.5 : 0)), [0]);
+  assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9)], 4000, () => 0), [0], "an hour under ten minutes long is not read");
 });

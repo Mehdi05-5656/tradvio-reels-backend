@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { probeLocal, annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, ClipsError, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type SourceInput } from "./studio-clips.js";
+import { probeLocal, annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, CLIP_LIMITS, ClipsError, chooseWithClaude, finalizeMoments, windows, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type RawMoment, type SourceInput } from "./studio-clips.js";
 import { transcribeWords } from "./studio-eleven.js";
 import { creditValueFloor, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
@@ -139,7 +139,7 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   // how long, from the Nov 18 2026 live runs (a 7.8 h stream: chat in 15 s, 34 checks in 666 s, 5 cuts in 157 s; the
   // old formula promised 42 min for that 14-min run): the chat, then each candidate heard and checked, then the cuts
   const cands = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
-  const eta_seconds = Math.round(45 + b.seconds * 0.004 + cands * 22 + count * 35);
+  const eta_seconds = Math.round(45 + b.seconds * 0.004 + cands * 22 + count * 35 + ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off" && b.seconds >= HYBRID.min_heard_s ? 240 : 0));
   return {
     tool: "clips", credits: clipsCharge(price, count),
     options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing) },
@@ -203,7 +203,9 @@ export function robustZ(x: number[], back = 60, least = 12): number[] {
   }
   return out;
 }
-export type Candidate = { rank: number; onset: number; peak: number; last: number; t_event: number; score: number; zs: Record<string, number>; asks: number; sample: string[] };
+export type Candidate = { rank: number; onset: number; peak: number; last: number; t_event: number; score: number; zs: Record<string, number>; asks: number; sample: string[];
+  /** "words" when Clips' picker found it in a read hour (HYBRID), else the chat's; `cut` is the picker's proposed cut (absolute seconds), on a chat candidate too when the picker marked the same minute */
+  source?: "chat" | "words"; cut?: { start: number; end: number }; title?: string };
 export const CANDIDATE = { combined: 6, single: 3, rate_only: 3, asks: 3, merge_s: 90, min_messages: 8,
   /** a burst stays open while the combined signal holds this much (hysteresis); off: it chained neighbouring moments into one on the Nov 18 chats */ sustain: Infinity,
   /** a moment is at most this long; a longer wave of chat is several moments (a saturated chat merged whole stretches into one candidate) */ max_span_s: 180,
@@ -273,6 +275,13 @@ const SENTENCE_END_RE = /[.!?\u2026]["')\]]*$/;
  *  behind everyone else's (checked only if budget is left). The Nov 19 2026 run spent a third of its checks on two
  *  hours of Fortnite the verifier turned down one by one, while every keep came from the IRL hours. */
 export const COLD = { bucket_s: 3600, after: 2 };
+/** The hybrid (research/baseline-clips-picker.md, Nov 19 2026): the hours where the chat reacted most are heard whole and
+ *  read by Clips' own picker, so the talk that stands alone without a burst is found too, and a chat moment the picker
+ *  also marked gets its cut from the words. At most `hours` hours, each at least `min_heard_s` long and not muted; the
+ *  picker's model is the cheaper one unless STUDIO_LIVE_PICK_MODEL says otherwise (Opus read an hour for $0.29 against
+ *  about $0.06; Scribe is $0.20 an hour either way). Checks that fall inside a read hour take their words from it (no
+ *  fetch, no second transcription). Off with STUDIO_LIVE_HYBRID=off. */
+export const HYBRID = { hours: 3, min_heard_s: 600, wanted_per_window: 5, near_s: 90, pick_model: "claude-sonnet-5-5" };
 export const VERIFY_SYSTEM = `You are the best short-form video editor alive, checking ONE candidate moment from a live stream before it is cut into a 20-55 second vertical clip for TikTok, Reels and Shorts. The moment was found by the stream's own chat reacting (the burst is marked on the transcript) and by the sound. You see the transcript of the window with its signals, and stills from it. Decide whether this is a clip a stranger would stop for, and where exactly it should start and end.
 
 Keep it only if ALL hold: it stands alone (no context needed from earlier in the stream, no "as I said"); it has a payoff (a laugh, a shock, a win, a fail, a reveal, a line that lands) and the clip ends right after it; it is not a sponsor read, an ad break, a "be right back" screen, music only, or the streamer reading a chat message that needs the chat to be seen; it is not just the game's cutscene with the streamer silent unless the picture itself is the payoff.
@@ -335,6 +344,9 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   chat?: (b: Broadcast, onProgress: (share: number) => void) => Promise<ChatMsg[]>;
   playlists?: (b: Broadcast) => Promise<{ audio: string; video: string }>;
   hear?: (audioFile: string, dir: string, seconds?: number) => Promise<Heard>;
+  /** for tests: an hour heard whole (HYBRID), and Clips' picker on a window of its lines */
+  hearHour?: (audioFile: string, seconds: number) => Promise<{ words: Heard["words"]; events: Heard["events"]; language: string | null }>;
+  pick?: (lines: Line[]) => Promise<RawMoment[]>;
   verify?: (input: { lines: Line[]; stills: Array<{ t: number; jpg: Buffer }>; head: string; body: string }) => Promise<Verdict>;
   /** for tests: the head-to-head order of the kept moments (indexes into the list, best first) */
   rerank?: (moments: Moment[]) => Promise<number[] | null>;
@@ -358,6 +370,43 @@ async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>
  *  picture and sound (for cutting; timestamps start at 0, so the caller keeps the offset). */
 export async function fetchSound(url: string, start: number, seconds: number, target: string): Promise<void> {
   await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, "-t", String(seconds), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", target], { timeoutMs: 4 * 60_000 });
+}
+export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"] };
+/** The hours to read whole: the strongest by the chat's candidates (their scores summed), not muted, in stream order. */
+export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours): number[] {
+  const score = new Map<number, number>();
+  for (const c of cands) { const h = Math.floor(c.t_event / 3600); score.set(h, (score.get(h) ?? 0) + c.score); }
+  return [...score.entries()].filter(([h]) => Math.min(3600, seconds - h * 3600) >= HYBRID.min_heard_s && mutedShare(h * 3600, Math.min(seconds, (h + 1) * 3600)) <= 0.4)
+    .sort((a, b) => b[1] - a[1]).slice(0, max).map(([h]) => h).sort((a, b) => a - b);
+}
+/** One hour heard whole and read by Clips' picker: its words (seconds from the hour's start) and the moments (absolute). */
+async function readHour(deps: StreamDeps, b: Broadcast, audioUrl: string, hour: number, dir: string, u: string, length: ClipLength): Promise<{ read: HourRead; moments: Moment[] } | null> {
+  const start = hour * 3600, seconds = Math.min(3600, b.seconds - start), file = join(dir, `h${hour}.mp3`);
+  const env = deps.env ?? process.env;
+  try {
+    await (deps.fetchWindow ?? fetchSound)(audioUrl, start, seconds, file);
+    const got = deps.fetchWindow ? seconds : (await probeLocal(file).catch(() => ({ seconds: 0 }))).seconds || 0;
+    if (got < HYBRID.min_heard_s) return null;
+    const heard = await (deps.hearHour ?? (async (f: string, sec: number) => {
+      const r = await transcribeWords({ env, fetch: deps.fetch } as any, { audio: await readFile(f), events: true });
+      recordEvent({ user_id: u, kind: "vendor", name: "elevenlabs_scribe", usd: (sec / 3600) * 0.2, props: { use: "live_clips_hour", seconds: sec } });
+      return { words: r.words, events: r.events, language: r.language };
+    }))(file, got);
+    const lines = linesFromWords(heard.words);
+    const pickDeps: ClipsDeps = { ...deps, env: { ...env, STUDIO_CLIPS_MODEL: env.STUDIO_LIVE_PICK_MODEL || HYBRID.pick_model } };
+    const raw: RawMoment[] = [];
+    for (const w of windows(lines)) raw.push(...await (deps.pick ?? ((ls: Line[]) => chooseWithClaude(pickDeps, { lines: ls, meta: { title: b.title || null, channel: b.channel || null, description: "", chapters: [], replay: [] } as any, length, wanted: HYBRID.wanted_per_window }, u)))(w));
+    const moments = finalizeMoments(raw, lines, heard.words, length, 12, CLIP_LIMITS.min_score, heard.events).map((m) => ({ ...m, start: round2(m.start + start), end: round2(m.end + start) }));
+    return { read: { hour, start, seconds: got, words: heard.words, events: heard.events }, moments };
+  } catch (err: any) { (deps.log ?? console.log)(`[live] hour ${hour} not read: ${String(err?.message ?? err).slice(0, 160)}`); return null; }
+  finally { await rm(file, { force: true }).catch(() => undefined); }
+}
+/** A window's hearing taken from an hour read whole: its words and events shifted to the window's start. */
+function heardFromRead(read: HourRead, start: number, span: number): Heard {
+  const d = read.start - start;
+  const words = read.words.filter((w) => w.end + d > 0 && w.start + d < span).map((w) => ({ ...w, start: round2(w.start + d), end: round2(w.end + d) }));
+  const events = read.events.filter((e) => e.end + d > 0 && e.start + d < span).map((e) => ({ ...e, start: round2(e.start + d), end: round2(e.end + d) }));
+  return { words, events, lines: annotateLines(linesFromWords(words), events, null), excess: null, language: null };
 }
 export async function fetchStretchCopy(url: string, start: number, seconds: number, target: string): Promise<void> {
   await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, "-t", String(seconds), "-c", "copy", "-movflags", "+faststart", target], { timeoutMs: 6 * 60_000 });
@@ -536,6 +585,31 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const muted = deps.muted ?? (b.platform === "twitch" ? await mutedRanges(deps, pl.audio).catch(() => [] as Array<[number, number]>) : []);
     const mutedShare = (from: number, to: number) => muted.reduce((acc, [x, y]) => acc + Math.max(0, Math.min(to, y) - Math.max(from, x)), 0) / Math.max(1, to - from);
     if (muted.length) log(`[live] muted ${JSON.stringify({ job: job.id, stretches: muted.length, seconds: Math.round(muted.reduce((acc, [x, y]) => acc + y - x, 0)) })}`);
+    // the hybrid (HYBRID): the strongest hours heard whole and read by Clips' own picker; its moments join the candidates
+    // (a chat candidate within 90 s takes the picker's cut instead), the two orders interleaved, the chat's first
+    const hourReads: HourRead[] = [];
+    if ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off") {
+      const hours = hoursToRead(cands, b.seconds, mutedShare);
+      if (hours.length) {
+        await renew(sb, job, { stage: "transcribing", message: `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
+        const tHours = Date.now();
+        const reads = (await Promise.all(hours.map((h) => readHour(deps, b, pl.audio, h, dir!, u, length)))).filter((r): r is NonNullable<typeof r> => !!r);
+        const picked = reads.flatMap((r) => r.moments).sort((x, y) => y.score - x.score);
+        hourReads.push(...reads.map((r) => r.read));
+        const extra: Candidate[] = [];
+        for (const m of picked) {
+          const near = cands.find((c) => Math.abs(c.t_event - m.start) < HYBRID.near_s || (m.start < c.t_event + 60 && m.end > c.t_event - 60));
+          if (near) { if (!near.cut) { near.cut = { start: m.start, end: m.end }; near.title = m.title; } continue; }
+          if (extra.some((c) => Math.abs(c.t_event - m.start) < HYBRID.near_s)) continue;
+          extra.push({ rank: 0, onset: m.start + 8, peak: m.start + 15, last: m.end, t_event: m.start, score: m.score, zs: {}, asks: 0, sample: [], source: "words", cut: { start: m.start, end: m.end }, title: m.title });
+        }
+        const merged: Candidate[] = [];
+        for (let k = 0; k < Math.max(cands.length, extra.length); k++) { if (k < cands.length) merged.push(cands[k]); if (k < extra.length) merged.push(extra[k]); }
+        cands.splice(0, cands.length, ...merged.map((c, k) => ({ ...c, rank: k + 1 })));
+        timing.hours = hours; timing.hours_s = Math.round((Date.now() - tHours) / 1000); timing.hour_words = reads.reduce((a, r) => a + r.read.words.length, 0); timing.picked = picked.length; timing.words_cands = extra.length;
+        log(`[live] hours ${JSON.stringify({ job: job.id, hours, read: reads.map((r) => r.read.hour), words: timing.hour_words, picked: picked.length, new: extra.length, seconds: timing.hours_s, top: picked.slice(0, 5).map((m) => [Math.round(m.start), m.score, m.title.slice(0, 40)]) })}`);
+      }
+    }
     // B. each candidate's window heard, then checked by the model, until `count` are kept
     await renew(sb, job, { stage: "transcribing", message: `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
@@ -563,7 +637,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       await renew(sb, job, { stage: checked === 0 ? "transcribing" : "choosing", message: `Checking moment ${checked + 1} of up to ${want} · ${kept.length} kept`, done: kept.length, total: count });
       const audio = join(dir, `w${c.rank}.mp3`);
       let heard: Heard;
-      try {
+      const read = hourReads.find((r) => start >= r.start && start + span <= r.start + r.seconds);
+      if (read) { heard = heardFromRead(read, start, span); if (!heard.words.length) { unheard++; continue; } heardOk++; }
+      else try {
         await windowOf(pl.audio, start, span, audio);
         // a window the platform silenced (or a fetch that came back short) has nothing to hear: it is not a verdict
         const got = deps.fetchWindow ? span : (await probeLocal(audio).catch(() => ({ seconds: 0 }))).seconds || 0;
@@ -574,16 +650,18 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       checked++;
       const lines = heard.lines;
       const onsetRel = c.onset - start, peakRel = c.peak - start, eventRel = c.t_event - start, base = baseAt(start);
-      const cut = firstCut(lines, eventRel, peakRel, (rel) => chatAt(start + rel), base, heard.events);
+      let cut = firstCut(lines, eventRel, peakRel, (rel) => chatAt(start + rel), base, heard.events);
+      if (c.cut) { const rs = c.cut.start - start, re = c.cut.end - start; const s0 = lines.findIndex((l) => l.end > rs + 0.05); let e0 = -1; for (let k = 0; k < lines.length; k++) if (lines[k].start < re - 0.05) e0 = k; if (s0 >= 0 && e0 >= s0) cut = { s: s0, e: e0 }; }
       const mark = (l: Line) => {
         const tags: string[] = [];
+        if (c.source === "words") return l.text;
         if (l.start <= onsetRel && l.end > onsetRel - 1) tags.push(`chat burst begins: ×${(chatAt(c.onset + 5) / Math.max(base, 1)).toFixed(1)} the usual rate`);
         if (l.start <= peakRel && l.end > peakRel - 1) tags.push(`chat peak (${signals.rate[Math.floor(c.peak / 10)]} messages in 10 s, e.g. ${c.sample.slice(0, 5).map((x) => JSON.stringify(x)).join(", ")})`);
         return tags.length ? `${l.text} [${tags.join("; ")}]` : l.text;
       };
       const body = lines.map((l) => `L${l.i} [${mmss(l.start)}]${l.speaker ? ` ${l.speaker}:` : ""} ${mark(l)}${(l.events ?? []).map((x) => ` [${x}]`).join("")}${(l.loud ?? 0) >= 5 ? ` ⟪+${l.loud} dB⟫` : ""}`).join("\n");
       const peaks = heard.excess ? loudPeaks(heard.excess, 5) : [];
-      const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.`;
+      const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.${c.source === "words" ? " This moment was found in the words of the stream, not by a chat burst; the proposed cut is the picker's." : c.cut ? " The chat burst here and the picker of the words proposed this cut." : ""}`;
       const times = [...new Set([lines[cut.s]?.start ?? 0, eventRel, peakRel, (lines[cut.s]?.start ?? 0 + (lines[cut.e]?.end ?? span)) / 2, lines[cut.e]?.end ?? span, Math.min(span - 1, peakRel + 20)].map((t) => Math.round(Math.max(0, Math.min(span - 1, t)))))].sort((a, c) => a - c).slice(0, 6);
       const frames = await stills(pl.video, times.map((t) => start + t), dir, `s${c.rank}`);
       let v: Verdict;
