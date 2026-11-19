@@ -263,11 +263,19 @@ export function chatCandidates(s: ChatSignals, msgs: ChatMsg[], o: Partial<typeo
 // Hearing a candidate and placing its cut (4.3-4.4): the window is 45 s before the chat's onset to 105 s after
 // ---------------------------------------------------------------------------------------------------
 export const WINDOW = { lead: 45, length: 150 };
+/** The model's cut at the edge of what was heard: when its end lands within `near` seconds of the window's end, `more`
+ *  seconds are heard and the cut closes on the first thought that ends in them. A clip ended on "You know about" on
+ *  Nov 19 2026: the moment the model chose was 100 s after the chat's mark and ran into the window's edge. */
+export const EDGE = { near: 3, more: 30 };
+/** Where the checks go: once an hour of the stream has given `after` verdicts and no keep, its other candidates wait
+ *  behind everyone else's (checked only if budget is left). The Nov 19 2026 run spent a third of its checks on two
+ *  hours of Fortnite the verifier turned down one by one, while every keep came from the IRL hours. */
+export const COLD = { bucket_s: 3600, after: 2 };
 export const VERIFY_SYSTEM = `You are the best short-form video editor alive, checking ONE candidate moment from a live stream before it is cut into a 20-55 second vertical clip for TikTok, Reels and Shorts. The moment was found by the stream's own chat reacting (the burst is marked on the transcript) and by the sound. You see the transcript of the window with its signals, and stills from it. Decide whether this is a clip a stranger would stop for, and where exactly it should start and end.
 
 Keep it only if ALL hold: it stands alone (no context needed from earlier in the stream, no "as I said"); it has a payoff (a laugh, a shock, a win, a fail, a reveal, a line that lands) and the clip ends right after it; it is not a sponsor read, an ad break, a "be right back" screen, music only, or the streamer reading a chat message that needs the chat to be seen; it is not just the game's cutscene with the streamer silent unless the picture itself is the payoff.
 
-The proposed cut is only a first guess from the chat's timing. YOUR job is to find the best clip inside the whole window: if the payoff comes later than the proposed end (the chat often reacts before the moment finishes), move end_line to the line where the payoff lands plus the reaction it earns; if the setup starts earlier, move start_line back. The clip must be 20 to 55 seconds and start where a thought starts. Judge the moment with YOUR boundaries, not the proposed ones.
+The proposed cut is only a first guess from the chat's timing. YOUR job is to find the best clip inside the whole window: if the payoff comes later than the proposed end (the chat often reacts before the moment finishes), move end_line to the line where the payoff lands plus the reaction it earns. Open on the hook: start_line is the first line a stranger needs, as late as possible. A line that only exists because the stream was running (a transaction, a greeting, "okay so", waiting, small talk, the streamer reading chat) is never the first line; setup lines stay only when the payoff makes no sense without them, and then the fewest. A clip that opens on the stake or the turn itself and lets the reaction run beats one that opens ten seconds before it. End right after the reaction the payoff earns; never trail into the next topic. The clip must be 20 to 55 seconds and start where a thought starts. Judge the moment with YOUR boundaries, not the proposed ones.
 
 Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is ordinary, 2 is weak):
 - hook: does the first line or the first picture of YOUR cut already show the stakes or the reaction, with no greeting, no dead air, no warm-up?
@@ -276,7 +284,7 @@ Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is or
 - reaction: how strong is the visible or audible reaction (a laugh, a scream, a silence, a chat explosion)?
 - quotable: is there one line a stranger would repeat, that works as the caption?
 - length: does the cut fit 20 to 45 seconds with nothing to trim? (over 50 needs two beats)
-hard_fail: empty, or one short reason when the clip must never go out whatever the grades: a song is the whole point of the moment with nothing worth hearing over it (a DJ set, singing along, a music break; game radio or background music under the streamer's talk is NOT a hard fail); a slur, doxxing or a real person humiliated; it needs the previous five minutes; it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen.
+hard_fail: empty, or one short reason when the clip must never go out whatever the grades: a song is the whole point of the moment with nothing worth hearing over it (a DJ set, singing along, a music break; game radio or background music under the streamer's talk is NOT a hard fail); a slur, doxxing or a real person humiliated; it needs the previous five minutes; it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen; explicit sexual content, drug use, self-harm or real violence as the point of the clip (the platforms suppress these; swearing and crude banter are fine). When such a line is only the tail of an otherwise good moment, end the clip before it instead of failing it.
 Also give score 0-100 as your overall feeling. start_line is the first line of the clip and end_line the last, using the line numbers exactly as given. title under 60 characters in the stream's language, no hashtags; hook: the first spoken line, under 100 characters; hook_line: the words to put on screen for the first two seconds, 3 to 6 words, a stake or a tease, never "insane moment", in the stream's language; caption: one sentence a stranger could post the clip with, under 110 characters, no hashtags; why under 15 words; why_not under 15 words when it should not be kept (empty otherwise); tags: 1 to 3 lowercase topic words.`;
 /** The checklist's weights (research/viral-signals.md 4d): hook 25, standalone 20, payoff 20, reaction 15, quotable 10, length 5. */
 export const CHECKLIST = { hook: 0.25, standalone: 0.2, payoff: 0.2, reaction: 0.15, quotable: 0.1, length: 0.05 } as const;
@@ -293,14 +301,15 @@ export const VERIFY_SCHEMA = { type: "object", additionalProperties: false, requ
     hard_fail: { type: "string" }, start_line: { type: "integer" }, end_line: { type: "integer" }, title: { type: "string" }, hook: { type: "string" }, hook_line: { type: "string" }, caption: { type: "string" }, why: { type: "string" }, why_not: { type: "string" }, tags: { type: "array", items: { type: "string" } } } };
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 export type Heard = { words: Array<{ text: string; start: number; end: number; speaker: string | null }>; events: Array<{ text: string; start: number; end: number }>; lines: Line[]; excess: number[] | null; language: string | null };
-/** The first guess at the cut on the lines: a thought that opens 8-25 s before the event; a thought that closes once
- *  the chat has started falling (or 12 s past its peak), carried past a laugh. 20-55 s. */
+/** The first guess at the cut on the lines: a thought that opens 5-20 s before the event (it was 8-25 s until Nov 19
+ *  2026, and the clips opened on checkout chatter); a thought that closes once the chat has started falling (or 12 s
+ *  past its peak), carried past a laugh. 20-55 s. The verifier moves both ends; this is only its starting point. */
 export function firstCut(lines: Line[], eventRel: number, peakRel: number, chatAt: (rel: number) => number, base: number, events: Heard["events"]): { s: number; e: number } {
   if (!lines.length) return { s: 0, e: 0 };
   const opens = (k: number) => k === 0 || !!lines[k].opens, closes = (k: number) => k === lines.length - 1 || !!lines[k].closes;
   let s = -1;
-  for (let k = lines.length - 1; k >= 0; k--) if (opens(k) && lines[k].start <= eventRel - 8 && lines[k].start >= eventRel - 25) { s = k; break; }
-  if (s < 0) for (let k = lines.length - 1; k >= 0; k--) if (opens(k) && lines[k].start <= eventRel - 8) { s = k; break; }
+  for (let k = lines.length - 1; k >= 0; k--) if (opens(k) && lines[k].start <= eventRel - 5 && lines[k].start >= eventRel - 20) { s = k; break; }
+  if (s < 0) for (let k = lines.length - 1; k >= 0; k--) if (opens(k) && lines[k].start <= eventRel - 5) { s = k; break; }
   if (s < 0) s = 0;
   let fall = peakRel + 12; for (let t = peakRel + 3; t < peakRel + 40; t++) if (chatAt(t) < 1.5 * Math.max(base, 1)) { fall = Math.min(fall, t); break; }
   let e = -1; for (let k = 0; k < lines.length; k++) if (lines[k].end >= fall && closes(k)) { e = k; break; }
@@ -323,7 +332,7 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   /** for tests: the chat replay, the playlists, the hearing of one window, the verify call, the cutter */
   chat?: (b: Broadcast, onProgress: (share: number) => void) => Promise<ChatMsg[]>;
   playlists?: (b: Broadcast) => Promise<{ audio: string; video: string }>;
-  hear?: (audioFile: string, dir: string) => Promise<Heard>;
+  hear?: (audioFile: string, dir: string, seconds?: number) => Promise<Heard>;
   verify?: (input: { lines: Line[]; stills: Array<{ t: number; jpg: Buffer }>; head: string; body: string }) => Promise<Verdict>;
   /** for tests: the head-to-head order of the kept moments (indexes into the list, best first) */
   rerank?: (moments: Moment[]) => Promise<number[] | null>;
@@ -360,12 +369,12 @@ async function stillsFrom(video: string, times: number[], dir: string, tag: stri
   }
   return out;
 }
-async function hearWindow(deps: StreamDeps, audioFile: string, dir: string, userId: string): Promise<Heard> {
+async function hearWindow(deps: StreamDeps, audioFile: string, dir: string, userId: string, seconds = WINDOW.length): Promise<Heard> {
   const env = deps.env ?? process.env;
   const buf = await readFile(audioFile);
   const r = await transcribeWords({ env, fetch: deps.fetch } as any, { audio: buf, events: true });
   // (the cost ledger: Scribe is priced by the hour of audio; the window is WINDOW.length seconds)
-  recordEvent({ user_id: userId, kind: "vendor", name: "elevenlabs_scribe", usd: (WINDOW.length / 3600) * 0.2, props: { use: "live_clips", seconds: WINDOW.length } });
+  recordEvent({ user_id: userId, kind: "vendor", name: "elevenlabs_scribe", usd: (seconds / 3600) * 0.2, props: { use: "live_clips", seconds } });
   const rms = await loudnessTrack(audioFile, dir).catch(() => [] as number[]);
   const excess = rms.length ? loudnessExcess(rms) : null;
   const lines = annotateLines(linesFromWords(r.words), r.events, excess);
@@ -529,13 +538,21 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
     const baseAt = (abs: number) => { const bin = Math.floor(abs / 10); const h = signals.rate.slice(Math.max(0, bin - 60), Math.max(1, bin)).slice().sort((a, c) => a - c); return h.length ? h[Math.floor(h.length / 2)] : 0; };
     const kept: Moment[] = []; let checked = 0, heardOk = 0; const tListen = Date.now(); let claudeCalls = 0;
-    const hear = deps.hear ?? ((f, d) => hearWindow(deps, f, d, u));
+    const hear = deps.hear ?? ((f, d, sec) => hearWindow(deps, f, d, u, sec));
     const verify = deps.verify ?? ((input) => verifyWithClaude(deps, input, u));
     const stills = deps.stills ?? stillsFrom;
     const windowOf = deps.fetchWindow ?? fetchSound;
-    let skippedMuted = 0, unheard = 0;
-    for (const c of cands) {
+    let skippedMuted = 0, unheard = 0, deferred = 0, extended = 0;
+    // the order is the detector's, except that an hour gone cold (COLD) waits behind everyone else
+    const queue = [...cands]; const later: Candidate[] = []; let pass = 0;
+    const verdicts = new Map<number, { n: number; kept: number }>();
+    const hourOf = (c: Candidate) => Math.floor(c.t_event / COLD.bucket_s);
+    const isCold = (c: Candidate) => { const v = verdicts.get(hourOf(c)); return !!v && v.kept === 0 && v.n >= COLD.after; };
+    while (queue.length || later.length) {
+      if (!queue.length) { if (pass++) break; queue.push(...later.splice(0)); }
+      const c = queue.shift()!;
       if (checked >= want || kept.length >= count + OVERSHOOT(count)) break;
+      if (!pass && isCold(c)) { later.push(c); deferred++; continue; }
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
       const start = Math.max(0, c.onset - WINDOW.lead), span = Math.min(WINDOW.length, b.seconds - start);
       if (span < 30) continue;
@@ -574,6 +591,21 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const relStart = ls ? ls.start : lines[cut.s]?.start ?? 0, relEnd = le ? le.end : lines[cut.e]?.end ?? 0;
       let a = relStart, z = relEnd;
       for (const ev of heard.events) if (/laugh|applause|cheer/i.test(ev.text) && ev.start >= z - 0.6 && ev.start <= z + 1.5) z = Math.max(z, Math.min(ev.end + 0.35, a + len.max));
+      // the end at the edge of what was heard (EDGE): more is heard, and the cut closes on the first thought ending in it
+      if (z > span - EDGE.near && z - a < len.max - 3 && start + span < b.seconds - 5) {
+        const more = Math.min(EDGE.more, b.seconds - (start + span)), extra = join(dir, `w${c.rank}x.mp3`);
+        try {
+          await windowOf(pl.audio, start + span, more, extra);
+          const h2 = await hear(extra, dir, more);
+          const shifted = h2.words.map((w) => ({ ...w, start: w.start + span, end: w.end + span }));
+          const nl = linesFromWords(shifted).map((l, k) => ({ ...l, i: lines.length + k }));
+          lines.push(...nl); heard.words.push(...shifted); extended++;
+          const close = nl.find((l) => l.closes && l.end - a <= len.max) ?? [...nl].reverse().find((l) => l.end - a <= len.max);
+          const was = z; if (close) z = close.end;
+          log(`[live] edge ${JSON.stringify({ job: job.id, rank: c.rank, heard: Math.round(more), end: [round2(start + was), round2(start + z)] })}`);
+        } catch (err: any) { log(`[live] edge of ${c.rank} of ${job.id} not heard: ${String(err?.message ?? err).slice(0, 120)}`); }
+        finally { await rm(extra, { force: true }).catch(() => undefined); }
+      }
       // the model's cut under the length's floor grows to the next closing thoughts (then earlier opening ones),
       // never past the ceiling: a 16 s clip of a 30 s moment was kept on Nov 18 2026 before this
       const closesAfter = (t: number) => lines.find((l) => l.start >= t - 0.05 && l.closes && l.end - a <= len.max);
@@ -589,6 +621,8 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const standalone = v.grades ? v.grades.standalone >= 5 : v.standalone;
       const keep = v.keep && !v.hard_fail && standalone && score >= bar && d >= len.min && d <= len.max + 3;
       log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score, felt: v.score, grades: v.grades ?? undefined, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), hook_line: v.hook_line?.slice(0, 40), why_not: keep ? undefined : v.hard_fail?.slice(0, 80) || v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
+      const hv = verdicts.get(hourOf(c)) ?? { n: 0, kept: 0 }; hv.n++; if (keep) hv.kept++; verdicts.set(hourOf(c), hv);
+      if (!keep && !hv.kept && hv.n === COLD.after) log(`[live] cold ${JSON.stringify({ job: job.id, hour: hourOf(c), after: hv.n })}`);
       if (!keep) continue;
       const absStart = round2(start + a), absEnd = round2(start + z);
       if (kept.some((k) => Math.min(k.end, absEnd) - Math.max(k.start, absStart) > 0.25 * Math.min(k.end - k.start, absEnd - absStart))) continue;
@@ -597,7 +631,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         speech: inside.length ? speechOf(inside.map((w) => ({ ...w, start: w.start + start, end: w.end + start }))) : undefined,
         words: inside.map((w) => [w.text, round2(w.start + start), round2(w.end + start), w.speaker ?? null] as [string, number, number, string | null]) });
     }
-    timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls; timing.unheard = unheard; timing.skipped_muted = skippedMuted;
+    timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls; timing.unheard = unheard; timing.skipped_muted = skippedMuted; timing.deferred = deferred; timing.extended = extended;
     if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked} times, but none of those moments stands alone as a clip` : "No moment in this stream stands out enough to be a clip", 422);
     kept.sort((x, y) => y.score - x.score || x.start - y.start);
     // more kept than asked for: one head-to-head look settles the order (model grades bunch), and the extra ones go
@@ -614,7 +648,12 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const tCut = Date.now(); const cutTimes: Array<[number, number]> = [];
     // no burned-in credit (the owner, Nov 18 2026: nobody in the market marks the streamer on the clip); the source
     // link and channel stay on the collection, and attributionFilter stays for anyone who wants it back
-    const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: null };
+    const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: null,
+      // 1080x1920 (the platforms' native size; a portrait IRL source keeps every line), a peak limiter (a clip peaked at
+      // +1.4 dBFS on Nov 19 2026), and the framing told what an IRL clip is (the Home Depot clip held the streamer while
+      // the worker whose age was the point stood half out of frame)
+      tall: true, limiter: true,
+      framingHint: "This is a clip of a live IRL stream. When the speaker is talking TO another person who is in the picture (asking them something, reacting to them, being answered), put x between the two faces so both stay inside the crop; follow the speaker alone only when nobody else is in the picture or the other person is far from them." };
     const stretchOf = deps.fetchStretch ?? fetchStretchCopy;
     const skipped: number[] = [];
     // the layout is looked at once per clip, on a still from its own stretch: the first live runs (Nov 18 2026) looked

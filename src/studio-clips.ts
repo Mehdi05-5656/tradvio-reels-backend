@@ -813,7 +813,7 @@ export async function defaultExtractAudio(src: SourceInput, target: string) {
 // ---------------------------------------------------------------------------------------------------
 export type Layout = "person" | "screen" | "none";
 export type TrackRead = { layout: Layout; x: number; speaker_visible: boolean };
-export type TrackInput = { frames: Array<{ t: number; jpg: Buffer }>; speech: Speech[]; userId?: string };
+export type TrackInput = { frames: Array<{ t: number; jpg: Buffer }>; speech: Speech[]; userId?: string; /** a paragraph added to the instructions (CutCtx.framingHint) */ hint?: string | null };
 export const TRACK_SCHEMA = {
   type: "object", additionalProperties: false, required: ["frames"],
   properties: { frames: { type: "array", items: { type: "object", additionalProperties: false, required: ["n", "layout", "x", "speaker_visible"],
@@ -835,7 +835,7 @@ export async function readTrack(deps: ClipsDeps, input: TrackInput): Promise<Tra
     output_config: { effort: "low", format: { type: "json_schema", schema: TRACK_SCHEMA } },
     messages: [{ role: "user", content: [
       ...input.frames.flatMap((f, k) => [{ type: "text", text: `Frame ${k + 1} at ${f.t.toFixed(1)} s:` }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.jpg.toString("base64") } }]),
-      { type: "text", text: `${TRACK_PROMPT}\n\nWhat is said (seconds from the clip's start):\n${said || "(no speech)"}` },
+      { type: "text", text: `${TRACK_PROMPT}${input.hint ? `\n\n${input.hint}` : ""}\n\nWhat is said (seconds from the clip's start):\n${said || "(no speech)"}` },
     ] }],
   }, "clips_frame", input.userId);
   const list: any[] = Array.isArray(out?.frames) ? out.frames : [];
@@ -931,11 +931,12 @@ function pick(segs: Seg[], value: (g: Seg) => string, a = 0, b = segs.length - 1
 }
 /** The ffmpeg filter graph for one clip, from [0:v] to [v]. Vertical: 720x1280 by a moving crop, a blurred fill, or both
  *  by stretch. Original: the source's shape, at most 1280 on the long side. Frame rate capped at 30. */
-export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; segs: Seg[]; fps: number | null }): string {
+export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; segs: Seg[]; fps: number | null; /** the vertical frame rendered (720x1280 unless given) */ out?: { w: number; h: number } }): string {
   const fps = p.fps && p.fps > 30.5 ? ",fps=30" : "";
   const tail = `setsar=1${fps},format=yuv420p`;
+  const W = p.out?.w ?? 720, H = p.out?.h ?? 1280;
   if (p.format === "original") return p.w >= p.h ? `[0:v]scale='min(1280,iw)':-2,${tail}[v]` : `[0:v]scale=-2:'min(1280,ih)',${tail}[v]`;
-  if (p.h / p.w >= 1.7) return `[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,${tail}[v]`;
+  if (p.h / p.w >= 1.7) return `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},${tail}[v]`;
   const cw = Math.min(even(p.w), even(p.h * 9 / 16));
   const px = (x: number) => Math.max(0, Math.min(p.w - cw, even(x * p.w - cw / 2)));
   const segs = p.segs.length ? p.segs : [{ start: 0, end: 1e6, mode: "crop" as const, x0: 0.5, x1: 0.5 }];
@@ -945,8 +946,8 @@ export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; s
   const xs = segs.map((g) => { if (g.mode === "crop") { const a = px(g.x0), b = px(g.x1); last = b; return [a, b] as const; } return [last, last] as const; });
   const value = (g: Seg) => { const [a, b] = xs[segs.indexOf(g)]; return a === b || g.end - g.start < 0.01 ? String(a) : `${a}+${b - a}*(t-${g.start.toFixed(3)})/${(g.end - g.start).toFixed(3)}`; };
   const expr = crops.length && new Set(xs.map(([a, b]) => `${a},${b}`)).size === 1 && xs[0][0] === xs[0][1] ? String(xs[0][0]) : pick(segs, value);
-  const crop = (inp: string, out: string) => `${inp}crop=${cw}:${even(p.h)}:'${expr}':0,scale=720:1280${out}`;
-  const fit = (a: string, b: string, out: string) => `${a}scale=180:320:force_original_aspect_ratio=increase,crop=180:320,boxblur=8:2,scale=720:1280,eq=brightness=-0.06[bg];${b}scale=720:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2${out}`;
+  const crop = (inp: string, out: string) => `${inp}crop=${cw}:${even(p.h)}:'${expr}':0,scale=${W}:${H}${out}`;
+  const fit = (a: string, b: string, out: string) => `${a}scale=${W / 4}:${H / 4}:force_original_aspect_ratio=increase,crop=${W / 4}:${H / 4},boxblur=8:2,scale=${W}:${H},eq=brightness=-0.06[bg];${b}scale=${W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2${out}`;
   if (!fits.length) return `${crop("[0:v]", "")},${tail}[v]`;
   if (!crops.length) return `[0:v]split=2[a][b];${fit("[a]", "[b]", "")},${tail}[v]`;
   const when = fits.map((g) => `between(t,${g.start.toFixed(3)},${(g.end - 0.001).toFixed(3)})`).join("+");
@@ -960,7 +961,10 @@ export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: stri
   /** captions burned in, in this style (the Clips page's "Captions" switch) */ captions?: any | null;
   /** an ffmpeg filter appended after the captions (Live Clips burns the streamer's name in: studio-live-clips.ts attributionFilter) */ overlay?: string | null;
   /** the whole filter graph ([0:v] to [v]) in place of the usual crop or fit (Live Clips' stacked facecam-over-game framing); it may name its own frame size, which the captions are laid out for */ layout?: ((info: { w: number; h: number; fps: number | null }) => string | { graph: string; w: number; h: number } | null) | null;
-  /** only these stretches of the clip are kept (seconds from the clip's start, ascending): pauses cut out before the layout, the words re-timed (Live Clips' format step) */ trim?: Array<[number, number]> | null };
+  /** only these stretches of the clip are kept (seconds from the clip's start, ascending): pauses cut out before the layout, the words re-timed (Live Clips' format step) */ trim?: Array<[number, number]> | null;
+  /** 1080x1920 out instead of 720x1280 (Live Clips: the platforms' native size; a portrait IRL source keeps every line) */ tall?: boolean;
+  /** a peak limiter after the loudness pass (Live Clips: a clip peaked at +1.4 dBFS on Nov 19 2026) */ limiter?: boolean;
+  /** a paragraph added to the framing model's instructions (Live Clips: hold both people when the speaker talks to someone in the picture) */ framingHint?: string | null };
 /** The time map of a trim: a clip-relative time to its time in the trimmed clip (a time inside a cut pause lands at the cut), and the kept total. */
 export function trimRemap(segs: Array<[number, number]>): { map: (t: number) => number; total: number } {
   const s = [...segs].filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
@@ -1018,7 +1022,7 @@ async function frameClip(ctx: CutCtx, m: Moment, mezz: string, dur: number): Pro
       }
     }));
     const speech: Speech[] = (m.speech ?? []).map(([a, b, who, text]) => [round2(Math.max(0, a - m.start)), round2(Math.min(dur, b - m.start)), who, text] as Speech).filter((x) => x[1] > 0 && x[0] < dur);
-    const reads = await (ctx.deps.frame ?? ((x) => readTrack(ctx.deps, x)))({ frames, speech, userId: ctx.u });
+    const reads = await (ctx.deps.frame ?? ((x) => readTrack(ctx.deps, x)))({ frames, speech, userId: ctx.u, hint: ctx.framingHint ?? null });
     const switches = speech.filter((x, k) => k > 0 && x[2] && speech[k - 1][2] && x[2] !== speech[k - 1][2]).map((x) => x[0]);
     return trackPath(frames.map((f, k) => ({ t: f.t, ...reads[k] })), cuts, dur, switches);
   } catch (e: any) {
@@ -1026,9 +1030,9 @@ async function frameClip(ctx: CutCtx, m: Moment, mezz: string, dur: number): Pro
     return [{ start: 0, end: dur, mode: "fit", x0: 0.5, x1: 0.5 }];
   }
 }
-/** The size buildClipFilter renders: 720x1280 for vertical, the source's shape up to 1280 on its long side otherwise. */
-export function outputSize(w: number, h: number, format: ClipFormat): { w: number; h: number } {
-  if (format === "vertical") return { w: 720, h: 1280 };
+/** The size buildClipFilter renders: 720x1280 for vertical (1080x1920 when `tall`), the source's shape up to 1280 on its long side otherwise. */
+export function outputSize(w: number, h: number, format: ClipFormat, tall = false): { w: number; h: number } {
+  if (format === "vertical") return tall ? { w: 1080, h: 1920 } : { w: 720, h: 1280 };
   if (w >= h) { const ow = Math.min(1280, w); return { w: even(ow), h: even((h * ow) / Math.max(1, w)) }; }
   const oh = Math.min(1280, h); return { w: even((w * oh) / Math.max(1, h)), h: even(oh) };
 }
@@ -1047,8 +1051,9 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   if (ctx.format === "vertical" && !ctx.layout && info.w / Math.max(1, info.h) > 0.75 && info.h / Math.max(1, info.w) < 1.7) segs = await frameClip(ctx, m, mezz, dur);
   // 3. the clip: framed, 720x1280 (or the original shape), loudness evened out, soft edges on the sound
   const lay = ctx.layout ? ctx.layout({ w: info.w, h: info.h, fps: info.fps }) : null;
-  let graph = lay ? (typeof lay === "string" ? lay : lay.graph) : buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
-  const frame = lay && typeof lay !== "string" ? { w: lay.w, h: lay.h } : outputSize(info.w, info.h, ctx.format);
+  const tallOut = ctx.tall ? outputSize(info.w, info.h, "vertical", true) : undefined;
+  let graph = lay ? (typeof lay === "string" ? lay : lay.graph) : buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps, out: tallOut });
+  const frame = lay && typeof lay !== "string" ? { w: lay.w, h: lay.h } : outputSize(info.w, info.h, ctx.format, !!ctx.tall);
   // the clip's own words, from its start: kept for Captions, and burned in now when the switch is on
   let rel = (m.words ?? []).map(([text, a, b, speaker]) => ({ text, start: Math.round((a - m.start) * 100) / 100, end: Math.round((b - m.start) * 100) / 100, speaker })).filter((w) => w.end > 0 && w.start < dur);
   // a trim: only the kept stretches reach the layout, the sound follows, and the words are re-timed to the trimmed clip
@@ -1077,7 +1082,8 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   // (two clips at once with uncapped threads went past 2 GB and the server was killed, Oct 31 2026)
   const enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-threads", "2", "-rc-lookahead", "20", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart"];
   const render = (audio: string) => ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", "-i", mezz, "-filter_complex_threads", "1", "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?", "-af", audio, ...enc, out], { timeoutMs: 8 * 60_000 });
-  await render(`loudnorm=I=-14:TP=-1.5:LRA=11,${af}`).catch(() => render(af));
+  // (the limiter: loudnorm's single pass can still let a sample through over its true-peak ceiling)
+  await render(`loudnorm=I=-14:TP=-1.5:LRA=11,${ctx.limiter ? "alimiter=limit=0.891:level=false," : ""}${af}`).catch(() => render(af));
   await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, outDur / 3).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still], { timeoutMs: 60_000 });
   const final = await probeLocal(out);
   if (ctx.length === "minute" && (final.seconds || dur) < CLIP_LENGTHS.minute.min - 0.5) throw new ClipsError("clip_too_short", "the clip came out under a minute", 502);

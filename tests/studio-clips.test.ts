@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import {
-  linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
+  linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, outputSize, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, settledAnalysis, clipsPrice, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
   timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
@@ -146,6 +146,11 @@ test("framing: the crop follows the speaker (holds, pans as they walk, cuts to t
   assert.equal(buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: [{ start: 0, end: 30, mode: "crop", x0: 0.5, x1: 0.5 }], fps: 30 }), "[0:v]crop=608:1080:'656':0,scale=720:1280,setsar=1,format=yuv420p[v]");
   assert.match(buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: [{ start: 0, end: 5, mode: "crop", x0: 0.99, x1: 0.99 }], fps: 30 }), /'1312'/, "a face at the edge still crops inside the picture");
   assert.match(buildClipFilter({ w: 1080, h: 1920, format: "vertical", segs: [], fps: 30 }), /^\[0:v\]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280/, "a vertical source is only resized");
+  // Live Clips renders 1080x1920: the same graph at the bigger frame; a portrait IRL source then keeps every line
+  assert.equal(buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: [{ start: 0, end: 30, mode: "crop", x0: 0.5, x1: 0.5 }], fps: 30, out: { w: 1080, h: 1920 } }), "[0:v]crop=608:1080:'656':0,scale=1080:1920,setsar=1,format=yuv420p[v]");
+  assert.match(buildClipFilter({ w: 1080, h: 1920, format: "vertical", segs: [], fps: 30, out: { w: 1080, h: 1920 } }), /^\[0:v\]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920/);
+  assert.match(buildClipFilter({ w: 1920, h: 1080, format: "vertical", segs: [{ start: 0, end: 30, mode: "fit", x0: 0.5, x1: 0.5 }], fps: 30, out: { w: 1080, h: 1920 } }), /scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=8:2,scale=1080:1920/);
+  assert.deepEqual(outputSize(1920, 1080, "vertical", true), { w: 1080, h: 1920 }); assert.deepEqual(outputSize(1920, 1080, "vertical"), { w: 720, h: 1280 });
   assert.equal(buildClipFilter({ w: 1920, h: 1080, format: "original", segs: [], fps: 30 }), "[0:v]scale='min(1280,iw)':-2,setsar=1,format=yuv420p[v]");
   // a long clip with many moves stays inside ffmpeg's nesting limit (a balanced tree of ifs)
   const many = trackPath(Array.from({ length: 90 }, (_, k) => P(k + 0.3, k % 2 ? 0.3 : 0.7)), [], 91);

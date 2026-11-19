@@ -70,7 +70,7 @@ test("the chat's content against its own baseline finds the burst, puts the even
   assert.ok(chatCandidates(chatSignals(edge, 1800), edge).every((c) => c.onset >= 180 && c.onset <= 1680));
 });
 
-test("the first cut starts on a thought 8-25 s before the event and ends on a thought once the chat falls, 20-55 s", () => {
+test("the first cut starts on a thought 5-20 s before the event and ends on a thought once the chat falls, 20-55 s", () => {
   const words: Array<{ text: string; start: number; end: number; speaker: string | null }> = [];
   let t = 0;
   for (let i = 0; i < 130; i++) { words.push({ text: i % 6 === 5 ? "done." : "word", start: t, end: t + 0.4, speaker: "S1" }); t += i % 6 === 5 ? 1.2 : 0.5; }
@@ -78,7 +78,7 @@ test("the first cut starts on a thought 8-25 s before the event and ends on a th
   const rate = (rel: number) => (rel >= 53 && rel < 65 ? 40 : 10);
   const cut = firstCut(lines, 45, 58, rate, 10, []);
   const start = lines[cut.s].start, end = lines[cut.e].end;
-  assert.ok(start <= 45 - 8 && start >= 45 - 25 - 3, `start ${start}`);
+  assert.ok(start <= 45 - 5 && start >= 45 - 20 - 3, `start ${start}`);
   assert.ok(end >= 58 + 3, `end ${end}`);
   assert.ok(end - start >= 20 && end - start <= 55, `length ${end - start}`);
   assert.ok(lines[cut.s].opens && lines[cut.e].closes);
@@ -182,6 +182,7 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   assert.ok(m.start >= 850 && m.start < 900, `the clip starts near the event: ${m.start}`); assert.ok(m.end - m.start >= 17, `length ${m.end - m.start}`);
   assert.equal(m.title, "He loses it"); assert.ok(m.words.length > 0 && m.words[0][1] >= 850);
   assert.equal(ctx.overlay, null, "no burned-in credit on the clip"); assert.equal(ctx.src.offset, Math.max(0, m.start - 2));
+  assert.equal(ctx.tall, true, "1080x1920 out"); assert.equal(ctx.limiter, true); assert.match(ctx.framingHint, /IRL stream/);
   assert.match(verifyInputs[0].body, /chat burst begins/); assert.match(verifyInputs[0].head, /CaseOh_ on Twitch/);
   const complete = calls.find((c) => c[0] === "studio_complete");
   assert.equal(complete[1].p_credits_charged, 30 + 10);
@@ -258,4 +259,39 @@ test("stacked framing: the facecam box on top at its own shape, the game under i
   assert.equal(cleanFacecam({ present: false, x: 0, y: 0, w: 0, h: 0 }), null);
   assert.equal(cleanFacecam({ present: true, x: 0, y: 0, w: 0.9, h: 0.9 }), null, "the whole frame is not a corner camera");
   assert.deepEqual(cleanFacecam({ present: true, x: 0.02, y: 0.7, w: 0.25, h: 0.28 }), { x: 0.02, y: 0.7, w: 0.25, h: 0.28 });
+});
+
+test("the edge: a cut that ends where the window ends hears 30 s more and closes on the next thought; a cold hour waits behind the rest", async () => {
+  const words = (startRel: number, n = 40) => { const w = []; let t = startRel; for (let i = 0; i < n; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; } return w; };
+  const base: any = { env: ENV, log: () => undefined, plans: PLANS, drawtext: true, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), fetchWindow: async () => undefined, fetchStretch: async () => undefined, stills: async () => [] };
+  const job = (count: number, seconds: number): any => ({ id: "job-e", user_id: U, lease_token: "t", asset_id: null, credits_reserved: 200, attempts: 1, progress: {},
+    options: { platform: "twitch", url: "https://www.twitch.tv/videos/1", stream: { platform: "twitch", vod_id: "1", login: "x", channel_id: "1", started_at: "2026-11-18T03:01:21Z", strictness: "balanced" }, source: { title: "T", channel: "x" }, seconds, count, length: "standard", format: "vertical", price: { analysis: 30, per_clip: 10, lite: 0 }, collection_id: "col-1" } });
+  const graded = (input: any, extra: any = {}) => ({ keep: true, score: 80, standalone: true, grades: { hook: 8, standalone: 8, payoff: 8, reaction: 7, quotable: 6, length: 8 }, hard_fail: "", start_line: input.lines[0].i, end_line: input.lines[input.lines.length - 1].i, title: "T", hook: "", hook_line: "", caption: "", why: "", why_not: "", tags: [], ...extra });
+  // 1. the words run to the window's end (150 s) and the model ends on the last line: the extension is heard (a file
+  // named ...x.mp3, 30 s), the cut closes on its first closing thought, and the clip's words include it
+  const heardFiles: string[] = []; const cut: any[] = [];
+  const out = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => chatWith(900, 3600),
+    hear: async (f: string, d: string, sec?: number) => { heardFiles.push(`${f.split("/").pop()}:${sec ?? ""}`); const w = /x\.mp3$/.test(f) ? words(0.5, 16) : words(126); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
+    verify: async (i: any) => graded(i), cut: async (ctx: any, m: any) => { cut.push(m); return { asset_id: "e1", bytes: 1, seconds: m.end - m.start }; } }, job(1, 3600));
+  assert.equal(out, "done"); assert.equal(cut.length, 1);
+  assert.equal(heardFiles.length, 2, `the window, then its extension: ${heardFiles}`); assert.match(heardFiles[1], /x\.mp3:30$/);
+  const d = cut[0].end - cut[0].start;
+  assert.ok(d > 27 && d < 32, `the cut grew past the window's end to the next closing thought: ${d}`);
+  assert.ok(cut[0].words.some((w: any) => w[0] === "yeah." && w[1] > cut[0].start + 25), "the extension's words are the clip's too");
+  // 2. three bursts in the first hour the model turns down, one weaker burst in the second it keeps: after two
+  // verdicts the first hour is cold, so the second hour's burst is the THIRD check (not the fourth), and the deferred
+  // one is still checked afterwards while budget remains
+  const chat = [...chatWith(900, 5400), ...chatWith(1500, 5400).filter((m) => m.t >= 1500 && m.t < 1512 && /[A-Z]{4}/.test(m.c) || m.t >= 1500 && m.t < 1512 && m.e), ...chatWith(2100, 5400).filter((m) => m.t >= 2100 && m.t < 2112 && /[A-Z]{4}/.test(m.c) || m.t >= 2100 && m.t < 2112 && m.e),
+    ...chatWith(4500, 5400).filter((m) => m.t >= 4500 && m.t < 4512 && /[A-Z]{4}/.test(m.c))];
+  const starts: number[] = []; const cut2: any[] = [];
+  const minutesOf = (head: string) => { const m = /Window: (\d+):(\d+)/.exec(head)!; return Number(m[1]) + Number(m[2]) / 60; };
+  const out2 = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => chat,
+    hear: async () => { const w = words(30); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
+    verify: async (i: any) => { const min = minutesOf(i.head); starts.push(min); return min > 60 ? graded(i) : graded(i, { keep: false, why_not: "needs the game" }); },
+    cut: async (ctx: any, m: any) => { cut2.push(m); return { asset_id: "e2", bytes: 1, seconds: m.end - m.start }; } }, job(1, 5400));
+  assert.equal(out2, "done"); assert.equal(cut2.length, 1); assert.ok(cut2[0].start > 4400, `the second hour's moment: ${cut2[0].start}`);
+  assert.equal(starts.length, 4, `all four checked (budget 12): ${starts}`);
+  assert.ok(starts[0] < 60 && starts[1] < 60, `the first hour's strongest two first: ${starts}`);
+  assert.ok(starts[2] > 60, `the first hour went cold after two misses, so the second hour came third: ${starts}`);
+  assert.ok(starts[3] < 60, `the deferred one was still checked: ${starts}`);
 });
