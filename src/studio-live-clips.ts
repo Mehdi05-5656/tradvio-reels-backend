@@ -298,7 +298,7 @@ Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is or
 - reaction: how strong is the visible or audible reaction (a laugh, a scream, a silence, a chat explosion)?
 - quotable: is there one line a stranger would repeat, that works as the caption?
 - length: does the cut fit 20 to 45 seconds with nothing to trim? (over 50 needs two beats)
-hard_fail: empty, or one short reason when the clip must never go out whatever the grades: a song is the whole point of the moment with nothing worth hearing over it (a DJ set, singing along, a music break; game radio or background music under the streamer's talk is NOT a hard fail); a slur, doxxing or a real person humiliated; it needs the previous five minutes; it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen; explicit sexual content, drug use, self-harm or real violence as the point of the clip (the platforms suppress these; swearing and crude banter are fine). When such a line is only the tail of an otherwise good moment, end the clip before it instead of failing it.
+hard_fail: empty, or one short reason when the clip must never go out whatever the grades: a song is the whole point of the moment with nothing worth hearing over it (a DJ set, singing along, a music break; game radio or background music under the streamer's talk is NOT a hard fail); a slur, doxxing or a real person humiliated; it needs the previous five minutes (when "the five minutes before the window" are given, read them first: the clip fails for context only if a stranger needs something from there that no line inside the window carries); it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen; explicit sexual content, drug use, self-harm or real violence as the point of the clip (the platforms suppress these; swearing and crude banter are fine). When such a line is only the tail of an otherwise good moment, end the clip before it instead of failing it.
 Also give score 0-100 as your overall feeling. start_line is the first line of the clip and end_line the last, using the line numbers exactly as given. title under 60 characters in the stream's language, no hashtags; hook: the first spoken line, under 100 characters; hook_line: the words to put on screen for the first two seconds, 3 to 6 words, a stake or a tease, never "insane moment", in the stream's language; caption: one sentence a stranger could post the clip with, under 110 characters, no hashtags; why under 15 words; why_not under 15 words when it should not be kept (empty otherwise); tags: 1 to 3 lowercase topic words.`;
 /** The checklist's weights (research/viral-signals.md 4d): hook 25, standalone 20, payoff 20, reaction 15, quotable 10, length 5. */
 export const CHECKLIST = { hook: 0.25, standalone: 0.2, payoff: 0.2, reaction: 0.15, quotable: 0.1, length: 0.05 } as const;
@@ -673,12 +673,17 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         return tags.length ? `${l.text} [${tags.join("; ")}]` : l.text;
       };
       const body = lines.map((l) => `L${l.i} [${mmss(l.start)}]${l.speaker ? ` ${l.speaker}:` : ""} ${mark(l)}${(l.events ?? []).map((x) => ` [${x}]`).join("")}${(l.loud ?? 0) >= 5 ? ` ⟪+${l.loud} dB⟫` : ""}`).join("\n");
+      // the five minutes before the window, when its hour was read: the verifier's commonest call is "it needs the previous
+      // five minutes" (22 of 25 rejections on the Nov 19 2026 run), made without seeing them; now it can read them (for
+      // context only; the clip cannot start there)
+      const before = read && start > read.start ? heardFromRead(read, Math.max(read.start, start - 300), Math.min(300, start - read.start)).words : [];
+      const context = before.length ? `\n\nThe five minutes before the window, for context only (the clip cannot start here):\n${before.map((w) => w.text).join(" ").slice(-1800)}` : "";
       const peaks = heard.excess ? loudPeaks(heard.excess, 5) : [];
       const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.${c.source === "words" ? " This moment was found in the words of the stream, not by a chat burst; the proposed cut is the picker's." : c.cut ? " The chat burst here and the picker of the words proposed this cut." : ""}`;
       const times = [...new Set([lines[cut.s]?.start ?? 0, eventRel, peakRel, (lines[cut.s]?.start ?? 0 + (lines[cut.e]?.end ?? span)) / 2, lines[cut.e]?.end ?? span, Math.min(span - 1, peakRel + 20)].map((t) => Math.round(Math.max(0, Math.min(span - 1, t)))))].sort((a, c) => a - c).slice(0, 6);
       const frames = await stills(pl.video, times.map((t) => start + t), dir, `s${c.rank}`);
       let v: Verdict;
-      try { v = await verify({ lines, stills: frames, head, body }); claudeCalls++; }
+      try { v = await verify({ lines, stills: frames, head, body: body + context }); claudeCalls++; }
       catch (err: any) { log(`[live] verify ${c.rank} of ${job.id} failed: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
       const byI = new Map(lines.map((l) => [l.i, l]));
       const ls = byI.get(v.start_line), le = byI.get(v.end_line);
@@ -723,7 +728,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const standalone = v.grades ? v.grades.standalone >= 5 : v.standalone;
       const keep = v.keep && !v.hard_fail && standalone && score >= bar && d >= len.min && d <= len.max + 3;
       log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score, felt: v.score, grades: v.grades ?? undefined, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), hook_line: v.hook_line?.slice(0, 40), why_not: keep ? undefined : v.hard_fail?.slice(0, 80) || v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
-      const hv = verdicts.get(hourOf(c)) ?? { n: 0, kept: 0 }; hv.n++; if (keep) hv.kept++; verdicts.set(hourOf(c), hv);
+      const hv = verdicts.get(hourOf(c)) ?? { n: 0, kept: 0 }; if (!c.cut && c.source !== "words") hv.n++; if (keep) hv.kept++; verdicts.set(hourOf(c), hv);
       if (!keep && !hv.kept && hv.n === COLD.after) log(`[live] cold ${JSON.stringify({ job: job.id, hour: hourOf(c), after: hv.n })}`);
       if (!keep) continue;
       const absStart = round2(start + a), absEnd = round2(start + z);
