@@ -278,6 +278,16 @@ test("the edge: a cut that ends where the window ends hears 30 s more and closes
   const d = cut[0].end - cut[0].start;
   assert.ok(d > 27 && d < 32, `the cut grew past the window's end to the next closing thought: ${d}`);
   assert.ok(cut[0].words.some((w: any) => w[0] === "yeah." && w[1] > cut[0].start + 25), "the extension's words are the clip's too");
+  // 1b. the model ends on a line that pauses mid-sentence ("You know about" then a second of air, then "TikTok?"):
+  // the cut runs to the sentence's end
+  const pause = () => { const w: any[] = []; let t = 20; for (let i = 0; i < 40; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; }
+    for (const [text, gap] of [["You", 0.4], ["know", 0.4], ["about", 1.1], ["TikTok?", 0.4], ["Of", 0.4], ["course.", 1.2], ["Okay", 0.4], ["bye.", 0.4]] as Array<[string, number]>) { w.push({ text, start: t, end: t + 0.3, speaker: "S1" }); t += gap; } return w; };
+  const cutP: any[] = [];
+  const outP = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => chatWith(900, 3600),
+    hear: async () => { const w = pause(); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
+    verify: async (i: any) => graded(i, { end_line: i.lines.find((l: any) => /about$/.test(l.text.trim())).i }), cut: async (ctx: any, m: any) => { cutP.push(m); return { asset_id: "p1", bytes: 1, seconds: m.end - m.start }; } }, job(1, 3600));
+  assert.equal(outP, "done"); assert.equal(cutP.length, 1);
+  assert.match(cutP[0].transcript, /course\.$/, `the cut ran to the end of the sentence, not the pause: ${cutP[0].transcript.slice(-40)}`);
   // 2. three bursts in the first hour the model turns down, one weaker burst in the second it keeps: after two
   // verdicts the first hour is cold, so the second hour's burst is the THIRD check (not the fourth), and the deferred
   // one is still checked afterwards while budget remains

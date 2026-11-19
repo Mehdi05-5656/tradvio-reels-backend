@@ -267,6 +267,8 @@ export const WINDOW = { lead: 45, length: 150 };
  *  seconds are heard and the cut closes on the first thought that ends in them. A clip ended on "You know about" on
  *  Nov 19 2026: the moment the model chose was 100 s after the chat's mark and ran into the window's edge. */
 export const EDGE = { near: 3, more: 30 };
+/** A line that ends a sentence (a cut may end on it); the lines also break at pauses, which is not the same thing. */
+const SENTENCE_END_RE = /[.!?\u2026]["')\]]*$/;
 /** Where the checks go: once an hour of the stream has given `after` verdicts and no keep, its other candidates wait
  *  behind everyone else's (checked only if budget is left). The Nov 19 2026 run spent a third of its checks on two
  *  hours of Fortnite the verifier turned down one by one, while every keep came from the IRL hours. */
@@ -607,6 +609,14 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         } catch (err: any) { log(`[live] edge of ${c.rank} of ${job.id} not heard: ${String(err?.message ?? err).slice(0, 120)}`); }
         finally { await rm(extra, { force: true }).catch(() => undefined); }
       }
+      // an end on a line that pauses mid-sentence (the lines break at a pause of 0.9 s too, so "You know about" ended a
+      // clip on Nov 19 2026 while "TikTok?" followed a second later): the sentence's end within 6 s, else the previous one
+      { const at = lines.find((l) => Math.abs(l.end - z) < 0.06);
+        if (at && !SENTENCE_END_RE.test(at.text.trim())) {
+          const next = lines.find((l) => l.start >= z - 0.05 && SENTENCE_END_RE.test(l.text.trim()) && l.end - z <= 6 && l.end - a <= len.max);
+          const prev = next ? null : [...lines].reverse().find((l) => l.end <= z - 0.05 && SENTENCE_END_RE.test(l.text.trim()) && l.end - a >= len.min);
+          if (next) z = next.end; else if (prev) z = prev.end;
+        } }
       // the model's cut under the length's floor grows to the next closing thoughts (then earlier opening ones),
       // never past the ceiling: a 16 s clip of a 30 s moment was kept on Nov 18 2026 before this
       const closesAfter = (t: number) => lines.find((l) => l.start >= t - 0.05 && l.closes && l.end - a <= len.max);
