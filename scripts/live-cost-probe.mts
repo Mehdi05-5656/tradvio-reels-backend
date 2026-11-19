@@ -10,6 +10,7 @@ import { twitchVodPlaylists } from "../src/live-sources.js";
 import { fetchSound, firstCut, VERIFY_SYSTEM, VERIFY_SCHEMA, checklistScore } from "../src/studio-live-clips.js";
 import { transcribeWords } from "../src/studio-eleven.js";
 import { annotateLines, linesFromWords, claudeJson, chooseWithClaude, finalizeMoments, windows, ffmpeg, CLIP_LIMITS, type Line } from "../src/studio-clips.js";
+import { transcribeGroq } from "../src/studio-stt.js";
 
 const envText = await readFile(join(process.env.HOME ?? "", "tradvio/ops/.env"), "utf8").catch(() => "");
 for (const l of envText.split("\n")) { const m = l.match(/^([A-Z_]+)=(.*)$/); if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, ""); }
@@ -151,6 +152,41 @@ if (mode === "stills17" || mode === "pickverify") {
       rows.push(`${who.padEnd(6)} ${name.padEnd(20)} ${v.keep ? "KEEP" : "no  "} ${v.score} "${(v.title || "").slice(0, 40)}" ${(v.why_not || v.hard_fail || "").slice(0, 40)}`);
     }
     console.log(rows.join("\n")); console.log(`kept: haiku ${kept.haiku}/6, sonnet ${kept.sonnet}/6, $${usd.toFixed(3)}`);
+  }
+}
+// 5. the cheap door: hour 2 heard by Groq's Whisper turbo against Scribe's cached words; the Haiku picker on each
+if (mode === "stt") {
+  const pl = await twitchVodPlaylists(deps, vodId);
+  const hc = await hour(2);
+  const mp3 = join(dir, "h2.mp3"); const t0 = Date.now();
+  await fetchSound(pl.audio, 7200, 3600, mp3);
+  const buf = await readFile(mp3); const t1 = Date.now();
+  const g = await transcribeGroq({ env, fetch }, { audio: buf });
+  const t2 = Date.now();
+  console.log(`\n== stt probe: hour 2, ${Math.round(buf.length / 1024)} kB fetched in ${Math.round((t1 - t0) / 1000)} s; Groq turbo: ${g.words.length} words in ${Math.round((t2 - t1) / 1000)} s (Scribe cached: ${hc.words.length} words, ${hc.events.length} sounds)`);
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, "");
+  const A = hc.words.map((w) => norm(w.text)).filter(Boolean), B = g.words.map((w) => norm(w.text)).filter(Boolean);
+  // a plain diff on the word strings: matched words, and the time offset between the doors on the matches
+  // LCS on 12k words is heavy; sample by 10-minute stretches instead
+  let matched = 0, offs: number[] = [], total = 0;
+  for (let k = 0; k < 6; k++) {
+    const from = k * 600, to = from + 600;
+    const a = hc.words.filter((w) => w.start >= from && w.start < to), b = g.words.filter((w) => w.start >= from && w.start < to);
+    const bi = new Map<string, number[]>(); b.forEach((w, i) => { const key = norm(w.text); if (!bi.has(key)) bi.set(key, []); bi.get(key)!.push(i); });
+    let last = -1;
+    for (const w of a) { total++; const key = norm(w.text); if (!key) continue; const cands = (bi.get(key) ?? []).filter((i) => i > last && Math.abs(b[i].start - w.start) < 2.5); if (cands.length) { matched++; last = cands[0]; offs.push(b[cands[0]].start - w.start); } }
+  }
+  offs.sort((x, y) => x - y);
+  const med = offs.length ? offs[Math.floor(offs.length / 2)] : 0, p90 = offs.length ? Math.abs(offs[Math.floor(offs.length * 0.9)]) : 0;
+  console.log(`words of Scribe found in Groq's at the same time (within 2.5 s): ${matched}/${total} (${Math.round((100 * matched) / Math.max(1, total))} %); time offset median ${med.toFixed(2)} s, 90th pct ${p90.toFixed(2)} s`);
+  const sampleAt = (t: number) => ({ scribe: hc.words.filter((w) => w.start >= t && w.start < t + 20).map((w) => w.text).join(" "), groq: g.words.filter((w) => w.start >= t && w.start < t + 20).map((w) => w.text).join(" ") });
+  for (const t of [800, 1900, 3100]) { const x = sampleAt(t); console.log(`\n[${7200 + t} s] Scribe: ${x.scribe.slice(0, 220)}\n[${7200 + t} s] Groq:   ${x.groq.slice(0, 220)}`); }
+  for (const [label, words, events] of [["Scribe", hc.words, hc.events], ["Groq", g.words, []]] as const) {
+    const lines = linesFromWords(words as any); const d2 = { ...deps, env: { ...env, STUDIO_CLIPS_MODEL: "claude-haiku-5-5" } };
+    const raw: any[] = []; const before = costs.length;
+    for (const w of windows(lines)) raw.push(...await chooseWithClaude(d2, { lines: w, meta: { title: "stableronaldo IRL stream", channel: "stableronaldo", description: "", chapters: [], replay: [] } as any, length: "standard", wanted: 5 }));
+    const ms = finalizeMoments(raw, lines, words as any, "standard", 12, CLIP_LIMITS.min_score, events as any);
+    console.log(`\nHaiku picker on ${label}'s words: ${ms.length} moments ($${costs.slice(before).reduce((x, c) => x + c.usd, 0).toFixed(3)}): ${ms.map((m) => `${Math.round(7200 + m.start)}s ${m.score} "${m.title.slice(0, 32)}"`).join(" | ")}`);
   }
 }
 await rm(dir, { recursive: true, force: true }).catch(() => undefined);

@@ -1,9 +1,11 @@
 // Speech to text for Live Clips, by provider. ElevenLabs Scribe ($0.20 an hour) hears speakers and sounds (laughter,
 // music), which the framing and the cut's end use; Groq's hosted Whisper large-v3-turbo ($0.04 an hour, Nov 19 2026)
 // hears words with times and nothing else. The cost study (docs/live-clips/research/costs/) put transcription at 40 %
-// of a Live Clips run; the hours read whole and the candidate windows only need the words, so they can go to the cheap
-// door (STUDIO_LIVE_STT=groq with GROQ_API_KEY), and the few clips that are kept are heard again by Scribe for their
-// speakers. Scribe stays the default until the cheap door is checked on a real stream.
+// of a Live Clips run. The hours read whole only feed the picker and the context, so they can go to the cheap door
+// (STUDIO_LIVE_STT=groq with GROQ_API_KEY); the candidate windows are judged and cut on their exact words, and on the
+// first cheap-door run (Nov 19 2026) the verifier called Whisper turbo's windows "garbled" and dropped a kept moment
+// (it hears about a fifth fewer words where people talk over each other), so the windows stay on Scribe. Scribe is
+// the default for everything until the cheap door's hours are checked on more streams.
 import { transcribeWords, type TimedWord, type AudioEvent } from "./studio-eleven.js";
 import { recordEvent } from "./studio-events.js";
 
@@ -33,7 +35,7 @@ export async function transcribeGroq(deps: SttDeps, p: { audio: Buffer; filename
   form.set("temperature", "0");
   if (p.language) form.set("language", p.language);
   let last = "";
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     const r = await (deps.fetch ?? fetch)("https://api.groq.com/openai/v1/audio/transcriptions", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(10 * 60_000) }).catch((e: any) => { last = String(e?.message ?? e); return null; });
     if (r && r.ok) {
       const body: any = await r.json();
@@ -44,7 +46,8 @@ export async function transcribeGroq(deps: SttDeps, p: { audio: Buffer; filename
     }
     const status = r?.status ?? 0;
     last = r ? `${status}: ${(await r.text().catch(() => "")).slice(0, 200)}` : last;
-    if (status === 429 || status >= 500 || status === 0) { await new Promise((res) => setTimeout(res, 3000 * (attempt + 1))); continue; }
+    // (a rate limit on the free tier is counted per minute: the first cheap-door run lost an hour and 17 windows to 429s with 3-9 s waits)
+    if (status === 429 || status >= 500 || status === 0) { await new Promise((res) => setTimeout(res, status === 429 ? 20_000 * (attempt + 1) : 3000 * (attempt + 1))); continue; }
     break;
   }
   throw new Error(`Groq transcription failed: ${last || "no answer"}`);

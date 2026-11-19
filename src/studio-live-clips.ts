@@ -281,7 +281,8 @@ export const COLD = { bucket_s: 3600, after: 2 };
  *  also marked gets its cut from the words. At most `hours` hours, each at least `min_heard_s` long and not muted; the
  *  picker's model is Haiku unless STUDIO_LIVE_PICK_MODEL says otherwise (an hour: Opus $0.29, Sonnet $0.16, Haiku
  *  $0.014; on hour 2 of the Nov 19 2026 stream the verifier kept 2 of Haiku's 6 moments and 3 of Sonnet's 6, one of
- *  Haiku's being the Home Depot moment Sonnet missed). The hours' sound goes through the door studio-stt.ts chooses. Checks that fall inside a read hour take their words from it (no
+ *  Haiku's being the Home Depot moment Sonnet missed). The hours' sound goes through the door studio-stt.ts chooses;
+ *  the windows are always Scribe's (the verdict and the cut need the exact words). Checks that fall inside a read hour take their words from it (no
  *  fetch, no second transcription). Off with STUDIO_LIVE_HYBRID=off. */
 export const HYBRID = { hours: 2, min_heard_s: 600, wanted_per_window: 5, near_s: 90, pick_model: "claude-haiku-5-5", /** a window around a cut the picker proposed, when the words are free */ max_span_s: 240 };
 /** How many hours a run reads: HYBRID.hours, or STUDIO_LIVE_HYBRID_HOURS (the first run of Nov 19 2026 read three for $1.47
@@ -378,7 +379,7 @@ async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>
 export async function fetchSound(url: string, start: number, seconds: number, target: string): Promise<void> {
   await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, "-t", String(seconds), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", target], { timeoutMs: 4 * 60_000 });
 }
-export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"] };
+export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"]; /** the door that heard it: a window reuses the words only when it was Scribe (exact words for the verdict and the cut) */ door: "scribe" | "groq" };
 /** The hours to read whole: the strongest by the chat's candidates (their scores summed), not muted, in stream order. */
 export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours): number[] {
   const score = new Map<number, number>();
@@ -400,7 +401,7 @@ async function readHour(deps: StreamDeps, b: Broadcast, audioUrl: string, hour: 
     const raw: RawMoment[] = [];
     for (const w of windows(lines)) raw.push(...await (deps.pick ?? ((ls: Line[]) => chooseWithClaude(pickDeps, { lines: ls, meta: { title: b.title || null, channel: b.channel || null, description: "", chapters: [], replay: [] } as any, length, wanted: HYBRID.wanted_per_window }, u)))(w));
     const moments = finalizeMoments(raw, lines, heard.words, length, 12, CLIP_LIMITS.min_score, heard.events).map((m) => ({ ...m, start: round2(m.start + start), end: round2(m.end + start) }));
-    return { read: { hour, start, seconds: got, words: heard.words, events: heard.events }, moments };
+    return { read: { hour, start, seconds: got, words: heard.words, events: heard.events, door: sttProvider(env) }, moments };
   } catch (err: any) { (deps.log ?? console.log)(`[live] hour ${hour} not read: ${String(err?.message ?? err).slice(0, 160)}`); return null; }
   finally { await rm(file, { force: true }).catch(() => undefined); }
 }
@@ -427,7 +428,7 @@ async function hearWindow(deps: StreamDeps, audioFile: string, dir: string, user
   const env = deps.env ?? process.env;
   const buf = await readFile(audioFile);
   // (the cost ledger: the door is priced by the hour of audio heard; the window is WINDOW.length seconds)
-  const r = await hearAudio({ env, fetch: deps.fetch }, { audio: buf, seconds, use: "live_clips", userId });
+  const r = await hearAudio({ env, fetch: deps.fetch }, { audio: buf, seconds, use: "live_clips", userId, provider: "scribe" });
   const rms = await loudnessTrack(audioFile, dir).catch(() => [] as number[]);
   const excess = rms.length ? loudnessExcess(rms) : null;
   const lines = annotateLines(linesFromWords(r.words), r.events, excess);
@@ -651,8 +652,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       await renew(sb, job, { stage: checked === 0 ? "transcribing" : "choosing", message: `Checking moment ${checked + 1} of up to ${want} · ${kept.length} kept`, done: kept.length, total: count });
       const audio = join(dir, `w${c.rank}.mp3`);
       let heard: Heard;
+      // a window inside an hour Scribe heard takes its words from it; an hour the cheap door heard only gives context
       const read = hourReads.find((r) => start >= r.start && start + span <= r.start + r.seconds);
-      if (read) { heard = heardFromRead(read, start, span); if (!heard.words.length) { unheard++; continue; } heardOk++; }
+      if (read && read.door === "scribe") { heard = heardFromRead(read, start, span); if (!heard.words.length) { unheard++; continue; } heardOk++; }
       else try {
         await windowOf(pl.audio, start, span, audio);
         // a window the platform silenced (or a fetch that came back short) has nothing to hear: it is not a verdict
@@ -767,9 +769,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // the layout is looked at once per clip, on a still from its own stretch: the first live runs (Nov 18 2026) looked
     // once per run and three Rainbow Six clips wore the chess scene's camera box, a slice of the game where the face was
     const asLayout = (r: Layout | FacecamBox | null): Layout => (r && "cam" in r ? r : { cam: r as FacecamBox | null, content: null });
-    // the cheap door hears no speakers: a kept clip is heard again by Scribe (a few seconds of sound each), so the
-    // framing can follow who is talking and the Captions page gets the same words it always had
-    const rehear = sttProvider(deps.env ?? process.env) !== "scribe";
+    // if the windows ever go through a door without speakers, a kept clip is heard again by Scribe (a few seconds of
+    // sound each) so the framing can follow who is talking; today the windows are Scribe's and this never runs
+    const windowDoor = "scribe" as const; const rehear = (windowDoor as string) !== "scribe";
     for (const m of todo) {
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
       if (rehear) {
