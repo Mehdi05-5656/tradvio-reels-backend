@@ -69,7 +69,9 @@ export function streamPrice(plans: PlanLike[], p: { seconds: number; length: Cli
 export const likelyStreamClips = (seconds: number) => Math.max(1, Math.min(LIVE_LIMITS.max_clips, Math.round(seconds / 1000)));
 export const streamCountCap = (seconds: number) => Math.max(1, Math.min(LIVE_LIMITS.max_clips, Math.floor(seconds / 120)));
 export type Strictness = "best" | "balanced" | "more";
-export const VERIFY_BAR: Record<Strictness, number> = { best: 70, balanced: 60, more: 50 };
+/** The bar the checklist score must clear. The checklist (phase B) grades the same moments 15-25 points under the old
+ *  single score (Nov 19 2026, the same 35-hour stream: 72 -> 60, 62 -> 42, 72 -> 33), so the bars sit lower than they did. */
+export const VERIFY_BAR: Record<Strictness, number> = { best: 65, balanced: 55, more: 45 };
 const strictnessOf = (v: unknown): Strictness => (v === "best" || v === "more" ? v : "balanced");
 export type Framing = "auto" | "stacked" | "person";
 const framingOf = (v: unknown): Framing => (v === "stacked" || v === "person" ? v : "auto");
@@ -584,7 +586,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       // the checklist decides (research/viral-signals.md 4d): the weighted grades against the bar, a hard fail vetoes,
       // and a stranger must understand it (standalone grade 6+, or the old boolean where a seam gives no grades)
       const score = checklistScore(v);
-      const standalone = v.grades ? v.grades.standalone >= 6 : v.standalone;
+      const standalone = v.grades ? v.grades.standalone >= 5 : v.standalone;
       const keep = v.keep && !v.hard_fail && standalone && score >= bar && d >= len.min && d <= len.max + 3;
       log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score, felt: v.score, grades: v.grades ?? undefined, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), hook_line: v.hook_line?.slice(0, 40), why_not: keep ? undefined : v.hard_fail?.slice(0, 80) || v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
       if (!keep) continue;

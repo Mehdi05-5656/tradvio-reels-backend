@@ -30,6 +30,20 @@ test("a run's cost: proxy by job, Claude by person and time, transcription estim
   assert.ok(r.margin! > 0.4);
 });
 
+test("a stream run (Live Clips): transcription is the windows it heard, Claude includes its own calls; a 35-hour stream is not priced as 35 hours of sound", () => {
+  // the owner's run of Nov 19 2026: 35 h of stream, 11 windows heard, 140 credits
+  const [r] = clipsRuns([job("s", "u1", { options: { seconds: 126420, count: 5, stream: { platform: "twitch" } }, credits_charged: 140, credits_reserved: 140 })], [
+    { ...doneEvt("s"), props: { job: "s", asked: 5, clips: 2, stream: true, timing: { video_s: 126420, chat_messages: 374933, heard: 11, clips: 2 } } },
+    ...Array.from({ length: 11 }, (_, k) => ev("elevenlabs_scribe", "vendor", "u1", 0.0083, 1 + k * 0.5, { use: "live_clips" })),
+    ...Array.from({ length: 11 }, (_, k) => ev("live_clips_verify", "claude", "u1", 0.0147, 1.2 + k * 0.5)),
+    ev("live_clips_facecam", "claude", "u1", 0.0003, 7),
+    ev("elevenlabs_scribe", "vendor", "u2", 5, 3, { use: "live_clips" }), // someone else's
+  ], T + 3600_000);
+  assert.equal(r.cost.transcribe, 0.09, "11 windows at Scribe's rate, not 35 hours");
+  assert.equal(r.cost.claude, 0.16);
+  assert.ok(r.cost.total < 0.3 && r.margin! > 0.8, `margin ${r.margin} on $${r.cost.total}`);
+});
+
 test("alerts: our failures, fallbacks, thin margins, slow and stuck runs; never the person's own unusable video", () => {
   const jobs = [
     job("ok", "u1"),

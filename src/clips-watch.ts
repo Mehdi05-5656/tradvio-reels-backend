@@ -12,9 +12,12 @@
 // clips_digest event. GET /api/studio/admin/clips-health?hours=24 (owner only) answers with the same numbers.
 //
 // Costs: the proxy to the cent from its own events (by job); Claude from its cost events, given to the run of the same
-// person that was going at the time (the events carry no job id); ElevenLabs is not recorded, so it is estimated at
-// its rate ($0.22 an hour of sound). Revenue is the credits charged at the cheapest credit we sell, so a margin here
-// is the lowest it can be. Off with STUDIO_CLIPS_WATCH=off. Never throws.
+// person that was going at the time (the events carry no job id); ElevenLabs is not recorded for a video run, so it is
+// estimated at its rate ($0.22 an hour of sound). A stream run (Live Clips, options.stream) hears only its candidate
+// windows and records each one (elevenlabs_scribe events), so its transcription is those events, by person and time;
+// pricing it as the whole stream said "$7.73, margin -243 %" for a run that cost 25 cents (Nov 19 2026). Revenue is
+// the credits charged at the cheapest credit we sell, so a margin here is the lowest it can be. Off with
+// STUDIO_CLIPS_WATCH=off. Never throws.
 import type { Express } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLANS } from "./studio.js";
@@ -54,7 +57,8 @@ export function clipsRuns(jobs: any[], events: any[], now = Date.now(), plans = 
     if (e.name === "clips_done" && job) done.set(job, e.props);
     if (e.name === "youtube_proxy" && job) { const p = proxy.get(job) ?? { usd: 0, bytes: 0 }; p.usd += Number(e.usd) || 0; p.bytes += Number(e.props?.bytes) || 0; proxy.set(job, p); }
   }
-  const claude = events.filter((e) => e.kind === "claude" && /^clips_/.test(e.name));
+  const claude = events.filter((e) => e.kind === "claude" && /^(clips_|live_clips_)/.test(e.name));
+  const scribe = events.filter((e) => e.kind === "vendor" && e.name === "elevenlabs_scribe");
   return jobs.map((j): ClipsRun => {
     const d = done.get(j.id), t = d?.timing ?? {}, o = j.options ?? {};
     const start = ms(j.started_at ?? j.created_at), end = ms(j.finished_at) || now;
@@ -62,7 +66,9 @@ export function clipsRuns(jobs: any[], events: any[], now = Date.now(), plans = 
     const cl = claude.filter((e) => e.user_id === j.user_id && ms(e.created_at) >= start && ms(e.created_at) <= end + 60_000).reduce((a, e) => a + (Number(e.usd) || 0), 0);
     const seconds = Number(t.video_s ?? o.seconds) || 0;
     const p = proxy.get(j.id) ?? { usd: 0, bytes: 0 };
-    const transcribe = j.status === "done" || (j.status === "failed" && p.bytes > 0) ? (seconds / 3600) * TRANSCRIBE_USD_PER_HOUR : 0;
+    const stream = !!o.stream || t.chat_messages != null;
+    const heardUsd = scribe.filter((e) => e.user_id === j.user_id && ms(e.created_at) >= start && ms(e.created_at) <= end + 60_000).reduce((a, e) => a + (Number(e.usd) || 0), 0);
+    const transcribe = stream ? heardUsd : j.status === "done" || (j.status === "failed" && p.bytes > 0) ? (seconds / 3600) * TRANSCRIBE_USD_PER_HOUR : 0;
     const total = p.usd + cl + transcribe, credits = Number(j.credits_charged) || 0, revenue = credits * credit;
     const lean = !!t.lean || (!d && o.lean === true);
     return {

@@ -98,7 +98,7 @@ test("prices: reading by the hour with a minimum, clips at Clips' price, both ov
   assert.equal(streamPrice(PLANS, { seconds: 20 * 3600, length: "standard", env: ENV }).analysis, streamPrice(PLANS, { seconds: 8 * 3600, length: "standard", env: ENV }).analysis);
   assert.equal(LIVE_LIMITS.max_seconds, 48 * 3600);
   assert.equal(likelyStreamClips(4 * 3600), 14); assert.equal(streamCountCap(600), 5); assert.equal(streamCountCap(10 * 3600), LIVE_LIMITS.max_clips);
-  assert.equal(VERIFY_BAR.balanced, 60);
+  assert.equal(VERIFY_BAR.balanced, 55); assert.equal(VERIFY_BAR.best, 65); assert.equal(VERIFY_BAR.more, 45);
 });
 
 test("the registry: campaign streamers, blocked ones (file and environment), everyone else unknown", () => {
