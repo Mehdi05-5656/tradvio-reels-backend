@@ -281,7 +281,10 @@ export const COLD = { bucket_s: 3600, after: 2 };
  *  picker's model is the cheaper one unless STUDIO_LIVE_PICK_MODEL says otherwise (Opus read an hour for $0.29 against
  *  about $0.06; Scribe is $0.20 an hour either way). Checks that fall inside a read hour take their words from it (no
  *  fetch, no second transcription). Off with STUDIO_LIVE_HYBRID=off. */
-export const HYBRID = { hours: 3, min_heard_s: 600, wanted_per_window: 5, near_s: 90, pick_model: "claude-sonnet-5-5" };
+export const HYBRID = { hours: 2, min_heard_s: 600, wanted_per_window: 5, near_s: 90, pick_model: "claude-sonnet-5-5", /** a window around a cut the picker proposed, when the words are free */ max_span_s: 240 };
+/** How many hours a run reads: HYBRID.hours, or STUDIO_LIVE_HYBRID_HOURS (the first run of Nov 19 2026 read three for $1.47
+ *  a run against $2.40 at the floor, 39 %; two is about $1.15, 52 %). */
+export function hybridHours(env: Record<string, string | undefined> = process.env): number { const n = Number(env.STUDIO_LIVE_HYBRID_HOURS); return Number.isFinite(n) && n > 0 ? Math.min(6, Math.round(n)) : HYBRID.hours; }
 export const VERIFY_SYSTEM = `You are the best short-form video editor alive, checking ONE candidate moment from a live stream before it is cut into a 20-55 second vertical clip for TikTok, Reels and Shorts. The moment was found by the stream's own chat reacting (the burst is marked on the transcript) and by the sound. You see the transcript of the window with its signals, and stills from it. Decide whether this is a clip a stranger would stop for, and where exactly it should start and end.
 
 Keep it only if ALL hold: it stands alone (no context needed from earlier in the stream, no "as I said"); it has a payoff (a laugh, a shock, a win, a fail, a reveal, a line that lands) and the clip ends right after it; it is not a sponsor read, an ad break, a "be right back" screen, music only, or the streamer reading a chat message that needs the chat to be seen; it is not just the game's cutscene with the streamer silent unless the picture itself is the payoff.
@@ -589,22 +592,27 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // (a chat candidate within 90 s takes the picker's cut instead), the two orders interleaved, the chat's first
     const hourReads: HourRead[] = [];
     if ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off") {
-      const hours = hoursToRead(cands, b.seconds, mutedShare);
+      const hours = hoursToRead(cands, b.seconds, mutedShare, hybridHours(deps.env ?? process.env));
       if (hours.length) {
         await renew(sb, job, { stage: "transcribing", message: `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
         const tHours = Date.now();
         const reads = (await Promise.all(hours.map((h) => readHour(deps, b, pl.audio, h, dir!, u, length)))).filter((r): r is NonNullable<typeof r> => !!r);
         const picked = reads.flatMap((r) => r.moments).sort((x, y) => y.score - x.score);
         hourReads.push(...reads.map((r) => r.read));
-        const extra: Candidate[] = [];
+        const extra: Candidate[] = []; const pickScore = new Map<Candidate, number>();
         for (const m of picked) {
           const near = cands.find((c) => Math.abs(c.t_event - m.start) < HYBRID.near_s || (m.start < c.t_event + 60 && m.end > c.t_event - 60));
-          if (near) { if (!near.cut) { near.cut = { start: m.start, end: m.end }; near.title = m.title; } continue; }
+          if (near) { if (!near.cut) { near.cut = { start: m.start, end: m.end }; near.title = m.title; pickScore.set(near, m.score); } continue; }
           if (extra.some((c) => Math.abs(c.t_event - m.start) < HYBRID.near_s)) continue;
           extra.push({ rank: 0, onset: m.start + 8, peak: m.start + 15, last: m.end, t_event: m.start, score: m.score, zs: {}, asks: 0, sample: [], source: "words", cut: { start: m.start, end: m.end }, title: m.title });
         }
-        const merged: Candidate[] = [];
-        for (let k = 0; k < Math.max(cands.length, extra.length); k++) { if (k < cands.length) merged.push(cands[k]); if (k < extra.length) merged.push(extra[k]); }
+        // the order: the moments both readers marked first (a chat burst AND the picker: the first hybrid run of Nov 19
+        // 2026 left the cashier's song, the picker's 82, at its chat rank of 60 and never checked it), then the chat's
+        // and the picker's own interleaved, the chat's first
+        const both = cands.filter((c) => c.cut).sort((x, y) => (pickScore.get(x) ?? 0) - (pickScore.get(y) ?? 0)).reverse();
+        const rest = cands.filter((c) => !c.cut);
+        const merged: Candidate[] = [...both];
+        for (let k = 0; k < Math.max(rest.length, extra.length); k++) { if (k < rest.length) merged.push(rest[k]); if (k < extra.length) merged.push(extra[k]); }
         cands.splice(0, cands.length, ...merged.map((c, k) => ({ ...c, rank: k + 1 })));
         timing.hours = hours; timing.hours_s = Math.round((Date.now() - tHours) / 1000); timing.hour_words = reads.reduce((a, r) => a + r.read.words.length, 0); timing.picked = picked.length; timing.words_cands = extra.length;
         log(`[live] hours ${JSON.stringify({ job: job.id, hours, read: reads.map((r) => r.read.hour), words: timing.hour_words, picked: picked.length, new: extra.length, seconds: timing.hours_s, top: picked.slice(0, 5).map((m) => [Math.round(m.start), m.score, m.title.slice(0, 40)]) })}`);
@@ -631,7 +639,12 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       if (checked >= want || kept.length >= count + OVERSHOOT(count)) break;
       if (!pass && isCold(c)) { later.push(c); deferred++; continue; }
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
-      const start = Math.max(0, c.onset - WINDOW.lead), span = Math.min(WINDOW.length, b.seconds - start);
+      let start = Math.max(0, c.onset - WINDOW.lead), span = Math.min(WINDOW.length, b.seconds - start);
+      // a cut the picker proposed sits inside the window when its hour was read (the words cost nothing more): the
+      // first hybrid run's window of 7895-8045 s held the chat's mark and not the song at 8050-8073 s it was told about
+      if (c.cut && hourReads.some((r) => c.cut!.start >= r.start && c.cut!.end <= r.start + r.seconds)) {
+        start = Math.max(0, Math.min(start, c.cut.start - 30)); span = Math.min(HYBRID.max_span_s, b.seconds - start, Math.max(WINDOW.length, c.cut.end + 20 - start));
+      }
       if (span < 30) continue;
       if (mutedShare(start, start + span) > 0.4) { skippedMuted++; continue; }
       await renew(sb, job, { stage: checked === 0 ? "transcribing" : "choosing", message: `Checking moment ${checked + 1} of up to ${want} · ${kept.length} kept`, done: kept.length, total: count });

@@ -331,12 +331,22 @@ test("the hybrid: the strongest hours are heard whole and read by Clips' picker;
     pick: async (ls: any[]) => { const s = ls.find((l) => l.start >= 884); const e = [...ls].reverse().find((l) => l.end <= 912); return s && e ? [{ start_line: s.i, end_line: e.i, title: "Same minute", hook: "so", why: "talk", score: 70, tags: [] }] : []; },
     verify: async (i: any) => { heads2.push(i.head); return graded(i); }, cut: async (ctx: any, m: any) => { cut2.push(m); return { asset_id: "h2", bytes: 1, seconds: m.end - m.start }; } }, job(1, 7200));
   assert.equal(out2, "done"); assert.equal(cut2.length, 1); assert.equal(heads2.length, 1, "one candidate, not two"); assert.match(heads2[0], /picker of the words proposed/); assert.equal(hears, 0);
+  // two bursts, the picker marks the second: a moment both readers marked is checked first, in a window that holds the cut
+  const heads3: string[] = []; const two = [...chatWith(900, 7200), ...chatWith(1500, 7200).filter((m) => m.t >= 1500 && m.t < 1512 && /[A-Z]{4}/.test(m.c))];
+  const out4 = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => two,
+    pick: async (ls: any[]) => { const s = ls.find((l) => l.start >= 1500); const e = [...ls].reverse().find((l) => l.end <= 1600); return s && e ? [{ start_line: s.i, end_line: e.i, title: "Both", hook: "so", why: "talk", score: 70, tags: [] }] : []; },
+    hearHour: async () => ({ words: [...mk(880), ...mk(1500, 48), ...mk(1560, 48)], events: [], language: "en" }),
+    verify: async (i: any) => { heads3.push(i.head); return graded(i); } }, job(1, 7200));
+  assert.equal(out4, "done"); assert.match(heads3[0], /picker of the words proposed/, `the agreed moment first: ${heads3[0].slice(0, 120)}`);
+  const win = /Window: (\d+):(\d+) to (\d+):(\d+)/.exec(heads3[0])!; const wEnd = Number(win[3]) * 60 + Number(win[4]);
+  assert.ok(wEnd >= 1587 + 15, `the window reaches past the picker's cut end (~1587 s): ends ${wEnd}`);
   // off: nothing read, the window fetched and heard as before
   const out3 = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, STUDIO_LIVE_HYBRID: "off" }, chat: async () => chatWith(900, 7200), hearHour: async () => { throw new Error("must not read"); } }, job(1, 7200));
   assert.equal(out3, "done"); assert.equal(hears, 1);
   // the hours: by the chat's strength, muted hours skipped, at most three, in stream order
   const c = (t_event: number, score: number) => ({ t_event, score });
-  assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9), c(8000, 1), c(12000, 7), c(16000, 8)], 18000, () => 0), [1, 3, 4]);
+  assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9), c(8000, 1), c(12000, 7), c(16000, 8)], 18000, () => 0, 3), [1, 3, 4]);
+  assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9), c(8000, 1), c(12000, 7), c(16000, 8)], 18000, () => 0), [1, 4], "two hours by default");
   assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9)], 18000, (a) => (a === 3600 ? 0.5 : 0)), [0]);
   assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9)], 4000, () => 0), [0], "an hour under ten minutes long is not read");
 });
