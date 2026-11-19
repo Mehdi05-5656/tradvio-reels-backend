@@ -437,7 +437,9 @@ async function hearWindow(deps: StreamDeps, audioFile: string, dir: string, user
 async function verifyWithClaude(deps: StreamDeps, input: { lines: Line[]; stills: Array<{ t: number; jpg: Buffer }>; head: string; body: string }, userId: string): Promise<Verdict> {
   const env = deps.env ?? process.env;
   const out = await claudeJson(deps, {
-    model: env.STUDIO_LIVE_VERIFY_MODEL || "claude-sonnet-5-5", max_tokens: 2000, system: VERIFY_SYSTEM,
+    // the system prompt and the schema are the same for every check of a run: cached, they cost a twentieth (a check's
+    // input is about 2,200 tokens of them and 2,400 of its own; measured Nov 19 2026: $0.0114 -> $0.0076 a check)
+    model: env.STUDIO_LIVE_VERIFY_MODEL || "claude-sonnet-5-5", max_tokens: 2000, system: [{ type: "text", text: VERIFY_SYSTEM, cache_control: { type: "ephemeral" } }],
     output_config: { effort: env.STUDIO_LIVE_VERIFY_EFFORT || "medium", format: { type: "json_schema", schema: VERIFY_SCHEMA } },
     messages: [{ role: "user", content: [
       ...input.stills.flatMap((f) => [{ type: "text", text: `Still at ${Math.round(f.t)} s:` }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.jpg.toString("base64") } }]),
