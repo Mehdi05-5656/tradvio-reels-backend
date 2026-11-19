@@ -38,7 +38,7 @@ export const liveClipsEnabled = (env: Record<string, string | undefined> = proce
 export const liveClipsOpen = (env: Record<string, string | undefined> = process.env) => liveClipsEnabled(env) && env.STUDIO_LIVE_CLIPS_OPEN === "true";
 /** A broadcast of any length the platform still keeps (Twitch keeps up to 48 hours): the reading is by windows, so
  *  length only adds chat pages; the model checks are capped by verify_max whatever the length. */
-export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 3, verify_extra: 4, verify_max: 60 };
+export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 3, verify_extra: 6, verify_max: 60 };
 /** Prices (RESEARCH.md 6.5, revised with experiment 1): reading a past stream by the hour (the chat, and about four
  *  candidate windows an hour heard and checked), at least the minimum; and each clip, which carries the two or three
  *  extra windows it took to find it (experiment 1: a third to a half of the checked windows become clips), so a stream
@@ -150,28 +150,40 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
 const LAUGH = /\b(LUL\w*|KEKW|OMEGALUL|LMAO+|LMFAO|HAHA+|LOL+|KEK|XD)\b|😂|💀|🤣/i;
 const HYPE = /\b(W|POG\w*|LETS ?GO+|GG|HOLY|NO WAY|WTF|OMG|INSANE|CRAZY|NAH|BRUH|WHAT|CLUTCH|SHEESH)\b|🔥|😱|\?\?\?+|!!!+/i;
 const CAPS = /^[^a-z]{6,}$/;
+const SHOCK = /\b(monkaS|WutFace|O_O|NOOO+|AYO+|PAUSE|JESUS|OH NO+)\b|😳|😨|🫢/i;
 const ASK = /\bclip/i;
-export type ChatSignals = { bins: number; rate: number[]; distinct: number[]; laugh: number[]; hype: number[]; same: number[]; caps: number[]; emote: number[]; asks: number[]; perMinute: number };
-/** Per-10-second counts of each signal over the whole broadcast. */
+/** Per 10-second bin (phase A of research/viral-signals.md, Nov 18 2026): the counts, and the people and the shape
+ *  behind them. `reactors` = distinct users who reacted (caps, laughter, hype, shock, an emote, a clip ask): a wave of
+ *  people, not a loud few. `len` = mean message length; `alike` = the share of messages that repeat the bin's most
+ *  common one; during a highlight messages get shorter and more alike. `topShare` = the busiest user's share of the
+ *  bin; `sameUsers` = how many different users sent the most common message (a chant from many, or one spammer). */
+export type ChatSignals = { bins: number; rate: number[]; distinct: number[]; laugh: number[]; hype: number[]; shock: number[]; same: number[]; caps: number[]; emote: number[]; asks: number[]; reactors: number[]; len: number[]; alike: number[]; topShare: number[]; sameUsers: number[]; perMinute: number };
 export function chatSignals(msgs: ChatMsg[], seconds: number): ChatSignals {
   const bins = Math.max(1, Math.ceil(seconds / 10) + 1);
   const by: ChatMsg[][] = Array.from({ length: bins }, () => []);
   for (const m of msgs) { const b = Math.floor(m.t / 10); if (b >= 0 && b < bins) by[b].push(m); }
   const z = () => new Array(bins).fill(0);
-  const s: ChatSignals = { bins, rate: z(), distinct: z(), laugh: z(), hype: z(), same: z(), caps: z(), emote: z(), asks: z(), perMinute: msgs.length / Math.max(1, seconds / 60) };
+  const s: ChatSignals = { bins, rate: z(), distinct: z(), laugh: z(), hype: z(), shock: z(), same: z(), caps: z(), emote: z(), asks: z(), reactors: z(), len: z(), alike: z(), topShare: z(), sameUsers: z(), perMinute: msgs.length / Math.max(1, seconds / 60) };
   for (let b = 0; b < bins; b++) {
     const w = by[b]; s.rate[b] = w.length; if (!w.length) continue;
-    s.distinct[b] = new Set(w.map((m) => m.u)).size;
-    const same = new Map<string, number>();
+    const users = new Map<string, number>(); const same = new Map<string, Set<string>>(); const reactors = new Set<string>(); let chars = 0;
     for (const m of w) {
-      const t = m.c.trim();
-      if (LAUGH.test(t)) s.laugh[b]++;
-      if (HYPE.test(t)) s.hype[b]++;
-      if (CAPS.test(t)) s.caps[b]++;
-      if (m.e > 0) s.emote[b]++;
-      const k = t.toLowerCase(); same.set(k, (same.get(k) ?? 0) + 1);
+      const t = m.c.trim(); let reacted = false;
+      if (LAUGH.test(t)) { s.laugh[b]++; reacted = true; }
+      if (HYPE.test(t)) { s.hype[b]++; reacted = true; }
+      if (SHOCK.test(t)) { s.shock[b]++; reacted = true; }
+      if (CAPS.test(t)) { s.caps[b]++; reacted = true; }
+      if (m.e > 0) { s.emote[b]++; reacted = true; }
+      if (ASK.test(t)) reacted = true;
+      if (reacted) reactors.add(m.u);
+      users.set(m.u, (users.get(m.u) ?? 0) + 1);
+      const k = t.toLowerCase(); if (!same.has(k)) same.set(k, new Set()); same.get(k)!.add(m.u);
+      chars += Math.min(t.length, 200);
     }
-    s.same[b] = Math.max(...same.values());
+    s.distinct[b] = users.size; s.reactors[b] = reactors.size; s.len[b] = chars / w.length;
+    let top = 0, topUsers = 0; for (const [k, u] of same) { const c = w.filter((m) => m.c.trim().toLowerCase() === k).length; if (c > top) { top = c; topUsers = u.size; } }
+    s.same[b] = top; s.sameUsers[b] = topUsers; s.alike[b] = top / w.length;
+    s.topShare[b] = Math.max(...users.values()) / w.length;
     s.asks[b] = new Set(w.filter((m) => ASK.test(m.c)).map((m) => m.u)).size;
   }
   return s;
@@ -188,27 +200,41 @@ export function robustZ(x: number[], back = 60, least = 12): number[] {
   return out;
 }
 export type Candidate = { rank: number; onset: number; peak: number; last: number; t_event: number; score: number; zs: Record<string, number>; asks: number; sample: string[] };
-export const CANDIDATE = { combined: 6, single: 3, rate_only: 3, asks: 3, merge_s: 90, min_messages: 8 };
-/** The moments the chat points at, strongest first: bins where the combined content burst is high (or one content
- *  signal alone, or the rate alone on a small chat, or people asking for a clip), merged within 90 s. */
-export function chatCandidates(s: ChatSignals, msgs: ChatMsg[]): Candidate[] {
-  const Z = { caps: robustZ(s.caps), laugh: robustZ(s.laugh), hype: robustZ(s.hype), same: robustZ(s.same), emote: robustZ(s.emote), rate: robustZ(s.rate), distinct: robustZ(s.distinct) };
+export const CANDIDATE = { combined: 6, single: 3, rate_only: 3, asks: 3, merge_s: 90, min_messages: 8,
+  /** a burst stays open while the combined signal holds this much (hysteresis); off: it chained neighbouring moments into one on the Nov 18 chats */ sustain: Infinity,
+  /** a moment is at most this long; a longer wave of chat is several moments (a saturated chat merged whole stretches into one candidate) */ max_span_s: 180,
+  /** weights of the people and shape terms beside the content burst */ w_reactors: 0.5, w_shape: 0.5, w_shock: 0.5,
+  /** the checking order spreads over the stream: first one candidate from each ten minutes, then up to three, then the rest (one long hype stretch used to fill the whole checked set) */ diversity_window_s: 600, tiers: [1, 3] as readonly number[],
+  /** the first and last stretch of a broadcast are greetings and raid-outs, never clips */ skip_start_s: 180, skip_end_s: 120,
+  /** spam: one user over this share of a bin, or the bin's chant coming from fewer than `chant_users` people while it is over `chant_share` of the bin */ spam_user_share: 0.3, chant_users: 3, chant_share: 0.4, spam_weight: 0.3 };
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+/** The moments the chat points at, strongest first: bins where the combined burst is high (content and shape, and the
+ *  people behind it), or one content signal alone, or the rate alone on a small chat, or people asking for a clip;
+ *  a burst extends while it sustains, and bursts within 90 s are one. */
+export function chatCandidates(s: ChatSignals, msgs: ChatMsg[], o: Partial<typeof CANDIDATE> & { /** relax the bars step by step until this many candidates come out (a saturated chat hides its bursts) */ atLeast?: number } = {}): Candidate[] {
+  const C = { ...CANDIDATE, ...o };
+  const seconds = (s.bins - 1) * 10;
+  const Z = { caps: robustZ(s.caps), laugh: robustZ(s.laugh), hype: robustZ(s.hype), shock: robustZ(s.shock), same: robustZ(s.same), emote: robustZ(s.emote), rate: robustZ(s.rate), distinct: robustZ(s.distinct),
+    reactors: robustZ(s.reactors), short: robustZ(s.len.map((x) => -x)), alike: robustZ(s.alike) };
   const out: Candidate[] = []; let cur: Candidate | null = null;
   for (let b = 0; b < s.bins; b++) {
-    if (s.rate[b] < CANDIDATE.min_messages) continue;
-    const content = Z.caps[b] + Z.laugh[b] + Z.hype[b] + Z.same[b] + Z.emote[b];
-    const combined = content + 0.5 * (Z.rate[b] + Z.distinct[b]);
-    const single = Math.max(Z.caps[b], Z.laugh[b], Z.hype[b]);
-    const rateBurst = Z.rate[b] >= CANDIDATE.rate_only && Z.distinct[b] >= 2 && s.rate[b] >= 2.5 * Math.max(1, s.rate[Math.max(0, b - 30)]);
-    const ok = combined >= CANDIDATE.combined || single >= CANDIDATE.single || rateBurst || s.asks[b] >= CANDIDATE.asks;
-    if (!ok) continue;
-    const score = combined + (s.asks[b] >= CANDIDATE.asks ? 6 : 0);
-    const zs = Object.fromEntries(Object.entries(Z).map(([k, v]) => [k, Math.round(v[b] * 10) / 10]));
     const t = b * 10;
-    if (cur && t - cur.last <= CANDIDATE.merge_s) {
+    if (s.rate[b] < C.min_messages || t < C.skip_start_s || t > seconds - C.skip_end_s) continue;
+    const content = Z.caps[b] + Z.laugh[b] + Z.hype[b] + Z.same[b] + Z.emote[b] + C.w_shock * Z.shock[b];
+    const shape = clamp(Z.short[b], -2, 3) + clamp(Z.alike[b], -2, 3);
+    const spam = s.topShare[b] > C.spam_user_share || (s.sameUsers[b] < C.chant_users && s.alike[b] > C.chant_share);
+    const combined = (content + C.w_reactors * clamp(Z.reactors[b], -2, 6) + 0.5 * Z.distinct[b] + C.w_shape * shape) * (spam ? C.spam_weight : 1);
+    const single = Math.max(Z.caps[b], Z.laugh[b], Z.hype[b]) * (spam ? C.spam_weight : 1);
+    const rateBurst = !spam && Z.rate[b] >= C.rate_only && Z.distinct[b] >= 2 && s.rate[b] >= 2.5 * Math.max(1, s.rate[Math.max(0, b - 30)]);
+    const ok = combined >= C.combined || single >= C.single || rateBurst || s.asks[b] >= C.asks;
+    const holds = !!cur && t - cur.last <= C.merge_s && combined >= C.sustain;
+    if (!ok && !holds) continue;
+    const score = combined + (s.asks[b] >= C.asks ? 6 : 0);
+    const zs = Object.fromEntries(Object.entries(Z).map(([k, v]) => [k, Math.round(v[b] * 10) / 10]));
+    if (cur && t - cur.last <= C.merge_s && t - cur.onset <= C.max_span_s) {
       cur.last = t;
       if (score > cur.score) { cur.score = score; cur.peak = t; cur.zs = zs; cur.asks = s.asks[b]; }
-    } else { cur = { rank: 0, onset: t, peak: t, last: t, t_event: Math.max(0, t - 8), score, zs, asks: s.asks[b], sample: [] }; out.push(cur); }
+    } else if (ok) { cur = { rank: 0, onset: t, peak: t, last: t, t_event: Math.max(0, t - 8), score, zs, asks: s.asks[b], sample: [] }; out.push(cur); }
   }
   for (const c of out) {
     const w = msgs.filter((m) => m.t >= c.peak && m.t < c.peak + 10);
@@ -216,8 +242,17 @@ export function chatCandidates(s: ChatSignals, msgs: ChatMsg[]): Candidate[] {
     const rank = (m: ChatMsg) => (CAPS.test(m.c.trim()) ? 0 : LAUGH.test(m.c) || HYPE.test(m.c) ? 1 : 2);
     c.sample = w.map((m, i) => ({ m, i })).sort((x, y) => rank(x.m) - rank(y.m) || x.i - y.i).slice(0, 8).map(({ m }) => m.c.slice(0, 40));
   }
+  if (o.atLeast && out.length < o.atLeast && C.combined > CANDIDATE.combined * 0.5) return chatCandidates(s, msgs, { ...o, combined: C.combined * 0.8, single: C.single * 0.85, sustain: C.sustain * 0.8 });
   out.sort((a, b) => b.score - a.score);
-  return out.map((c, k) => ({ ...c, rank: k + 1, score: Math.round(c.score * 10) / 10 }));
+  // the order the run checks them in: strongest first, but no ten minutes of the stream gets more than `per_window`
+  // places before every other part has had its turn; the deferred ones follow, still strongest first
+  const ordered: Candidate[] = []; const taken = new Set<Candidate>(); const seen = new Map<number, number>();
+  for (const cap of [...C.tiers, Infinity]) for (const c of out) {
+    if (taken.has(c)) continue;
+    const w = Math.floor(c.peak / C.diversity_window_s); const k = seen.get(w) ?? 0;
+    if (k < cap) { seen.set(w, k + 1); taken.add(c); ordered.push(c); }
+  }
+  return ordered.map((c, k) => ({ ...c, rank: k + 1, score: Math.round(c.score * 10) / 10 }));
 }
 
 // ---------------------------------------------------------------------------------------------------

@@ -54,6 +54,20 @@ test("the chat's content against its own baseline finds the burst, puts the even
   const twice = [...chatWith(900), ...chatWith(960).filter((m) => m.t >= 960 && m.t < 972 && /[A-Z]{4}/.test(m.c))];
   const c2 = chatCandidates(chatSignals(twice, 1800), twice);
   assert.equal(c2.filter((c) => c.onset >= 880 && c.onset <= 1000).length, 1);
+  // phase A (research/viral-signals.md): the people and the shape behind a burst are counted
+  assert.ok(s.reactors[90] >= 50, `reacting users at the burst: ${s.reactors[90]}`); assert.ok(s.reactors[60] < s.reactors[90] / 3);
+  assert.ok(s.len[90] < s.len[60], "messages get shorter in a burst"); assert.ok(s.alike[90] > 0 && s.alike[90] <= 1);
+  // one user shouting alone is not a burst: the spam rule weighs it down
+  const one: ChatMsg[] = [...chatWith(0, 1800, 1)]; for (let t = 900; t < 912; t++) for (let k = 0; k < 9; k++) one.push({ t, u: "spammer", c: "LMAOOO NO WAY", e: 0 });
+  const s1 = chatSignals(one, 1800); assert.ok(s1.topShare[90] > 0.3);
+  assert.equal(chatCandidates(s1, one).filter((c) => c.onset >= 880 && c.onset <= 1000).length, 0, "a lone spammer makes no candidate");
+  // a wave that never stops is several moments, not one (KaiCenat's chat, Nov 18 2026: one candidate spanned 42 minutes)
+  const wave: ChatMsg[] = [...chatWith(0, 1800, 1)]; for (let t = 600; t < 1200; t++) for (let k = 0; k < 6; k++) wave.push({ t, u: `w${(t * 7 + k) % 400}`, c: ["LMAOOO", "NO WAY", "KEKW", "W"][k % 4], e: 0 });
+  const cw = chatCandidates(chatSignals(wave, 1800), wave);
+  assert.ok(cw.length >= 3, `a ten-minute wave gives several candidates: ${cw.length}`); assert.ok(cw.every((c) => c.last - c.onset <= 180));
+  // the first and last minutes are never candidates
+  const edge = [...chatWith(60, 1800), ...chatWith(1740, 1800).filter((m) => m.t >= 1740)];
+  assert.ok(chatCandidates(chatSignals(edge, 1800), edge).every((c) => c.onset >= 180 && c.onset <= 1680));
 });
 
 test("the first cut starts on a thought 8-25 s before the event and ends on a thought once the chat falls, 20-55 s", () => {
