@@ -150,7 +150,7 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   const msgs = chatWith(900, 3600);
   const { sb, calls, updates } = fakeSb();
   const cutCalls: any[] = []; const verifyInputs: any[] = [];
-  const deps: any = { env: ENV, log: () => undefined, plans: PLANS,
+  const deps: any = { env: ENV, log: () => undefined, plans: PLANS, drawtext: true,
     chat: async () => msgs, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), fetchWindow: async () => undefined, fetchStretch: async () => undefined, stills: async () => [],
     hear: async () => { const w = words(30); return { words: w, events: [{ text: "laughter", start: 52, end: 53.5 }], lines: linesFromWords(w), excess: null, language: "en" }; },
     verify: async (input: any) => { verifyInputs.push(input); const ls = input.lines; return { keep: true, score: 72, standalone: true, start_line: ls[0].i, end_line: ls[Math.min(ls.length - 1, 7)].i, title: "He loses it", hook: "so so so", why: "big laugh", why_not: "", tags: ["gta"] }; },

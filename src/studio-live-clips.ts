@@ -266,6 +266,7 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   fetchWindow?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   fetchStretch?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<{ asset_id: string; bytes: number; seconds: number }>;
+  /** for tests: whether ffmpeg has drawtext, without asking it */ drawtext?: boolean;
 };
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
   const next = { ...progress };
@@ -425,7 +426,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const todo = kept.filter((m) => !made.some((x) => x.rank === m.rank));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: kept.length, message: `Cutting clip ${Math.min(made.length + 1, kept.length)} of ${kept.length}`, made });
     const tCut = Date.now(); const cutTimes: Array<[number, number]> = [];
-    const canDraw = await ffmpegHasDrawtext();
+    const canDraw = deps.drawtext ?? (await ffmpegHasDrawtext());
     if (!canDraw && st.attribution !== false) log(`[live] ${job.id}: this ffmpeg has no drawtext filter; clips go out without the burned-in credit`);
     const attribution = st.attribution === false || !canDraw ? null : attributionFilter(`${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}`, env);
     const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: attribution };
