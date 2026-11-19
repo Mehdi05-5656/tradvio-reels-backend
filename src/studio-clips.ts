@@ -955,7 +955,8 @@ export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; s
 // One clip: cut the stretch exactly, find its shots, follow the speaker, render it, store it
 // ---------------------------------------------------------------------------------------------------
 export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: string; src: SourceInput; format: ClipFormat; collectionId: string; sourceTitle: string | null; jobId: string; length?: ClipLength;
-  /** captions burned in, in this style (the Clips page's "Captions" switch) */ captions?: any | null };
+  /** captions burned in, in this style (the Clips page's "Captions" switch) */ captions?: any | null;
+  /** an ffmpeg filter appended after the captions (Live Clips burns the streamer's name in: studio-live-clips.ts attributionFilter) */ overlay?: string | null };
 /** One clip run and one captions run never render at once on a server (one CPU, 2 GB). */
 export const busy = { clips: false, captions: false };
 export type CutResult = { asset_id: string; bytes: number; seconds: number };
@@ -1033,6 +1034,7 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
     await writeFile(assPath, cv.captionAss(rel.map((w, i) => ({ ...w, key: keys.includes(i) })), ctx.captions, fr, ctx.deps.env ?? process.env));
     graph = graph.replace(/\[v\]$/, `,${cv.assFilter(assPath, ctx.deps.env ?? process.env)}[v]`);
   }
+  if (ctx.overlay) graph = graph.replace(/\[v\]$/, `,${ctx.overlay}[v]`);
   const af = `afade=t=in:d=0.06,afade=t=out:st=${Math.max(0, dur - 0.25).toFixed(3)}:d=0.25`;
   // threads capped: on a 1-CPU server ffmpeg would start one per core it sees on the host, each holding frames
   // (two clips at once with uncapped threads went past 2 GB and the server was killed, Oct 31 2026)
@@ -1250,6 +1252,7 @@ function priceOf(o: any, plans: PlanLike[], env: Record<string, string | undefin
   return o?.plan_from ? { ...fresh, analysis: 0, lite: 0 } : fresh;
 }
 export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job): Promise<string> {
+  if (job.options?.stream) return (await import("./studio-live-clips.js")).runStreamClipsJob(sb, deps, job); // a past Twitch/Kick broadcast (Live Clips)
   const env = leanEnv(deps.env ?? process.env, job.user_id), log = deps.log ?? ((l: string) => console.log(l));
   const plans = deps.plans ?? [];
   const o = job.options ?? {}, u = job.user_id;

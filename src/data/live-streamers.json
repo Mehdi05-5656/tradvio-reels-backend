@@ -1,0 +1,9 @@
+{
+  "_about": "Live Clips streamer registry, phase 1 (docs/live-clips/RESEARCH.md section 3). Keys are platform:login. `campaign`: streamers with a public clipping campaign or Kick's clipping program on Nov 18 2026 (clyper.io listing; permission to clip within their rules). `block`: streamers who object to clip channels or have written to us; add to STUDIO_LIVE_BLOCK on Render for an instant block without a deploy.",
+  "campaign": [
+    "kick:ishowspeed", "twitch:ishowspeed", "twitch:kaicenat", "kick:kaicenat", "twitch:jakepaul", "twitch:clix", "kick:n3on", "kick:adinross", "twitch:dukedennis", "kick:dukedennis", "twitch:tjr", "kick:nelk"
+  ],
+  "block": [
+    "twitch:qtcinderella", "twitch:corpse_husband", "twitch:ironmouse", "twitch:timthetatman", "twitch:valkyrae", "twitch:pokimane"
+  ]
+}

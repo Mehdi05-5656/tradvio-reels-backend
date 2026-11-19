@@ -43,6 +43,8 @@ import { quoteReshoot, registerReshoot, reshootEnabled, reshootOpen } from "./st
 import { blueprintsV2Enabled, blueprintsV2Open, quoteBlueprints, registerBlueprints, writePlan } from "./studio-blueprints-routes.js";
 import { cleanTraits, influencerName, influencerPrompt } from "./studio-influencer.js";
 import { ClipsError, clipsEnabled, clipsQueue, clipsCapacity, clipsTiming, etaFor, isLongSource, quoteClips, LONG_SOURCE } from "./studio-clips.js";
+import { isStreamLink } from "./live-sources.js";
+import { liveClipsOpen, quoteStreamClips } from "./studio-live-clips.js"; // Live Clips: a past Twitch/Kick broadcast as a Clips job
 import { importEnabled, quoteImport, registerLibrary } from "./studio-library.js";
 import Stripe from "stripe";
 
@@ -143,7 +145,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Reshoot: a one-camera take re-filmed as a multi-camera edit; open to everyone only when its own switch says so.
     reshoot: reshootOpen(env),
     // Blueprint versions: openings x looks of a person's own video (the Blueprint worker); open to everyone only when its own switch says so.
-    blueprint_versions: blueprintsV2Open(env) };
+    blueprint_versions: blueprintsV2Open(env),
+    // Live Clips: past Twitch/Kick broadcasts into clips (the owner sees it when switched on; everyone when open).
+    live_clips: liveClipsOpen(env) };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1219,6 +1223,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "reshoot") return quoteReshoot(env, PLANS, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
     if (String(body?.tool ?? "") === "blueprint_versions") return quoteBlueprints(env, PLANS, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
     const asset = await loadAsset(sb, u, body?.asset_id);
+    if (String(body?.tool ?? "") === "clips" && !asset && isStreamLink(body?.options?.url)) return quoteStreamClips({ env, log, userId: u }, PLANS, body?.options, { owner: o.owner }); // Live Clips
     if (String(body?.tool ?? "") === "clips") {
       const q = await quoteClips({ env, log, userId: u }, PLANS, asset, body?.options);
       // how long it would take if started now, counting the runs already waiting (the page says "ready in about...")
