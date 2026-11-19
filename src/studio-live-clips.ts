@@ -11,7 +11,7 @@
 //  - the choosing: one verify call per candidate (Sonnet 5.5 by default) that PLACES the cut inside the window (the
 //    chat often reacts before the payoff lands) and keeps the moment only when it stands alone;
 //  - the cut: each kept moment's stretch is fetched from the recording and goes through cutClip as any clip does, with
-//    the streamer's name burned in (attribution is a guardrail of the rights stance, RESEARCH.md section 3).
+//    no mark on the clip (the owner dropped the burned-in credit on Nov 18 2026; the source link stays on the collection).
 // Prices: reading by the hour of stream (LIVE_RATES) and Clips' per-clip price; settled on what was made.
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -36,12 +36,14 @@ import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChat
 export const liveClipsEnabled = (env: Record<string, string | undefined> = process.env) =>
   env.STUDIO_LIVE_CLIPS_ENABLED === "true" && !!env.ANTHROPIC_API_KEY && !!env.ELEVENLABS_API_KEY && !!env.TWITCH_CLIENT_ID && !!env.TWITCH_CLIENT_SECRET;
 export const liveClipsOpen = (env: Record<string, string | undefined> = process.env) => liveClipsEnabled(env) && env.STUDIO_LIVE_CLIPS_OPEN === "true";
-export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 8 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 3, verify_extra: 4, verify_max: 60 };
+/** A broadcast of any length the platform still keeps (Twitch keeps up to 48 hours): the reading is by windows, so
+ *  length only adds chat pages; the model checks are capped by verify_max whatever the length. */
+export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 3, verify_extra: 4, verify_max: 60 };
 /** Prices (RESEARCH.md 6.5, revised with experiment 1): reading a past stream by the hour (the chat, and about four
  *  candidate windows an hour heard and checked), at least the minimum; and each clip, which carries the two or three
  *  extra windows it took to find it (experiment 1: a third to a half of the checked windows become clips), so a stream
  *  clip is 10 credits where a Clips clip is 5. */
-export const LIVE_RATES = { per_hour: 15, min: 30, per_clip: { short: 10, standard: 10, long: 12, minute: 12 } as Record<ClipLength, number> };
+export const LIVE_RATES = { per_hour: 15, min: 30, /** the reading is charged for the first hours only: our cost of reading does not grow past this (the checks are capped) */ hours_cap: 8, per_clip: { short: 10, standard: 10, long: 12, minute: 12 } as Record<ClipLength, number> };
 /** What it costs us, at list (6.4): the chat (calls), each candidate's window heard (2.5 min of Scribe at $0.20/h) and
  *  verified (Sonnet 5.5 with six stills), the worker's time; four windows an hour in the reading, two more per clip. */
 export const LIVE_COST = { chat_usd_per_hour: 0.002, worker_usd_per_hour: 0.006, listen_usd_per_candidate: 0.0083, verify_usd_per_candidate: 0.02, candidates_per_hour: 4, extra_candidates_per_clip: 2 };
@@ -55,9 +57,9 @@ export function streamAnalysisUsd(seconds: number): number {
 export const streamClipUsd = (length: ClipLength, env: Record<string, string | undefined>) => perClipUsd(length, env, false) + LIVE_COST.extra_candidates_per_clip * windowUsd();
 export function streamPrice(plans: PlanLike[], p: { seconds: number; length: ClipLength; count?: number; env: Record<string, string | undefined> }): ClipsPrice {
   const floor = plans.length ? creditValueFloor(plans) : 0.016;
-  const hours = p.seconds / 3600;
+  const hours = Math.min(p.seconds / 3600, LIVE_RATES.hours_cap);
   return {
-    analysis: Math.max(LIVE_RATES.min, Math.ceil(hours * LIVE_RATES.per_hour), credits(streamAnalysisUsd(p.seconds), floor, LIVE_SAFETY_MARGIN.analysis)),
+    analysis: Math.max(LIVE_RATES.min, Math.ceil(hours * LIVE_RATES.per_hour), credits(streamAnalysisUsd(hours * 3600), floor, LIVE_SAFETY_MARGIN.analysis)),
     per_clip: Math.max(LIVE_RATES.per_clip[p.length], credits(streamClipUsd(p.length, p.env), floor, LIVE_SAFETY_MARGIN.clip)),
     lite: 0,
   };
@@ -118,7 +120,7 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const permission = streamerPermission(b.platform, b.login, env);
   if (permission === "blocked") throw new ClipsError("streamer_blocked", `${b.channel} has asked not to be clipped on Clone8`, 403);
   if (b.seconds < LIVE_LIMITS.min_seconds) throw new ClipsError("clip_source_too_short", "That broadcast is under 10 minutes");
-  if (b.seconds > LIVE_LIMITS.max_seconds) throw new ClipsError("clip_source_too_long", `That broadcast is ${Math.round(b.seconds / 3600)} hours; Live Clips reads up to 8 hours of a stream`);
+  if (b.seconds > LIVE_LIMITS.max_seconds) throw new ClipsError("clip_source_too_long", `That broadcast is ${Math.round(b.seconds / 3600)} hours; Live Clips reads up to 48 hours of a stream`);
   const length = lengthOf(opt.length), format: ClipFormat = opt.format === "original" ? "original" : "vertical";
   const likely = likelyStreamClips(b.seconds), cap = streamCountCap(b.seconds);
   const asked = Math.round(Number(opt.count));
@@ -130,12 +132,13 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const minutes = Math.ceil(b.seconds / 60), hours = Math.round((b.seconds / 3600) * 10) / 10;
   const warning = Number.isFinite(asked) && asked > cap ? `A ${hours}-hour stream fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
     : count > likely ? `A ${hours}-hour stream usually holds about ${likely} strong ${likely === 1 ? "clip" : "clips"}. We'll make as many as the chat really reacted to, up to ${count}; you're only charged for the clips we make.` : null;
-  // how long: the chat replay (about 2 % of the stream's length), then each candidate heard and checked, then the cuts
+  // how long, from the Nov 18 2026 live runs (a 7.8 h stream: chat in 15 s, 34 checks in 666 s, 5 cuts in 157 s; the
+  // old formula promised 42 min for that 14-min run): the chat, then each candidate heard and checked, then the cuts
   const cands = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
-  const eta_seconds = Math.round(60 + b.seconds * 0.02 + cands * 35 + count * 70);
+  const eta_seconds = Math.round(45 + b.seconds * 0.004 + cands * 22 + count * 35);
   return {
     tool: "clips", credits: clipsCharge(price, count),
-    options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing), attribution: opt.attribution === false ? false : true },
+    options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing) },
       format, length, count, likely, cap, max_clips: count, seconds: b.seconds, minutes, source, youtube_direct: true, price, warning, language: "original", captions, eta_seconds, ahead: 0 },
     summary: `${hours} h of ${b.channel} · up to ${count} ${count === 1 ? "clip" : "clips"}`,
   };
@@ -470,10 +473,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const todo = kept.filter((m) => !made.some((x) => x.rank === m.rank));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: kept.length, message: `Cutting clip ${Math.min(made.length + 1, kept.length)} of ${kept.length}`, made });
     const tCut = Date.now(); const cutTimes: Array<[number, number]> = [];
-    const canDraw = deps.drawtext ?? (await ffmpegHasDrawtext());
-    if (!canDraw && st.attribution !== false) log(`[live] ${job.id}: this ffmpeg has no drawtext filter; clips go out without the burned-in credit`);
-    const attribution = st.attribution === false || !canDraw ? null : attributionFilter(`${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}`, env);
-    const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: attribution };
+    // no burned-in credit (the owner, Nov 18 2026: nobody in the market marks the streamer on the clip); the source
+    // link and channel stay on the collection, and attributionFilter stays for anyone who wants it back
+    const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: null };
     const stretchOf = deps.fetchStretch ?? fetchStretchCopy;
     const skipped: number[] = [];
     let facecam: FacecamBox | null | undefined; // (looked for once per run: a stream's camera box stays where it is)

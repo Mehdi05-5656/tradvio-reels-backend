@@ -79,6 +79,10 @@ test("prices: reading by the hour with a minimum, clips at Clips' price, both ov
   assert.ok(p4.analysis * floor * (1 - 0.35) >= streamAnalysisUsd(4 * 3600), "reading keeps 35 % at the floor");
   assert.ok(p4.per_clip * floor * 0.5 >= streamClipUsd("standard", ENV), "a clip keeps 50 % at the floor");
   assert.equal(streamPrice(PLANS, { seconds: 7200, length: "long", env: ENV }).per_clip, 12);
+  // the reading is charged for the first 8 hours only (our cost of reading is capped by the checks), so a 20-hour
+  // broadcast reads for the same 120 credits as an 8-hour one
+  assert.equal(streamPrice(PLANS, { seconds: 20 * 3600, length: "standard", env: ENV }).analysis, streamPrice(PLANS, { seconds: 8 * 3600, length: "standard", env: ENV }).analysis);
+  assert.equal(LIVE_LIMITS.max_seconds, 48 * 3600);
   assert.equal(likelyStreamClips(4 * 3600), 14); assert.equal(streamCountCap(600), 5); assert.equal(streamCountCap(10 * 3600), LIVE_LIMITS.max_clips);
   assert.equal(VERIFY_BAR.balanced, 60);
 });
@@ -156,14 +160,14 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
     verify: async (input: any) => { verifyInputs.push(input); const ls = input.lines; return { keep: true, score: 72, standalone: true, start_line: ls[0].i, end_line: ls[Math.min(ls.length - 1, 7)].i, title: "He loses it", hook: "so so so", why: "big laugh", why_not: "", tags: ["gta"] }; },
     cut: async (ctx: any, m: any) => { cutCalls.push([ctx, m]); return { asset_id: "asset-1", bytes: 1000, seconds: m.end - m.start }; } };
   const job: any = { id: "job-1", user_id: U, lease_token: "t", asset_id: null, credits_reserved: 30 + 10 * 3, attempts: 1,
-    options: { platform: "twitch", url: "https://www.twitch.tv/videos/2932003293", stream: { platform: "twitch", vod_id: "2932003293", login: "caseoh_", channel_id: "123", started_at: "2026-11-18T03:01:21Z", strictness: "balanced", attribution: true }, source: { title: "LOSING MY MIND", channel: "CaseOh_" }, seconds: 3600, count: 3, length: "standard", format: "vertical", price: { analysis: 30, per_clip: 10, lite: 0 }, collection_id: "col-1" }, progress: {} };
+    options: { platform: "twitch", url: "https://www.twitch.tv/videos/2932003293", stream: { platform: "twitch", vod_id: "2932003293", login: "caseoh_", channel_id: "123", started_at: "2026-11-18T03:01:21Z", strictness: "balanced" }, source: { title: "LOSING MY MIND", channel: "CaseOh_" }, seconds: 3600, count: 3, length: "standard", format: "vertical", price: { analysis: 30, per_clip: 10, lite: 0 }, collection_id: "col-1" }, progress: {} };
   const out = await runStreamClipsJob(sb, deps, job);
   assert.equal(out, "done");
   assert.equal(cutCalls.length, 1);
   const [ctx, m] = cutCalls[0];
   assert.ok(m.start >= 850 && m.start < 900, `the clip starts near the event: ${m.start}`); assert.ok(m.end - m.start >= 17, `length ${m.end - m.start}`);
   assert.equal(m.title, "He loses it"); assert.ok(m.words.length > 0 && m.words[0][1] >= 850);
-  assert.match(ctx.overlay, /CaseOh_ on Twitch/); assert.equal(ctx.src.offset, Math.max(0, m.start - 2));
+  assert.equal(ctx.overlay, null, "no burned-in credit on the clip"); assert.equal(ctx.src.offset, Math.max(0, m.start - 2));
   assert.match(verifyInputs[0].body, /chat burst begins/); assert.match(verifyInputs[0].head, /CaseOh_ on Twitch/);
   const complete = calls.find((c) => c[0] === "studio_complete");
   assert.equal(complete[1].p_credits_charged, 30 + 10);
