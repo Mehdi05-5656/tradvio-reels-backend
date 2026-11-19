@@ -315,6 +315,15 @@ async function verifyWithClaude(deps: StreamDeps, input: { lines: Line[]; stills
   }, "live_clips_verify", userId);
   return { keep: !!out?.keep, score: Number(out?.score) || 0, standalone: !!out?.standalone, start_line: Number(out?.start_line), end_line: Number(out?.end_line), title: String(out?.title ?? ""), hook: String(out?.hook ?? ""), why: String(out?.why ?? ""), why_not: String(out?.why_not ?? ""), tags: Array.isArray(out?.tags) ? out.tags.map((x: any) => String(x)) : [] };
 }
+/** Whether this server's ffmpeg has the drawtext filter (Render's Debian build does; a Homebrew build may not). Read once. */
+let drawtextOk: Promise<boolean> | null = null;
+export function ffmpegHasDrawtext(): Promise<boolean> {
+  if (!drawtextOk) drawtextOk = new Promise((resolve) => {
+    const c = spawn("ffmpeg", ["-hide_banner", "-filters"], { stdio: ["ignore", "pipe", "ignore"] });
+    let o = ""; c.stdout.on("data", (b) => { o += b; }); c.on("error", () => resolve(false)); c.on("close", () => resolve(/\sdrawtext\s/.test(o)));
+  });
+  return drawtextOk;
+}
 /** The streamer's name burned in (top left, a soft box): an ffmpeg drawtext filter for cutClip's `overlay`. */
 export function attributionFilter(text: string, env: Record<string, string | undefined> = process.env): string {
   const esc = (t: string) => t.replace(/\\/g, "\\\\").replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/%/g, "%%").replace(/[\[\],;]/g, " ");
@@ -416,7 +425,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const todo = kept.filter((m) => !made.some((x) => x.rank === m.rank));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: kept.length, message: `Cutting clip ${Math.min(made.length + 1, kept.length)} of ${kept.length}`, made });
     const tCut = Date.now(); const cutTimes: Array<[number, number]> = [];
-    const attribution = st.attribution === false ? null : attributionFilter(`${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}`, env);
+    const canDraw = await ffmpegHasDrawtext();
+    if (!canDraw && st.attribution !== false) log(`[live] ${job.id}: this ffmpeg has no drawtext filter; clips go out without the burned-in credit`);
+    const attribution = st.attribution === false || !canDraw ? null : attributionFilter(`${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}`, env);
     const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: attribution };
     const stretchOf = deps.fetchStretch ?? fetchStretchCopy;
     const skipped: number[] = [];
