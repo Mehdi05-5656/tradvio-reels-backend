@@ -280,7 +280,7 @@ The proposed cut is only a first guess from the chat's timing. YOUR job is to fi
 Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is ordinary, 2 is weak):
 - hook: does the first line or the first picture of YOUR cut already show the stakes or the reaction, with no greeting, no dead air, no warm-up?
 - standalone: would a stranger who never saw this stream understand it with no context? 8+ means fully; under 6 means it needs the stream.
-- payoff: is there a clear turn (a fail, a win, a reveal, a punchline, a shock) that lands between a third and four fifths of the way through, with the reaction after it inside the clip?
+- payoff: is there a clear turn (a fail, a win, a reveal, a punchline, a shock) that lands in the second half, best in the last ten seconds (where the clips that win on TikTok put it), with the reaction after it inside the clip and nothing after the reaction?
 - reaction: how strong is the visible or audible reaction (a laugh, a scream, a silence, a chat explosion)?
 - quotable: is there one line a stranger would repeat, that works as the caption?
 - length: does the cut fit 20 to 45 seconds with nothing to trim? (over 50 needs two beats)
@@ -439,12 +439,13 @@ export function cleanFacecam(out: any): FacecamBox | null {
 }
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
 /** The format (research/MOMENTS_AND_FORMAT_PLAN.md §3): 1080x1920 out; the camera panel 450-640 lines (a third of
- *  the frame at most: a near-square camera box took half the frame on the first run, Nov 19 2026); a camera box over
+ *  the frame at most: a near-square camera box took half the frame on the first run, Nov 19 2026; the TikTok study of
+ *  Nov 19 measured 31-34 % on the accounts that win with this format, so the panel is 600-640 lines); a camera box over
  *  15 % of the frame is the person themselves, so the clip is framed on them instead of stacked; captions, when
  *  chosen, just under the divider (or at 58 % on a full-frame clip), at most 68 % of the width, inside the box all
  *  three apps leave visible. No text on the picture, no pauses cut, no punch-in: the owner wants the clip as it was
  *  streamed; edits like those belong to the editor that comes later. */
-export const FORMAT = { w: 1080, h: 1920, cam: { min: 450, max: 640 }, irl_cam_share: 0.15, caption: { gap: 0.05, irl_y: 0.58, max_width: 0.68 } };
+export const FORMAT = { w: 1080, h: 1920, cam: { min: 600, max: 640 }, irl_cam_share: 0.15, caption: { gap: 0.05, irl_y: 0.58, max_width: 0.68 } };
 export type StackedLayout = { graph: string; w: number; h: number; camH: number };
 /** The 1080x1920 graph: the facecam box scaled to the full width on top (its own shape, 450-640 lines, cropped from a
  *  third of the way down so a face is never cut at the forehead), the content box (or the whole picture) scaled to
