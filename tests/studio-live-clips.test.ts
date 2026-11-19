@@ -223,18 +223,34 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   assert.equal(out3, "chat_too_quiet");
 });
 
-test("stacked framing: the facecam box on top at its own shape, the game under it, 1280 lines in all", async () => {
-  const { stackedFilter, cleanFacecam, cleanContent } = await import("../src/studio-live-clips.js");
+test("stacked framing: the facecam box on top at its own shape, the game under it, 1920 lines in all", async () => {
+  const { stackedFilter, stackedLayout, cleanFacecam, cleanContent, hookFilter, FORMAT } = await import("../src/studio-live-clips.js");
+  const { trimPlan, trimRemap } = await import("../src/studio-clips.js");
   const g = stackedFilter({ w: 1920, h: 1080, fps: 60 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 });
-  // the camera panel is cropped from a third of the way down, never the middle: a face sits high in its box
-  assert.match(g, /crop=480:302:38:756,scale=720:454:force_original_aspect_ratio=increase,crop=720:454:0:\(ih-454\)\*0\.3\[cam\]/);
-  assert.match(g, /\[g\]scale=720:826:force_original_aspect_ratio=increase,crop=720:826\[game\]/);
+  // 1080x1920 out (the format, Nov 18 2026); the camera panel is cropped from a third of the way down, never the middle
+  assert.match(g, /crop=480:302:38:756,scale=1080:680:force_original_aspect_ratio=increase,crop=1080:680:0:\(ih-680\)\*0\.3\[cam\]/);
+  assert.match(g, /\[g\]scale=1080:1240:force_original_aspect_ratio=increase,crop=1080:1240\[game\]/);
   assert.match(g, /vstack,setsar=1,fps=30,format=yuv420p\[v\]$/);
-  // a tall camera box (jynxzi's, Nov 18 2026: 507x472 on 1920x1080) is not squeezed under 520 lines any more
-  assert.match(stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.736, y: 0.563, w: 0.264, h: 0.437 }), /scale=720:600:/);
+  assert.deepEqual([stackedLayout({ w: 1920, h: 1080, fps: 60 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 }).w, stackedLayout({ w: 1920, h: 1080, fps: 60 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 }).h], [1080, 1920]);
+  // a tall camera box (jynxzi's, Nov 18 2026: 507x472 on 1920x1080) is capped at 900 lines, not squeezed
+  assert.match(stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.736, y: 0.563, w: 0.264, h: 0.437 }), /scale=1080:900:/);
   // with a content box (a chess board beside its move list), the game panel is cut from that box first
   const g2 = stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.736, y: 0.563, w: 0.264, h: 0.437 }, { x: 0.05, y: 0.08, w: 0.5, h: 0.85 });
-  assert.match(g2, /\[g\]crop=960:918:96:86,scale=720:680:force_original_aspect_ratio=increase,crop=720:680\[game\]/);
+  assert.match(g2, /\[g\]crop=960:918:96:86,scale=1080:1020:force_original_aspect_ratio=increase,crop=1080:1020\[game\]/);
+  // the punch-in: the camera panel grows 1.15x at the loudest second and eases back
+  const g3 = stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 }, null, { punchAt: 12.5 });
+  assert.match(g3, /scale=w='1080\*\(1\+0\.15[0-9]*\*min\(1,max\(0,\(t-12\.50\)\/0\.3\)\)\*min\(1,max\(0,\(14\.30-t\)\/0\.3\)\)\)':h='680\*/); assert.match(g3, /eval=frame,crop=1080:680\[cam\]/);
+  assert.ok(!stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 }, null, { punchAt: 0.2 }).includes("eval=frame"), "no punch-in in the first half second");
+  // the hook line: centred, for the first 2.5 s, sized to the frame
+  const hk = hookFilter("He bet it all: 100%", { w: 1080, h: 1920 }, 0.35, {});
+  assert.match(hk, /^drawtext=.*text='He bet it all\\: 100%%':fontsize=81:.*x=\(w-text_w\)\/2:y=672-text_h\/2:enable='between\(t,0,2\.5\)'$/);
+  // the trim: pauses over 0.6 s are cut to 0.18 s of air on each side; a word's time maps into the trimmed clip
+  const words = [{ start: 0.2, end: 0.5 }, { start: 0.6, end: 0.9 }, { start: 2.4, end: 2.7 }, { start: 2.8, end: 3.1 }, { start: 3.2, end: 3.5 }, { start: 5.5, end: 5.8 }, { start: 6, end: 6.3 }];
+  const plan = trimPlan(words, 7, FORMAT.trim)!;
+  assert.deepEqual(plan.map(([a, b]) => [Math.round(a * 100) / 100, Math.round(b * 100) / 100]), [[0, 1.08], [2.22, 3.68], [5.32, 7]]);
+  const { map, total } = trimRemap(plan);
+  assert.equal(Math.round(total * 100) / 100, 4.22); assert.equal(Math.round(map(2.4) * 100) / 100, 1.26); assert.equal(Math.round(map(1.5) * 100) / 100, 1.08, "a time inside a cut pause lands at the cut");
+  assert.equal(trimPlan([{ start: 0.2, end: 0.5 }, { start: 0.7, end: 1 }, { start: 1.2, end: 1.5 }, { start: 1.7, end: 2 }], 3, FORMAT.trim), null, "nothing to cut: no plan");
   assert.equal(cleanContent({ present: false, x: 0, y: 0, w: 0, h: 0 }), null);
   assert.equal(cleanContent({ present: true, x: 0, y: 0, w: 0.98, h: 0.98 }), null, "the whole frame is no content box");
   assert.equal(cleanContent({ present: true, x: 0.7, y: 0.6, w: 0.2, h: 0.2 }), null, "a corner is too small to be the content");

@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, ClipsError, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type SourceInput } from "./studio-clips.js";
+import { trimPlan, trimRemap, annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, ClipsError, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type SourceInput } from "./studio-clips.js";
 import { transcribeWords } from "./studio-eleven.js";
 import { creditValueFloor, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
@@ -126,8 +126,9 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const asked = Math.round(Number(opt.count));
   const count = Number.isFinite(asked) && asked >= 1 ? Math.min(asked, cap) : Math.min(likely, 10);
   const price = streamPrice(plans, { seconds: b.seconds, length, count, env });
-  const captions = opt.captions && typeof opt.captions === "object" ? (await import("./studio-caption-video.js")).cleanSettings(opt.captions) : null;
-  if (captions) price.per_clip += captionsPerClip(env);
+  // captions are on unless switched off (captions: false) and included in the clip's price: 80 % of the viral tier has
+  // burned-in captions (research/MOMENTS_AND_FORMAT_PLAN.md §3), and a stream clip is priced for them
+  const captions = opt.captions === false || opt.captions === null ? null : (await import("./studio-caption-video.js")).cleanSettings(opt.captions && typeof opt.captions === "object" ? opt.captions : { style: { id: "bold_pop" }, keywords: true, fillers: true });
   const source: StreamSource = { platform: b.platform, url: b.url, asset_id: null, title: b.title || null, channel: b.channel || null, login: b.login, channel_id: b.channel_id, vod_id: b.id, seconds: b.seconds, started_at: b.started_at, thumbnail_url: b.thumbnail_url, permission };
   const minutes = Math.ceil(b.seconds / 60), hours = Math.round((b.seconds / 3600) * 10) / 10;
   const warning = Number.isFinite(asked) && asked > cap ? `A ${hours}-hour stream fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
@@ -328,6 +329,7 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   fetchStretch?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<{ asset_id: string; bytes: number; seconds: number }>;
   /** for tests: whether ffmpeg has drawtext, without asking it */ drawtext?: boolean;
+  /** for tests: false switches the pause trim off */ trim?: boolean;
   facecam?: (jpg: Buffer) => Promise<Layout | FacecamBox | null>;
 };
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
@@ -424,16 +426,38 @@ export function cleanFacecam(out: any): FacecamBox | null {
   return { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(b.w, 1 - Math.max(0, b.x)), h: Math.min(b.h, 1 - Math.max(0, b.y)) };
 }
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
-/** The 720x1280 graph: the facecam box scaled to the full width on top (its own shape, 300-600 lines, cropped from a
+/** The format (research/MOMENTS_AND_FORMAT_PLAN.md §3, the owner's four defaults of Nov 18 2026): 1080x1920 out; the
+ *  camera panel 450-900 lines (a third of the frame by default); a camera box over 15 % of the frame is the person
+ *  themselves, so the clip is framed on them instead of stacked; captions just under the divider (or at 58 % on a
+ *  full-frame clip), at most 68 % of the width, inside the box all three apps leave visible; the hook line for the
+ *  first 2.5 s; a 1.15x punch-in on the camera at the loudest second; pauses over 0.6 s cut to 0.18 s of air. */
+export const FORMAT = { w: 1080, h: 1920, cam: { min: 450, max: 900 }, irl_cam_share: 0.15, caption: { gap: 0.05, irl_y: 0.58, max_width: 0.68 }, hook: { seconds: 2.5, size: 0.042, irl_y: 0.18 }, punch: { zoom: 1.15, ramp: 0.3, hold: 1.8 }, trim: { gap: 0.6, keep: 0.18 } };
+export type StackedLayout = { graph: string; w: number; h: number; camH: number };
+/** The 1080x1920 graph: the facecam box scaled to the full width on top (its own shape, 450-900 lines, cropped from a
  *  third of the way down so a face is never cut at the forehead), the content box (or the whole picture) scaled to
- *  the rest and cropped to its middle, frame rate capped at 30. */
-export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null): string {
+ *  the rest and cropped to its middle, a punch-in on the camera at `punchAt` seconds when given, frame rate capped at 30. */
+export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null, o: { punchAt?: number | null } = {}): string {
+  return stackedLayout(info, cam, content, o).graph;
+}
+export function stackedLayout(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null, o: { punchAt?: number | null } = {}): StackedLayout {
+  const W = FORMAT.w, H = FORMAT.h;
   const cw = even(cam.w * info.w), ch = even(cam.h * info.h), cx = even(cam.x * info.w), cy = even(cam.y * info.h);
-  const camH = even(Math.max(300, Math.min(600, 720 * ch / Math.max(1, cw))));
-  const gameH = 1280 - camH;
+  const camH = even(Math.max(FORMAT.cam.min, Math.min(FORMAT.cam.max, W * ch / Math.max(1, cw))));
+  const gameH = H - camH;
   const fps = info.fps && info.fps > 30.5 ? ",fps=30" : "";
   const focus = content ? `crop=${even(content.w * info.w)}:${even(content.h * info.h)}:${even(content.x * info.w)}:${even(content.y * info.h)},` : "";
-  return `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=720:${camH}:force_original_aspect_ratio=increase,crop=720:${camH}:0:(ih-${camH})*0.3[cam];[g]${focus}scale=720:${gameH}:force_original_aspect_ratio=increase,crop=720:${gameH}[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
+  // the punch-in: the camera panel grows to 1.15x over 0.3 s at the loudest second, holds 1.8 s, and eases back
+  const punch = o.punchAt != null && o.punchAt >= 0.5 ? (() => { const T = o.punchAt!.toFixed(2), z = (FORMAT.punch.zoom - 1).toFixed(2), r = FORMAT.punch.ramp, e = (o.punchAt! + FORMAT.punch.hold).toFixed(2); const k = `(1+${z}*min(1,max(0,(t-${T})/${r}))*min(1,max(0,(${e}-t)/${r})))`; return `,scale=w='${W}*${k}':h='${camH}*${k}':eval=frame,crop=${W}:${camH}`; })() : "";
+  const graph = `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=${W}:${camH}:force_original_aspect_ratio=increase,crop=${W}:${camH}:0:(ih-${camH})*0.3${punch}[cam];[g]${focus}scale=${W}:${gameH}:force_original_aspect_ratio=increase,crop=${W}:${gameH}[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
+  return { graph, w: W, h: H, camH };
+}
+/** The hook line for the first seconds, drawn over the frame: a drawtext filter centred at `yFrac` of the height. */
+export function hookFilter(text: string, frame: { w: number; h: number }, yFrac: number, env: Record<string, string | undefined> = process.env): string {
+  const esc = (t: string) => t.replace(/\\/g, "\\\\").replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/%/g, "%%").replace(/[\[\],;]/g, " ");
+  const bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const font = env.STUDIO_OVERLAY_FONT_BOLD || (existsSync(bold) ? bold : env.STUDIO_OVERLAY_FONT || (existsSync("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf") ? "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" : null));
+  const size = Math.round(frame.h * FORMAT.hook.size), y = Math.round(frame.h * yFrac);
+  return `drawtext=${font ? `fontfile=${font}:` : ""}text='${esc(text).slice(0, 60)}':fontsize=${size}:fontcolor=white:borderw=${Math.max(2, Math.round(size / 14))}:bordercolor=black@0.9:box=1:boxcolor=black@0.45:boxborderw=${Math.round(size / 3)}:x=(w-text_w)/2:y=${y}-text_h/2:enable='between(t,0,${FORMAT.hook.seconds})'`;
 }
 /** Whether this server's ffmpeg has the drawtext filter (Render's Debian build does; a Homebrew build may not). Read once. */
 let drawtextOk: Promise<boolean> | null = null;
@@ -562,7 +586,8 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const absStart = round2(start + a), absEnd = round2(start + z);
       if (kept.some((k) => Math.min(k.end, absEnd) - Math.max(k.start, absStart) > 0.25 * Math.min(k.end - k.start, absEnd - absStart))) continue;
       const inside = heard.words.filter((w) => w.end > a && w.start < z);
-      kept.push({ rank: kept.length + 1, start: absStart, end: absEnd, title: clean(v.title, 80) || `Moment ${kept.length + 1}`, hook: clean(v.hook, 140), hook_line: clean(v.hook_line ?? "", 60) || undefined, caption: clean(v.caption ?? "", 120) || undefined, grades: v.grades ?? undefined, why: clean(v.why, 120), score, tags: v.tags.map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: inside.map((w) => w.text).join(" ").slice(0, 2000),
+      const loudest = heard.excess ? (() => { let best = -1, at = -1; for (let t = Math.ceil(a); t < Math.floor(z) && t < heard.excess!.length; t++) if (heard.excess![t] > best) { best = heard.excess![t]; at = t; } return at >= 0 && best > 3 ? round2(start + at) : undefined; })() : undefined;
+      kept.push({ rank: kept.length + 1, start: absStart, end: absEnd, title: clean(v.title, 80) || `Moment ${kept.length + 1}`, hook: clean(v.hook, 140), hook_line: clean(v.hook_line ?? "", 60) || undefined, caption: clean(v.caption ?? "", 120) || undefined, grades: v.grades ?? undefined, punch: loudest, why: clean(v.why, 120), score, tags: v.tags.map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: inside.map((w) => w.text).join(" ").slice(0, 2000),
         speech: inside.length ? speechOf(inside.map((w) => ({ ...w, start: w.start + start, end: w.end + start }))) : undefined,
         words: inside.map((w) => [w.text, round2(w.start + start), round2(w.end + start), w.speaker ?? null] as [string, number, number, string | null]) });
     }
@@ -597,14 +622,26 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         await stretchOf(pl.video, from, m.end + 2 - from, file);
         const src: SourceInput = { video: file, audio: null, proxy: null, width: 0, height: 0, fps: null, offset: from };
         // framing: "person" = Clips' own; "stacked" or "auto" = the facecam on top when one is found on the stretch
-        let layout: CutCtx["layout"] = null;
+        let layout: CutCtx["layout"] = null; let stackedCamH = 0; let stacked: { cam: FacecamBox; content: FacecamBox | null } | null = null;
+        const punchRel = (abs: number) => Math.max(0.5, abs - m.start);
         if (format === "vertical" && framingOf(st.framing) !== "person") {
           const still = (await stills(file, [Math.max(0.5, (m.start - from) + (m.end - m.start) / 2)], dir, `fc${m.rank}`))[0];
           const lay = still ? asLayout(await (deps.facecam ?? ((jpg) => findLayout(deps, jpg, u)))(still.jpg).catch(() => null)) : { cam: null, content: null };
-          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content })}`);
-          if (lay.cam) { const { cam, content } = lay; layout = (info) => stackedFilter(info, cam, content); }
+          // a camera box over 15 % of the frame is the person themselves (an IRL stream): framed on them, never stacked
+          const irl = !!lay.cam && lay.cam.w * lay.cam.h > FORMAT.irl_cam_share;
+          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content, irl })}`);
+          if (lay.cam && !irl) stacked = lay as { cam: FacecamBox; content: FacecamBox | null };
         }
-        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout }, m);
+        // the format: pauses cut, the captions placed under the divider (or at 58 % on a full-frame clip), the hook
+        // line, the punch-in at the loudest second (its time taken through the trim's map)
+        const trim = deps.trim === false ? null : trimPlan((m.words ?? []).map(([, a, b]) => ({ start: a - m.start, end: b - m.start })), m.end - m.start, FORMAT.trim);
+        const remap = trim ? trimRemap(trim).map : (t: number) => t;
+        if (stacked) { const { cam, content } = stacked; const punchAt = m.punch != null ? remap(punchRel(m.punch)) : null; layout = (info) => stackedLayout(info, cam, content, { punchAt }); stackedCamH = stackedLayout({ w: 1920, h: 1080, fps: null }, cam, content).camH; }
+        const frame = stackedCamH ? { w: FORMAT.w, h: FORMAT.h } : { w: 720, h: 1280 };
+        const captionY = stackedCamH ? stackedCamH / FORMAT.h + FORMAT.caption.gap : FORMAT.caption.irl_y;
+        const captions = ctxBase.captions ? { ...ctxBase.captions, style: { ...ctxBase.captions.style, y: captionY, maxWidth: Math.min(Number(ctxBase.captions.style?.maxWidth) || 1, FORMAT.caption.max_width) } } : null;
+        const hook = m.hook_line && (deps.drawtext ?? (await ffmpegHasDrawtext())) ? hookFilter(m.hook_line, frame, stackedCamH ? stackedCamH / FORMAT.h : FORMAT.hook.irl_y, env) : null;
+        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout, captions, overlay: hook, trim }, m);
         made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds }); cutTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - tc) / 100) / 10]);
         await renew(sb, job, { clip_at: new Date().toISOString(), done: made.length, total: kept.length, message: made.length < kept.length ? `Cutting clip ${made.length + 1} of ${kept.length}` : "Finishing", made });
       } catch (err: any) {

@@ -670,8 +670,8 @@ export async function chooseWithClaude(deps: ClipsDeps, input: ChooseInput, user
 /** What was said in a clip, by whom and when (absolute seconds), for framing on the speaker. */
 export type Speech = [start: number, end: number, speaker: string | null, text: string];
 export type Moment = { rank: number; start: number; end: number; title: string; hook: string; why: string; score: number; tags: string[]; transcript: string; speech?: Speech[];
-  /** Live Clips' verifier (studio-live-clips.ts): the words for the screen in the first two seconds, a caption to post with, the six grades */
-  hook_line?: string; caption?: string; grades?: Record<string, number>;
+  /** Live Clips' verifier (studio-live-clips.ts): the words for the screen in the first two seconds, a caption to post with, the six grades, the loudest second (absolute) for the punch-in */
+  hook_line?: string; caption?: string; grades?: Record<string, number>; punch?: number;
   /** every word with its time (absolute seconds), for captions; only when the words were heard (not YouTube's captions) */
   words?: Array<[string, number, number, string | null]> };
 export function finalizeMoments(raw: RawMoment[], lines: Line[], words: TimedWord[] | null, length: ClipLength, cap: number, minScore = CLIP_LIMITS.min_score, events: AudioEvent[] = []): Moment[] {
@@ -959,7 +959,29 @@ export function buildClipFilter(p: { w: number; h: number; format: ClipFormat; s
 export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: string; src: SourceInput; format: ClipFormat; collectionId: string; sourceTitle: string | null; jobId: string; length?: ClipLength;
   /** captions burned in, in this style (the Clips page's "Captions" switch) */ captions?: any | null;
   /** an ffmpeg filter appended after the captions (Live Clips burns the streamer's name in: studio-live-clips.ts attributionFilter) */ overlay?: string | null;
-  /** the whole filter graph ([0:v] to [v]) in place of the usual crop or fit (Live Clips' stacked facecam-over-game framing) */ layout?: ((info: { w: number; h: number; fps: number | null }) => string) | null };
+  /** the whole filter graph ([0:v] to [v]) in place of the usual crop or fit (Live Clips' stacked facecam-over-game framing); it may name its own frame size, which the captions are laid out for */ layout?: ((info: { w: number; h: number; fps: number | null }) => string | { graph: string; w: number; h: number } | null) | null;
+  /** only these stretches of the clip are kept (seconds from the clip's start, ascending): pauses cut out before the layout, the words re-timed (Live Clips' format step) */ trim?: Array<[number, number]> | null };
+/** The time map of a trim: a clip-relative time to its time in the trimmed clip (a time inside a cut pause lands at the cut), and the kept total. */
+export function trimRemap(segs: Array<[number, number]>): { map: (t: number) => number; total: number } {
+  const s = [...segs].filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
+  const total = s.reduce((acc, [a, b]) => acc + (b - a), 0);
+  const map = (t: number) => { let kept = 0; for (const [a, b] of s) { if (t <= a) return kept; if (t <= b) return kept + (t - a); kept += b - a; } return kept; };
+  return { map, total };
+}
+/** Where a clip's words leave a pause longer than `gap`, the kept stretches with `keep` seconds of air on each side (never
+ *  the first or last word's own breath): what the format step cuts. Null when nothing is worth cutting. */
+export function trimPlan(words: Array<{ start: number; end: number }>, dur: number, o: { gap?: number; keep?: number; min_cut?: number } = {}): Array<[number, number]> | null {
+  const gap = o.gap ?? 0.6, keep = o.keep ?? 0.18, minCut = o.min_cut ?? 0.4;
+  const ws = [...words].filter((w) => w.end > 0 && w.start < dur).sort((a, b) => a.start - b.start);
+  if (ws.length < 4) return null;
+  const segs: Array<[number, number]> = []; let from = 0; let cut = 0;
+  for (let i = 1; i < ws.length; i++) {
+    const prev = ws[i - 1].end, next = ws[i].start;
+    if (next - prev >= gap && next - prev - 2 * keep >= minCut) { segs.push([from, Math.min(dur, prev + keep)]); from = Math.max(0, next - keep); cut += next - keep - (prev + keep); }
+  }
+  segs.push([from, dur]);
+  return cut >= minCut ? segs.filter(([a, b]) => b - a > 0.05) : null;
+}
 /** One clip run and one captions run never render at once on a server (one CPU, 2 GB). */
 export const busy = { clips: false, captions: false };
 export type CutResult = { asset_id: string; bytes: number; seconds: number };
@@ -1024,27 +1046,39 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   let segs: Seg[] = [{ start: 0, end: dur, mode: "crop", x0: 0.5, x1: 0.5 }];
   if (ctx.format === "vertical" && !ctx.layout && info.w / Math.max(1, info.h) > 0.75 && info.h / Math.max(1, info.w) < 1.7) segs = await frameClip(ctx, m, mezz, dur);
   // 3. the clip: framed, 720x1280 (or the original shape), loudness evened out, soft edges on the sound
-  let graph = ctx.layout ? ctx.layout({ w: info.w, h: info.h, fps: info.fps }) : buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
+  const lay = ctx.layout ? ctx.layout({ w: info.w, h: info.h, fps: info.fps }) : null;
+  let graph = lay ? (typeof lay === "string" ? lay : lay.graph) : buildClipFilter({ w: info.w, h: info.h, format: ctx.format, segs, fps: info.fps });
+  const frame = lay && typeof lay !== "string" ? { w: lay.w, h: lay.h } : outputSize(info.w, info.h, ctx.format);
   // the clip's own words, from its start: kept for Captions, and burned in now when the switch is on
-  const rel = (m.words ?? []).map(([text, a, b, speaker]) => ({ text, start: Math.round((a - m.start) * 100) / 100, end: Math.round((b - m.start) * 100) / 100, speaker })).filter((w) => w.end > 0 && w.start < dur);
+  let rel = (m.words ?? []).map(([text, a, b, speaker]) => ({ text, start: Math.round((a - m.start) * 100) / 100, end: Math.round((b - m.start) * 100) / 100, speaker })).filter((w) => w.end > 0 && w.start < dur);
+  // a trim: only the kept stretches reach the layout, the sound follows, and the words are re-timed to the trimmed clip
+  let apre = "";
+  const trim = ctx.trim && ctx.trim.length ? trimRemap(ctx.trim.map(([a, b]) => [Math.max(0, a), Math.min(dur, b)] as [number, number])) : null;
+  if (trim && trim.total > 1 && trim.total < dur - 0.3) {
+    const sel = ctx.trim!.map(([a, b]) => `between(t,${Math.max(0, a).toFixed(3)},${Math.min(dur, b).toFixed(3)})`).join("+");
+    graph = `[0:v]select='${sel}',setpts=N/FRAME_RATE/TB[tv];${graph.replace("[0:v]", "[tv]")}`;
+    apre = `aselect='${sel}',asetpts=N/SR/TB,`;
+    rel = rel.map((w) => ({ ...w, start: Math.round(trim.map(w.start) * 100) / 100, end: Math.round(Math.max(trim.map(w.start) + 0.05, trim.map(w.end)) * 100) / 100 }));
+  }
+  const outDur = trim && trim.total > 1 && trim.total < dur - 0.3 ? trim.total : dur;
   let keys: number[] = [];
   const burned = !!ctx.captions && rel.length > 0;
   if (burned) {
     const cv = await import("./studio-caption-video.js");
     if (ctx.captions.keywords) keys = await cv.markKeywords(ctx.deps, rel, u).catch(() => []);
-    const fr = outputSize(info.w, info.h, ctx.format);
+    const fr = frame;
     const assPath = join(dir, `c${m.rank}.ass`);
     await writeFile(assPath, cv.captionAss(rel.map((w, i) => ({ ...w, key: keys.includes(i) })), ctx.captions, fr, ctx.deps.env ?? process.env));
     graph = graph.replace(/\[v\]$/, `,${cv.assFilter(assPath, ctx.deps.env ?? process.env)}[v]`);
   }
   if (ctx.overlay) graph = graph.replace(/\[v\]$/, `,${ctx.overlay}[v]`);
-  const af = `afade=t=in:d=0.06,afade=t=out:st=${Math.max(0, dur - 0.25).toFixed(3)}:d=0.25`;
+  const af = `${apre}afade=t=in:d=0.06,afade=t=out:st=${Math.max(0, outDur - 0.25).toFixed(3)}:d=0.25`;
   // threads capped: on a 1-CPU server ffmpeg would start one per core it sees on the host, each holding frames
   // (two clips at once with uncapped threads went past 2 GB and the server was killed, Oct 31 2026)
   const enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-threads", "2", "-rc-lookahead", "20", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart"];
   const render = (audio: string) => ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", "-i", mezz, "-filter_complex_threads", "1", "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?", "-af", audio, ...enc, out], { timeoutMs: 8 * 60_000 });
   await render(`loudnorm=I=-14:TP=-1.5:LRA=11,${af}`).catch(() => render(af));
-  await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, dur / 3).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still], { timeoutMs: 60_000 });
+  await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, outDur / 3).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still], { timeoutMs: 60_000 });
   const final = await probeLocal(out);
   if (ctx.length === "minute" && (final.seconds || dur) < CLIP_LENGTHS.minute.min - 0.5) throw new ClipsError("clip_too_short", "the clip came out under a minute", 502);
   const bytes = (await stat(out)).size;
