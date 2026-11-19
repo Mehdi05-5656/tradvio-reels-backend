@@ -341,6 +341,13 @@ test("the hybrid: the strongest hours are heard whole and read by Clips' picker;
   assert.equal(out4, "done"); assert.match(heads3[0], /picker of the words proposed/, `the agreed moment first: ${heads3[0].slice(0, 120)}`);
   const win = /Window: (\d+):(\d+) to (\d+):(\d+)/.exec(heads3[0])!; const wEnd = Number(win[3]) * 60 + Number(win[4]);
   assert.ok(wEnd >= 1587 + 15, `the window reaches past the picker's cut end (~1587 s): ends ${wEnd}`);
+  // the cheap door: a kept clip is heard again by Scribe for its speakers (the words it carries are the re-heard ones)
+  const reheard: number[] = []; const cutR: any[] = [];
+  const outR = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, STUDIO_LIVE_STT: "groq", GROQ_API_KEY: "k" }, chat: async () => chatWith(900, 7200),
+    hearClip: async (_f: string, sec: number) => { reheard.push(Math.round(sec)); return { words: [{ text: "Re-heard", start: 0.2, end: 0.6, speaker: "S1" }, { text: "words.", start: 0.7, end: 1.1, speaker: "S1" }], events: [], language: "en" }; },
+    cut: async (ctx: any, m: any) => { cutR.push(m); return { asset_id: "r", bytes: 1, seconds: m.end - m.start }; } }, job(1, 7200));
+  assert.equal(outR, "done"); assert.equal(reheard.length, 1, "one kept clip, heard once more"); assert.ok(reheard[0] >= 18);
+  assert.equal(cutR[0].words[0][0], "Re-heard"); assert.ok(cutR[0].words[0][1] > cutR[0].start - 0.01 && cutR[0].words[0][1] < cutR[0].start + 1, "absolute times"); assert.equal(cutR[0].speech[0][2], "S1");
   // off: nothing read, the window fetched and heard as before
   const out3 = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, STUDIO_LIVE_HYBRID: "off" }, chat: async () => chatWith(900, 7200), hearHour: async () => { throw new Error("must not read"); } }, job(1, 7200));
   assert.equal(out3, "done"); assert.equal(hears, 1);

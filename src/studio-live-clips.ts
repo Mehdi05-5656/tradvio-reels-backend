@@ -22,6 +22,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { probeLocal, annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, CLIP_LIMITS, ClipsError, chooseWithClaude, finalizeMoments, windows, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type RawMoment, type SourceInput } from "./studio-clips.js";
 import { transcribeWords } from "./studio-eleven.js";
+import { hearAudio, sttProvider } from "./studio-stt.js";
 import { creditValueFloor, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { studioFail } from "./studio-fail.js";
@@ -278,10 +279,11 @@ export const COLD = { bucket_s: 3600, after: 2 };
 /** The hybrid (research/baseline-clips-picker.md, Nov 19 2026): the hours where the chat reacted most are heard whole and
  *  read by Clips' own picker, so the talk that stands alone without a burst is found too, and a chat moment the picker
  *  also marked gets its cut from the words. At most `hours` hours, each at least `min_heard_s` long and not muted; the
- *  picker's model is the cheaper one unless STUDIO_LIVE_PICK_MODEL says otherwise (Opus read an hour for $0.29 against
- *  about $0.06; Scribe is $0.20 an hour either way). Checks that fall inside a read hour take their words from it (no
+ *  picker's model is Haiku unless STUDIO_LIVE_PICK_MODEL says otherwise (an hour: Opus $0.29, Sonnet $0.16, Haiku
+ *  $0.014; on hour 2 of the Nov 19 2026 stream the verifier kept 2 of Haiku's 6 moments and 3 of Sonnet's 6, one of
+ *  Haiku's being the Home Depot moment Sonnet missed). The hours' sound goes through the door studio-stt.ts chooses. Checks that fall inside a read hour take their words from it (no
  *  fetch, no second transcription). Off with STUDIO_LIVE_HYBRID=off. */
-export const HYBRID = { hours: 2, min_heard_s: 600, wanted_per_window: 5, near_s: 90, pick_model: "claude-sonnet-5-5", /** a window around a cut the picker proposed, when the words are free */ max_span_s: 240 };
+export const HYBRID = { hours: 2, min_heard_s: 600, wanted_per_window: 5, near_s: 90, pick_model: "claude-haiku-5-5", /** a window around a cut the picker proposed, when the words are free */ max_span_s: 240 };
 /** How many hours a run reads: HYBRID.hours, or STUDIO_LIVE_HYBRID_HOURS (the first run of Nov 19 2026 read three for $1.47
  *  a run against $2.40 at the floor, 39 %; two is about $1.15, 52 %). */
 export function hybridHours(env: Record<string, string | undefined> = process.env): number { const n = Number(env.STUDIO_LIVE_HYBRID_HOURS); return Number.isFinite(n) && n > 0 ? Math.min(6, Math.round(n)) : HYBRID.hours; }
@@ -350,6 +352,8 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   /** for tests: an hour heard whole (HYBRID), and Clips' picker on a window of its lines */
   hearHour?: (audioFile: string, seconds: number) => Promise<{ words: Heard["words"]; events: Heard["events"]; language: string | null }>;
   pick?: (lines: Line[]) => Promise<RawMoment[]>;
+  /** for tests: a kept clip heard again (Scribe, for its speakers) when the cheap door heard the windows */
+  hearClip?: (audioFile: string, seconds: number) => Promise<{ words: Heard["words"]; events: Heard["events"]; language: string | null }>;
   verify?: (input: { lines: Line[]; stills: Array<{ t: number; jpg: Buffer }>; head: string; body: string }) => Promise<Verdict>;
   /** for tests: the head-to-head order of the kept moments (indexes into the list, best first) */
   rerank?: (moments: Moment[]) => Promise<number[] | null>;
@@ -390,11 +394,7 @@ async function readHour(deps: StreamDeps, b: Broadcast, audioUrl: string, hour: 
     await (deps.fetchWindow ?? fetchSound)(audioUrl, start, seconds, file);
     const got = deps.fetchWindow ? seconds : (await probeLocal(file).catch(() => ({ seconds: 0 }))).seconds || 0;
     if (got < HYBRID.min_heard_s) return null;
-    const heard = await (deps.hearHour ?? (async (f: string, sec: number) => {
-      const r = await transcribeWords({ env, fetch: deps.fetch } as any, { audio: await readFile(f), events: true });
-      recordEvent({ user_id: u, kind: "vendor", name: "elevenlabs_scribe", usd: (sec / 3600) * 0.2, props: { use: "live_clips_hour", seconds: sec } });
-      return { words: r.words, events: r.events, language: r.language };
-    }))(file, got);
+    const heard = await (deps.hearHour ?? (async (f: string, sec: number) => hearAudio({ env, fetch: deps.fetch }, { audio: await readFile(f), seconds: sec, use: "live_clips_hour", userId: u })))(file, got);
     const lines = linesFromWords(heard.words);
     const pickDeps: ClipsDeps = { ...deps, env: { ...env, STUDIO_CLIPS_MODEL: env.STUDIO_LIVE_PICK_MODEL || HYBRID.pick_model } };
     const raw: RawMoment[] = [];
@@ -426,9 +426,8 @@ async function stillsFrom(video: string, times: number[], dir: string, tag: stri
 async function hearWindow(deps: StreamDeps, audioFile: string, dir: string, userId: string, seconds = WINDOW.length): Promise<Heard> {
   const env = deps.env ?? process.env;
   const buf = await readFile(audioFile);
-  const r = await transcribeWords({ env, fetch: deps.fetch } as any, { audio: buf, events: true });
-  // (the cost ledger: Scribe is priced by the hour of audio; the window is WINDOW.length seconds)
-  recordEvent({ user_id: userId, kind: "vendor", name: "elevenlabs_scribe", usd: (seconds / 3600) * 0.2, props: { use: "live_clips", seconds } });
+  // (the cost ledger: the door is priced by the hour of audio heard; the window is WINDOW.length seconds)
+  const r = await hearAudio({ env, fetch: deps.fetch }, { audio: buf, seconds, use: "live_clips", userId });
   const rms = await loudnessTrack(audioFile, dir).catch(() => [] as number[]);
   const excess = rms.length ? loudnessExcess(rms) : null;
   const lines = annotateLines(linesFromWords(r.words), r.events, excess);
@@ -768,8 +767,19 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // the layout is looked at once per clip, on a still from its own stretch: the first live runs (Nov 18 2026) looked
     // once per run and three Rainbow Six clips wore the chess scene's camera box, a slice of the game where the face was
     const asLayout = (r: Layout | FacecamBox | null): Layout => (r && "cam" in r ? r : { cam: r as FacecamBox | null, content: null });
+    // the cheap door hears no speakers: a kept clip is heard again by Scribe (a few seconds of sound each), so the
+    // framing can follow who is talking and the Captions page gets the same words it always had
+    const rehear = sttProvider(deps.env ?? process.env) !== "scribe";
     for (const m of todo) {
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
+      if (rehear) {
+        const snd = join(dir, `rh${m.rank}.mp3`);
+        try {
+          const h = await (deps.hearClip ?? (async (f: string, sec: number) => { await fetchSound(pl.audio, m.start, sec, f); return hearAudio({ env: deps.env, fetch: deps.fetch }, { audio: await readFile(f), seconds: sec, use: "live_clips_clip", userId: u, provider: "scribe" }); }))(snd, m.end - m.start);
+          if (h.words.length) { m.words = h.words.map((w) => [w.text, round2(w.start + m.start), round2(w.end + m.start), w.speaker ?? null] as [string, number, number, string | null]); m.transcript = h.words.map((w) => w.text).join(" ").slice(0, 2000); m.speech = speechOf(h.words.map((w) => ({ ...w, start: w.start + m.start, end: w.end + m.start }))); }
+        } catch (err: any) { log(`[live] clip ${m.rank} of ${job.id} not re-heard: ${String(err?.message ?? err).slice(0, 120)}`); }
+        finally { await rm(snd, { force: true }).catch(() => undefined); }
+      }
       const from = Math.max(0, m.start - 2), file = join(dir, `st${m.rank}.mp4`);
       const tc = Date.now();
       try {

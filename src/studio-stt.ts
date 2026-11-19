@@ -1,0 +1,65 @@
+// Speech to text for Live Clips, by provider. ElevenLabs Scribe ($0.20 an hour) hears speakers and sounds (laughter,
+// music), which the framing and the cut's end use; Groq's hosted Whisper large-v3-turbo ($0.04 an hour, Nov 19 2026)
+// hears words with times and nothing else. The cost study (docs/live-clips/research/costs/) put transcription at 40 %
+// of a Live Clips run; the hours read whole and the candidate windows only need the words, so they can go to the cheap
+// door (STUDIO_LIVE_STT=groq with GROQ_API_KEY), and the few clips that are kept are heard again by Scribe for their
+// speakers. Scribe stays the default until the cheap door is checked on a real stream.
+import { transcribeWords, type TimedWord, type AudioEvent } from "./studio-eleven.js";
+import { recordEvent } from "./studio-events.js";
+
+export type SttProvider = "scribe" | "groq";
+export type Heard = { words: TimedWord[]; events: AudioEvent[]; language: string | null };
+export type SttDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch };
+/** Dollars an hour of sound, each door (Nov 19 2026 list prices; Scribe is what the cost events have always used). */
+export const STT_RATES: Record<SttProvider, number> = { scribe: 0.2, groq: 0.04 };
+export const GROQ_MODEL = "whisper-large-v3-turbo";
+
+/** The door for the hours and the windows: Groq when asked for and its key is there, else Scribe. */
+export function sttProvider(env: Record<string, string | undefined> = process.env): SttProvider {
+  return env.STUDIO_LIVE_STT === "groq" && env.GROQ_API_KEY ? "groq" : "scribe";
+}
+
+/** Groq's OpenAI-shaped transcription: the words with their times; no speakers, no sounds. */
+export async function transcribeGroq(deps: SttDeps, p: { audio: Buffer; filename?: string; type?: string; language?: string | null }): Promise<Heard> {
+  const env = deps.env ?? process.env;
+  const key = env.GROQ_API_KEY;
+  if (!key) throw new Error("GROQ_API_KEY is not set");
+  const form = new FormData();
+  form.set("file", new Blob([new Uint8Array(p.audio)], { type: p.type ?? "audio/mpeg" }), p.filename ?? "source.mp3");
+  form.set("model", env.GROQ_STT_MODEL || GROQ_MODEL);
+  form.set("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "word");
+  form.append("timestamp_granularities[]", "segment");
+  form.set("temperature", "0");
+  if (p.language) form.set("language", p.language);
+  let last = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await (deps.fetch ?? fetch)("https://api.groq.com/openai/v1/audio/transcriptions", { method: "POST", headers: { authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(10 * 60_000) }).catch((e: any) => { last = String(e?.message ?? e); return null; });
+    if (r && r.ok) {
+      const body: any = await r.json();
+      const words: TimedWord[] = (Array.isArray(body?.words) ? body.words : [])
+        .filter((w: any) => w && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && String(w.word ?? w.text ?? "").trim())
+        .map((w: any) => ({ text: String(w.word ?? w.text).trim(), start: Number(w.start), end: Math.max(Number(w.start), Number(w.end)), speaker: null }));
+      return { words, events: [], language: body?.language ? String(body.language) : null };
+    }
+    const status = r?.status ?? 0;
+    last = r ? `${status}: ${(await r.text().catch(() => "")).slice(0, 200)}` : last;
+    if (status === 429 || status >= 500 || status === 0) { await new Promise((res) => setTimeout(res, 3000 * (attempt + 1))); continue; }
+    break;
+  }
+  throw new Error(`Groq transcription failed: ${last || "no answer"}`);
+}
+
+/** Sound heard through the chosen door, its cost recorded (by the seconds heard) under the door's own name. */
+export async function hearAudio(deps: SttDeps, p: { audio: Buffer; seconds: number; use: string; userId: string; provider?: SttProvider; events?: boolean; language?: string | null }): Promise<Heard> {
+  const env = deps.env ?? process.env;
+  const provider = p.provider ?? sttProvider(env);
+  if (provider === "groq") {
+    const r = await transcribeGroq(deps, { audio: p.audio, language: p.language ?? undefined });
+    recordEvent({ user_id: p.userId, kind: "vendor", name: "groq_whisper", usd: (p.seconds / 3600) * STT_RATES.groq, props: { use: p.use, seconds: p.seconds, model: env.GROQ_STT_MODEL || GROQ_MODEL } });
+    return r;
+  }
+  const r = await transcribeWords({ env, fetch: deps.fetch } as any, { audio: p.audio, events: p.events ?? true, language: p.language ?? undefined });
+  recordEvent({ user_id: p.userId, kind: "vendor", name: "elevenlabs_scribe", usd: (p.seconds / 3600) * STT_RATES.scribe, props: { use: p.use, seconds: p.seconds } });
+  return { words: r.words, events: r.events, language: r.language };
+}

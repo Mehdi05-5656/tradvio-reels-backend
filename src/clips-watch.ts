@@ -58,7 +58,7 @@ export function clipsRuns(jobs: any[], events: any[], now = Date.now(), plans = 
     if (e.name === "youtube_proxy" && job) { const p = proxy.get(job) ?? { usd: 0, bytes: 0 }; p.usd += Number(e.usd) || 0; p.bytes += Number(e.props?.bytes) || 0; proxy.set(job, p); }
   }
   const claude = events.filter((e) => e.kind === "claude" && /^(clips_|live_clips_)/.test(e.name));
-  const scribe = events.filter((e) => e.kind === "vendor" && e.name === "elevenlabs_scribe");
+  const scribe = events.filter((e) => e.kind === "vendor" && (e.name === "elevenlabs_scribe" || e.name === "groq_whisper"));
   return jobs.map((j): ClipsRun => {
     const d = done.get(j.id), t = d?.timing ?? {}, o = j.options ?? {};
     const start = ms(j.started_at ?? j.created_at), end = ms(j.finished_at) || now;
