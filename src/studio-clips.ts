@@ -985,7 +985,7 @@ export function trimPlan(words: Array<{ start: number; end: number }>, dur: numb
 /** One clip run and one captions run never render at once on a server (one CPU, 2 GB). */
 export const busy = { clips: false, captions: false };
 export type CutResult = { asset_id: string; bytes: number; seconds: number };
-async function probeLocal(file: string): Promise<{ w: number; h: number; fps: number | null; seconds: number; start: number | null }> {
+export async function probeLocal(file: string): Promise<{ w: number; h: number; fps: number | null; seconds: number; start: number | null }> {
   const raw = await new Promise<string>((resolve, reject) => {
     const c = spawn("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate:format=duration,start_time", "-of", "json", file], { stdio: ["ignore", "pipe", "pipe"] });
     let o = ""; c.stdout.on("data", (b) => { o += b.toString(); }); c.on("error", reject); c.on("close", (code) => (code === 0 ? resolve(o) : reject(new ClipsError("clip_media_failed", "the stretch could not be read", 502, true))));

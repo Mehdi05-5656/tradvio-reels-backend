@@ -289,6 +289,22 @@ export async function hlsVariants(deps: LiveDeps, master: string): Promise<Varia
   if (!r || !r.ok) throw new LiveSourceError("vod_unreadable", `The recording's playlist could not be read (${r?.status ?? "no answer"})`, 502, true);
   return parseMaster(await r.text(), master);
 }
+/** The stretches of a recording whose sound the platform muted (Twitch names those segments "-muted"): seconds from
+ *  the start, merged. Empty when the playlist cannot be read or names nothing muted. */
+export async function mutedRanges(deps: LiveDeps, playlist: string): Promise<Array<[number, number]>> {
+  const r = await f(deps)(playlist, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20_000) }).catch(() => null);
+  if (!r || !r.ok) return [];
+  const text = await r.text().catch(() => "");
+  const out: Array<[number, number]> = []; let t = 0, dur = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("#EXTINF:")) { dur = Number(line.slice(8).split(",")[0]) || 0; continue; }
+    if (!line || line.startsWith("#")) continue;
+    if (/-muted/i.test(line)) { const last = out[out.length - 1]; if (last && Math.abs(last[1] - t) < 0.01) last[1] = t + dur; else out.push([t, t + dur]); }
+    t += dur; dur = 0;
+  }
+  return out;
+}
 /** The rung to hear from (the smallest) and the rung to cut from (about 720 lines, else the biggest under 1080). */
 export function pickRungs(vs: Variant[]): { audio: string; video: string } {
   if (!vs.length) throw new LiveSourceError("vod_unreadable", "The recording has no playable rung", 502);

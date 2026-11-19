@@ -20,13 +20,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { trimPlan, trimRemap, annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, ClipsError, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type SourceInput } from "./studio-clips.js";
+import { probeLocal, annotateLines, claudeJson, clipsCharge, cutClip, ffmpeg, lengthOf, linesFromWords, loudnessExcess, loudnessTrack, loudPeaks, perClipUsd, captionsPerClip, CLIP_LENGTHS, ClipsError, type ClipFormat, type ClipLength, type ClipsDeps, type ClipsPrice, type CutCtx, type Line, type Moment, type SourceInput } from "./studio-clips.js";
 import { transcribeWords } from "./studio-eleven.js";
 import { creditValueFloor, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
-import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform } from "./live-sources.js";
+import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -38,7 +38,7 @@ export const liveClipsEnabled = (env: Record<string, string | undefined> = proce
 export const liveClipsOpen = (env: Record<string, string | undefined> = process.env) => liveClipsEnabled(env) && env.STUDIO_LIVE_CLIPS_OPEN === "true";
 /** A broadcast of any length the platform still keeps (Twitch keeps up to 48 hours): the reading is by windows, so
  *  length only adds chat pages; the model checks are capped by verify_max whatever the length. */
-export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 3, verify_extra: 6, verify_max: 60 };
+export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 4, verify_extra: 8, verify_max: 60 };
 /** Prices (RESEARCH.md 6.5, revised with experiment 1): reading a past stream by the hour (the chat, and about four
  *  candidate windows an hour heard and checked), at least the minimum; and each clip, which carries the two or three
  *  extra windows it took to find it (experiment 1: a third to a half of the checked windows become clips), so a stream
@@ -274,7 +274,7 @@ Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is or
 - reaction: how strong is the visible or audible reaction (a laugh, a scream, a silence, a chat explosion)?
 - quotable: is there one line a stranger would repeat, that works as the caption?
 - length: does the cut fit 20 to 45 seconds with nothing to trim? (over 50 needs two beats)
-hard_fail: empty, or one short reason when the clip must never go out whatever the grades: copyrighted music is the main sound; a slur, doxxing or a real person humiliated; it needs the previous five minutes; it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen.
+hard_fail: empty, or one short reason when the clip must never go out whatever the grades: a song is the whole point of the moment with nothing worth hearing over it (a DJ set, singing along, a music break; game radio or background music under the streamer's talk is NOT a hard fail); a slur, doxxing or a real person humiliated; it needs the previous five minutes; it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen.
 Also give score 0-100 as your overall feeling. start_line is the first line of the clip and end_line the last, using the line numbers exactly as given. title under 60 characters in the stream's language, no hashtags; hook: the first spoken line, under 100 characters; hook_line: the words to put on screen for the first two seconds, 3 to 6 words, a stake or a tease, never "insane moment", in the stream's language; caption: one sentence a stranger could post the clip with, under 110 characters, no hashtags; why under 15 words; why_not under 15 words when it should not be kept (empty otherwise); tags: 1 to 3 lowercase topic words.`;
 /** The checklist's weights (research/viral-signals.md 4d): hook 25, standalone 20, payoff 20, reaction 15, quotable 10, length 5. */
 export const CHECKLIST = { hook: 0.25, standalone: 0.2, payoff: 0.2, reaction: 0.15, quotable: 0.1, length: 0.05 } as const;
@@ -330,7 +330,7 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   fetchStretch?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<{ asset_id: string; bytes: number; seconds: number }>;
   /** for tests: whether ffmpeg has drawtext, without asking it */ drawtext?: boolean;
-  /** for tests: false switches the pause trim off */ trim?: boolean;
+  /** for tests: the platform's muted stretches of the recording (seconds), in place of reading the playlist */ muted?: Array<[number, number]>;
   facecam?: (jpg: Buffer) => Promise<Layout | FacecamBox | null>;
 };
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
@@ -427,38 +427,29 @@ export function cleanFacecam(out: any): FacecamBox | null {
   return { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(b.w, 1 - Math.max(0, b.x)), h: Math.min(b.h, 1 - Math.max(0, b.y)) };
 }
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
-/** The format (research/MOMENTS_AND_FORMAT_PLAN.md §3, the owner's four defaults of Nov 18 2026): 1080x1920 out; the
- *  camera panel 450-900 lines (a third of the frame by default); a camera box over 15 % of the frame is the person
- *  themselves, so the clip is framed on them instead of stacked; captions just under the divider (or at 58 % on a
- *  full-frame clip), at most 68 % of the width, inside the box all three apps leave visible; the hook line for the
- *  first 2.5 s; a 1.15x punch-in on the camera at the loudest second; pauses over 0.6 s cut to 0.18 s of air. */
-export const FORMAT = { w: 1080, h: 1920, cam: { min: 450, max: 900 }, irl_cam_share: 0.15, caption: { gap: 0.05, irl_y: 0.58, max_width: 0.68 }, hook: { seconds: 2.5, size: 0.042, irl_y: 0.18 }, punch: { zoom: 1.15, ramp: 0.3, hold: 1.8 }, trim: { gap: 0.6, keep: 0.18 } };
+/** The format (research/MOMENTS_AND_FORMAT_PLAN.md §3): 1080x1920 out; the camera panel 450-640 lines (a third of
+ *  the frame at most: a near-square camera box took half the frame on the first run, Nov 19 2026); a camera box over
+ *  15 % of the frame is the person themselves, so the clip is framed on them instead of stacked; captions, when
+ *  chosen, just under the divider (or at 58 % on a full-frame clip), at most 68 % of the width, inside the box all
+ *  three apps leave visible. No text on the picture, no pauses cut, no punch-in: the owner wants the clip as it was
+ *  streamed; edits like those belong to the editor that comes later. */
+export const FORMAT = { w: 1080, h: 1920, cam: { min: 450, max: 640 }, irl_cam_share: 0.15, caption: { gap: 0.05, irl_y: 0.58, max_width: 0.68 } };
 export type StackedLayout = { graph: string; w: number; h: number; camH: number };
-/** The 1080x1920 graph: the facecam box scaled to the full width on top (its own shape, 450-900 lines, cropped from a
+/** The 1080x1920 graph: the facecam box scaled to the full width on top (its own shape, 450-640 lines, cropped from a
  *  third of the way down so a face is never cut at the forehead), the content box (or the whole picture) scaled to
- *  the rest and cropped to its middle, a punch-in on the camera at `punchAt` seconds when given, frame rate capped at 30. */
-export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null, o: { punchAt?: number | null } = {}): string {
-  return stackedLayout(info, cam, content, o).graph;
+ *  the rest and cropped to its middle, frame rate capped at 30. */
+export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null): string {
+  return stackedLayout(info, cam, content).graph;
 }
-export function stackedLayout(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null, o: { punchAt?: number | null } = {}): StackedLayout {
+export function stackedLayout(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null): StackedLayout {
   const W = FORMAT.w, H = FORMAT.h;
   const cw = even(cam.w * info.w), ch = even(cam.h * info.h), cx = even(cam.x * info.w), cy = even(cam.y * info.h);
   const camH = even(Math.max(FORMAT.cam.min, Math.min(FORMAT.cam.max, W * ch / Math.max(1, cw))));
   const gameH = H - camH;
   const fps = info.fps && info.fps > 30.5 ? ",fps=30" : "";
   const focus = content ? `crop=${even(content.w * info.w)}:${even(content.h * info.h)}:${even(content.x * info.w)}:${even(content.y * info.h)},` : "";
-  // the punch-in: the camera panel grows to 1.15x over 0.3 s at the loudest second, holds 1.8 s, and eases back
-  const punch = o.punchAt != null && o.punchAt >= 0.5 ? (() => { const T = o.punchAt!.toFixed(2), z = (FORMAT.punch.zoom - 1).toFixed(2), r = FORMAT.punch.ramp, e = (o.punchAt! + FORMAT.punch.hold).toFixed(2); const k = `(1+${z}*min(1,max(0,(t-${T})/${r}))*min(1,max(0,(${e}-t)/${r})))`; return `,scale=w='${W}*${k}':h='${camH}*${k}':eval=frame,crop=${W}:${camH}`; })() : "";
-  const graph = `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=${W}:${camH}:force_original_aspect_ratio=increase,crop=${W}:${camH}:0:(ih-${camH})*0.3${punch}[cam];[g]${focus}scale=${W}:${gameH}:force_original_aspect_ratio=increase,crop=${W}:${gameH}[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
+  const graph = `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=${W}:${camH}:force_original_aspect_ratio=increase,crop=${W}:${camH}:0:(ih-${camH})*0.3[cam];[g]${focus}scale=${W}:${gameH}:force_original_aspect_ratio=increase,crop=${W}:${gameH}[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
   return { graph, w: W, h: H, camH };
-}
-/** The hook line for the first seconds, drawn over the frame: a drawtext filter centred at `yFrac` of the height. */
-export function hookFilter(text: string, frame: { w: number; h: number }, yFrac: number, env: Record<string, string | undefined> = process.env): string {
-  const esc = (t: string) => t.replace(/\\/g, "\\\\").replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/%/g, "%%").replace(/[\[\],;]/g, " ");
-  const bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
-  const font = env.STUDIO_OVERLAY_FONT_BOLD || (existsSync(bold) ? bold : env.STUDIO_OVERLAY_FONT || (existsSync("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf") ? "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" : null));
-  const size = Math.round(frame.h * FORMAT.hook.size), y = Math.round(frame.h * yFrac);
-  return `drawtext=${font ? `fontfile=${font}:` : ""}text='${esc(text).slice(0, 60)}':fontsize=${size}:fontcolor=white:borderw=${Math.max(2, Math.round(size / 14))}:bordercolor=black@0.9:box=1:boxcolor=black@0.45:boxborderw=${Math.round(size / 3)}:x=(w-text_w)/2:y=${y}-text_h/2:enable='between(t,0,${FORMAT.hook.seconds})'`;
 }
 /** Whether this server's ffmpeg has the drawtext filter (Render's Debian build does; a Homebrew build may not). Read once. */
 let drawtextOk: Promise<boolean> | null = null;
@@ -521,10 +512,16 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const signals = chatSignals(chat, b.seconds);
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute) throw new ClipsError("chat_too_quiet", `This stream's chat was too quiet to read (${Math.round(signals.perMinute)} messages a minute); Live Clips needs a chat that reacts`, 422);
     const cands = chatCandidates(signals, chat);
-    const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra, cands.length);
+    // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
+    // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked)
+    const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     if (!cands.length) throw new ClipsError("clips_none_found", "The chat never lit up: no moment in this stream stands out enough to clip", 422);
     const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master))))(b);
+    // the stretches the platform muted (music it recognised): their moments cannot be heard or posted, so they are not checked
+    const muted = deps.muted ?? (b.platform === "twitch" ? await mutedRanges(deps, pl.audio).catch(() => [] as Array<[number, number]>) : []);
+    const mutedShare = (from: number, to: number) => muted.reduce((acc, [x, y]) => acc + Math.max(0, Math.min(to, y) - Math.max(from, x)), 0) / Math.max(1, to - from);
+    if (muted.length) log(`[live] muted ${JSON.stringify({ job: job.id, stretches: muted.length, seconds: Math.round(muted.reduce((acc, [x, y]) => acc + y - x, 0)) })}`);
     // B. each candidate's window heard, then checked by the model, until `count` are kept
     await renew(sb, job, { stage: "transcribing", message: `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
@@ -534,18 +531,25 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const verify = deps.verify ?? ((input) => verifyWithClaude(deps, input, u));
     const stills = deps.stills ?? stillsFrom;
     const windowOf = deps.fetchWindow ?? fetchSound;
-    for (const c of cands.slice(0, want)) {
-      if (kept.length >= count + OVERSHOOT(count)) break;
+    let skippedMuted = 0, unheard = 0;
+    for (const c of cands) {
+      if (checked >= want || kept.length >= count + OVERSHOOT(count)) break;
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
-      checked++;
       const start = Math.max(0, c.onset - WINDOW.lead), span = Math.min(WINDOW.length, b.seconds - start);
       if (span < 30) continue;
-      await renew(sb, job, { stage: checked === 1 ? "transcribing" : "choosing", message: `Checking moment ${checked} of ${want} · ${kept.length} kept`, done: kept.length, total: count });
+      if (mutedShare(start, start + span) > 0.4) { skippedMuted++; continue; }
+      await renew(sb, job, { stage: checked === 0 ? "transcribing" : "choosing", message: `Checking moment ${checked + 1} of up to ${want} · ${kept.length} kept`, done: kept.length, total: count });
       const audio = join(dir, `w${c.rank}.mp3`);
       let heard: Heard;
-      try { await windowOf(pl.audio, start, span, audio); heard = await hear(audio, dir); heardOk++; }
-      catch (err: any) { log(`[live] window ${c.rank} of ${job.id} not heard: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
+      try {
+        await windowOf(pl.audio, start, span, audio);
+        // a window the platform silenced (or a fetch that came back short) has nothing to hear: it is not a verdict
+        const got = deps.fetchWindow ? span : (await probeLocal(audio).catch(() => ({ seconds: 0 }))).seconds || 0;
+        if (got < Math.min(30, span * 0.5)) { unheard++; log(`[live] window ${c.rank} of ${job.id} is ${Math.round(got)} s of ${Math.round(span)}: muted or empty, skipped`); continue; }
+        heard = await hear(audio, dir); heardOk++;
+      } catch (err: any) { unheard++; log(`[live] window ${c.rank} of ${job.id} not heard: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
       finally { await rm(audio, { force: true }).catch(() => undefined); }
+      checked++;
       const lines = heard.lines;
       const onsetRel = c.onset - start, peakRel = c.peak - start, eventRel = c.t_event - start, base = baseAt(start);
       const cut = firstCut(lines, eventRel, peakRel, (rel) => chatAt(start + rel), base, heard.events);
@@ -587,12 +591,11 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const absStart = round2(start + a), absEnd = round2(start + z);
       if (kept.some((k) => Math.min(k.end, absEnd) - Math.max(k.start, absStart) > 0.25 * Math.min(k.end - k.start, absEnd - absStart))) continue;
       const inside = heard.words.filter((w) => w.end > a && w.start < z);
-      const loudest = heard.excess ? (() => { let best = -1, at = -1; for (let t = Math.ceil(a); t < Math.floor(z) && t < heard.excess!.length; t++) if (heard.excess![t] > best) { best = heard.excess![t]; at = t; } return at >= 0 && best > 3 ? round2(start + at) : undefined; })() : undefined;
-      kept.push({ rank: kept.length + 1, start: absStart, end: absEnd, title: clean(v.title, 80) || `Moment ${kept.length + 1}`, hook: clean(v.hook, 140), hook_line: clean(v.hook_line ?? "", 60) || undefined, caption: clean(v.caption ?? "", 120) || undefined, grades: v.grades ?? undefined, punch: loudest, why: clean(v.why, 120), score, tags: v.tags.map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: inside.map((w) => w.text).join(" ").slice(0, 2000),
+      kept.push({ rank: kept.length + 1, start: absStart, end: absEnd, title: clean(v.title, 80) || `Moment ${kept.length + 1}`, hook: clean(v.hook, 140), hook_line: clean(v.hook_line ?? "", 60) || undefined, caption: clean(v.caption ?? "", 120) || undefined, grades: v.grades ?? undefined, why: clean(v.why, 120), score, tags: v.tags.map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: inside.map((w) => w.text).join(" ").slice(0, 2000),
         speech: inside.length ? speechOf(inside.map((w) => ({ ...w, start: w.start + start, end: w.end + start }))) : undefined,
         words: inside.map((w) => [w.text, round2(w.start + start), round2(w.end + start), w.speaker ?? null] as [string, number, number, string | null]) });
     }
-    timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls;
+    timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls; timing.unheard = unheard; timing.skipped_muted = skippedMuted;
     if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked} times, but none of those moments stands alone as a clip` : "No moment in this stream stands out enough to be a clip", 422);
     kept.sort((x, y) => y.score - x.score || x.start - y.start);
     // more kept than asked for: one head-to-head look settles the order (model grades bunch), and the extra ones go
@@ -624,7 +627,6 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         const src: SourceInput = { video: file, audio: null, proxy: null, width: 0, height: 0, fps: null, offset: from };
         // framing: "person" = Clips' own; "stacked" or "auto" = the facecam on top when one is found on the stretch
         let layout: CutCtx["layout"] = null; let stackedCamH = 0; let stacked: { cam: FacecamBox; content: FacecamBox | null } | null = null;
-        const punchRel = (abs: number) => Math.max(0.5, abs - m.start);
         if (format === "vertical" && framingOf(st.framing) !== "person") {
           const still = (await stills(file, [Math.max(0.5, (m.start - from) + (m.end - m.start) / 2)], dir, `fc${m.rank}`))[0];
           const lay = still ? asLayout(await (deps.facecam ?? ((jpg) => findLayout(deps, jpg, u)))(still.jpg).catch(() => null)) : { cam: null, content: null };
@@ -633,16 +635,11 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
           log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content, irl })}`);
           if (lay.cam && !irl) stacked = lay as { cam: FacecamBox; content: FacecamBox | null };
         }
-        // the format: pauses cut, the captions placed under the divider (or at 58 % on a full-frame clip), the hook
-        // line, the punch-in at the loudest second (its time taken through the trim's map)
-        const trim = deps.trim === false ? null : trimPlan((m.words ?? []).map(([, a, b]) => ({ start: a - m.start, end: b - m.start })), m.end - m.start, FORMAT.trim);
-        const remap = trim ? trimRemap(trim).map : (t: number) => t;
-        if (stacked) { const { cam, content } = stacked; const punchAt = m.punch != null ? remap(punchRel(m.punch)) : null; layout = (info) => stackedLayout(info, cam, content, { punchAt }); stackedCamH = stackedLayout({ w: 1920, h: 1080, fps: null }, cam, content).camH; }
-        const frame = stackedCamH ? { w: FORMAT.w, h: FORMAT.h } : { w: 720, h: 1280 };
+        // the format: the clip as streamed; captions, when chosen, placed under the divider (or at 58 % on a full-frame clip)
+        if (stacked) { const { cam, content } = stacked; layout = (info) => stackedLayout(info, cam, content); stackedCamH = stackedLayout({ w: 1920, h: 1080, fps: null }, cam, content).camH; }
         const captionY = stackedCamH ? stackedCamH / FORMAT.h + FORMAT.caption.gap : FORMAT.caption.irl_y;
         const captions = ctxBase.captions ? { ...ctxBase.captions, style: { ...ctxBase.captions.style, y: captionY, maxWidth: Math.min(Number(ctxBase.captions.style?.maxWidth) || 1, FORMAT.caption.max_width) } } : null;
-        const hook = m.hook_line && (deps.drawtext ?? (await ffmpegHasDrawtext())) ? hookFilter(m.hook_line, frame, stackedCamH ? stackedCamH / FORMAT.h : FORMAT.hook.irl_y, env) : null;
-        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout, captions, overlay: hook, trim }, m);
+        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout, captions }, m);
         made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds }); cutTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - tc) / 100) / 10]);
         await renew(sb, job, { clip_at: new Date().toISOString(), done: made.length, total: kept.length, message: made.length < kept.length ? `Cutting clip ${made.length + 1} of ${kept.length}` : "Finishing", made });
       } catch (err: any) {
