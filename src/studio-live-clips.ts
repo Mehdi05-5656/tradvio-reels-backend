@@ -126,9 +126,10 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const asked = Math.round(Number(opt.count));
   const count = Number.isFinite(asked) && asked >= 1 ? Math.min(asked, cap) : Math.min(likely, 10);
   const price = streamPrice(plans, { seconds: b.seconds, length, count, env });
-  // captions are on unless switched off (captions: false) and included in the clip's price: 80 % of the viral tier has
-  // burned-in captions (research/MOMENTS_AND_FORMAT_PLAN.md §3), and a stream clip is priced for them
-  const captions = opt.captions === false || opt.captions === null ? null : (await import("./studio-caption-video.js")).cleanSettings(opt.captions && typeof opt.captions === "object" ? opt.captions : { style: { id: "bold_pop" }, keywords: true, fillers: true });
+  // captions are the person's choice (the owner, Nov 19 2026: not on by default), priced as on the Clips page; a clip made
+  // without them keeps its words, so the Captions page can add them afterwards
+  const captions = opt.captions && typeof opt.captions === "object" ? (await import("./studio-caption-video.js")).cleanSettings(opt.captions) : null;
+  if (captions) price.per_clip += captionsPerClip(env);
   const source: StreamSource = { platform: b.platform, url: b.url, asset_id: null, title: b.title || null, channel: b.channel || null, login: b.login, channel_id: b.channel_id, vod_id: b.id, seconds: b.seconds, started_at: b.started_at, thumbnail_url: b.thumbnail_url, permission };
   const minutes = Math.ceil(b.seconds / 60), hours = Math.round((b.seconds / 3600) * 10) / 10;
   const warning = Number.isFinite(asked) && asked > cap ? `A ${hours}-hour stream fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
