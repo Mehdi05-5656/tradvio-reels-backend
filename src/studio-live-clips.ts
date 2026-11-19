@@ -206,7 +206,7 @@ export const CANDIDATE = { combined: 6, single: 3, rate_only: 3, asks: 3, merge_
   /** weights of the people and shape terms beside the content burst */ w_reactors: 0.5, w_shape: 0.5, w_shock: 0.5,
   /** the checking order spreads over the stream: first one candidate from each ten minutes, then up to three, then the rest (one long hype stretch used to fill the whole checked set) */ diversity_window_s: 600, tiers: [1, 3] as readonly number[],
   /** the first and last stretch of a broadcast are greetings and raid-outs, never clips */ skip_start_s: 180, skip_end_s: 120,
-  /** spam: one user over this share of a bin, or the bin's chant coming from fewer than `chant_users` people while it is over `chant_share` of the bin */ spam_user_share: 0.3, chant_users: 3, chant_share: 0.4, spam_weight: 0.3 };
+  /** spam, and the bin cannot open or extend a candidate: one user over this share of a bin, or the bin's chant coming from fewer than `chant_users` people while it is over `chant_share` of the bin (a lone spammer's z against a quiet chat runs to 90; no weight tames it) */ spam_user_share: 0.3, chant_users: 3, chant_share: 0.4 };
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 /** The moments the chat points at, strongest first: bins where the combined burst is high (content and shape, and the
  *  people behind it), or one content signal alone, or the rate alone on a small chat, or people asking for a clip;
@@ -222,10 +222,10 @@ export function chatCandidates(s: ChatSignals, msgs: ChatMsg[], o: Partial<typeo
     if (s.rate[b] < C.min_messages || t < C.skip_start_s || t > seconds - C.skip_end_s) continue;
     const content = Z.caps[b] + Z.laugh[b] + Z.hype[b] + Z.same[b] + Z.emote[b] + C.w_shock * Z.shock[b];
     const shape = clamp(Z.short[b], -2, 3) + clamp(Z.alike[b], -2, 3);
-    const spam = s.topShare[b] > C.spam_user_share || (s.sameUsers[b] < C.chant_users && s.alike[b] > C.chant_share);
-    const combined = (content + C.w_reactors * clamp(Z.reactors[b], -2, 6) + 0.5 * Z.distinct[b] + C.w_shape * shape) * (spam ? C.spam_weight : 1);
-    const single = Math.max(Z.caps[b], Z.laugh[b], Z.hype[b]) * (spam ? C.spam_weight : 1);
-    const rateBurst = !spam && Z.rate[b] >= C.rate_only && Z.distinct[b] >= 2 && s.rate[b] >= 2.5 * Math.max(1, s.rate[Math.max(0, b - 30)]);
+    if (s.topShare[b] > C.spam_user_share || (s.sameUsers[b] < C.chant_users && s.alike[b] > C.chant_share)) continue;
+    const combined = content + C.w_reactors * clamp(Z.reactors[b], -2, 6) + 0.5 * Z.distinct[b] + C.w_shape * shape;
+    const single = Math.max(Z.caps[b], Z.laugh[b], Z.hype[b]);
+    const rateBurst = Z.rate[b] >= C.rate_only && Z.distinct[b] >= 2 && s.rate[b] >= 2.5 * Math.max(1, s.rate[Math.max(0, b - 30)]);
     const ok = combined >= C.combined || single >= C.single || rateBurst || s.asks[b] >= C.asks;
     const holds = !!cur && t - cur.last <= C.merge_s && combined >= C.sustain;
     if (!ok && !holds) continue;

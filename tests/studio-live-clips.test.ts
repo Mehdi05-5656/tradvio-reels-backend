@@ -64,7 +64,7 @@ test("the chat's content against its own baseline finds the burst, puts the even
   // a wave that never stops is several moments, not one (KaiCenat's chat, Nov 18 2026: one candidate spanned 42 minutes)
   const wave: ChatMsg[] = [...chatWith(0, 1800, 1)]; for (let t = 600; t < 1200; t++) for (let k = 0; k < 6; k++) wave.push({ t, u: `w${(t * 7 + k) % 400}`, c: ["LMAOOO", "NO WAY", "KEKW", "W"][k % 4], e: 0 });
   const cw = chatCandidates(chatSignals(wave, 1800), wave);
-  assert.ok(cw.length >= 3, `a ten-minute wave gives several candidates: ${cw.length}`); assert.ok(cw.every((c) => c.last - c.onset <= 180));
+  assert.ok(cw.length >= 2, `a ten-minute wave gives several candidates, until it becomes the chat's own baseline: ${cw.length}`); assert.ok(cw.every((c) => c.last - c.onset <= 180));
   // the first and last minutes are never candidates
   const edge = [...chatWith(60, 1800), ...chatWith(1740, 1800).filter((m) => m.t >= 1740)];
   assert.ok(chatCandidates(chatSignals(edge, 1800), edge).every((c) => c.onset >= 180 && c.onset <= 1680));

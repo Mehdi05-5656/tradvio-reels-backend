@@ -9,7 +9,7 @@ for (const name of Object.keys(labels)) {
   const L = labels[name]; const msgs = readFileSync(join(dir, `${name}.jsonl`), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const s = chatSignals(msgs, L.seconds);
   const wantN = Math.min(LIVE_LIMITS.verify_max, L.count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
-  const variants: Array<[string, any]> = [["baseline-like", { w_reactors: 0, w_shape: 0, w_shock: 0, max_span_s: Infinity, spam_weight: 1, tiers: [] }]];
+  const variants: Array<[string, any]> = [["baseline-like", { w_reactors: 0, w_shape: 0, w_shock: 0, max_span_s: Infinity, spam_user_share: 1.01, chant_users: 0, tiers: [] }]];
   for (const span of [180, 120]) for (const tiers of [[1], [1, 2], [1, 3], [2], [2, 4]]) variants.push([`span${span} tiers${JSON.stringify(tiers)}`, { max_span_s: span, tiers }]);
   const good = Object.entries(L.moments).filter(([, v]) => Number(v) >= 60).map(([t]) => Number(t));
   console.log(`${name}: ${msgs.length} msgs, ${Math.round(s.perMinute)}/min, checking up to ${wantN}`);
