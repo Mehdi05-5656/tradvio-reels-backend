@@ -263,9 +263,30 @@ export const VERIFY_SYSTEM = `You are the best short-form video editor alive, ch
 
 Keep it only if ALL hold: it stands alone (no context needed from earlier in the stream, no "as I said"); it has a payoff (a laugh, a shock, a win, a fail, a reveal, a line that lands) and the clip ends right after it; it is not a sponsor read, an ad break, a "be right back" screen, music only, or the streamer reading a chat message that needs the chat to be seen; it is not just the game's cutscene with the streamer silent unless the picture itself is the payoff.
 
-The proposed cut is only a first guess from the chat's timing. YOUR job is to find the best clip inside the whole window: if the payoff comes later than the proposed end (the chat often reacts before the moment finishes), move end_line to the line where the payoff lands plus the reaction it earns; if the setup starts earlier, move start_line back. The clip must be 20 to 55 seconds and start where a thought starts. Judge the moment with YOUR boundaries, not the proposed ones. Score 0-100 for how likely it holds a stranger (hook 30, payoff 25, energy or reaction 20, standalone 15, novelty 10). Be strict: 90+ exceptional, 75 strong, 60 usable. start_line is the first line of the clip and end_line the last, using the line numbers exactly as given. title under 60 characters in the stream's language, no hashtags; hook: the first spoken line, under 100 characters; why under 15 words; why_not under 15 words when it should not be kept (empty otherwise); tags: 1 to 3 lowercase topic words.`;
-export const VERIFY_SCHEMA = { type: "object", additionalProperties: false, required: ["keep", "score", "standalone", "start_line", "end_line", "title", "hook", "why", "why_not", "tags"],
-  properties: { keep: { type: "boolean" }, score: { type: "integer" }, standalone: { type: "boolean" }, start_line: { type: "integer" }, end_line: { type: "integer" }, title: { type: "string" }, hook: { type: "string" }, why: { type: "string" }, why_not: { type: "string" }, tags: { type: "array", items: { type: "string" } } } };
+The proposed cut is only a first guess from the chat's timing. YOUR job is to find the best clip inside the whole window: if the payoff comes later than the proposed end (the chat often reacts before the moment finishes), move end_line to the line where the payoff lands plus the reaction it earns; if the setup starts earlier, move start_line back. The clip must be 20 to 55 seconds and start where a thought starts. Judge the moment with YOUR boundaries, not the proposed ones.
+
+Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is ordinary, 2 is weak):
+- hook: does the first line or the first picture of YOUR cut already show the stakes or the reaction, with no greeting, no dead air, no warm-up?
+- standalone: would a stranger who never saw this stream understand it with no context? 8+ means fully; under 6 means it needs the stream.
+- payoff: is there a clear turn (a fail, a win, a reveal, a punchline, a shock) that lands between a third and four fifths of the way through, with the reaction after it inside the clip?
+- reaction: how strong is the visible or audible reaction (a laugh, a scream, a silence, a chat explosion)?
+- quotable: is there one line a stranger would repeat, that works as the caption?
+- length: does the cut fit 20 to 45 seconds with nothing to trim? (over 50 needs two beats)
+hard_fail: empty, or one short reason when the clip must never go out whatever the grades: copyrighted music is the main sound; a slur, doxxing or a real person humiliated; it needs the previous five minutes; it starts mid-sentence with no way to start earlier; a sponsor read, an ad break, a "be right back" screen.
+Also give score 0-100 as your overall feeling. start_line is the first line of the clip and end_line the last, using the line numbers exactly as given. title under 60 characters in the stream's language, no hashtags; hook: the first spoken line, under 100 characters; hook_line: the words to put on screen for the first two seconds, 3 to 6 words, a stake or a tease, never "insane moment", in the stream's language; caption: one sentence a stranger could post the clip with, under 110 characters, no hashtags; why under 15 words; why_not under 15 words when it should not be kept (empty otherwise); tags: 1 to 3 lowercase topic words.`;
+/** The checklist's weights (research/viral-signals.md 4d): hook 25, standalone 20, payoff 20, reaction 15, quotable 10, length 5. */
+export const CHECKLIST = { hook: 0.25, standalone: 0.2, payoff: 0.2, reaction: 0.15, quotable: 0.1, length: 0.05 } as const;
+export type Grades = Record<keyof typeof CHECKLIST, number>;
+/** The checklist as one 0-100 score; a verdict without grades (older seams) falls back to the model's own score. */
+export function checklistScore(v: { score: number; grades?: Grades | null }): number {
+  if (!v.grades) return Math.max(0, Math.min(100, Math.round(v.score)));
+  let total = 0; for (const k of Object.keys(CHECKLIST) as Array<keyof typeof CHECKLIST>) total += CHECKLIST[k] * Math.max(0, Math.min(10, Number(v.grades[k]) || 0)) * 10;
+  return Math.round(total);
+}
+export const VERIFY_SCHEMA = { type: "object", additionalProperties: false, required: ["keep", "score", "standalone", "grades", "hard_fail", "start_line", "end_line", "title", "hook", "hook_line", "caption", "why", "why_not", "tags"],
+  properties: { keep: { type: "boolean" }, score: { type: "integer" }, standalone: { type: "boolean" },
+    grades: { type: "object", additionalProperties: false, required: ["hook", "standalone", "payoff", "reaction", "quotable", "length"], properties: { hook: { type: "integer" }, standalone: { type: "integer" }, payoff: { type: "integer" }, reaction: { type: "integer" }, quotable: { type: "integer" }, length: { type: "integer" } } },
+    hard_fail: { type: "string" }, start_line: { type: "integer" }, end_line: { type: "integer" }, title: { type: "string" }, hook: { type: "string" }, hook_line: { type: "string" }, caption: { type: "string" }, why: { type: "string" }, why_not: { type: "string" }, tags: { type: "array", items: { type: "string" } } } };
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 export type Heard = { words: Array<{ text: string; start: number; end: number; speaker: string | null }>; events: Array<{ text: string; start: number; end: number }>; lines: Line[]; excess: number[] | null; language: string | null };
 /** The first guess at the cut on the lines: a thought that opens 8-25 s before the event; a thought that closes once
@@ -288,7 +309,7 @@ export function firstCut(lines: Line[], eventRel: number, peakRel: number, chatA
   void events;
   return { s, e };
 }
-type Verdict = { keep: boolean; score: number; standalone: boolean; start_line: number; end_line: number; title: string; hook: string; why: string; why_not: string; tags: string[] };
+type Verdict = { keep: boolean; score: number; standalone: boolean; grades?: Grades | null; hard_fail?: string; start_line: number; end_line: number; title: string; hook: string; hook_line?: string; caption?: string; why: string; why_not: string; tags: string[] };
 
 // ---------------------------------------------------------------------------------------------------
 // The run
@@ -300,6 +321,8 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   playlists?: (b: Broadcast) => Promise<{ audio: string; video: string }>;
   hear?: (audioFile: string, dir: string) => Promise<Heard>;
   verify?: (input: { lines: Line[]; stills: Array<{ t: number; jpg: Buffer }>; head: string; body: string }) => Promise<Verdict>;
+  /** for tests: the head-to-head order of the kept moments (indexes into the list, best first) */
+  rerank?: (moments: Moment[]) => Promise<number[] | null>;
   stills?: (video: string, times: number[], dir: string, tag: string) => Promise<Array<{ t: number; jpg: Buffer }>>;
   fetchWindow?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   fetchStretch?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
@@ -353,7 +376,9 @@ async function verifyWithClaude(deps: StreamDeps, input: { lines: Line[]; stills
       { type: "text", text: `${input.head}\n\nTranscript (Lnn [m:ss] speaker: words; sounds in brackets; ⟪+dB⟫ = louder than usual; the chat's reaction marked where it begins and peaks):\n${input.body || "(no speech heard in this window)"}` },
     ] }],
   }, "live_clips_verify", userId);
-  return { keep: !!out?.keep, score: Number(out?.score) || 0, standalone: !!out?.standalone, start_line: Number(out?.start_line), end_line: Number(out?.end_line), title: String(out?.title ?? ""), hook: String(out?.hook ?? ""), why: String(out?.why ?? ""), why_not: String(out?.why_not ?? ""), tags: Array.isArray(out?.tags) ? out.tags.map((x: any) => String(x)) : [] };
+  const g = out?.grades && typeof out.grades === "object" ? out.grades : null;
+  const grades: Grades | null = g ? { hook: Number(g.hook) || 0, standalone: Number(g.standalone) || 0, payoff: Number(g.payoff) || 0, reaction: Number(g.reaction) || 0, quotable: Number(g.quotable) || 0, length: Number(g.length) || 0 } : null;
+  return { keep: !!out?.keep, score: Number(out?.score) || 0, standalone: !!out?.standalone, grades, hard_fail: String(out?.hard_fail ?? "").trim(), start_line: Number(out?.start_line), end_line: Number(out?.end_line), title: String(out?.title ?? ""), hook: String(out?.hook ?? ""), hook_line: String(out?.hook_line ?? ""), caption: String(out?.caption ?? ""), why: String(out?.why ?? ""), why_not: String(out?.why_not ?? ""), tags: Array.isArray(out?.tags) ? out.tags.map((x: any) => String(x)) : [] };
 }
 // ---------------------------------------------------------------------------------------------------
 // Stacked framing (RESEARCH.md 4.5): the facecam on top, the game under it. Clips' own framing labels a game with a
@@ -426,6 +451,22 @@ export function attributionFilter(text: string, env: Record<string, string | und
   return `drawtext=${font ? `fontfile=${font}:` : ""}text='${esc(text).slice(0, 60)}':fontsize=26:fontcolor=white@0.9:box=1:boxcolor=black@0.35:boxborderw=10:x=24:y=120`;
 }
 const round2 = (x: number) => Math.round(x * 100) / 100;
+/** How many more than asked the run keeps before the rerank picks: two when three or more were asked, else one. */
+export const OVERSHOOT = (count: number) => (count >= 3 ? 2 : 1);
+export const RERANK_SYSTEM = `You are the best short-form editor alive, ordering finished clip candidates from one live stream for TikTok, Reels and Shorts. For each you get its title, its on-screen hook line, its grades (hook, standalone, payoff, reaction, quotable, length, each 0-10), its length and the first words spoken. Rank them best first by how likely each is to stop a stranger scrolling and hold them to the end. Prefer variety: two clips of the same bit, back to back, are worth less than one of each. Answer with the order as a list of the given indexes, every index exactly once.`;
+export const RERANK_SCHEMA = { type: "object", additionalProperties: false, required: ["order"], properties: { order: { type: "array", items: { type: "integer" } } } };
+/** The head-to-head order of the kept moments by Claude: indexes into the list, best first. */
+export async function rerankWithClaude(deps: ClipsDeps, moments: Moment[], userId?: string): Promise<number[] | null> {
+  const env = deps.env ?? process.env;
+  const list = moments.map((m, i) => `#${i}: "${m.title}" · hook line "${m.hook_line ?? ""}" · ${Math.round(m.end - m.start)} s · grades ${m.grades ? Object.entries(m.grades).map(([k, v]) => `${k} ${v}`).join(", ") : `score ${m.score}`} · opens: ${m.transcript.split(/\s+/).slice(0, 24).join(" ")}`).join("\n");
+  const out = await claudeJson(deps, {
+    model: env.STUDIO_LIVE_VERIFY_MODEL || "claude-sonnet-5-5", max_tokens: 300, system: RERANK_SYSTEM,
+    output_config: { effort: "low", format: { type: "json_schema", schema: RERANK_SCHEMA } },
+    messages: [{ role: "user", content: [{ type: "text", text: `${moments.length} candidates:\n${list}` }] }],
+  }, "live_clips_rerank", userId);
+  const order = Array.isArray(out?.order) ? out.order.map((x: any) => Number(x)).filter((x: number) => Number.isInteger(x) && x >= 0 && x < moments.length) : [];
+  return order.length ? order : null;
+}
 const clean = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
 export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, job: Job): Promise<string> {
@@ -469,7 +510,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const stills = deps.stills ?? stillsFrom;
     const windowOf = deps.fetchWindow ?? fetchSound;
     for (const c of cands.slice(0, want)) {
-      if (kept.length >= count) break;
+      if (kept.length >= count + OVERSHOOT(count)) break;
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
       checked++;
       const start = Math.max(0, c.onset - WINDOW.lead), span = Math.min(WINDOW.length, b.seconds - start);
@@ -511,19 +552,31 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       // moments scoring 66-78 were dropped as "too long" on Nov 18 2026 instead of being trimmed
       if (z - a > len.max + 3) { const floor = z - len.max; const first = lines.find((l) => l.start >= floor - 0.05 && l.start <= z - len.min); a = first ? first.start : floor; }
       const d = z - a;
-      const keep = v.keep && v.standalone && v.score >= bar && d >= len.min && d <= len.max + 3;
-      log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score: v.score, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), why_not: keep ? undefined : v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
+      // the checklist decides (research/viral-signals.md 4d): the weighted grades against the bar, a hard fail vetoes,
+      // and a stranger must understand it (standalone grade 6+, or the old boolean where a seam gives no grades)
+      const score = checklistScore(v);
+      const standalone = v.grades ? v.grades.standalone >= 6 : v.standalone;
+      const keep = v.keep && !v.hard_fail && standalone && score >= bar && d >= len.min && d <= len.max + 3;
+      log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score, felt: v.score, grades: v.grades ?? undefined, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), hook_line: v.hook_line?.slice(0, 40), why_not: keep ? undefined : v.hard_fail?.slice(0, 80) || v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
       if (!keep) continue;
       const absStart = round2(start + a), absEnd = round2(start + z);
       if (kept.some((k) => Math.min(k.end, absEnd) - Math.max(k.start, absStart) > 0.25 * Math.min(k.end - k.start, absEnd - absStart))) continue;
       const inside = heard.words.filter((w) => w.end > a && w.start < z);
-      kept.push({ rank: kept.length + 1, start: absStart, end: absEnd, title: clean(v.title, 80) || `Moment ${kept.length + 1}`, hook: clean(v.hook, 140), why: clean(v.why, 120), score: Math.min(100, Math.round(v.score)), tags: v.tags.map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: inside.map((w) => w.text).join(" ").slice(0, 2000),
+      kept.push({ rank: kept.length + 1, start: absStart, end: absEnd, title: clean(v.title, 80) || `Moment ${kept.length + 1}`, hook: clean(v.hook, 140), hook_line: clean(v.hook_line ?? "", 60) || undefined, caption: clean(v.caption ?? "", 120) || undefined, grades: v.grades ?? undefined, why: clean(v.why, 120), score, tags: v.tags.map((x) => clean(x, 24).toLowerCase()).filter(Boolean).slice(0, 3), transcript: inside.map((w) => w.text).join(" ").slice(0, 2000),
         speech: inside.length ? speechOf(inside.map((w) => ({ ...w, start: w.start + start, end: w.end + start }))) : undefined,
         words: inside.map((w) => [w.text, round2(w.start + start), round2(w.end + start), w.speaker ?? null] as [string, number, number, string | null]) });
     }
     timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls;
     if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked} times, but none of those moments stands alone as a clip` : "No moment in this stream stands out enough to be a clip", 422);
-    kept.sort((x, y) => y.score - x.score || x.start - y.start); kept.forEach((m, k) => { m.rank = k + 1; });
+    kept.sort((x, y) => y.score - x.score || x.start - y.start);
+    // more kept than asked for: one head-to-head look settles the order (model grades bunch), and the extra ones go
+    if (kept.length > count) {
+      const order = await (deps.rerank ?? ((ms) => rerankWithClaude(deps, ms, u)))(kept).catch((err: any) => { log(`[live] rerank of ${job.id} failed: ${String(err?.message ?? err).slice(0, 160)}`); return null; });
+      if (order && order.length) { const by = new Map(kept.map((m, i) => [i, m])); const picked = [...new Set(order)].map((i) => by.get(i as number)).filter((m): m is Moment => !!m); for (const m of kept) if (!picked.includes(m)) picked.push(m); kept.splice(0, kept.length, ...picked); }
+      log(`[live] rerank ${JSON.stringify({ job: job.id, kept: kept.length, count, order: kept.map((m) => m.title.slice(0, 30)) })}`);
+      kept.splice(count);
+    }
+    kept.forEach((m, k) => { m.rank = k + 1; });
     // C. the cuts: each moment's stretch fetched from the recording, then the Clips cutter
     const todo = kept.filter((m) => !made.some((x) => x.rank === m.rank));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: kept.length, message: `Cutting clip ${Math.min(made.length + 1, kept.length)} of ${kept.length}`, made });

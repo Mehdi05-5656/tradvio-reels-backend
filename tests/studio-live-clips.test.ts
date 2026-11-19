@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
-import { chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR } from "../src/studio-live-clips.js";
+import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { PLANS } from "../src/studio.js";
@@ -200,6 +200,24 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   assert.equal(out4, "done"); assert.equal(cutCalls4.length, 1);
   const d4 = cutCalls4[0].end - cutCalls4[0].start;
   assert.ok(d4 >= 18 && d4 <= 55.5, `trimmed to the standard length (18-55 s), not dropped: ${d4}`);
+  // the checklist (phase B): the six grades weigh into one score; a hard fail vetoes whatever the grades
+  assert.equal(checklistScore({ score: 90, grades: { hook: 8, standalone: 9, payoff: 7, reaction: 6, quotable: 5, length: 8 } }), 70);
+  assert.equal(checklistScore({ score: 72 }), 72, "no grades (an older seam): the model's own score");
+  assert.equal(OVERSHOOT(3), 2); assert.equal(OVERSHOOT(1), 1);
+  const graded = (title: string, extra: any = {}) => (input: any) => ({ keep: true, score: 80, standalone: true, grades: { hook: 8, standalone: 8, payoff: 8, reaction: 7, quotable: 6, length: 8 }, hard_fail: "", start_line: input.lines[0].i, end_line: input.lines[Math.min(input.lines.length - 1, 7)].i, title, hook: "so so", hook_line: "He bet it all", caption: "He bet the whole round on one call.", why: "big", why_not: "", tags: ["gta"], ...extra });
+  const cut5: any[] = [];
+  const out5 = await runStreamClipsJob(fakeSb().sb, { ...deps, verify: async (i: any) => graded("Fine clip")(i), cut: async (ctx: any, m: any) => { cut5.push(m); return { asset_id: "a5", bytes: 1, seconds: m.end - m.start }; } }, { ...job, progress: {} });
+  assert.equal(out5, "done"); assert.equal(cut5[0].score, 73, "the checklist score (72.5 rounded), not the felt 80"); assert.equal(cut5[0].hook_line, "He bet it all"); assert.match(cut5[0].caption, /whole round/); assert.equal(cut5[0].grades.hook, 8);
+  const out6 = await runStreamClipsJob(fakeSb().sb, { ...deps, verify: async (i: any) => graded("Music", { hard_fail: "copyrighted music is the main sound" })(i) }, { ...job, progress: {} });
+  assert.equal(out6, "clips_none_found", "a hard fail vetoes a well-graded moment");
+  const out7 = await runStreamClipsJob(fakeSb().sb, { ...deps, verify: async (i: any) => graded("Needs it", { grades: { hook: 9, standalone: 4, payoff: 9, reaction: 9, quotable: 9, length: 9 } })(i) }, { ...job, progress: {} });
+  assert.equal(out7, "clips_none_found", "a stranger must understand it: standalone under 6 is out");
+  // more kept than asked: the rerank picks, and only `count` are cut (two bursts 300 s apart, one clip asked)
+  const two = [...chatWith(900, 1800), ...chatWith(1200, 1800).filter((m) => m.t >= 1200 && m.t < 1212 && /[A-Z]{4}/.test(m.c))];
+  let n7 = 0; const cut7: any[] = []; const seen: string[][] = [];
+  const out8 = await runStreamClipsJob(fakeSb().sb, { ...deps, chat: async () => two, verify: async (i: any) => graded(`M${++n7}`)(i), rerank: async (ms: any[]) => { seen.push(ms.map((m) => m.title)); return [1, 0]; }, cut: async (ctx: any, m: any) => { cut7.push(m); return { asset_id: "a7", bytes: 1, seconds: m.end - m.start }; } },
+    { ...job, options: { ...job.options, count: 1 }, credits_reserved: 40, progress: {} });
+  assert.equal(out8, "done"); assert.equal(seen.length, 1, "one rerank call"); assert.equal(seen[0].length, 2, "it saw both kept moments"); assert.equal(cut7.length, 1, "only the one asked for is cut"); assert.equal(cut7[0].title, seen[0][1], "the rerank's first pick");
   // a quiet chat is refused before anything is heard
   const out3 = await runStreamClipsJob(fakeSb().sb, { ...deps, chat: async () => msgs.filter((x) => x.t % 10 === 0).slice(0, 100) }, { ...job, progress: {} });
   assert.equal(out3, "chat_too_quiet");

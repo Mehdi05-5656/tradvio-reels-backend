@@ -670,6 +670,8 @@ export async function chooseWithClaude(deps: ClipsDeps, input: ChooseInput, user
 /** What was said in a clip, by whom and when (absolute seconds), for framing on the speaker. */
 export type Speech = [start: number, end: number, speaker: string | null, text: string];
 export type Moment = { rank: number; start: number; end: number; title: string; hook: string; why: string; score: number; tags: string[]; transcript: string; speech?: Speech[];
+  /** Live Clips' verifier (studio-live-clips.ts): the words for the screen in the first two seconds, a caption to post with, the six grades */
+  hook_line?: string; caption?: string; grades?: Record<string, number>;
   /** every word with its time (absolute seconds), for captions; only when the words were heard (not YouTube's captions) */
   words?: Array<[string, number, number, string | null]> };
 export function finalizeMoments(raw: RawMoment[], lines: Line[], words: TimedWord[] | null, length: ClipLength, cap: number, minScore = CLIP_LIMITS.min_score, events: AudioEvent[] = []): Moment[] {
@@ -1058,7 +1060,7 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   const ins = await sb.from("studio_assets").insert({
     id, user_id: u, kind: "video", name, object_key: key, bytes, status: "ready", collection_id: ctx.collectionId,
     probe: { duration: round2(final.seconds || dur), width: final.w, height: final.h, poster_key: pu.error ? undefined : posterKey, cuts, cuts_at: new Date().toISOString(),
-      source: "clips", title: m.title, hook: m.hook, why: m.why, score: m.score, tags: m.tags, transcript: m.transcript,
+      source: "clips", title: m.title, hook: m.hook, why: m.why, score: m.score, tags: m.tags, transcript: m.transcript, ...(m.hook_line ? { hook_line: m.hook_line } : {}), ...(m.caption ? { caption: m.caption } : {}), ...(m.grades ? { grades: m.grades } : {}),
       clip: { start: m.start, end: m.end, rank: m.rank, source_title: ctx.sourceTitle, job_id: ctx.jobId, length: ctx.length ?? null },
       // captions burned in by the switch: marked like a Captions copy, so the library, Publish and the run page know
       ...(burned ? { captions: { style: ctx.captions!.style.id, from: "clips", job_id: ctx.jobId } } : {}) },
