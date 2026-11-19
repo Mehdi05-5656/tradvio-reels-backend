@@ -177,6 +177,15 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   const out2 = await runStreamClipsJob(sb2, { ...deps, verify: async () => ({ keep: false, score: 40, standalone: false, start_line: 0, end_line: 0, title: "", hook: "", why: "", why_not: "needs context", tags: [] }) }, { ...job, progress: {} });
   assert.equal(out2, "clips_none_found");
   assert.ok(!calls2.some((c) => c[0] === "studio_complete"));
+  // the model's cut past the ceiling is trimmed to the length, its payoff kept, instead of dropped as "too long"
+  const long = (startRel: number) => { const w = []; let t = startRel; for (let i = 0; i < 150; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; } return w; };
+  const cutCalls4: any[] = [];
+  const out4 = await runStreamClipsJob(fakeSb().sb, { ...deps, hear: async () => { const w = long(5); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
+    verify: async (input: any) => ({ keep: true, score: 78, standalone: true, start_line: input.lines[0].i, end_line: input.lines[input.lines.length - 1].i, title: "The whole bit", hook: "", why: "", why_not: "", tags: [] }),
+    cut: async (ctx: any, m: any) => { cutCalls4.push(m); return { asset_id: "asset-4", bytes: 1000, seconds: m.end - m.start }; } }, { ...job, progress: {} });
+  assert.equal(out4, "done"); assert.equal(cutCalls4.length, 1);
+  const d4 = cutCalls4[0].end - cutCalls4[0].start;
+  assert.ok(d4 >= 18 && d4 <= 55.5, `trimmed to the standard length (18-55 s), not dropped: ${d4}`);
   // a quiet chat is refused before anything is heard
   const out3 = await runStreamClipsJob(fakeSb().sb, { ...deps, chat: async () => msgs.filter((x) => x.t % 10 === 0).slice(0, 100) }, { ...job, progress: {} });
   assert.equal(out3, "chat_too_quiet");

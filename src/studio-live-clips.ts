@@ -472,6 +472,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const closesAfter = (t: number) => lines.find((l) => l.start >= t - 0.05 && l.closes && l.end - a <= len.max);
       for (let guard = 0; z - a < len.min && guard < 6; guard++) { const n = closesAfter(z + 0.05); if (!n) break; z = n.end; }
       for (let guard = 0; z - a < len.min && guard < 6; guard++) { const prev = [...lines].reverse().find((l) => l.end <= a + 0.05 && l.opens && z - l.start <= len.max); if (!prev) break; a = prev.start; }
+      // a cut past the length's ceiling keeps its payoff (the end) and starts at the first thought that fits: four
+      // moments scoring 66-78 were dropped as "too long" on Nov 18 2026 instead of being trimmed
+      if (z - a > len.max + 3) { const floor = z - len.max; const first = lines.find((l) => l.start >= floor - 0.05 && l.start <= z - len.min); a = first ? first.start : floor; }
       const d = z - a;
       const keep = v.keep && v.standalone && v.score >= bar && d >= len.min && d <= len.max + 3;
       log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score: v.score, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), why_not: keep ? undefined : v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
