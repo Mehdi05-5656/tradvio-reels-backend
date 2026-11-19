@@ -35,10 +35,11 @@ export const QUESTIONS: Record<string, Spec> = {
   heard: { values: { tiktok: "TikTok", instagram: "Instagram", youtube: "YouTube", x: "X", discord: "Discord", reddit: "Reddit", google: "Google", ai: "ChatGPT or another AI", friend: "a friend", creator: "a creator they follow", ad: "an ad", other: "somewhere else" } },
 };
 /** Version 1 keys still accepted (people who answered before Oct 31 2026, or an old cached dashboard). */
-const V1 = new Set(["intent", "source", "recast_reason", "length", "character", "start"]);
+const V1 = new Set(["intent", "source", "recast_reason", "length", "character", "start",
+  "heard_account"]); // Nov 18 2026: the tracked content account they saw (an id from content_accounts, or "unsure"); studio-content-perf.ts reads it
 /** Free text: first_make (the older flow) and goal_other (what "Other" on the goals screen means, asked since Nov 10 2026). */
-const TEXT_KEYS: Record<string, number> = { first_make: 400, goal_other: 160 };
-const STEP_IDS = new Set(["role", "about", "goals", "goal", "channels", "volume", "blocker", "stack", "heard", "first"]);
+const TEXT_KEYS: Record<string, number> = { first_make: 400, goal_other: 160, heard_video: 120 };
+const STEP_IDS = new Set(["role", "about", "goals", "goal", "channels", "volume", "blocker", "stack", "heard", "first", "heard_account"]);
 /** The five screens asked today, in order, and how each reads in the admin panel. */
 export const STEPS: Array<[string, string]> = [["role", "Who they are"], ["goals", "What they want to do"], ["channels", "Where they post"], ["blocker", "What holds them back"], ["heard", "How they found us"]];
 const ATTRIBUTION = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "ref", "landing", "at"];

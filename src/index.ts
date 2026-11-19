@@ -60,6 +60,7 @@ import { registerStudioAdmin } from "./studio-admin.js";
 import { registerCommunity } from "./studio-community.js";
 import { registerLiveClips } from "./studio-live-clips.js";
 import { flushCosts, initCosts, registerStudioCosts } from "./studio-costs.js";
+import { registerContentPerf, startContentPerfLoop } from "./studio-content-perf-routes.js";
 import { stopGracefully } from "./studio-leases.js";
 import { flushPosthog } from "./posthog.js";
 import { registerStoryExam } from "./studio-story-exam.js";
@@ -127,6 +128,7 @@ async function main() {
   registerCommunity(app, getSb); // Community: the shared library of generative films (off unless STUDIO_COMMUNITY_ENABLED)
   registerLiveClips(app, getSb); // Live Clips: the Streams page and link lookups (off unless STUDIO_LIVE_CLIPS_ENABLED; owner-only unless STUDIO_LIVE_CLIPS_OPEN)
   registerStudioCosts(app, getSb); // the admin panel's Money tab: what Clone8 paid, by vendor, tool and step
+  registerContentPerf(app, getSb); // the admin panel's Content tab: the organic accounts posting for Clone8 (STUDIO_CONTENT_PERF_ENABLED)
   registerStoryExam(app, getSb, { plans: PLANS }); // the Stories practice exam (admin only; STORY_MASTER_PLAN.md phase 0)
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
@@ -146,6 +148,7 @@ async function main() {
   startKageLoop(getSb); // Kage remixes (Claude plans, the platform renders every shot at once); off until STUDIO_KAGE_ENABLED=true
   void import("./studio-youtube.js").then((m) => m.ffmpegReport()).then((r) => console.log(`[clips] ffmpeg: ${r}`)).catch(() => undefined); // Clips from long videos, one run at a time; needs ANTHROPIC_API_KEY plus ScrapeCreators or ElevenLabs
   startImportLoop(getSb, { plans: PLANS }); // bulk link imports into the library; needs SCRAPECREATORS_API_KEY
+  startContentPerfLoop(getSb); // hourly readings of the content accounts (studio-content-perf-routes.ts); needs STUDIO_CONTENT_PERF_ENABLED and SCRAPECREATORS_API_KEY
   void import("./vendor-alerts.js").then((m) => m.startScrapeCreatorsWatch()).catch(() => undefined); // emails the owner when ScrapeCreators' credits run low or out (src/vendor-alerts.ts)
   startClipsWatch(getSb); // emails the owner when a Clips run fails on our side, falls back, loses margin or sticks; a daily summary at 07:00 PT
   startFailureWatch(getSb); // emails the owner about every customer failure in any tool (with the full reason and repeats); a daily summary at 07:30 PT
