@@ -44,7 +44,7 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
     return pulling;
   };
 
-  /** GET /api/studio/admin/content?days=7|30|90|all&tz=-480&pre=1&internal=1: the page's numbers. */
+  /** GET /api/studio/admin/content?days=7|30|90|all&tz=-480&hide_pre=1&internal=1: the page's numbers. */
   app.get("/api/studio/admin/content", async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     try {
@@ -56,7 +56,7 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
       const now = deps.now?.() ?? Date.now();
       if (!cache || now - cache.at > 60_000 || req.query.fresh === "1") cache = { at: now, data: await load(sb, { since: now - 400 * 86400_000, isInternal: (e) => isInternalEmail(e, env) }) };
       const tracking = cache.data.accounts.map((a) => a.tracking_since).filter(Boolean).sort()[0] ?? null;
-      const summary = summarize({ ...cache.data, range: rangeFor(days, tz, now, tracking), include_pre: req.query.pre === "1", include_internal: req.query.internal === "1" });
+      const summary = summarize({ ...cache.data, range: rangeFor(days, tz, now, tracking), hide_pre: req.query.hide_pre === "1", include_internal: req.query.internal === "1" });
       const signed = await signAll(sb, [...summary.videos.map((v) => v.thumb_key!), ...summary.accounts.map((a) => a.avatar_key!)]);
       for (const v of summary.videos) v.thumb_url = v.thumb_key ? signed.get(v.thumb_key) ?? null : null;
       for (const v of summary.now) v.thumb_url = v.thumb_key ? signed.get(v.thumb_key) ?? null : null;

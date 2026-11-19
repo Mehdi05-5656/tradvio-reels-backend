@@ -28,6 +28,10 @@ export const FEATURE_IDS = new Set(FEATURES.map((f) => f[0]));
 export const HOUR = 3600_000, DAY = 86400_000;
 /** Hourly while a video is under this old; every 4 hours otherwise. Followers once a day. */
 export const FRESH_MS = 48 * HOUR, HOT_INTERVAL_MS = HOUR, QUIET_INTERVAL_MS = 4 * HOUR, PROFILE_INTERVAL_MS = 20 * HOUR;
+/** Every video the account ever posted is read on the first pull and once a day after (the deep read, up to DEEP_PAGES
+ *  pages); the hourly pulls read the newest HOT_PAGES pages, where the moving videos are. The owner's rule (Nov 18 2026):
+ *  every video is tracked from day one, old ones included; only the views they had before our first reading are unused. */
+export const DEEP_INTERVAL_MS = 24 * HOUR, DEEP_PAGES = 25, HOT_PAGES = 2;
 const SC = "https://api.scrapecreators.com";
 const COUNTS = ["views", "likes", "comments", "shares", "saves"] as const;
 type Counts = Record<(typeof COUNTS)[number], number | null>;
@@ -37,7 +41,7 @@ export type AccountRow = {
   id: string; platform: Platform; handle: string; url: string | null; display_name: string | null; owner_kind: "ours" | "creator";
   cost_usd_per_video: number | null; cost_usd_per_month: number | null; default_feature: string | null; enabled: boolean;
   tracking_since: string | null; followers: number | null; avatar_key: string | null; latest_posted_at: string | null;
-  last_pulled_at: string | null; last_profile_at: string | null; last_status: string | null; last_error: string | null;
+  last_pulled_at: string | null; last_profile_at: string | null; last_deep_at?: string | null; last_status: string | null; last_error: string | null;
 };
 export type VideoRow = {
   id: string; account_id: string; platform: string; platform_post_id: string; url: string; caption: string | null; posted_at: string | null; duration_s: number | null;
@@ -72,11 +76,28 @@ async function scGet(deps: Deps, path: string): Promise<any> {
 }
 
 /** The newest page of an account's videos. */
-export async function readVideos(deps: Deps, platform: Platform, handle: string): Promise<PerfPost[]> {
+export async function readVideos(deps: Deps, platform: Platform, handle: string, pages = 1): Promise<PerfPost[]> {
   const h = encodeURIComponent(handle.replace(/^@/, ""));
-  if (platform === "tiktok") return parseTikTokPosts(await scGet(deps, `/v3/tiktok/profile/videos?handle=${h}`), handle.replace(/^@/, ""));
-  if (platform === "instagram") return parseInstagramPosts(await scGet(deps, `/v1/instagram/user/reels?handle=${h}`));
-  return parseYouTubeShorts(await scGet(deps, `/v1/youtube/channel/shorts?handle=${h}&sort=newest`));
+  const posts: PerfPost[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < pages; i++) {
+    if (platform === "tiktok") {
+      const r = await scGet(deps, `/v3/tiktok/profile/videos?handle=${h}${cursor ? `&max_cursor=${encodeURIComponent(cursor)}` : ""}`);
+      posts.push(...parseTikTokPosts(r, handle.replace(/^@/, "")));
+      cursor = r?.has_more && r?.max_cursor ? String(r.max_cursor) : null;
+    } else if (platform === "instagram") {
+      const r = await scGet(deps, `/v1/instagram/user/reels?handle=${h}${cursor ? `&max_id=${encodeURIComponent(cursor)}` : ""}`);
+      posts.push(...parseInstagramPosts(r));
+      cursor = r?.paging_info?.more_available && r?.paging_info?.max_id ? String(r.paging_info.max_id) : r?.more_available && r?.next_max_id ? String(r.next_max_id) : null;
+    } else {
+      const r = await scGet(deps, `/v1/youtube/channel/shorts?handle=${h}&sort=newest${cursor ? `&continuationToken=${encodeURIComponent(cursor)}` : ""}`);
+      posts.push(...parseYouTubeShorts(r));
+      cursor = r?.continuationToken ? String(r.continuationToken) : null;
+    }
+    if (!cursor) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return posts;
 }
 /** Followers, the display name and the avatar. A failure here never fails the pull: the videos matter more. */
 export async function readProfile(deps: Deps, platform: Platform, handle: string): Promise<{ followers: number | null; display_name: string | null; avatar_url: string | null } | null> {
@@ -127,7 +148,8 @@ export async function pullContent(sb: SupabaseClient, deps: Deps = {}, opts: { f
   const due = ((q.data ?? []) as AccountRow[]).filter((a) => (opts.accountIds ? opts.accountIds.includes(a.id) : true) && (opts.force || isDue(a, now)));
   for (const a of due) {
     try {
-      const posts = await readVideos(deps, a.platform, a.handle);
+      const deep = !a.last_deep_at || now - Date.parse(a.last_deep_at) >= DEEP_INTERVAL_MS;
+      const posts = await readVideos(deps, a.platform, a.handle, deep ? DEEP_PAGES : HOT_PAGES);
       const tracking = a.tracking_since ?? new Date(now).toISOString();
       const have = await sb.from("content_videos").select("id,platform_post_id,views,likes,comments,shares,saves,thumb_key").eq("account_id", a.id);
       if (have.error) throw have.error;
@@ -159,7 +181,7 @@ export async function pullContent(sb: SupabaseClient, deps: Deps = {}, opts: { f
         }
       }
       // the profile once a day: followers, the name and the avatar; the daily account row even when the profile call failed
-      const patch: Record<string, any> = { tracking_since: tracking, last_pulled_at: new Date(now).toISOString(), last_status: `ok: ${uniq.length} videos read`, last_error: null, latest_posted_at: latestPosted ? new Date(latestPosted).toISOString() : a.latest_posted_at, updated_at: new Date(now).toISOString() };
+      const patch: Record<string, any> = { tracking_since: tracking, last_pulled_at: new Date(now).toISOString(), last_status: `ok: ${uniq.length} videos read${deep ? " (every page)" : ""}`, last_error: null, ...(deep ? { last_deep_at: new Date(now).toISOString() } : {}), latest_posted_at: latestPosted ? new Date(latestPosted).toISOString() : a.latest_posted_at, updated_at: new Date(now).toISOString() };
       let followers = a.followers;
       if (!a.last_profile_at || now - Date.parse(a.last_profile_at) >= PROFILE_INTERVAL_MS) {
         const prof = await readProfile(deps, a.platform, a.handle);
@@ -265,12 +287,13 @@ const localHour = (t: number, off: number) => new Date(t + off * 60_000).getUTCH
 const localWeekday = (t: number, off: number) => new Date(t + off * 60_000).getUTCDay();
 const startOfLocalDay = (t: number, off: number) => { const d = new Date(t + off * 60_000); d.setUTCHours(0, 0, 0, 0); return d.getTime() - off * 60_000; };
 
-export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; snapshots: SnapshotRow[]; account_snapshots: AccountSnapshotRow[]; signups: SignupRow[]; pulls?: Array<{ at: string; usd: number }>; range: Range; include_pre?: boolean; include_internal?: boolean }): Summary {
+export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; snapshots: SnapshotRow[]; account_snapshots: AccountSnapshotRow[]; signups: SignupRow[]; pulls?: Array<{ at: string; usd: number }>; range: Range; hide_pre?: boolean; include_internal?: boolean }): Summary {
   const { range } = input, off = range.tz_offset_min, until = range.until, since = range.since, prevSince = since - (until - since);
   const accounts = input.accounts, byAccount = new Map(accounts.map((a) => [a.id, a]));
   const snapsBy = new Map<string, SnapshotRow[]>();
   for (const s of input.snapshots) { const l = snapsBy.get(s.video_id) ?? []; l.push(s); snapsBy.set(s.video_id, l); }
-  const videos = input.videos.filter((v) => byAccount.has(v.account_id) && !v.hidden && (input.include_pre || !v.pre_tracking));
+  // every video counts from its first reading, the ones posted before tracking too (the owner's rule); hide_pre leaves those out
+  const videos = input.videos.filter((v) => byAccount.has(v.account_id) && !v.hidden && !(input.hide_pre && v.pre_tracking));
   const signups = input.signups.filter((s) => input.include_internal || !s.internal);
   const handleKey = (p: string | null | undefined, h: string | null | undefined) => `${String(p ?? "").toLowerCase()}:${String(h ?? "").toLowerCase().replace(/^@/, "")}`;
   const accountByKey = new Map(accounts.map((a) => [handleKey(a.platform, a.handle), a]));

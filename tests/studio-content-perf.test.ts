@@ -40,7 +40,7 @@ test("summarize: gains are latest minus the baseline (never lifetime); pre-track
   const v1 = video("1", { views: 5000, likes: 400 }), v2 = video("2", { views: 300 }), pre = video("3", { pre_tracking: true, posted_at: iso(NOW - 30 * DAY), base_views: 900000, views: 950000 });
   const snapshots = [snap("1", NOW - 2 * DAY, 100), snap("1", NOW - DAY, 1500, 120), snap("1", NOW - 2 * HOUR, 4200, 300), snap("1", NOW - 30 * 60_000, 5000, 400), snap("2", NOW - 2 * DAY, 100), snap("2", NOW - DAY, 400), snap("2", NOW - HOUR, 300), snap("3", NOW - DAY, 950000)];
   const base = { accounts: [account()], videos: [v1, v2, pre], snapshots, account_snapshots: [], signups: [] as SignupRow[] };
-  const s = summarize({ ...base, range: rangeFor(7, PT, NOW) });
+  const s = summarize({ ...base, range: rangeFor(7, PT, NOW), hide_pre: true });
   assert.equal(s.kpis.views, 4900 + 200, "v1 gained 4,900 since its first reading; v2 is at 300 against a baseline of 100, its drop from 400 is never subtracted");
   const o1 = s.videos.find((v) => v.id === "1")!;
   assert.equal(o1.gain.views, 4900); assert.equal(o1.velocity_1h, 800, "the last hour: 4,200 to 5,000"); assert.equal(o1.velocity_24h, 3500);
@@ -48,11 +48,12 @@ test("summarize: gains are latest minus the baseline (never lifetime); pre-track
   const o2 = s.videos.find((v) => v.id === "2")!;
   assert.equal(o2.gain.views, 200); assert.equal(o2.gain.revised, true);
   assert.ok(s.notes.some((n) => /revised a count downward/.test(n)));
-  assert.equal(s.videos.length, 2, "the pre-tracking video is left out");
+  assert.equal(s.videos.length, 2, "hide_pre leaves the video posted before tracking out");
   assert.equal(s.accounts[0].videos_pre, 1);
-  const withPre = summarize({ ...base, range: rangeFor(7, PT, NOW), include_pre: true });
-  assert.equal(withPre.videos.length, 3);
-  assert.equal(withPre.videos.find((v) => v.id === "3")!.gain.views, 50000, "even included, only the gain since its first reading counts, never the 950,000");
+  const withPre = summarize({ ...base, range: rangeFor(7, PT, NOW) });
+  assert.equal(withPre.videos.length, 3, "by default every video counts, the ones posted before tracking too");
+  assert.equal(withPre.videos.find((v) => v.id === "3")!.gain.views, 50000, "only the gain since its first reading counts, never the 950,000");
+  assert.equal(withPre.kpis.views, 5100 + 50000);
   assert.equal(s.now[0].id, "1", "pulling views now: the biggest 24-hour gain first");
   assert.equal(s.daily.length, 7);
   assert.ok(s.daily.reduce((a, d) => a + d.views, 0) >= s.kpis.views, "the days add up to at least the total (a day never goes below zero, so a revision can make them add up to more)");
@@ -175,10 +176,11 @@ test("pull: the first reading sets the baseline and tracking_since; a changed co
   const a = tables.content_accounts[0];
   assert.equal(a.tracking_since, iso(NOW)); assert.equal(a.followers, 1234); assert.equal(a.display_name, "BTY"); assert.equal(a.avatar_key, "content/avatars/tiktok-bty.clips.jpg");
   const v = tables.content_videos.find((x) => x.platform_post_id === "7000000000000000001");
-  assert.equal(v.base_views, 1000); assert.equal(v.views, 1000); assert.equal(v.pre_tracking, true, "posted before this first reading: pre-tracking");
+  assert.equal(v.base_views, 1000); assert.equal(v.views, 1000); assert.equal(v.pre_tracking, true, "posted before this first reading: pre-tracking (still counted from here on)");
+  assert.equal(a.last_deep_at, iso(NOW)); assert.match(a.last_status, /every page/);
   assert.equal(v.thumb_key, "content/tiktok/7000000000000000001.jpg");
   assert.equal(tables.content_account_snapshots.length, 1);
-  assert.equal(net.calls.filter((c) => c.includes("scrapecreators")).length, 2, "one page of videos and one profile");
+  assert.equal(net.calls.filter((c) => c.includes("scrapecreators")).length, 2, "one page of videos (the fake has no more) and one profile");
   // an hour later: one video moved
   const net2 = fakeNet({ "7000000000000000001": 1400, "7000000000000000002": 50 });
   const r2 = await pullContent(sb, { env: ENV, fetch: net2.f, log: () => {}, now: () => NOW + HOUR }, { force: true });
@@ -186,6 +188,7 @@ test("pull: the first reading sets the baseline and tracking_since; a changed co
   assert.equal(tables.content_snapshots.length, 3);
   assert.equal(v.views, 1400); assert.equal(v.base_views, 1000, "the baseline never moves");
   assert.equal(net2.calls.filter((c) => c.includes("/v1/tiktok/profile?")).length, 0, "the profile is read once a day");
+  assert.equal(tables.content_accounts[0].last_deep_at, iso(NOW), "the deep read is once a day too");
   assert.equal(tables.content_accounts[0].last_status, "ok: 2 videos read");
 });
 
@@ -220,7 +223,7 @@ test("routes: the owner's account only; the page's numbers come signed; an accou
     assert.equal(tables.content_videos.length, 1);
     const bad = await fetch(`${base}/api/studio/admin/content/accounts`, { method: "POST", headers: { "content-type": "application/json", "x-who": "me" }, body: JSON.stringify({ link: "https://x.com/nope" }) });
     assert.equal(bad.status, 400);
-    const page = await fetch(`${base}/api/studio/admin/content?days=7&tz=-480&pre=1`, { headers: { "x-who": "me" } });
+    const page = await fetch(`${base}/api/studio/admin/content?days=7&tz=-480`, { headers: { "x-who": "me" } });
     assert.equal(page.status, 200);
     const body = await page.json();
     assert.equal(body.accounts.length, 1); assert.equal(body.accounts[0].avatar_url, "https://signed/content/avatars/tiktok-bty.clips.jpg");
