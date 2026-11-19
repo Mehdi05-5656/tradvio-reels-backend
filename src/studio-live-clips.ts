@@ -270,7 +270,7 @@ export type StreamDeps = ClipsDeps & LiveDeps & {
   fetchStretch?: (url: string, start: number, seconds: number, target: string) => Promise<void>;
   cut?: (ctx: CutCtx, m: Moment) => Promise<{ asset_id: string; bytes: number; seconds: number }>;
   /** for tests: whether ffmpeg has drawtext, without asking it */ drawtext?: boolean;
-  facecam?: (jpg: Buffer) => Promise<FacecamBox | null>;
+  facecam?: (jpg: Buffer) => Promise<Layout | FacecamBox | null>;
 };
 async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>) {
   const next = { ...progress };
@@ -326,18 +326,33 @@ async function verifyWithClaude(deps: StreamDeps, input: { lines: Line[]; stills
 // (the first live run, Nov 18 2026). One look at a still finds the facecam box; the graph stacks the two.
 // ---------------------------------------------------------------------------------------------------
 export type FacecamBox = { x: number; y: number; w: number; h: number };
-export const FACECAM_SCHEMA = { type: "object", additionalProperties: false, required: ["present", "x", "y", "w", "h"],
-  properties: { present: { type: "boolean" }, x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } } };
-export const FACECAM_PROMPT = `This is a frame from a live stream. Is there a webcam box (the streamer's camera feed, a rectangle showing a person, usually in a corner over the game or the screen)? If yes, give its box as fractions of the frame: x and y are the top-left corner (0-1 from the left and from the top), w and h its width and height (0-1). Be exact about the edges of the box, including any border. If the whole frame is the person (no game or screen), or there is no camera box, answer present false with zeros.`;
-/** The facecam box on a still, by Haiku; null when there is none or the answer is not a box worth stacking. */
-export async function findFacecam(deps: ClipsDeps, jpg: Buffer, userId?: string): Promise<FacecamBox | null> {
+/** What one still says about the picture: the camera box (null when there is none worth stacking) and the content
+ *  box, the thing being watched (the game viewport, the chess board, the page), null when it is the whole frame. */
+export type Layout = { cam: FacecamBox | null; content: FacecamBox | null };
+const BOX = { type: "object", additionalProperties: false, required: ["present", "x", "y", "w", "h"], properties: { present: { type: "boolean" }, x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } } };
+export const FACECAM_SCHEMA = { type: "object", additionalProperties: false, required: ["cam", "content"], properties: { cam: BOX, content: BOX } };
+export const FACECAM_PROMPT = `This is a frame from a live stream. Give two boxes, each as fractions of the frame: x and y are the top-left corner (0-1 from the left and from the top), w and h the width and height (0-1).
+1. cam: the webcam box (the streamer's camera feed, a rectangle showing a person, usually in a corner over the game or the screen). Be exact about its edges, including any border. If the whole frame is the person (no game or screen), or there is no camera box, answer present false with zeros.
+2. content: the thing being watched, excluding the webcam box, chat panels, alert bars, overlays and empty borders: the game's viewport, a chess board with its clocks, a browser page or a video player. If the content fills the frame, answer present false with zeros.`;
+/** The layout of a still, by Haiku: the facecam box (null when none, or not a box worth stacking) and the content box. */
+export async function findLayout(deps: ClipsDeps, jpg: Buffer, userId?: string): Promise<Layout> {
   const env = deps.env ?? process.env;
   const out = await claudeJson(deps, {
     model: env.STUDIO_CLIPS_FRAME_MODEL || "claude-haiku-5-5", max_tokens: 400,
     output_config: { effort: "low", format: { type: "json_schema", schema: FACECAM_SCHEMA } },
     messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpg.toString("base64") } }, { type: "text", text: FACECAM_PROMPT }] }],
   }, "live_clips_facecam", userId);
-  return cleanFacecam(out);
+  return { cam: cleanFacecam(out?.cam), content: cleanContent(out?.content) };
+}
+/** The content box: at least a third of the frame each way, inside it; else the whole frame (null). */
+export function cleanContent(out: any): FacecamBox | null {
+  if (!out?.present) return null;
+  const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
+  const b = { x: n(out.x), y: n(out.y), w: n(out.w), h: n(out.h) };
+  if ([b.x, b.y, b.w, b.h].some((v) => !Number.isFinite(v))) return null;
+  if (b.w < 0.33 || b.h < 0.33 || b.x < 0 || b.y < 0 || b.x + b.w > 1.02 || b.y + b.h > 1.02) return null;
+  if (b.w > 0.95 && b.h > 0.95) return null;
+  return { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(b.w, 1 - Math.max(0, b.x)), h: Math.min(b.h, 1 - Math.max(0, b.y)) };
 }
 export function cleanFacecam(out: any): FacecamBox | null {
   if (!out?.present) return null;
@@ -349,14 +364,16 @@ export function cleanFacecam(out: any): FacecamBox | null {
   return { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(b.w, 1 - Math.max(0, b.x)), h: Math.min(b.h, 1 - Math.max(0, b.y)) };
 }
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
-/** The 720x1280 graph: the facecam box scaled to the full width on top (its own shape, 300-520 lines), the game
- *  scaled to the rest and cropped to the middle, frame rate capped at 30. */
-export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox): string {
+/** The 720x1280 graph: the facecam box scaled to the full width on top (its own shape, 300-600 lines, cropped from a
+ *  third of the way down so a face is never cut at the forehead), the content box (or the whole picture) scaled to
+ *  the rest and cropped to its middle, frame rate capped at 30. */
+export function stackedFilter(info: { w: number; h: number; fps: number | null }, cam: FacecamBox, content: FacecamBox | null = null): string {
   const cw = even(cam.w * info.w), ch = even(cam.h * info.h), cx = even(cam.x * info.w), cy = even(cam.y * info.h);
-  const camH = even(Math.max(300, Math.min(520, 720 * ch / Math.max(1, cw))));
+  const camH = even(Math.max(300, Math.min(600, 720 * ch / Math.max(1, cw))));
   const gameH = 1280 - camH;
   const fps = info.fps && info.fps > 30.5 ? ",fps=30" : "";
-  return `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=720:${camH}:force_original_aspect_ratio=increase,crop=720:${camH}[cam];[g]scale=-2:${gameH},crop=720:${gameH}:(iw-720)/2:0[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
+  const focus = content ? `crop=${even(content.w * info.w)}:${even(content.h * info.h)}:${even(content.x * info.w)}:${even(content.y * info.h)},` : "";
+  return `[0:v]split=2[c][g];[c]crop=${cw}:${ch}:${cx}:${cy},scale=720:${camH}:force_original_aspect_ratio=increase,crop=720:${camH}:0:(ih-${camH})*0.3[cam];[g]${focus}scale=720:${gameH}:force_original_aspect_ratio=increase,crop=720:${gameH}[game];[cam][game]vstack,setsar=1${fps},format=yuv420p[v]`;
 }
 /** Whether this server's ffmpeg has the drawtext filter (Render's Debian build does; a Homebrew build may not). Read once. */
 let drawtextOk: Promise<boolean> | null = null;
@@ -478,7 +495,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const ctxBase: CutCtx = { sb, deps, u, dir, src: { video: "", audio: null, proxy: null, width: 0, height: 0, fps: null }, format, collectionId, sourceTitle: b.title || null, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null, overlay: null };
     const stretchOf = deps.fetchStretch ?? fetchStretchCopy;
     const skipped: number[] = [];
-    let facecam: FacecamBox | null | undefined; // (looked for once per run: a stream's camera box stays where it is)
+    // the layout is looked at once per clip, on a still from its own stretch: the first live runs (Nov 18 2026) looked
+    // once per run and three Rainbow Six clips wore the chess scene's camera box, a slice of the game where the face was
+    const asLayout = (r: Layout | FacecamBox | null): Layout => (r && "cam" in r ? r : { cam: r as FacecamBox | null, content: null });
     for (const m of todo) {
       if (job.signal?.aborted) throw new ClipsError("lease_lost", "lease lost");
       const from = Math.max(0, m.start - 2), file = join(dir, `st${m.rank}.mp4`);
@@ -489,12 +508,10 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         // framing: "person" = Clips' own; "stacked" or "auto" = the facecam on top when one is found on the stretch
         let layout: CutCtx["layout"] = null;
         if (format === "vertical" && framingOf(st.framing) !== "person") {
-          if (facecam === undefined) {
-            const still = (await stills(file, [Math.min(3, Math.max(0.5, m.start - from + 1))], dir, `fc${m.rank}`))[0];
-            facecam = still ? await (deps.facecam ?? ((jpg) => findFacecam(deps, jpg, u)))(still.jpg).catch(() => null) : null;
-            log(`[live] facecam ${JSON.stringify({ job: job.id, found: !!facecam, box: facecam })}`);
-          }
-          if (facecam) { const box = facecam; layout = (info) => stackedFilter(info, box); }
+          const still = (await stills(file, [Math.max(0.5, (m.start - from) + (m.end - m.start) / 2)], dir, `fc${m.rank}`))[0];
+          const lay = still ? asLayout(await (deps.facecam ?? ((jpg) => findLayout(deps, jpg, u)))(still.jpg).catch(() => null)) : { cam: null, content: null };
+          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content })}`);
+          if (lay.cam) { const { cam, content } = lay; layout = (info) => stackedFilter(info, cam, content); }
         }
         const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout }, m);
         made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds }); cutTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - tc) / 100) / 10]);

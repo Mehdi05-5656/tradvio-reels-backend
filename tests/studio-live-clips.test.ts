@@ -183,11 +183,21 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
 });
 
 test("stacked framing: the facecam box on top at its own shape, the game under it, 1280 lines in all", async () => {
-  const { stackedFilter, cleanFacecam } = await import("../src/studio-live-clips.js");
+  const { stackedFilter, cleanFacecam, cleanContent } = await import("../src/studio-live-clips.js");
   const g = stackedFilter({ w: 1920, h: 1080, fps: 60 }, { x: 0.02, y: 0.7, w: 0.25, h: 0.28 });
-  assert.match(g, /crop=480:302:38:756,scale=720:454:force_original_aspect_ratio=increase,crop=720:454\[cam\]/);
-  assert.match(g, /scale=-2:826,crop=720:826:\(iw-720\)\/2:0\[game\]/);
+  // the camera panel is cropped from a third of the way down, never the middle: a face sits high in its box
+  assert.match(g, /crop=480:302:38:756,scale=720:454:force_original_aspect_ratio=increase,crop=720:454:0:\(ih-454\)\*0\.3\[cam\]/);
+  assert.match(g, /\[g\]scale=720:826:force_original_aspect_ratio=increase,crop=720:826\[game\]/);
   assert.match(g, /vstack,setsar=1,fps=30,format=yuv420p\[v\]$/);
+  // a tall camera box (jynxzi's, Nov 18 2026: 507x472 on 1920x1080) is not squeezed under 520 lines any more
+  assert.match(stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.736, y: 0.563, w: 0.264, h: 0.437 }), /scale=720:600:/);
+  // with a content box (a chess board beside its move list), the game panel is cut from that box first
+  const g2 = stackedFilter({ w: 1920, h: 1080, fps: 30 }, { x: 0.736, y: 0.563, w: 0.264, h: 0.437 }, { x: 0.05, y: 0.08, w: 0.5, h: 0.85 });
+  assert.match(g2, /\[g\]crop=960:918:96:86,scale=720:680:force_original_aspect_ratio=increase,crop=720:680\[game\]/);
+  assert.equal(cleanContent({ present: false, x: 0, y: 0, w: 0, h: 0 }), null);
+  assert.equal(cleanContent({ present: true, x: 0, y: 0, w: 0.98, h: 0.98 }), null, "the whole frame is no content box");
+  assert.equal(cleanContent({ present: true, x: 0.7, y: 0.6, w: 0.2, h: 0.2 }), null, "a corner is too small to be the content");
+  assert.deepEqual(cleanContent({ present: true, x: 0.05, y: 0.08, w: 0.5, h: 0.85 }), { x: 0.05, y: 0.08, w: 0.5, h: 0.85 });
   assert.equal(cleanFacecam({ present: false, x: 0, y: 0, w: 0, h: 0 }), null);
   assert.equal(cleanFacecam({ present: true, x: 0, y: 0, w: 0.9, h: 0.9 }), null, "the whole frame is not a corner camera");
   assert.deepEqual(cleanFacecam({ present: true, x: 0.02, y: 0.7, w: 0.25, h: 0.28 }), { x: 0.02, y: 0.7, w: 0.25, h: 0.28 });
