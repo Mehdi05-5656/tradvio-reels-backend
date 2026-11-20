@@ -44,6 +44,25 @@ test("a stream run (Live Clips): transcription is the windows it heard, Claude i
   assert.ok(r.cost.total < 0.3 && r.margin! > 0.8, `margin ${r.margin} on $${r.cost.total}`);
 });
 
+test("a stream run says how its hearing went; an hour not read or a window not heard is an alert; the digest has a Live Clips line", () => {
+  const runs = clipsRuns([job("h", "u1", { options: { seconds: 33769, count: 5, stream: { platform: "twitch" } }, credits_charged: 170, credits_reserved: 170 }), job("k", "u1", { options: { seconds: 33769, count: 5, stream: { platform: "twitch" } }, credits_charged: 170, credits_reserved: 170 })], [
+    { ...doneEvt("h"), props: { job: "h", asked: 5, clips: 4, stream: true, timing: { video_s: 33769, chat_messages: 60000, hours: [2, 6], hours_read: [2], checked: 28, unheard: 17, deferred: 9, picked: 7, clips: 4, run_s: 1673, eta_s: 1216 } } },
+    { ...doneEvt("k"), props: { job: "k", asked: 5, clips: 5, stream: true, timing: { video_s: 33769, chat_messages: 60000, hours: [0, 3], hours_read: [0, 3], checked: 9, unheard: 0, deferred: 0, picked: 17, clips: 5, run_s: 676, eta_s: 1211 } } },
+    ev("groq_whisper", "vendor", "u1", 0.04, 1, { use: "live_clips_hour" }), ev("elevenlabs_scribe", "vendor", "u1", 0.075, 2, { use: "live_clips" }), ev("live_clips_verify", "claude", "u1", 0.13, 3), ev("clips_choose", "claude", "u1", 0.018, 3.5),
+  ], T + 3600_000);
+  const [h, k] = runs;
+  assert.deepEqual(h.stream, { hours: 2, hours_read: 1, checked: 28, unheard: 17, deferred: 9, picked: 7 });
+  assert.deepEqual(k.stream, { hours: 2, hours_read: 2, checked: 9, unheard: 0, deferred: 0, picked: 17 });
+  assert.equal(k.took_s, 676, "a stream run's time is its run_s");
+  const alerts = clipsAlerts(runs, [], 0, {} as any);
+  const hearing = alerts.filter((a) => a.key === "clips_hearing");
+  assert.equal(hearing.length, 1, `only the run that lost hearing: ${alerts.map((a) => `${a.key}:${a.job}`)}`); assert.equal(hearing[0].job, "h");
+  assert.match(hearing[0].text, /1 of 2 hours not read, 17 windows not heard/); assert.match(hearing[0].text, /hours read 1\/2, 28 checks, 17 unheard/);
+  const s = clipsSummary(runs);
+  assert.equal(s.streams.runs, 2); assert.equal(s.streams.clips, 9); assert.equal(s.streams.credits, 340); assert.equal(s.streams.hours_not_read, 1); assert.equal(s.streams.unheard, 17);
+  assert.match(digestText(s, runs, 24).text, /Live Clips: 2 stream runs, 9 clips, 340 credits, cost \$[0-9.]+, margin [0-9]+ %; 1 hours not read, 17 windows not heard\./);
+});
+
 test("alerts: our failures, fallbacks, thin margins, slow and stuck runs; never the person's own unusable video", () => {
   const jobs = [
     job("ok", "u1"),

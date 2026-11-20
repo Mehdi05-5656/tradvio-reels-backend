@@ -45,6 +45,8 @@ export type ClipsRun = {
   lean: boolean; fallback: boolean; retries: number; proxy_mb: number | null;
   cost: { proxy: number; claude: number; transcribe: number; total: number }; margin: number | null;
   eta_s: number | null; took_s: number | null; running_s: number | null;
+  /** a Live Clips run (a past stream): how its hearing went; null for a video run */
+  stream: { hours: number; hours_read: number; checked: number; unheard: number; deferred: number; picked: number } | null;
 };
 export type ClipsAlert = { key: string; job: string | null; subject: string; text: string };
 
@@ -81,8 +83,10 @@ export function clipsRuns(jobs: any[], events: any[], now = Date.now(), plans = 
       proxy_mb: p.bytes ? Math.round(p.bytes / 1e5) / 10 : (t.fetch_mb ?? null),
       cost: { proxy: r2(p.usd), claude: r2(cl), transcribe: r2(transcribe), total: r2(total) },
       margin: revenue > 0 ? Math.round(((revenue - total) / revenue) * 100) / 100 : null,
-      eta_s: Number(t.eta_s ?? o.eta_seconds) || null, took_s: Number(t.total_s) || null,
+      eta_s: Number(t.eta_s ?? o.eta_seconds) || null, took_s: Number(t.total_s ?? t.run_s) || null,
       running_s: j.status === "running" || j.status === "queued" ? Math.round((now - start) / 1000) : null,
+      // (hours_read came with the watch of Nov 19 2026; an older run says only whether any hour's words came back)
+      stream: stream && d ? { hours: Array.isArray(t.hours) ? t.hours.length : 0, hours_read: Array.isArray(t.hours_read) ? t.hours_read.length : (Number(t.hour_words) > 0 && Array.isArray(t.hours) ? t.hours.length : 0), checked: Number(t.checked) || 0, unheard: Number(t.unheard) || 0, deferred: Number(t.deferred) || 0, picked: Number(t.picked) || 0 } : null,
     };
   });
 }
@@ -90,13 +94,16 @@ export function clipsRuns(jobs: any[], events: any[], now = Date.now(), plans = 
 /** What is worth an email about these runs (those finished, or going, since `since`). Pure. */
 export function clipsAlerts(runs: ClipsRun[], paused: any[], since: number, env: Env = process.env): ClipsAlert[] {
   const out: ClipsAlert[] = [], min = minMargin(env), id = (r: ClipsRun) => r.job.slice(0, 8);
-  const line = (r: ClipsRun) => `Run ${r.job} (${r.minutes ?? "?"} min video, ${r.clips ?? 0} of ${r.asked ?? "?"} clips, ${r.credits} credits, cost $${r.cost.total.toFixed(2)}${r.margin != null ? `, margin ${Math.round(r.margin * 100)} %` : ""})`;
+  const line = (r: ClipsRun) => `Run ${r.job} (${r.minutes ?? "?"} min ${r.stream ? "stream" : "video"}, ${r.clips ?? 0} of ${r.asked ?? "?"} clips, ${r.credits} credits, cost $${r.cost.total.toFixed(2)}${r.margin != null ? `, margin ${Math.round(r.margin * 100)} %` : ""}${r.stream ? `; hours read ${r.stream.hours_read}/${r.stream.hours}, ${r.stream.checked} checks, ${r.stream.unheard} unheard` : ""})`;
   for (const r of runs) {
     const fin = ms(r.finished_at);
     if (Number.isFinite(fin) && fin > since) {
       if (r.status === "failed" && r.ours) out.push({ key: "clips_failed", job: r.job, subject: `Clips run failed (${r.code})`, text: `${line(r)} failed with ${r.code}. The person was refunded. Its log: search the backend logs for ${id(r)}.` });
       if (r.fallback) out.push({ key: "clips_fallback", job: r.job, subject: "Clips: a lean run fell back to the whole download", text: `${line(r)} could not fetch its clips' stretches and downloaded the whole video (${r.proxy_mb ?? "?"} MB through the proxy, $${r.cost.proxy.toFixed(2)}), charged at the lean price. Two of these in ten lean runs pause lean for an hour by itself.` });
       if (r.margin != null && r.margin < min && r.status === "done") out.push({ key: "clips_margin", job: r.job, subject: `Clips run under ${Math.round(min * 100)} % margin`, text: `${line(r)}: proxy $${r.cost.proxy.toFixed(2)}, Claude $${r.cost.claude.toFixed(2)}, transcription ~$${r.cost.transcribe.toFixed(2)} against $${r.revenue_usd.toFixed(2)} at the cheapest credit.` });
+      // a stream run whose hearing failed in part: an hour the cheap door did not read, or windows Scribe did not hear
+      // (the run goes on without them, quietly; the first cheap-door run of Nov 19 2026 lost an hour and 17 windows to a rate limit)
+      if (r.stream && r.status === "done" && (r.stream.hours_read < r.stream.hours || r.stream.unheard > 0)) out.push({ key: "clips_hearing", job: r.job, subject: "Live Clips: part of a run was not heard", text: `${line(r)}: ${r.stream.hours - r.stream.hours_read} of ${r.stream.hours} hours not read${r.stream.unheard ? `, ${r.stream.unheard} windows not heard` : ""}. The run finished without them (fewer or weaker clips). Its log: search the backend logs for ${id(r)} and "not read" or "not heard" (a Groq rate limit, a Scribe refusal).` });
       if (r.eta_s && r.took_s && r.took_s > 2 * r.eta_s && r.took_s - r.eta_s > 600) out.push({ key: "clips_slow", job: r.job, subject: "Clips run took over twice its estimate", text: `${line(r)} took ${Math.round(r.took_s / 60)} min; the page said ${Math.round(r.eta_s / 60)} min.` });
     }
     if (r.running_s != null && r.running_s > 1200 && r.running_s > 3 * (r.eta_s ?? 600)) out.push({ key: "clips_stuck", job: r.job, subject: "Clips run looks stuck", text: `${line(r)} has been going ${Math.round(r.running_s / 60)} min; its estimate was ${r.eta_s ? Math.round(r.eta_s / 60) : "?"} min.` });
@@ -111,6 +118,7 @@ export function clipsSummary(runs: ClipsRun[]) {
   const ok = fin.filter((r) => r.status === "done"), lean = ok.filter((r) => r.lean);
   const sum = (v: number[]) => r2(v.reduce((a, b) => a + b, 0));
   const cost = sum(fin.map((r) => r.cost.total)), revenue = sum(fin.map((r) => r.revenue_usd));
+  const streams = ok.filter((r) => r.stream), sRev = sum(streams.map((r) => r.revenue_usd)), sCost = sum(streams.map((r) => r.cost.total));
   const etaErr = ok.filter((r) => r.eta_s && r.took_s).map((r) => Math.round(((r.took_s! - r.eta_s!) / r.eta_s!) * 100));
   return {
     runs: runs.length, done: ok.length, fewer: ok.filter((r) => r.clips != null && r.asked != null && r.clips < r.asked).length,
@@ -122,6 +130,7 @@ export function clipsSummary(runs: ClipsRun[]) {
     cost_usd: { total: cost, proxy: sum(fin.map((r) => r.cost.proxy)), claude: sum(fin.map((r) => r.cost.claude)), transcribe: sum(fin.map((r) => r.cost.transcribe)) },
     margin: revenue > 0 ? Math.round(((revenue - cost) / revenue) * 100) / 100 : null,
     lowest_margin: ok.filter((r) => r.margin != null).sort((a, b) => a.margin! - b.margin!)[0]?.margin ?? null,
+    streams: { runs: streams.length, clips: sum(streams.map((r) => r.clips ?? 0)), credits: sum(streams.map((r) => r.credits)), cost_usd: sCost, margin: sRev > 0 ? Math.round(((sRev - sCost) / sRev) * 100) / 100 : null, hours_not_read: sum(streams.map((r) => r.stream!.hours - r.stream!.hours_read)), unheard: sum(streams.map((r) => r.stream!.unheard)) },
     eta_error_pct_median: median(etaErr), minutes_median: median(ok.filter((r) => r.took_s).map((r) => Math.round(r.took_s! / 6) / 10)),
     codes: Object.fromEntries([...fin.reduce((m, r) => (r.code ? m.set(r.code, (m.get(r.code) ?? 0) + 1) : m), new Map<string, number>())]),
   };
@@ -137,6 +146,7 @@ export function digestText(s: ReturnType<typeof clipsSummary>, runs: ClipsRun[],
     `Clips made: ${s.clips} from ${s.video_minutes} min of video.`,
     `Lean: ${s.lean} of ${s.done} runs; ${s.fallbacks} fell back to the whole download; ${s.retries} stretch retries.`,
     `Proxy: ${s.proxy_mb} MB.`,
+    s.streams.runs ? `Live Clips: ${s.streams.runs} stream ${s.streams.runs === 1 ? "run" : "runs"}, ${s.streams.clips} clips, ${s.streams.credits} credits, cost $${s.streams.cost_usd.toFixed(2)}, margin ${pct(s.streams.margin)}${s.streams.hours_not_read || s.streams.unheard ? `; ${s.streams.hours_not_read} hours not read, ${s.streams.unheard} windows not heard` : "; every hour and window heard"}.` : null,
     `Money: ${s.credits} credits ≈ $${s.revenue_usd.toFixed(2)} at the cheapest credit; cost $${s.cost_usd.total.toFixed(2)} (proxy $${s.cost_usd.proxy.toFixed(2)}, Claude $${s.cost_usd.claude.toFixed(2)}, transcription ~$${s.cost_usd.transcribe.toFixed(2)}); margin ${pct(s.margin)}, lowest run ${pct(s.lowest_margin)}.`,
     `Time: median run ${s.minutes_median ?? "—"} min; the estimate was off by ${s.eta_error_pct_median == null ? "—" : `${s.eta_error_pct_median > 0 ? "+" : ""}${s.eta_error_pct_median} %`} (median; + means slower than shown).`,
     Object.keys(s.codes).length ? `Failure codes: ${Object.entries(s.codes).map(([k, v]) => `${k} ×${v}`).join(", ")}.` : null,

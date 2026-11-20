@@ -655,7 +655,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         const merged: Candidate[] = [...both];
         for (let k = 0; k < Math.max(rest.length, extra.length); k++) { if (k < rest.length) merged.push(rest[k]); if (k < extra.length) merged.push(extra[k]); }
         cands.splice(0, cands.length, ...merged.map((c, k) => ({ ...c, rank: k + 1 })));
-        timing.hours = hours; timing.hours_s = Math.round((Date.now() - tHours) / 1000); timing.hour_words = reads.reduce((a, r) => a + r.read.words.length, 0); timing.picked = picked.length; timing.words_cands = extra.length;
+        timing.hours = hours; timing.hours_read = reads.map((r) => r.read.hour); timing.hours_s = Math.round((Date.now() - tHours) / 1000); timing.hour_words = reads.reduce((a, r) => a + r.read.words.length, 0); timing.picked = picked.length; timing.words_cands = extra.length;
         log(`[live] hours ${JSON.stringify({ job: job.id, hours, read: reads.map((r) => r.read.hour), words: timing.hour_words, picked: picked.length, new: extra.length, seconds: timing.hours_s, top: picked.slice(0, 5).map((m) => [Math.round(m.start), m.score, m.title.slice(0, 40)]) })}`);
       }
     }
