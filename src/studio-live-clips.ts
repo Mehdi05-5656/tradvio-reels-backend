@@ -27,6 +27,7 @@ import { creditValueFloor, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
+import { gatherStretch } from "./hls-stretch.js";
 import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
@@ -377,7 +378,21 @@ async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>
 /** A stretch of an HLS recording to a local file: sound only (mono 16 kHz, for hearing) or a copy of the rung's
  *  picture and sound (for cutting; timestamps start at 0, so the caller keeps the offset). */
 export async function fetchSound(url: string, start: number, seconds: number, target: string): Promise<void> {
-  await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, "-t", String(seconds), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", target], { timeoutMs: 4 * 60_000 });
+  const sound = ["-t", String(seconds), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", target];
+  if (await fromSegments(url, start, seconds, `${target}.src.ts`, (src, offset) => ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", offset.toFixed(3), "-i", src, ...sound], { timeoutMs: 4 * 60_000 }))) return;
+  await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, ...sound], { timeoutMs: 4 * 60_000 });
+}
+/** A stretch read from the segments that cover it (hls-stretch.ts: a long stream's timestamps wrap at 26.5 hours and a
+ *  playlist seek past that point never lands); `run` gets the local file and how far into it the stretch begins. False
+ *  when the playlist is not plain MPEG-TS: the caller reads the playlist the old way. */
+async function fromSegments(url: string, start: number, seconds: number, src: string, run: (src: string, offset: number) => Promise<unknown>): Promise<boolean> {
+  if (!/^https?:\/\//.test(url)) return false;
+  try {
+    const got = await gatherStretch(url, start, seconds, src);
+    if (!got) return false;
+    await run(src, got.offset);
+    return true;
+  } finally { await rm(src, { force: true }).catch(() => undefined); }
 }
 export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"]; /** the door that heard it: a window reuses the words only when it was Scribe (exact words for the verdict and the cut) */ door: "scribe" | "groq" };
 /** The hours to read whole: the strongest by the chat's candidates (their scores summed), not muted, in stream order. */
@@ -413,13 +428,21 @@ function heardFromRead(read: HourRead, start: number, span: number): Heard {
   return { words, events, lines: annotateLines(linesFromWords(words), events, null), excess: null, language: null };
 }
 export async function fetchStretchCopy(url: string, start: number, seconds: number, target: string): Promise<void> {
-  await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, "-t", String(seconds), "-c", "copy", "-movflags", "+faststart", target], { timeoutMs: 6 * 60_000 });
+  const copy = ["-t", String(seconds), "-c", "copy", "-movflags", "+faststart", target];
+  if (await fromSegments(url, start, seconds, `${target}.src.ts`, (src, offset) => ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", offset.toFixed(3), "-i", src, ...copy], { timeoutMs: 6 * 60_000 }))) return;
+  await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, start)), "-i", url, ...copy], { timeoutMs: 6 * 60_000 });
 }
-async function stillsFrom(video: string, times: number[], dir: string, tag: string): Promise<Array<{ t: number; jpg: Buffer }>> {
+export async function stillsFrom(video: string, times: number[], dir: string, tag: string): Promise<Array<{ t: number; jpg: Buffer }>> {
   const out: Array<{ t: number; jpg: Buffer }> = [];
   for (const t of times) {
     const f = join(dir, `${tag}_${Math.round(t)}.jpg`);
-    try { await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, t)), "-i", video, "-frames:v", "1", "-vf", "scale=768:-2", "-q:v", "5", f], { timeoutMs: 90_000 }); out.push({ t, jpg: await readFile(f) }); await rm(f, { force: true }).catch(() => undefined); }
+    const still = ["-frames:v", "1", "-vf", "scale=768:-2", "-q:v", "5", f];
+    try {
+      // the one segment holding the moment (a long stream's playlist cannot be seeked past 26.5 hours: hls-stretch.ts)
+      if (!await fromSegments(video, t, 0.5, `${f}.src.ts`, (src, offset) => ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", offset.toFixed(3), "-i", src, ...still], { timeoutMs: 60_000 })))
+        await ffmpeg(["-v", "error", "-nostdin", "-y", "-rw_timeout", "30000000", "-ss", String(Math.max(0, t)), "-i", video, ...still], { timeoutMs: 90_000 });
+      out.push({ t, jpg: await readFile(f) }); await rm(f, { force: true }).catch(() => undefined);
+    }
     catch { /* a missing still is not a failed candidate */ }
   }
   return out;
@@ -620,7 +643,8 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute) throw new ClipsError("chat_too_quiet", `This stream's chat was too quiet to read (${Math.round(signals.perMinute)} messages a minute); Live Clips needs a chat that reacts`, 422);
     const cands = chatCandidates(signals, chat);
     // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
-    // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked)
+    // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked;
+    // most of those were likely past the 26.5-hour timestamp wrap, not muted: see hls-stretch.ts)
     const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     if (!cands.length) throw new ClipsError("clips_none_found", "The chat never lit up: no moment in this stream stands out enough to clip", 422);
@@ -698,9 +722,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         await windowOf(pl.audio, start, span, audio);
         // a window the platform silenced (or a fetch that came back short) has nothing to hear: it is not a verdict
         const got = deps.fetchWindow ? span : (await probeLocal(audio).catch(() => ({ seconds: 0 }))).seconds || 0;
-        if (got < Math.min(30, span * 0.5)) { unheard++; log(`[live] window ${c.rank} of ${job.id} is ${Math.round(got)} s of ${Math.round(span)}: muted or empty, skipped`); continue; }
+        if (got < Math.min(30, span * 0.5)) { unheard++; log(`[live] window ${c.rank} of ${job.id} at ${Math.round(start)} s is ${Math.round(got)} s of ${Math.round(span)}: muted or empty, skipped`); continue; }
         heard = await hear(audio, dir); heardOk++;
-      } catch (err: any) { unheard++; log(`[live] window ${c.rank} of ${job.id} not heard: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
+      } catch (err: any) { unheard++; log(`[live] window ${c.rank} of ${job.id} at ${Math.round(start)} s not heard: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
       finally { await rm(audio, { force: true }).catch(() => undefined); }
       checked++;
       const lines = heard.lines;
