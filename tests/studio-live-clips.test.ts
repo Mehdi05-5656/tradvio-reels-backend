@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
-import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W } from "../src/studio-live-clips.js";
+import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { PLANS } from "../src/studio.js";
@@ -393,4 +393,12 @@ test("content-first framing: a desktop stream with a tiny camera (or none) and a
   assert.match(g.graph, /^\[0:v\]split=2\[a\]\[b\];\[a\]crop=960:864:384:108,scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:2,scale=1080:1920,eq=brightness=-0.08\[bg\];\[b\]crop=960:864:384:108,scale=1080:-2\[fg\];\[bg\]\[fg\]overlay=\(W-w\)\/2:\(H-h\)\/2,setsar=1,fps=30,format=yuv420p\[v\]$/);
   // a tall content box (a phone-shaped player) is cropped to the frame
   assert.match(contentLayout({ w: 1920, h: 1080, fps: 30 }, { x: 0.35, y: 0, w: 0.3, h: 1 }).graph, /^\[0:v\]crop=576:1080:672:2,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p\[v\]$/);
+});
+
+test("the content box loses the camera's corner when they overlap: the larger rectangle beside or below the camera", () => {
+  // the Lacy trivia frame: the camera top-left 27 % wide, the content box starting at the same corner
+  assert.deepEqual(excludeCam({ x: 0, y: 0, w: 0.7, h: 0.955 }, { x: 0, y: 0, w: 0.268, h: 0.265 }), { x: 0, y: 0.265, w: 0.7, h: 0.69 }, "below the camera keeps more than beside it");
+  assert.deepEqual(excludeCam({ x: 0, y: 0, w: 0.7, h: 0.5 }, { x: 0, y: 0, w: 0.15, h: 0.45 }), { x: 0.15, y: 0, w: 0.55, h: 0.5 }, "a tall camera at the left: beside it");
+  assert.deepEqual(excludeCam({ x: 0.2, y: 0.1, w: 0.6, h: 0.8 }, { x: 0.02, y: 0.7, w: 0.15, h: 0.25 }), { x: 0.2, y: 0.1, w: 0.6, h: 0.8 }, "no overlap: unchanged");
+  assert.equal(excludeCam(null, { x: 0, y: 0, w: 0.2, h: 0.2 }), null);
 });

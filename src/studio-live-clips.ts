@@ -468,13 +468,35 @@ export const FACECAM_PROMPT = `This is a frame from a live stream. Give two boxe
 export async function findLayout(deps: ClipsDeps, jpg: Buffer, userId?: string): Promise<Layout> {
   const env = deps.env ?? process.env;
   const out = await claudeJson(deps, {
-    model: env.STUDIO_CLIPS_FRAME_MODEL || "claude-haiku-5-5", max_tokens: 400,
+    // Sonnet, not Haiku: on the Lacy run (Nov 19 2026) Haiku answered "no camera, no content" on a desktop frame with a
+    // camera 27 % wide, and two of five clips came out as the whole desktop letterboxed; the call is 1,200 tokens, so Sonnet
+    // is a quarter of a cent a clip
+    model: env.STUDIO_LIVE_LAYOUT_MODEL || "claude-sonnet-5-5", max_tokens: 400,
     output_config: { effort: "low", format: { type: "json_schema", schema: FACECAM_SCHEMA } },
     messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpg.toString("base64") } }, { type: "text", text: FACECAM_PROMPT }] }],
   }, "live_clips_facecam", userId);
-  return { cam: cleanFacecam(out?.cam), content: cleanContent(out?.content) };
+  const cam = cleanFacecam(out?.cam);
+  return { cam, content: excludeCam(cleanContent(out?.content), cam) };
 }
 /** The content box: at least a third of the frame each way, inside it; else the whole frame (null). */
+/** The content box with the camera box cut out of it when they overlap (the model is asked to exclude it and does not
+ *  always: the camera then showed twice, in its panel and in the game's corner). The larger of the two rectangles
+ *  that avoid the camera, below it or beside it; the content as given when neither keeps a third of the frame. */
+export function excludeCam(content: FacecamBox | null, cam: FacecamBox | null): FacecamBox | null {
+  if (!content || !cam) return content;
+  const ox = Math.min(content.x + content.w, cam.x + cam.w) - Math.max(content.x, cam.x), oy = Math.min(content.y + content.h, cam.y + cam.h) - Math.max(content.y, cam.y);
+  if (ox <= 0.01 || oy <= 0.01) return content;
+  const options: FacecamBox[] = [];
+  // the camera at the top or the bottom: the content below or above it; at the left or the right: beside it
+  if (cam.y <= content.y + 0.02) options.push({ x: content.x, y: cam.y + cam.h, w: content.w, h: content.y + content.h - (cam.y + cam.h) });
+  if (cam.y + cam.h >= content.y + content.h - 0.02) options.push({ x: content.x, y: content.y, w: content.w, h: cam.y - content.y });
+  if (cam.x <= content.x + 0.02) options.push({ x: cam.x + cam.w, y: content.y, w: content.x + content.w - (cam.x + cam.w), h: content.h });
+  if (cam.x + cam.w >= content.x + content.w - 0.02) options.push({ x: content.x, y: content.y, w: cam.x - content.x, h: content.h });
+  const best = options.filter((b) => b.w >= 0.33 && b.h >= 0.33).sort((a, b) => b.w * b.h - a.w * a.h)[0];
+  if (!best) return content;
+  const r = (v: number) => Math.round(v * 1000) / 1000;
+  return { x: r(best.x), y: r(best.y), w: r(best.w), h: r(best.h) };
+}
 export function cleanContent(out: any): FacecamBox | null {
   if (!out?.present) return null;
   const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
