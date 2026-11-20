@@ -73,7 +73,9 @@ export const streamCountCap = (seconds: number) => Math.max(1, Math.min(LIVE_LIM
 export type Strictness = "best" | "balanced" | "more";
 /** The bar the checklist score must clear. The checklist (phase B) grades the same moments 15-25 points under the old
  *  single score (Nov 19 2026, the same 35-hour stream: 72 -> 60, 62 -> 42, 72 -> 33), so the bars sit lower than they did. */
-export const VERIFY_BAR: Record<Strictness, number> = { best: 65, balanced: 55, more: 45 };
+// "Only the best" clears the same bar as "Balanced" (owner, Nov 20 2026): the stricter bar of 65 left runs far short
+// (a customer asked twice for 10 and got 2, with 13 moments at 55-64 each time); the choice stays in the app.
+export const VERIFY_BAR: Record<Strictness, number> = { best: 55, balanced: 55, more: 45 };
 const strictnessOf = (v: unknown): Strictness => (v === "best" || v === "more" ? v : "balanced");
 export type Framing = "auto" | "stacked" | "person";
 const framingOf = (v: unknown): Framing => (v === "stacked" || v === "person" ? v : "auto");
