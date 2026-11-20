@@ -2,10 +2,10 @@
 // music), which the framing and the cut's end use; Groq's hosted Whisper large-v3-turbo ($0.04 an hour, Nov 19 2026)
 // hears words with times and nothing else. The cost study (docs/live-clips/research/costs/) put transcription at 40 %
 // of a Live Clips run. The hours read whole only feed the picker and the context, so they can go to the cheap door
-// (STUDIO_LIVE_STT=groq with GROQ_API_KEY); the candidate windows are judged and cut on their exact words, and on the
+// (whenever GROQ_API_KEY is set; STUDIO_LIVE_STT=scribe keeps them on Scribe); the candidate windows are judged and cut on their exact words, and on the
 // first cheap-door run (Nov 19 2026) the verifier called Whisper turbo's windows "garbled" and dropped a kept moment
-// (it hears about a fifth fewer words where people talk over each other), so the windows stay on Scribe. Scribe is
-// the default for everything until the cheap door's hours are checked on more streams.
+// (it hears about a fifth fewer words where people talk over each other), so the windows stay on Scribe. Measured on
+// the paid tier the same night: a run at $0.75 against $0.90 with Scribe hours.
 import { transcribeWords, type TimedWord, type AudioEvent } from "./studio-eleven.js";
 import { recordEvent } from "./studio-events.js";
 
@@ -16,9 +16,11 @@ export type SttDeps = { env?: Record<string, string | undefined>; fetch?: typeof
 export const STT_RATES: Record<SttProvider, number> = { scribe: 0.2, groq: 0.04 };
 export const GROQ_MODEL = "whisper-large-v3-turbo";
 
-/** The door for the hours and the windows: Groq when asked for and its key is there, else Scribe. */
+/** The door for the hours read whole: Groq whenever its key is there (the owner's choice, Nov 19 2026: the hybrid on,
+ *  its hours on the cheap door), Scribe without it or when STUDIO_LIVE_STT=scribe says so. The windows are always Scribe's. */
 export function sttProvider(env: Record<string, string | undefined> = process.env): SttProvider {
-  return env.STUDIO_LIVE_STT === "groq" && env.GROQ_API_KEY ? "groq" : "scribe";
+  if (env.STUDIO_LIVE_STT === "scribe") return "scribe";
+  return env.GROQ_API_KEY ? "groq" : "scribe";
 }
 
 /** Groq's OpenAI-shaped transcription: the words with their times; no speakers, no sounds. */

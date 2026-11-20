@@ -344,7 +344,7 @@ test("the hybrid: the strongest hours are heard whole and read by Clips' picker;
   // the cheap door hears the hours only: an hour it heard gives the picker and the context its words, but a window inside
   // it is heard again by Scribe (the verdict and the cut need the exact words), and no kept clip is heard a third time
   const reheard: number[] = []; const cutR: any[] = []; hears = 0; const headsR: string[] = [];
-  const outR = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, STUDIO_LIVE_STT: "groq", GROQ_API_KEY: "k" }, chat: async () => chatWith(900, 7200),
+  const outR = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, GROQ_API_KEY: "k" }, chat: async () => chatWith(900, 7200),
     hearClip: async (_f: string, sec: number) => { reheard.push(Math.round(sec)); return { words: [], events: [], language: "en" }; },
     verify: async (i: any) => { headsR.push(i.head); return graded(i); },
     cut: async (ctx: any, m: any) => { cutR.push(m); return { asset_id: "r", bytes: 1, seconds: m.end - m.start }; } }, job(1, 7200));

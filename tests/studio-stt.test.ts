@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { transcribeGroq, sttProvider, hearAudio, STT_RATES } from "../src/studio-stt.js";
 
 test("the cheap door: Groq's words with times, no speakers; chosen only when asked for with a key; priced by the seconds heard", async () => {
-  assert.equal(sttProvider({}), "scribe"); assert.equal(sttProvider({ STUDIO_LIVE_STT: "groq" }), "scribe", "no key, no door"); assert.equal(sttProvider({ STUDIO_LIVE_STT: "groq", GROQ_API_KEY: "k" }), "groq");
+  assert.equal(sttProvider({}), "scribe"); assert.equal(sttProvider({ STUDIO_LIVE_STT: "groq" }), "scribe", "no key, no door"); assert.equal(sttProvider({ GROQ_API_KEY: "k" }), "groq", "the key alone opens the door"); assert.equal(sttProvider({ STUDIO_LIVE_STT: "scribe", GROQ_API_KEY: "k" }), "scribe", "asked for Scribe");
   const calls: any[] = [];
   const fetchFake: any = async (url: string, init: any) => { calls.push([url, init.headers.authorization, init.body.get("model"), init.body.getAll("timestamp_granularities[]")]); return { ok: true, status: 200, json: async () => ({ language: "en", words: [{ word: "Whose", start: 0.1, end: 0.4 }, { word: "address?", start: 0.4, end: 0.9 }, { word: "", start: 1, end: 1 }] }) }; };
   const r = await transcribeGroq({ env: { GROQ_API_KEY: "k" }, fetch: fetchFake }, { audio: Buffer.from("mp3") });
