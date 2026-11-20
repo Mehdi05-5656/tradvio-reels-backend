@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
-import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead } from "../src/studio-live-clips.js";
+import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { PLANS } from "../src/studio.js";
@@ -360,4 +360,37 @@ test("the hybrid: the strongest hours are heard whole and read by Clips' picker;
   assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9), c(8000, 1), c(12000, 7), c(16000, 8)], 18000, () => 0), [1, 4], "two hours by default");
   assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9)], 18000, (a) => (a === 3600 ? 0.5 : 0)), [0]);
   assert.deepEqual(hoursToRead([c(100, 5), c(4000, 9)], 4000, () => 0), [0], "an hour under ten minutes long is not read");
+});
+
+test("a cut never opens on a line that continues a sentence: it starts on the sentence's start, up to three lines back", async () => {
+  // "Mahomes" | 1 s pause | "finally has a receiver." then more; the verifier opens on "finally"
+  const w: any[] = []; let t = 30;
+  for (let i = 0; i < 24; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; }
+  w.push({ text: "Mahomes", start: t, end: t + 0.4, speaker: "S1" }); t += 1.4;
+  for (const [text, gap] of [["finally", 0.4], ["has", 0.4], ["a", 0.3], ["receiver.", 1.0], ["Finally!", 0.6]] as Array<[string, number]>) { w.push({ text, start: t, end: t + 0.3, speaker: "S1" }); t += gap; }
+  for (let i = 0; i < 40; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; }
+  const lines = linesFromWords(w);
+  const fin = lines.find((l) => /^finally has/.test(l.text))!; assert.ok(fin, `a line opens on "finally": ${lines.map((l) => l.text).join(" | ")}`);
+  const cutP: any[] = [];
+  const base: any = { env: ENV, log: () => undefined, plans: PLANS, drawtext: true, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), fetchWindow: async () => undefined, fetchStretch: async () => undefined, stills: async () => [],
+    hear: async () => ({ words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }),
+    verify: async (i: any) => ({ keep: true, score: 80, standalone: true, grades: { hook: 8, standalone: 8, payoff: 8, reaction: 7, quotable: 6, length: 8 }, hard_fail: "", start_line: fin.i, end_line: i.lines[i.lines.length - 1].i, title: "T", hook: "", hook_line: "", caption: "", why: "", why_not: "", tags: [] }),
+    cut: async (ctx: any, m: any) => { cutP.push(m); return { asset_id: "p", bytes: 1, seconds: m.end - m.start }; } };
+  const job: any = { id: "job-s", user_id: U, lease_token: "t", asset_id: null, credits_reserved: 200, attempts: 1, progress: {},
+    options: { platform: "twitch", url: "https://www.twitch.tv/videos/1", stream: { platform: "twitch", vod_id: "1", login: "x", channel_id: "1", started_at: "2026-11-18T03:01:21Z", strictness: "balanced" }, source: { title: "T", channel: "x" }, seconds: 3600, count: 1, length: "standard", format: "vertical", price: { analysis: 30, per_clip: 10, lite: 0 }, collection_id: "col-1" } };
+  const out = await runStreamClipsJob(fakeSb().sb, { ...base, env: { ...ENV, STUDIO_LIVE_HYBRID: "off" }, chat: async () => chatWith(900, 3600) }, job);
+  assert.equal(out, "done"); assert.equal(cutP.length, 1);
+  assert.match(cutP[0].transcript, /^Mahomes finally has a receiver/, `the clip opens on "Mahomes": ${cutP[0].transcript.slice(0, 50)}`);
+});
+
+test("content-first framing: a desktop stream with a tiny camera (or none) and a content box fills the frame with the content, not the whole desktop letterboxed", () => {
+  assert.equal(TINY_CAM_W, 0.1);
+  assert.ok(cleanFacecam({ present: true, x: 0.01, y: 0.02, w: 0.06, h: 0.1 }), "a camera 6 % wide is a camera now (it was dropped under 10 %)");
+  assert.equal(cleanFacecam({ present: true, x: 0.01, y: 0.02, w: 0.04, h: 0.08 }), null);
+  // a landscape content box (a browser card): scaled to the full width, centred over a blurred fill of itself
+  const g = contentLayout({ w: 1920, h: 1080, fps: 60 }, { x: 0.2, y: 0.1, w: 0.5, h: 0.8 });
+  assert.equal(g.w, 1080); assert.equal(g.h, 1920); assert.equal(g.camH, 0);
+  assert.match(g.graph, /^\[0:v\]split=2\[a\]\[b\];\[a\]crop=960:864:384:108,scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:2,scale=1080:1920,eq=brightness=-0.08\[bg\];\[b\]crop=960:864:384:108,scale=1080:-2\[fg\];\[bg\]\[fg\]overlay=\(W-w\)\/2:\(H-h\)\/2,setsar=1,fps=30,format=yuv420p\[v\]$/);
+  // a tall content box (a phone-shaped player) is cropped to the frame
+  assert.match(contentLayout({ w: 1920, h: 1080, fps: 30 }, { x: 0.35, y: 0, w: 0.3, h: 1 }).graph, /^\[0:v\]crop=576:1080:672:2,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p\[v\]$/);
 });

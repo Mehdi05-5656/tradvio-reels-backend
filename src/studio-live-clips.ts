@@ -463,7 +463,7 @@ const BOX = { type: "object", additionalProperties: false, required: ["present",
 export const FACECAM_SCHEMA = { type: "object", additionalProperties: false, required: ["cam", "content"], properties: { cam: BOX, content: BOX } };
 export const FACECAM_PROMPT = `This is a frame from a live stream. Give two boxes, each as fractions of the frame: x and y are the top-left corner (0-1 from the left and from the top), w and h the width and height (0-1).
 1. cam: the webcam box (the streamer's camera feed, a rectangle showing a person, usually in a corner over the game or the screen). Be exact about its edges, including any border. If the whole frame is the person (no game or screen), or there is no camera box, answer present false with zeros.
-2. content: the thing being watched, excluding the webcam box, chat panels, alert bars, overlays and empty borders: the game's viewport, a chess board with its clocks, a browser page or a video player. If the content fills the frame, answer present false with zeros.`;
+2. content: the thing being watched, excluding the webcam box, chat panels, alert bars, overlays and empty borders: the game's viewport, a chess board with its clocks, a browser page or a video player. On a desktop or a browser with a chat column or other panels beside it, the content is the window, page or player being looked at, even when it is most of the frame: give that box. Only if the content truly fills the frame edge to edge, answer present false with zeros.`;
 /** The layout of a still, by Haiku: the facecam box (null when none, or not a box worth stacking) and the content box. */
 export async function findLayout(deps: ClipsDeps, jpg: Buffer, userId?: string): Promise<Layout> {
   const env = deps.env ?? process.env;
@@ -490,7 +490,7 @@ export function cleanFacecam(out: any): FacecamBox | null {
   const b = { x: n(out.x), y: n(out.y), w: n(out.w), h: n(out.h) };
   if ([b.x, b.y, b.w, b.h].some((v) => !Number.isFinite(v))) return null;
   // a corner camera: between a tenth and six tenths of the width, at most seven tenths of the height, inside the frame
-  if (b.w < 0.1 || b.w > 0.6 || b.h < 0.1 || b.h > 0.7 || b.x < 0 || b.y < 0 || b.x + b.w > 1.02 || b.y + b.h > 1.02) return null;
+  if (b.w < 0.05 || b.w > 0.6 || b.h < 0.05 || b.h > 0.7 || b.x < 0 || b.y < 0 || b.x + b.w > 1.02 || b.y + b.h > 1.02) return null;
   return { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(b.w, 1 - Math.max(0, b.x)), h: Math.min(b.h, 1 - Math.max(0, b.y)) };
 }
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
@@ -503,6 +503,23 @@ const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
  *  streamed; edits like those belong to the editor that comes later. */
 export const FORMAT = { w: 1080, h: 1920, cam: { min: 600, max: 640 }, irl_cam_share: 0.15, caption: { gap: 0.05, irl_y: 0.58, max_width: 0.68 } };
 export type StackedLayout = { graph: string; w: number; h: number; camH: number };
+/** A camera narrower than this (of the frame's width) is too small to become a panel: scaled to the frame it is mush
+ *  (the Lacy run of Nov 19 2026: a camera 5 % wide on a desktop stream). */
+export const TINY_CAM_W = 0.1;
+/** The 1080x1920 graph for a desktop stream with no camera worth a panel: the content box (the page, the player, the
+ *  card being looked at) scaled to the full width and centred over a blurred fill of itself, instead of the whole
+ *  desktop letterboxed into the middle third (two of the five Lacy clips, Nov 19 2026: the trivia card and the tweet
+ *  unreadable on a phone). A content box taller than 9:16 is cropped to the frame instead. */
+export function contentLayout(info: { w: number; h: number; fps: number | null }, content: FacecamBox): StackedLayout {
+  const W = FORMAT.w, H = FORMAT.h;
+  const cw = even(content.w * info.w), ch = even(content.h * info.h), cx = even(content.x * info.w), cy = even(content.y * info.h);
+  const fps = info.fps && info.fps > 30.5 ? ",fps=30" : "";
+  const crop = `crop=${cw}:${ch}:${cx}:${cy}`;
+  const graph = ch / Math.max(1, cw) >= H / W
+    ? `[0:v]${crop},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1${fps},format=yuv420p[v]`
+    : `[0:v]split=2[a][b];[a]${crop},scale=${W / 4}:${H / 4}:force_original_aspect_ratio=increase,crop=${W / 4}:${H / 4},boxblur=10:2,scale=${W}:${H},eq=brightness=-0.08[bg];[b]${crop},scale=${W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${fps},format=yuv420p[v]`;
+  return { graph, w: W, h: H, camH: 0 };
+}
 /** The 1080x1920 graph: the facecam box scaled to the full width on top (its own shape, 450-640 lines, cropped from a
  *  third of the way down so a face is never cut at the forehead), the content box (or the whole picture) scaled to
  *  the rest and cropped to its middle, frame rate capped at 30. */
@@ -708,6 +725,14 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         } catch (err: any) { log(`[live] edge of ${c.rank} of ${job.id} not heard: ${String(err?.message ?? err).slice(0, 120)}`); }
         finally { await rm(extra, { force: true }).catch(() => undefined); }
       }
+      // a start on a line that continues a sentence (the lines break at a pause of 0.9 s too: a clip opened on "finally has
+      // a receiver" with "Mahomes" a second before it, Nov 19 2026): the sentence's start, up to three lines back
+      for (let guard = 0; guard < 3; guard++) {
+        const at = lines.find((l) => Math.abs(l.start - a) < 0.06); if (!at) break;
+        const prev = [...lines].reverse().find((l) => l.end <= at.start + 0.05 && l.end >= at.start - 2.5);
+        if (!prev || SENTENCE_END_RE.test(prev.text.trim()) || !/^[a-z]/.test(at.text.trim()) || z - prev.start > len.max) break;
+        a = prev.start;
+      }
       // an end on a line that pauses mid-sentence (the lines break at a pause of 0.9 s too, so "You know about" ended a
       // clip on Nov 19 2026 while "TikTok?" followed a second later): the sentence's end within 6 s, else the previous one
       { const at = lines.find((l) => Math.abs(l.end - z) < 0.06);
@@ -788,17 +813,21 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         await stretchOf(pl.video, from, m.end + 2 - from, file);
         const src: SourceInput = { video: file, audio: null, proxy: null, width: 0, height: 0, fps: null, offset: from };
         // framing: "person" = Clips' own; "stacked" or "auto" = the facecam on top when one is found on the stretch
-        let layout: CutCtx["layout"] = null; let stackedCamH = 0; let stacked: { cam: FacecamBox; content: FacecamBox | null } | null = null;
+        let layout: CutCtx["layout"] = null; let stackedCamH = 0; let stacked: { cam: FacecamBox; content: FacecamBox | null } | null = null; let contentOnly: FacecamBox | null = null;
         if (format === "vertical" && framingOf(st.framing) !== "person") {
           const still = (await stills(file, [Math.max(0.5, (m.start - from) + (m.end - m.start) / 2)], dir, `fc${m.rank}`))[0];
           const lay = still ? asLayout(await (deps.facecam ?? ((jpg) => findLayout(deps, jpg, u)))(still.jpg).catch(() => null)) : { cam: null, content: null };
           // a camera box over 15 % of the frame is the person themselves (an IRL stream): framed on them, never stacked
           const irl = !!lay.cam && lay.cam.w * lay.cam.h > FORMAT.irl_cam_share;
-          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content, irl })}`);
-          if (lay.cam && !irl) stacked = lay as { cam: FacecamBox; content: FacecamBox | null };
+          const tiny = !!lay.cam && lay.cam.w < TINY_CAM_W;
+          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content, irl, tiny })}`);
+          if (lay.cam && !irl && !tiny) stacked = lay as { cam: FacecamBox; content: FacecamBox | null };
+          // no camera worth a panel (none, or a tiny one) but a content box: the content fills the frame, the desktop around it goes
+          else if (!irl && lay.content) contentOnly = lay.content;
         }
         // the format: the clip as streamed; captions, when chosen, placed under the divider (or at 58 % on a full-frame clip)
         if (stacked) { const { cam, content } = stacked; layout = (info) => stackedLayout(info, cam, content); stackedCamH = stackedLayout({ w: 1920, h: 1080, fps: null }, cam, content).camH; }
+        else if (contentOnly) { const content = contentOnly; layout = (info) => contentLayout(info, content); }
         const captionY = stackedCamH ? stackedCamH / FORMAT.h + FORMAT.caption.gap : FORMAT.caption.irl_y;
         const captions = ctxBase.captions ? { ...ctxBase.captions, style: { ...ctxBase.captions.style, y: captionY, maxWidth: Math.min(Number(ctxBase.captions.style?.maxWidth) || 1, FORMAT.caption.max_width) } } : null;
         const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout, captions }, m);
