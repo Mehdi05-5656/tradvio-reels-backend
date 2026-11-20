@@ -4,10 +4,10 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isInternalEmail, isStudioAdmin } from "./studio-admin-auth.js";
-import { accountForSignup, loadContent, parseProfileLink, pullContent, rangeFor, sanitizeAccountInput, summarize, FEATURE_IDS, FEATURES, type Deps, type Loaded } from "./studio-content-perf.js";
+import { accountForSignup, loadContent, parseProfileLink, pullContent, rangeFor, sanitizeAccountInput, summarize, thinSnapshots, FEATURE_IDS, FEATURES, DAY, type Deps, type Loaded } from "./studio-content-perf.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const PULL_GAP_MS = 10 * 60_000, SIGN_TTL_S = 3600;
+const PULL_GAP_MS = 10 * 60_000, SIGN_TTL_S = 3600, MAX_VIDEOS = 600;
 
 export function contentPerfEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env.STUDIO_CONTENT_PERF_ENABLED === "true";
@@ -57,11 +57,18 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
       if (!cache || now - cache.at > 60_000 || req.query.fresh === "1") cache = { at: now, data: await load(sb, { since: now - 400 * 86400_000, isInternal: (e) => isInternalEmail(e, env) }) };
       const tracking = cache.data.accounts.map((a) => a.tracking_since).filter(Boolean).sort()[0] ?? null;
       const summary = summarize({ ...cache.data, range: rangeFor(days, tz, now, tracking), hide_pre: req.query.hide_pre === "1", include_internal: req.query.internal === "1" });
+      // the page lists at most MAX_VIDEOS videos (the biggest gains first, every one that brought a sign-up kept): the
+      // stress test put 12,000 videos at 9 MB a response, which no page needs
+      const videos_total = summary.videos.length;
+      if (summary.videos.length > MAX_VIDEOS) {
+        const keep = new Set(summary.videos.filter((v) => v.signups_stated + v.signups_link + v.paid > 0).map((v) => v.id));
+        summary.videos = summary.videos.filter((v, i) => i < MAX_VIDEOS || keep.has(v.id));
+      }
       const signed = await signAll(sb, [...summary.videos.map((v) => v.thumb_key!), ...summary.accounts.map((a) => a.avatar_key!)]);
       for (const v of summary.videos) v.thumb_url = v.thumb_key ? signed.get(v.thumb_key) ?? null : null;
       for (const v of summary.now) v.thumb_url = v.thumb_key ? signed.get(v.thumb_key) ?? null : null;
       for (const a of summary.accounts) a.avatar_url = a.avatar_key ? signed.get(a.avatar_key) ?? null : null;
-      res.json({ ...summary, features: FEATURES, pulling: !!pulling, generated_at: new Date(now).toISOString() });
+      res.json({ ...summary, videos_total, features: FEATURES, pulling: !!pulling, generated_at: new Date(now).toISOString() });
     } catch (e) { fail(res, e, "metrics"); }
   });
 
@@ -160,10 +167,13 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
 export function startContentPerfLoop(sbFn: () => SupabaseClient, deps: Deps = {}): ReturnType<typeof setInterval> | null {
   const env = deps.env ?? process.env;
   if (!contentPerfEnabled(env) || !env.SCRAPECREATORS_API_KEY) return null;
-  let busy = false;
+  let busy = false, lastThin = 0;
   const tick = async () => {
     const r = await pullContent(sbFn(), deps);
     if (r.accounts || r.errors.length) (deps.log ?? console.log)(`[content] pulled ${r.accounts} accounts, ${r.videos_new} new videos, ${r.snapshots} readings${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`);
+    // once a day: readings older than a week keep one per video per day
+    const now = deps.now?.() ?? Date.now();
+    if (now - lastThin >= DAY) { lastThin = now; const n = await thinSnapshots(sbFn(), now).catch((e) => { console.log(`[content] thin: ${String(e?.message ?? e).slice(0, 160)}`); return 0; }); if (n) (deps.log ?? console.log)(`[content] thinned ${n} old readings`); }
   };
   const t = setInterval(() => {
     if (busy) return;

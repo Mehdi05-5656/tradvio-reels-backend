@@ -192,7 +192,7 @@ export async function pullContent(sb: SupabaseClient, deps: Deps = {}, opts: { f
           if (prof.avatar_url) { const k = await keepImage(sb, f, prof.avatar_url, `content/avatars/${a.platform}-${safe(a.handle)}.jpg`); if (k) patch.avatar_key = k; }
         }
         const day = new Date(now).toISOString().slice(0, 10);
-        await sb.from("content_account_snapshots").upsert({ account_id: a.id, day, followers, videos: byId.size + out.videos_new, captured_at: new Date(now).toISOString() }, { onConflict: "account_id,day" });
+        await sb.from("content_account_snapshots").upsert({ account_id: a.id, day, followers, videos: byId.size + uniq.filter((p) => !byId.has(p.platform_post_id)).length, captured_at: new Date(now).toISOString() }, { onConflict: "account_id,day" });
       }
       const up = await sb.from("content_accounts").update(patch).eq("id", a.id);
       if (up.error) throw up.error;
@@ -225,6 +225,8 @@ export type AccountOut = {
   tracking_since: string | null; last_pulled_at: string | null; last_status: string | null; last_error: string | null; followers: number | null; followers_delta: number | null;
   cost_usd_per_video: number | null; cost_usd_per_month: number | null; default_feature: string | null;
   videos: number; videos_pre: number; gain: Gain; median_views: number | null; best_video_id: string | null; engagement: number | null;
+  /** what one of this account's videos gains in a typical day (median over videos tracked 12 h or more, since their first reading); null under 3 such videos */
+  usual_daily: number | null;
   signups_stated: number; signups_link: number; paid: number; net_usd: number; conversion: number | null; cost_usd: number | null; cpm_usd: number | null; cost_per_signup: number | null; cost_per_paid: number | null;
 };
 export type Summary = {
@@ -261,9 +263,10 @@ export const MIN_VIDEOS = 3, MIN_SIGNUPS = 10;
 /** A video's counts at an instant: the last reading at or before it, else its baseline (before the first reading: nothing). */
 function readingAt(v: VideoRow, snaps: SnapshotRow[], t: number): Counts | null {
   if (Date.parse(v.first_seen_at) > t) return null;
-  let best: SnapshotRow | null = null;
-  for (const s of snaps) { const at = Date.parse(s.captured_at); if (at <= t && (!best || at > Date.parse(best.captured_at))) best = s; }
-  if (best) return { views: best.views, likes: best.likes, comments: best.comments, shares: best.shares, saves: best.saves };
+  // snaps are sorted by captured_at (summarize sorts them once per video): the last one at or before t
+  let lo = 0, hi = snaps.length - 1, best = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (Date.parse(snaps[mid].captured_at) <= t) { best = mid; lo = mid + 1; } else hi = mid - 1; }
+  if (best >= 0) { const b = snaps[best]; return { views: b.views, likes: b.likes, comments: b.comments, shares: b.shares, saves: b.saves }; }
   return { views: v.base_views, likes: v.base_likes, comments: v.base_comments, shares: v.base_shares, saves: v.base_saves };
 }
 /** Gains between two instants, never below zero (a platform that revises a count down is flagged, not subtracted). */
@@ -277,7 +280,7 @@ function gainBetween(v: VideoRow, snaps: SnapshotRow[], from: number, to: number
     (g as any)[k] = Math.max(0, d);
   }
   // a reading inside the window lower than the one before it: the platform revised the count (flagged, never subtracted)
-  const inside = snaps.filter((s) => { const t = Date.parse(s.captured_at); return t > from && t <= to; }).sort((x, y) => Date.parse(x.captured_at) - Date.parse(y.captured_at));
+  const inside = snaps.filter((s) => { const t = Date.parse(s.captured_at); return t > from && t <= to; });
   let prev: Counts | null = a;
   for (const s of inside) { if (prev && COUNTS.some((k) => s[k] != null && prev![k] != null && s[k]! < prev![k]!)) g.revised = true; prev = s; }
   return g;
@@ -292,6 +295,7 @@ export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; s
   const accounts = input.accounts, byAccount = new Map(accounts.map((a) => [a.id, a]));
   const snapsBy = new Map<string, SnapshotRow[]>();
   for (const s of input.snapshots) { const l = snapsBy.get(s.video_id) ?? []; l.push(s); snapsBy.set(s.video_id, l); }
+  for (const l of snapsBy.values()) l.sort((x, y) => Date.parse(x.captured_at) - Date.parse(y.captured_at));
   // every video counts from its first reading, the ones posted before tracking too (the owner's rule); hide_pre leaves those out
   const videos = input.videos.filter((v) => byAccount.has(v.account_id) && !v.hidden && !(input.hide_pre && v.pre_tracking));
   const signups = input.signups.filter((s) => input.include_internal || !s.internal);
@@ -364,7 +368,8 @@ export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; s
       followers: a.followers ?? last?.followers ?? null, followers_delta: last && first && first !== last ? (last.followers ?? 0) - (first.followers ?? 0) : null,
       cost_usd_per_video: a.cost_usd_per_video, cost_usd_per_month: a.cost_usd_per_month, default_feature: a.default_feature,
       videos: own.length, videos_pre: input.videos.filter((v) => v.account_id === a.id && v.pre_tracking && !v.hidden).length, gain,
-      median_views: median(posted.map((v) => v.gain.views)), best_video_id: best && best.gain.views > 0 ? best.id : null, engagement: rate(eng, gain.views),
+      median_views: median(own.filter((v) => Date.parse(v.first_seen_at) <= until).map((v) => v.gain.views)), best_video_id: best && best.gain.views > 0 ? best.id : null, engagement: rate(eng, gain.views),
+      usual_daily: (() => { const xs = own.filter((v) => until - Date.parse(v.first_seen_at) >= 12 * HOUR).map((v) => v.total_gain.views / Math.max(0.5, (until - Date.parse(v.first_seen_at)) / DAY)); return xs.length >= 3 ? median(xs) : null; })(),
       signups_stated: stated.length, signups_link: link.length, paid: payers.length, net_usd: net, conversion: n >= MIN_SIGNUPS ? payers.length / n : null,
       cost_usd: cost, cpm_usd: cost != null && gain.views > 0 ? (cost / gain.views) * 1000 : null, cost_per_signup: cost != null && n > 0 ? cost / n : null, cost_per_paid: cost != null && payers.length > 0 ? cost / payers.length : null,
     };
@@ -506,4 +511,30 @@ export function parseProfileLink(s: string): { platform: Platform; handle: strin
   if (!m) return null;
   const platform: Platform = /tiktok/i.test(m[1]) ? "tiktok" : /instagram/i.test(m[1]) ? "instagram" : "youtube";
   return { platform, handle: m[2] };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Keeping the readings table small
+// ---------------------------------------------------------------------------------------------------
+export const THIN_AFTER_DAYS = 7;
+/** Of the readings older than a week, keep the last one of each video on each day and drop the rest; hourly detail stays for
+ *  the week the page can show it by the hour. Returns how many rows went. */
+export async function thinSnapshots(sb: SupabaseClient, now = Date.now()): Promise<number> {
+  const cutoff = new Date(now - THIN_AFTER_DAYS * DAY).toISOString();
+  const old: Array<{ id: number; video_id: string; captured_at: string }> = [];
+  for (let from = 0; from < 100_000; from += 1000) {
+    const r = await sb.from("content_snapshots").select("id,video_id,captured_at").lt("captured_at", cutoff).order("captured_at", { ascending: true }).range(from, from + 999);
+    if (r.error) throw r.error;
+    old.push(...((r.data ?? []) as any[]));
+    if ((r.data ?? []).length < 1000) break;
+  }
+  const keep = new Map<string, number>(); // video:day -> id of the last reading that day
+  for (const s of old) keep.set(`${s.video_id}:${s.captured_at.slice(0, 10)}`, s.id);
+  const keepIds = new Set(keep.values());
+  const drop = old.filter((s) => !keepIds.has(s.id)).map((s) => s.id);
+  for (let i = 0; i < drop.length; i += 500) {
+    const r = await sb.from("content_snapshots").delete().in("id", drop.slice(i, i + 500));
+    if (r.error) throw r.error;
+  }
+  return drop.length;
 }

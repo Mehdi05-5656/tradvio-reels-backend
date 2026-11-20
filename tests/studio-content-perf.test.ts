@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { isDue, pullContent, summarize, rangeFor, sanitizeAccountInput, parseProfileLink, median, HOUR, DAY, type AccountRow, type VideoRow, type SnapshotRow, type SignupRow } from "../src/studio-content-perf.js";
+import { isDue, pullContent, summarize, rangeFor, sanitizeAccountInput, parseProfileLink, median, thinSnapshots, HOUR, DAY, type AccountRow, type VideoRow, type SnapshotRow, type SignupRow } from "../src/studio-content-perf.js";
 import { registerContentPerf } from "../src/studio-content-perf-routes.js";
 import { sanitizeAnswers } from "../src/studio-onboarding.js";
 import { clearAdminCacheForTests } from "../src/studio-admin-auth.js";
@@ -255,4 +255,34 @@ test("routes: with the gate off every route answers as if absent, and the sign-u
     assert.equal((await fetch(`${base}/api/studio/admin/content`)).status, 404);
     assert.deepEqual(await (await fetch(`${base}/api/studio/content/accounts`)).json(), { accounts: [] });
   } finally { srv.close(); }
+});
+
+test("the account's usual day: median daily gain over videos tracked 12 h or more, the same whatever the range; readings in any order", () => {
+  const vids = [video("1", { first_seen_at: iso(NOW - 4 * DAY), base_views: 0, views: 4000 }), video("2", { first_seen_at: iso(NOW - 2 * DAY), base_views: 0, views: 200 }), video("3", { first_seen_at: iso(NOW - 2 * DAY), base_views: 0, views: 600 }), video("4", { first_seen_at: iso(NOW - HOUR), base_views: 0, views: 9000 })];
+  const snaps = [snap("1", NOW - HOUR, 4000), snap("1", NOW - 4 * DAY, 0), snap("2", NOW - 2 * DAY, 0), snap("2", NOW - HOUR, 200), snap("3", NOW - HOUR, 600), snap("3", NOW - 2 * DAY, 0), snap("4", NOW - HOUR, 0), snap("4", NOW - 10 * 60_000, 9000)];
+  for (const days of [1, 7, null]) {
+    const s = summarize({ accounts: [account()], videos: vids, snapshots: snaps, account_snapshots: [], signups: [], range: rangeFor(days, PT, NOW) });
+    assert.equal(s.accounts[0].usual_daily, 300, `days=${days}: videos 1-3 gain 1000, 100 and 300 a day; the hour-old video is left out`);
+  }
+  const few = summarize({ accounts: [account()], videos: vids.slice(0, 2), snapshots: snaps, account_snapshots: [], signups: [], range: rangeFor(7, PT, NOW) });
+  assert.equal(few.accounts[0].usual_daily, null, "under 3 videos there is no usual");
+  const v1 = few.videos.find((v) => v.id === "1")!;
+  assert.equal(v1.gain.views, 4000, "readings given out of order still read right");
+});
+
+test("thinning: readings older than a week keep the last one per video per day; the week itself is untouched", async () => {
+  const rows: any[] = [];
+  const at = (d: number, h: number) => iso(NOW - d * DAY + h * HOUR);
+  let id = 1;
+  for (const day of [10, 9]) for (const h of [1, 2, 3]) rows.push({ id: id++, video_id: "v1", captured_at: at(day, h), views: h });
+  for (const h of [1, 2]) rows.push({ id: id++, video_id: "v2", captured_at: at(9, h), views: h });
+  for (const h of [1, 2, 3]) rows.push({ id: id++, video_id: "v1", captured_at: at(2, h), views: h });
+  const tables = { content_snapshots: rows };
+  const sb: any = fakeSb(tables);
+  const deleted: number[] = [];
+  const orig = sb.from.bind(sb);
+  sb.from = (t: string) => { const q = orig(t); if (t === "content_snapshots") { q.lt = (k: string, v: any) => { q.__lt = v; return q; }; q.delete = () => ({ in: async (_k: string, ids: number[]) => { deleted.push(...ids); tables.content_snapshots = tables.content_snapshots.filter((r) => !ids.includes(r.id)); return { error: null }; } }); const then = q.then; q.then = (res: any, rej: any) => { if (q.__lt) { const out = tables.content_snapshots.filter((r) => r.captured_at < q.__lt); return Promise.resolve({ data: out, error: null }).then(res, rej); } return then(res, rej); }; } return q; };
+  const n = await thinSnapshots(sb, NOW);
+  assert.equal(n, 5, "two of three readings dropped on each old day of v1, one of two for v2");
+  assert.deepEqual(tables.content_snapshots.map((r) => r.id).sort((a, b) => a - b), [3, 6, 8, 9, 10, 11], "the last reading of each old day stays; this week's three stay");
 });
