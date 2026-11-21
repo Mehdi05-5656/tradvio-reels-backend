@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, isRecordingOf, type ChatMsg } from "../src/live-sources.js";
+import { twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, isRecordingOf, twitchSearch, twitchFollowers, type ChatMsg } from "../src/live-sources.js";
 import { partOf, liveNowOpen, checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
@@ -124,6 +124,8 @@ function twitchFetch(): typeof fetch {
     if (u.includes("/helix/videos?user_id=123")) return json({ data: [{ id: "2932003293", user_id: "123", user_login: "caseoh_", user_name: "CaseOh_", title: "LOSING MY MIND", created_at: "2026-11-18T03:01:21Z", duration: "4h0m43s", view_count: 768287, thumbnail_url: "https://t/%{width}x%{height}.jpg", type: "archive" }, { id: "1", user_id: "123", user_login: "caseoh_", user_name: "CaseOh_", title: "short", created_at: "2026-11-17T03:01:21Z", duration: "5m0s", view_count: 1, thumbnail_url: null, type: "archive" }] });
     if (u.includes("/helix/videos?id=2932003293")) return json({ data: [{ id: "2932003293", user_id: "123", user_login: "caseoh_", user_name: "CaseOh_", title: "LOSING MY MIND", created_at: "2026-11-18T03:01:21Z", duration: "4h0m43s", view_count: 768287, thumbnail_url: null, type: "archive" }] });
     if (u.includes("/helix/videos?id=9999999999")) return json({ data: [] });
+    if (u.includes("/helix/search/channels?query=caseoh")) return json({ data: [{ broadcaster_login: "caseoh_", display_name: "CaseOh_", id: "123", is_live: true, game_name: "Just Chatting", thumbnail_url: "https://p/c.png" }, { broadcaster_login: "", display_name: "nameless" }] });
+    if (u.includes("/helix/channels/followers?broadcaster_id=123")) return json({ total: 5300000, data: [] });
     if (u.includes("/helix/streams?")) return json({ data: [{ user_id: "123", user_login: "caseoh_", user_name: "CaseOh_", game_name: "Grand Theft Auto VI", title: "GTA", viewer_count: 90000, started_at: "2026-11-18T20:00:00Z", language: "en", thumbnail_url: "https://t/{width}x{height}.jpg" }] });
     return json({ error: "nope" }, 404);
   }) as typeof fetch;
@@ -489,4 +491,24 @@ test("a recording still processing has no picture (Twitch's placeholder does not
     : inner(url, init)) as typeof fetch;
   const list = await twitchBroadcasts({ env: ENV, fetch: f }, "123");
   assert.equal(list[0].thumbnail_url, null);
+});
+
+test("the Clips hub: creators by name, their followers, and any stretch of a past stream", async () => {
+  resetTwitchToken();
+  const deps = { env: ENV, fetch: twitchFetch() };
+  const hits = await twitchSearch(deps, "caseoh");
+  assert.deepEqual(hits, [{ platform: "twitch", login: "caseoh_", channel: "CaseOh_", channel_id: "123", live: true, category: "Just Chatting", profile_image_url: "https://p/c.png", url: "https://www.twitch.tv/caseoh_" }], "a hit without a login is dropped");
+  assert.equal(await twitchFollowers(deps, "123"), 5300000);
+  assert.equal(await twitchFollowers(deps, "999"), null, "an answer without a total is unknown, not 0");
+  // a stretch picked on the timeline: inside the broadcast, ten minutes at least; the whole of it is the whole stream
+  assert.deepEqual(partOf({ scope: "range", from: 3600, to: 7200 }, 14443, false), { from: 3600, to: 7200, scope: "range" });
+  assert.deepEqual(partOf({ scope: "range", from: 13000, to: 99999 }, 14443, false), { from: 13000, to: 14443, scope: "range" }, "the end is held to the broadcast's");
+  assert.equal(partOf({ scope: "range", from: 0, to: 14443 }, 14443, false), null);
+  assert.throws(() => partOf({ scope: "range", from: 100, to: 400 }, 14443, false), (e: any) => e.code === "part_too_short");
+  assert.throws(() => partOf({ scope: "range", from: 500, to: 100 }, 14443, false), (e: any) => e.code === "part_invalid");
+  assert.throws(() => partOf({ scope: "range" }, 14443, false), (e: any) => e.code === "part_invalid");
+  // the quote prices the stretch, not the broadcast, and says where it starts
+  const q = await quoteStreamClips(deps, PLANS, { url: "https://www.twitch.tv/videos/2932003293", scope: "range", from: 3600, to: 7200, count: 2 }, {});
+  assert.deepEqual(q.options.part, { from: 3600, to: 7200, scope: "range" }); assert.equal(q.options.price.analysis, 30);
+  assert.match(q.summary, /1 h of CaseOh_, from 1:00 · up to 2 clips/);
 });

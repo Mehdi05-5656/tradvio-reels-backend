@@ -95,6 +95,17 @@ export async function twitchBroadcastById(deps: LiveDeps, id: string): Promise<B
   if (String(v.type ?? "archive") !== "archive") throw new LiveSourceError("not_a_broadcast", "That link is a highlight or an upload, not a past broadcast", 400);
   return twitchBroadcast(v);
 }
+/** Channels by name as someone types (official search): who is live, what they play, their picture. */
+export type CreatorHit = { platform: "twitch"; login: string; channel: string; channel_id: string; live: boolean; category: string | null; profile_image_url: string | null; url: string };
+export async function twitchSearch(deps: LiveDeps, q: string, first = 8): Promise<CreatorHit[]> {
+  const b = await helix(deps, `search/channels?query=${encodeURIComponent(q)}&first=${Math.min(20, first)}`);
+  return (Array.isArray(b?.data) ? b.data : []).map((c: any) => ({ platform: "twitch" as const, login: String(c.broadcaster_login ?? ""), channel: String(c.display_name ?? c.broadcaster_login ?? ""), channel_id: String(c.id ?? ""), live: !!c.is_live, category: c.game_name ? String(c.game_name) : null, profile_image_url: c.thumbnail_url ? String(c.thumbnail_url) : null, url: `https://www.twitch.tv/${c.broadcaster_login}` })).filter((c: CreatorHit) => c.login);
+}
+/** A Twitch channel's follower count (official; the total comes with an app token). */
+export async function twitchFollowers(deps: LiveDeps, userId: string): Promise<number | null> {
+  const b = await helix(deps, `channels/followers?broadcaster_id=${encodeURIComponent(userId)}&first=1`).catch(() => null);
+  return Number.isFinite(Number(b?.total)) ? Number(b.total) : null;
+}
 /** The stream a Twitch channel has on right now, or null (official). */
 export async function twitchLiveNow(deps: LiveDeps, userId: string): Promise<{ started_at: string; title: string; viewers: number; category: string | null; thumbnail_url: string | null } | null> {
   const b = await helix(deps, `streams?user_id=${encodeURIComponent(userId)}&type=live`);

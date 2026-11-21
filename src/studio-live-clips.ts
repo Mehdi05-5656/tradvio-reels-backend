@@ -29,7 +29,7 @@ import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
-import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -46,14 +46,21 @@ export const liveNowOpen = (env: Record<string, string | undefined> = process.en
 /** The part of a broadcast a run reads. A live stream's default is its latest hour: the newest moments are the ones
  *  nobody has posted yet (the competitor's reel of Nov 20 2026 sells exactly that). "since" picks up where a run on the
  *  same stream stopped, so clips keep pace with the stream. */
-export type PartScope = "latest_30" | "latest_60" | "latest_120" | "since" | "all";
+export type PartScope = "latest_30" | "latest_60" | "latest_120" | "since" | "range" | "all";
 export type Part = { from: number; to: number; scope: PartScope };
-export const PART_SCOPES: Record<Exclude<PartScope, "since" | "all">, number> = { latest_30: 1800, latest_60: 3600, latest_120: 7200 };
-export function partOf(opt: { scope?: unknown; since?: unknown }, seconds: number, live: boolean): Part | null {
+export const PART_SCOPES: Record<Exclude<PartScope, "since" | "range" | "all">, number> = { latest_30: 1800, latest_60: 3600, latest_120: 7200 };
+export function partOf(opt: { scope?: unknown; since?: unknown; from?: unknown; to?: unknown }, seconds: number, live: boolean): Part | null {
   const raw = String(opt?.scope ?? "");
-  const scope: PartScope = raw === "latest_30" || raw === "latest_60" || raw === "latest_120" || raw === "since" || raw === "all" ? raw : live ? "latest_60" : "all";
+  const scope: PartScope = raw === "latest_30" || raw === "latest_60" || raw === "latest_120" || raw === "since" || raw === "range" || raw === "all" ? raw : live ? "latest_60" : "all";
   const to = Math.max(0, Math.floor(seconds));
   if (scope === "all") return null;
+  // any stretch of a broadcast, picked on its timeline (the Clips hub, Nov 21 2026): at least ten minutes, inside it
+  if (scope === "range") {
+    const a = Math.floor(Number(opt?.from)), z = Math.min(to, Math.floor(Number(opt?.to)));
+    if (!Number.isFinite(a) || !Number.isFinite(z) || a < 0 || z <= a) throw new ClipsError("part_invalid", "Pick a stretch of the stream to read", 400);
+    if (z - a < LIVE_LIMITS.min_seconds) throw new ClipsError("part_too_short", "Pick at least 10 minutes of the stream", 400);
+    return a === 0 && z >= to ? null : { from: a, to: z, scope };
+  }
   if (scope === "since") {
     const since = Math.floor(Number(opt?.since));
     if (!Number.isFinite(since) || since < 0 || since >= to) throw new ClipsError("part_nothing_new", "Nothing new has been streamed since that run yet", 400);
@@ -68,6 +75,7 @@ const partWords = (p: Part | null, seconds: number, channel: string, live: boole
   if (!p) return `${Math.round((seconds / 3600) * 10) / 10} h of ${who}${live ? " so far" : ""}`;
   const min = Math.round((p.to - p.from) / 60);
   if (p.scope === "since") return `${min} new min of ${who}`;
+  if (p.scope === "range") return `${min >= 60 ? `${Math.round((min / 60) * 10) / 10} h` : `${min} min`} of ${who}, from ${Math.floor(p.from / 3600)}:${String(Math.floor((p.from % 3600) / 60)).padStart(2, "0")}`;
   return `the latest ${min >= 60 && min % 60 === 0 ? `${min / 60 === 1 ? "hour" : `${min / 60} hours`}` : `${min} min`} of ${who}`;
 };
 /** A broadcast of any length the platform still keeps (Twitch keeps up to 48 hours): the reading is by windows, so
@@ -1022,6 +1030,16 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
       res.json({ niches: NICHES.map((n) => ({ id: n.id, label: n.label, live: streams.filter((s) => s.niche === n.id).length })), streams: streams.filter((s) => (!niche || s.niche === niche) && (!platform || s.platform === platform)).slice(0, 60), fresh_at: new Date(discovery?.at ?? Date.now()).toISOString(), open: liveClipsOpen(env), live_mode: liveNowOpen(env) || (await isStudioAdmin(req, sbFn(), env).catch(() => false)) });
     } catch (err) { fail(res, err); }
   });
+  // creators by name as someone types (Twitch's official search); blocked streamers are left out
+  app.get("/api/studio/live/search", async (req, res) => {
+    if (!(await gate(req, res))) return;
+    try {
+      const q = String(req.query.q ?? "").trim().replace(/^@/, "").slice(0, 40);
+      if (q.length < 2) return res.json({ creators: [] });
+      const hits = await twitchSearch(deps, q, 8);
+      res.json({ creators: hits.filter((c) => streamerPermission("twitch", c.login, env) !== "blocked") });
+    } catch (err) { fail(res, err); }
+  });
   app.get("/api/studio/live/lookup", async (req, res) => {
     if (!(await gate(req, res))) return;
     try {
@@ -1035,11 +1053,11 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
         if (!user) throw new ClipsError("link_no_media", "No Twitch channel has that name", 404);
         const permission = streamerPermission("twitch", user.login, env);
         if (permission === "blocked") throw new ClipsError("streamer_blocked", `${user.display_name} has asked not to be clipped on Clone8`, 403);
-        const [list, now] = await Promise.all([twitchBroadcasts(deps, user.id, 20), twitchLiveNow(deps, user.id).catch(() => null)]);
+        const [list, now, followers] = await Promise.all([twitchBroadcasts(deps, user.id, 100), twitchLiveNow(deps, user.id).catch(() => null), twitchFollowers(deps, user.id)]);
         // the stream on now is listed first, marked, however short it still is (the page says when it can be clipped)
         const marked = list.map((b) => (isRecordingOf(b, now) ? { ...b, live: true, thumbnail_url: now!.thumbnail_url ?? b.thumbnail_url } : b));
-        return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission, live: !!now, viewers: now?.viewers ?? null, title: now?.title ?? null, category: now?.category ?? null },
-          broadcasts: [...marked.filter((b) => b.live), ...marked.filter((b) => !b.live && b.seconds >= LIVE_LIMITS.min_seconds)], live_mode: liveMode });
+        return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission, live: !!now, viewers: now?.viewers ?? null, title: now?.title ?? null, category: now?.category ?? null, followers, past_count: list.length, past_more: list.length >= 100 },
+          broadcasts: [...marked.filter((b) => b.live), ...marked.filter((b) => !b.live && b.seconds >= LIVE_LIMITS.min_seconds)].slice(0, 40), live_mode: liveMode });
       }
       const ch = await kickChannel(deps, link.login!);
       const permission = streamerPermission("kick", ch.slug, env);
