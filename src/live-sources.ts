@@ -21,6 +21,13 @@ export type LiveStream = { platform: Platform; login: string; channel: string; c
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const f = (deps: LiveDeps) => deps.fetch ?? fetch;
 const e = (deps: LiveDeps) => deps.env ?? process.env;
+/** The lines a broadcast is cut from (Nov 20 2026: 1080, was 720). A vertical slice of a 16:9 stream is 9/16 of its
+ *  height wide: 405 pixels from 720 lines, 607 from 1080, stretched to 1080 wide either way; the 720 cuts looked soft
+ *  next to what creators post. Measured on a 44 s moment of a 16 h broadcast: 49 MB fetched instead of 21, the build
+ *  about 8% longer, the clip 19 MB instead of 18. STUDIO_LIVE_CUT_HEIGHT=720 goes back without a deploy. */
+export const cutHeight = (env: Record<string, string | undefined>) => (Number(env.STUDIO_LIVE_CUT_HEIGHT) === 720 ? 720 : 1080);
+/** yt-dlp's choice of Twitch rung for cutting: the biggest at or under `h` lines, 60 fps first. */
+export const twitchCutFormat = (h: number) => (h >= 1080 ? "1080p60/1080p30/1080p/720p60/720p30/720p/480p/best" : "720p60/720p30/720p/480p/best");
 
 // ---------------------------------------------------------------------------------------------------
 // Links
@@ -120,8 +127,8 @@ function run(bin: string, args: string[], ms: number): Promise<{ code: number | 
     c.on("close", (code) => { clearTimeout(t); resolve({ code, so, se }); });
   });
 }
-/** The HLS playlist addresses of a Twitch broadcast at two rungs: the smallest with sound (for hearing it) and about
- *  720 lines (for cutting). yt-dlp holds the handshake; no proxy (Twitch does not refuse datacenter addresses). */
+/** The HLS playlist addresses of a Twitch broadcast at two rungs: the smallest with sound (for hearing it) and up to
+ *  1080 lines (for cutting; cutHeight). yt-dlp holds the handshake; no proxy (Twitch does not refuse datacenter addresses). */
 export async function twitchVodPlaylists(deps: LiveDeps, videoId: string): Promise<{ audio: string; video: string }> {
   const bin = await ensureYtDlp({ fetch: deps.fetch, env: { ...e(deps), STUDIO_YT_PROXY: undefined } });
   const url = `https://www.twitch.tv/videos/${videoId}`;
@@ -132,7 +139,7 @@ export async function twitchVodPlaylists(deps: LiveDeps, videoId: string): Promi
     return u;
   };
   const audio = await get("160p/worst");
-  const video = await get("720p60/720p30/720p/480p/best");
+  const video = await get(twitchCutFormat(cutHeight(e(deps))));
   return { audio, video };
 }
 const GQL_CLIENT = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
@@ -305,11 +312,12 @@ export async function mutedRanges(deps: LiveDeps, playlist: string): Promise<Arr
   }
   return out;
 }
-/** The rung to hear from (the smallest) and the rung to cut from (about 720 lines, else the biggest under 1080). */
-export function pickRungs(vs: Variant[]): { audio: string; video: string } {
+/** The rung to hear from (the smallest) and the rung to cut from (the biggest at or under `maxHeight` lines, else the
+ *  biggest there is). */
+export function pickRungs(vs: Variant[], maxHeight = 1080): { audio: string; video: string } {
   if (!vs.length) throw new LiveSourceError("vod_unreadable", "The recording has no playable rung", 502);
   const audio = vs[0].url;
-  const want = vs.filter((v) => (v.height ?? 0) <= 720).sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0] ?? vs[vs.length - 1];
+  const want = vs.filter((v) => (v.height ?? 0) <= maxHeight).sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0] ?? vs[vs.length - 1];
   return { audio, video: want.url };
 }
 
