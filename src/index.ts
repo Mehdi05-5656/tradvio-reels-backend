@@ -2,6 +2,7 @@
 // Runs as a normal always-on Node server (no serverless cold-start concerns).
 import express from "express";
 import { createServer } from "node:http";
+import { readFileSync, writeSync } from "node:fs";
 import { registerRoutes } from "./routes.js";
 import { registerV2Routes } from "./v2-routes.js";
 import { registerCreatorVaultRoutes } from "./creatorvault.js";
@@ -184,13 +185,27 @@ async function main() {
   http.listen(port, "0.0.0.0", () => {
     console.log(`[server] listening on :${port}`);
   });
-  // A deploy or restart (Render: SIGTERM about a minute after the new server is live, then 30 s): no more jobs taken,
-  // requests in flight finish, every Studio job held goes back to the queue at once, buffers are written (studio-leases.ts)
-  // (process.on, not once: Render signals the whole process group, so this server gets SIGTERM twice, from Render
-  //  and again from npm; with once, the second one killed it before the first had run. A repeat is ignored inside.)
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => {
+  // A deploy or restart (Render: SIGTERM 60 s after the new server takes traffic, then 30 s to SIGKILL): no more jobs
+  // taken, requests in flight finish, every Studio job held goes back to the queue at once, buffers are written
+  // (studio-leases.ts). process.on, not once: a repeat signal is ignored inside.
+  // Nov 20 2026: no "[shutdown]" line has ever appeared on Render since this went live (Nov 15), and the old server
+  // keeps working until the SIGKILL, so the SIGTERM is not reaching this process. Who started us is logged at boot and
+  // every signal is logged the moment it lands (written straight to stdout), so a deploy shows where it goes.
+  console.log(`[boot] ${processLineage()}`);
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => {
+    try { writeSync(1, `[signal] ${signal} received by pid ${process.pid}\n`); } catch { /* stdout gone: carry on */ }
     void stopGracefully({ signal, sb: getSb, server: http, flush: [flushEvents, flushCosts, flushPosthog], waitMs: 10_000 });
   });
+}
+
+/** This process, its parent and pid 1, with their command lines (Linux /proc; "?" elsewhere), plus whether this
+ *  process leads its own group: enough to see which process a platform's stop signal goes to. */
+function processLineage(): string {
+  const cmd = (pid: number | string) => { try { return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ").slice(0, 120) || "?"; } catch { return "?"; } };
+  let group = "?";
+  // (/proc/self/stat after the command's closing parenthesis: state, ppid, pgrp, session, ...)
+  try { const s = readFileSync("/proc/self/stat", "utf8"); const f = s.slice(s.lastIndexOf(")") + 2).split(" "); group = `pgid ${f[2]}, sid ${f[3]}`; } catch { /* not Linux */ }
+  return `pid ${process.pid} (${group}); parent ${process.ppid}: ${cmd(process.ppid)}; pid 1: ${cmd(1)}`;
 }
 
 main().catch((e) => {
