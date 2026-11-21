@@ -1019,7 +1019,7 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
       const streams = await discoverStreams(deps, env);
       const niche = typeof req.query.niche === "string" && NICHES.some((n) => n.id === req.query.niche) ? req.query.niche : null;
       const platform = req.query.platform === "twitch" || req.query.platform === "kick" ? req.query.platform : null;
-      res.json({ niches: NICHES.map((n) => ({ id: n.id, label: n.label, live: streams.filter((s) => s.niche === n.id).length })), streams: streams.filter((s) => (!niche || s.niche === niche) && (!platform || s.platform === platform)).slice(0, 60), fresh_at: new Date(discovery?.at ?? Date.now()).toISOString(), open: liveClipsOpen(env) });
+      res.json({ niches: NICHES.map((n) => ({ id: n.id, label: n.label, live: streams.filter((s) => s.niche === n.id).length })), streams: streams.filter((s) => (!niche || s.niche === niche) && (!platform || s.platform === platform)).slice(0, 60), fresh_at: new Date(discovery?.at ?? Date.now()).toISOString(), open: liveClipsOpen(env), live_mode: liveNowOpen(env) || (await isStudioAdmin(req, sbFn(), env).catch(() => false)) });
     } catch (err) { fail(res, err); }
   });
   app.get("/api/studio/live/lookup", async (req, res) => {
