@@ -59,6 +59,7 @@ import { flushEvents, initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
 import { registerCommunity } from "./studio-community.js";
 import { registerLiveClips } from "./studio-live-clips.js";
+import { registerEditor } from "./studio-editor.js";
 import { flushCosts, initCosts, registerStudioCosts } from "./studio-costs.js";
 import { registerContentPerf, startContentPerfLoop } from "./studio-content-perf-routes.js";
 import { stopGracefully } from "./studio-leases.js";
@@ -126,6 +127,7 @@ async function main() {
   registerMcp(app, getSb); // the Clone8 connector for Claude/ChatGPT (docs/mcp/PLAN.md); off unless STUDIO_MCP_ENABLED, owner-only unless STUDIO_MCP_OPEN
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
   registerCommunity(app, getSb); // Community: the shared library of generative films (off unless STUDIO_COMMUNITY_ENABLED)
+  registerEditor(app, getSb); // the editor: a clip's project, saving edits, re-rendering (off unless STUDIO_EDITOR_ENABLED; paying plans)
   registerLiveClips(app, getSb); // Live Clips: the Streams page and link lookups (off unless STUDIO_LIVE_CLIPS_ENABLED; owner-only unless STUDIO_LIVE_CLIPS_OPEN)
   registerStudioCosts(app, getSb); // the admin panel's Money tab: what Clone8 paid, by vendor, tool and step
   registerContentPerf(app, getSb); // the admin panel's Content tab: the organic accounts posting for Clone8 (STUDIO_CONTENT_PERF_ENABLED)

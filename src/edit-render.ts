@@ -9,12 +9,19 @@ import { contentLayout, stackedLayout } from "./studio-live-clips.js";
 import type { EditDoc } from "./studio-projects.js";
 
 export type MediaInfo = { w: number; h: number; fps: number | null };
+const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
 
 /** The picture graph ([0:v] → [v]) and the frame it makes, from the edit file's layout. */
 export function layoutGraph(doc: EditDoc, info: MediaInfo): { graph: string; w: number; h: number } {
   const L = doc.layout;
   const pane = (role: "cam" | "content") => L.panes.find((p) => p.role === role)?.from ?? null;
-  if (L.type === "stacked" && pane("cam")) { const s = stackedLayout(info, pane("cam")!, pane("content")); return { graph: s.graph, w: s.w, h: s.h }; }
+  if (L.type === "stacked" && pane("cam")) {
+    const s = stackedLayout(info, pane("cam")!, pane("content"));
+    // a divider the person moved: the camera panel takes that share of the frame instead of the 600-640 lines the cutter picks
+    const want = L.divider != null ? even(L.divider * s.h) : s.camH;
+    if (Math.abs(want - s.camH) <= 2) return { graph: s.graph, w: s.w, h: s.h };
+    return { graph: s.graph.replaceAll(`${s.w}:${s.camH}`, `${s.w}:${want}`).replaceAll(`(ih-${s.camH})`, `(ih-${want})`).replaceAll(`${s.w}:${s.h - s.camH}`, `${s.w}:${s.h - want}`), w: s.w, h: s.h };
+  }
   if (L.type === "content" && pane("content")) { const s = contentLayout(info, pane("content")!); return { graph: s.graph, w: s.w, h: s.h }; }
   const format = doc.canvas.format === "original" || L.type === "original" ? "original" : "vertical";
   const out = format === "vertical" ? { w: doc.canvas.w, h: doc.canvas.h } : undefined;

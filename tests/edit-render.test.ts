@@ -23,7 +23,7 @@ test("the re-render draws the same picture the cutter drew: Clips' crop path", (
 
 test("the re-render draws the same picture the cutter drew: Live Clips' stacked and content layouts", () => {
   const cam = { x: 0.02, y: 0.62, w: 0.22, h: 0.36 }, content = { x: 0.26, y: 0, w: 0.6, h: 1 };
-  const st = base({ tool: "live_clips", frame: { w: 1080, h: 1920 }, segs: [], seen: { layout: "stacked", cam, content, irl: false, tiny: false, cam_h: 620 } });
+  const st = base({ tool: "live_clips", frame: { w: 1080, h: 1920 }, segs: [], seen: { layout: "stacked", cam, content, irl: false, tiny: false, cam_h: stackedLayout(info, cam, content).camH } });
   assert.equal(layoutGraph(st, info).graph, stackedLayout(info, cam, content).graph);
   const ct = base({ tool: "live_clips", frame: { w: 1080, h: 1920 }, segs: [], seen: { layout: "content", cam: null, content, irl: false, tiny: true } });
   assert.equal(layoutGraph(ct, info).graph, contentLayout(info, content).graph);
