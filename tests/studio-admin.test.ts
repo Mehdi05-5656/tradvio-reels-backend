@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { computeAdmin, jobCost, paymentsFrom, jobVia, registerStudioAdmin, type AdminData } from "../src/studio-admin.js";
+import { computeAdmin, jobCost, paymentsFrom, jobVia, registerStudioAdmin, toolKey, type AdminData } from "../src/studio-admin.js";
 import { isStudioAdmin, isInternalEmail, adminEmails, clearAdminCacheForTests } from "../src/studio-admin-auth.js";
 import { recordEvent, recordPageViews, initEvents, flushEvents, resetEventsForTests } from "../src/studio-events.js";
 import { logClaudeCost } from "../src/studio-pricing.js";
@@ -397,4 +397,22 @@ test("sign-up emails: sent, pressed the button, paid after; a payment goes to th
   ]);
   assert.deepEqual([s.people, s.pressed, s.paid, s.revenue_usd, s.rate_pct], [4, 2, 2, 118, 50]);
   assert.deepEqual(signupEmailStats([], [], null, Date.now()).rate_pct, null);
+});
+
+test("a job's measured cost wins over its estimate, failed or not; Stories, Motivation and Live Clips get their own rows", () => {
+  const film = { id: "m1", tool: "kage_motion", status: "done", options: { story: {}, cost_usd: 3.04 }, _metered: 2.92 };
+  assert.deepEqual(jobCost(film, ENV), { usd: 2.92, source: "metered" });
+  assert.deepEqual(jobCost({ ...film, _metered: undefined }, ENV), { usd: 3.04, source: "estimate" }, "no ledger rows: the budget");
+  assert.deepEqual(jobCost({ id: "r1", tool: "reshoot", status: "failed", options: {}, _metered: 4.1 }, ENV), { usd: 4.1, source: "metered" }, "a failed Reshoot still spent its renders");
+  assert.deepEqual(jobCost({ id: "r2", tool: "reshoot", status: "done", options: {} }, ENV).source, "none");
+  assert.deepEqual([toolKey(film), toolKey({ tool: "kage_motion", options: { motivation: {} } }), toolKey({ tool: "kage_motion", options: {} }), toolKey({ tool: "clips", options: { stream: {} } }), toolKey({ tool: "clips", options: {} })], ["stories", "motivation", "kage_motion", "live", "clips"]);
+  const d = data();
+  d.jobs.push({ id: "s1", user_id: A, tool: "kage_motion", status: "done", options: { story: {}, cost_usd: 3.04, via: "tool" }, credits_reserved: 100, credits_charged: 100, _metered: 2.5, outputs: [], created_at: ago(1) },
+    { id: "s2", user_id: A, tool: "stunts", status: "done", options: { via: "tool" }, credits_reserved: 30, credits_charged: 30, _metered: 0.6, outputs: [], created_at: ago(1) });
+  const m = computeAdmin(d, { days: 30, includeInternal: false, now: NOW }, ENV);
+  const row = (k: string) => m.tools.find((t: any) => t.tool === k)!;
+  assert.equal(row("stories").label, "Stories"); assert.equal(row("stories").jobs, 1); assert.equal(row("stories").cost_usd, 2.5);
+  assert.equal(row("stunts").label, "Stunts"); assert.equal(row("stunts").cost_usd, 0.6);
+  assert.equal(row("kage_motion").jobs, 0, "a Story is not counted under Kage");
+  assert.ok(m.notes.some((n: string) => /measured cost/.test(n)));
 });

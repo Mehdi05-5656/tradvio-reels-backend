@@ -29,16 +29,29 @@ export type AdminOptions = { days: number | null; includeInternal: boolean; now?
 
 export const TOOL_LABEL: Record<string, string> = { blueprint: "Blueprint", blueprint_plus: "Blueprint+", recast: "Recast", swap: "Swap", restyle: "Styles", trend: "Trends", character: "Characters", instrument: "Instruments",
   // everything that has shipped since: without a name here the panel showed the raw tool id
-  clips: "Clips", captions: "Captions", kage_motion: "Kage", longform: "Films", kage: "Kage remix", import: "Import" };
+  clips: "Clips", captions: "Captions", kage_motion: "Kage", longform: "Films", kage: "Kage remix", import: "Import",
+  // Nov 21 2026: the tools added since (these showed as raw ids), and the runs that share a worker shown apart
+  live: "Live Clips", stories: "Stories", motivation: "Motivation", reshoot: "Reshoot", stunts: "Stunts", splitscreen: "Split screen", blueprint_versions: "Blueprint versions" };
+/** The row a job counts under in the per-tool table: Stories and Motivation run on the Kage worker, Live Clips on Clips. */
+export function toolKey(j: any): string {
+  if (j.tool === "kage_motion" && j.options?.story) return "stories";
+  if (j.tool === "kage_motion" && j.options?.motivation) return "motivation";
+  if (j.tool === "clips" && j.options?.stream) return "live";
+  return String(j.tool);
+}
+const BASE_TOOL: Record<string, string> = { stories: "kage_motion", motivation: "kage_motion", live: "clips" };
 const RENDER_TOOLS = new Set(["recast", "swap", "restyle", "trend"]);
 
 // ---------------------------------------------------------------------------------------------------
 // One job's cost to us, and where the figure comes from
 // ---------------------------------------------------------------------------------------------------
-export type CostSource = "billed" | "estimate" | "table" | "model" | "legacy" | "calls" | "none";
+export type CostSource = "metered" | "billed" | "estimate" | "table" | "model" | "legacy" | "calls" | "none";
 export function jobCost(j: any, env: Env = process.env): { usd: number; source: CostSource } {
   const p = j.progress ?? {}, o = j.options ?? {}, outs: any[] = Array.isArray(j.outputs) ? j.outputs : [];
   const done = j.status === "done";
+  // what the job really cost, call by call, from the cost ledger (the Stories, Motivation, Kage and Films workers, and
+  // Reshoot and Stunts renders write it; loadAdminData sums it onto the job). Money a failed job spent was still spent.
+  if (j._metered != null && Number.isFinite(Number(j._metered))) return { usd: num(j._metered), source: "metered" };
   if (RENDER_TOOLS.has(j.tool)) {
     if (p.spend_usd != null) {
       // booked when a render completes (from Oct 31 2026): exact or Higgsfield's own estimate
@@ -277,10 +290,10 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
   const profit = cash - cost, profitPrev = cashPrev - costPrev;
 
   // ---- per tool
-  const toolNames = [...new Set([...Object.keys(TOOL_LABEL), ...jobs.map((j) => j.tool)])];
+  const toolNames = [...new Set([...Object.keys(TOOL_LABEL), ...jobs.map((j) => toolKey(j))])];
   const toolCalls = callCostByJob(d);
   const tools = toolNames.map((tool) => {
-    const js = costed.filter((x) => x.j.tool === tool);
+    const js = costed.filter((x) => toolKey(x.j) === tool);
     const doneJs = js.filter((x) => x.j.status === "done");
     const credits = js.reduce((n, x) => n + num(x.j.credits_charged), 0);
     const value = js.reduce((n, x) => n + num(x.j.credits_charged) * creditValueFor(cust.get(x.j.user_id)), 0);
@@ -297,7 +310,7 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
       outputs: doneJs.reduce((n, x) => n + (Array.isArray(x.j.outputs) ? x.j.outputs.length : 0), 0),
       seconds: RENDER_TOOLS.has(tool) ? r2(doneJs.reduce((n, x) => n + (x.j.outputs ?? []).reduce((m: number, o: any) => m + num(o?.duration), 0), 0)) : null,
       avg_render_s: times.length ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : null, p50_render_s: quant(times, 0.5), p90_render_s: quant(times, 0.9),
-      via, open: (toolsEnabled(env) as any)[tool] !== false,
+      via, open: (toolsEnabled(env) as any)[tool] ?? (toolsEnabled(env) as any)[BASE_TOOL[tool] ?? tool] ?? true,
     };
   }).filter((t) => t.jobs > 0 || Object.keys(TOOL_LABEL).includes(t.tool)).sort((a, b) => b.jobs - a.jobs || a.label.localeCompare(b.label));
 
@@ -441,6 +454,7 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
   if (!usage.tracked_since) notes.push("Claude costs, other paid services, emails, checkouts and page views are recorded from the moment the event table is live; until then they show as zero.");
   else if (since == null || Date.parse(usage.tracked_since) > since) notes.push(`Claude costs, emails, checkouts and page views are recorded since ${usage.tracked_since.slice(0, 10)}.`);
   if ((sources.get("legacy")?.jobs ?? 0) > 0) notes.push(`${sources.get("legacy")!.jobs} older job${sources.get("legacy")!.jobs === 1 ? "" : "s"} carry the cost booked when sent (before Oct 31 2026), which can include a retry Higgsfield did not bill.`);
+  if ((sources.get("metered")?.jobs ?? 0) > 0) notes.push(`${sources.get("metered")!.jobs} job${sources.get("metered")!.jobs === 1 ? "" : "s"} (Stories, Motivation, Kage, Films, Reshoot, Stunts) carry their measured cost, call by call. Films made before the cost ledger (Nov 11 2026) carry the estimate set when they were priced.`);
   if ((sources.get("model")?.jobs ?? 0) > 0) notes.push("Blueprint, character images and jobs without a recorded charge are costed from our rate table.");
   notes.push("Stripe fees are worked out at 2.9% + $0.30 per charge. Fixed monthly costs (Render, Supabase, Vercel, Ayrshare, Resend) are not in profit.");
 
@@ -615,6 +629,11 @@ export async function loadAdminData(sb: SupabaseClient): Promise<AdminData> {
     all(() => sb.from("studio_events").select("user_id,kind,name,usd,props,created_at").order("created_at"), 1000, 200_000),
     all(() => sb.from("studio_assistant_memory").select("user_id,created_at")),
   ]);
+  // each job's measured cost (rows that name a tool; the backend's own Claude and vendor rows are counted through events)
+  const metered = new Map<string, number>();
+  for (const r of await all(() => sb.from("studio_costs").select("job_id,usd").not("tool", "is", null).not("job_id", "is", null).order("id"), 1000, 500_000).catch(() => [] as any[]))
+    metered.set(String(r.job_id), (metered.get(String(r.job_id)) ?? 0) + num(r.usd));
+  for (const j of jobs) if (metered.has(String(j.id))) j._metered = metered.get(String(j.id));
   return { users, customers, jobs, ledger, stripe, conversations, automations, posts, profiles, insights, perfAccounts, assets, events, memory };
 }
 
