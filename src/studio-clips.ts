@@ -964,7 +964,8 @@ export type CutCtx = { sb: SupabaseClient; deps: ClipsDeps; u: string; dir: stri
   /** only these stretches of the clip are kept (seconds from the clip's start, ascending): pauses cut out before the layout, the words re-timed (Live Clips' format step) */ trim?: Array<[number, number]> | null;
   /** 1080x1920 out instead of 720x1280 (Live Clips: the platforms' native size; a portrait IRL source keeps every line) */ tall?: boolean;
   /** a peak limiter after the loudness pass (Live Clips: a clip peaked at +1.4 dBFS on Nov 19 2026) */ limiter?: boolean;
-  /** a paragraph added to the framing model's instructions (Live Clips: hold both people when the speaker talks to someone in the picture) */ framingHint?: string | null };
+  /** a paragraph added to the framing model's instructions (Live Clips: hold both people when the speaker talks to someone in the picture) */ framingHint?: string | null;
+  /** what the caller saw when it chose the layout, kept in the clip's project (editor thread: studio-projects.ts LiveSeen) */ edit?: import("./studio-projects.js").LiveSeen | null };
 /** The time map of a trim: a clip-relative time to its time in the trimmed clip (a time inside a cut pause lands at the cut), and the kept total. */
 export function trimRemap(segs: Array<[number, number]>): { map: (t: number) => number; total: number } {
   const s = [...segs].filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
@@ -1107,6 +1108,8 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   });
   if (ins.error) { await sb.storage.from("studio-uploads").remove([key]).catch(() => undefined); throw ins.error; }
   if (rel.length) await import("./studio-caption-video.js").then((cv) => cv.saveWords(sb, u, id, { words: rel.map((w) => [w.text, w.start, w.end, w.speaker ?? null] as [string, number, number, string | null]), keys, language: null, duration: round2(final.seconds || dur) })).catch(() => undefined);
+  // the clip's project (editor thread): its edit file and the kept piece of recording; off unless STUDIO_EDITOR_ENABLED, never fails the clip
+  await import("./studio-projects.js").then((pj) => pj.recordClipProject({ ctx, m, assetId: id, info: { ...info, seconds: dur }, segs, frame, burned, keys })).catch(() => undefined);
   await rm(mezz, { force: true }).catch(() => undefined);
   return { asset_id: id, bytes, seconds: final.seconds || dur };
 }

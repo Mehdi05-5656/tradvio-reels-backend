@@ -861,14 +861,14 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         await stretchOf(pl.video, from, m.end + 2 - from, file);
         const src: SourceInput = { video: file, audio: null, proxy: null, width: 0, height: 0, fps: null, offset: from };
         // framing: "person" = Clips' own; "stacked" or "auto" = the facecam on top when one is found on the stretch
-        let layout: CutCtx["layout"] = null; let stackedCamH = 0; let stacked: { cam: FacecamBox; content: FacecamBox | null } | null = null; let contentOnly: FacecamBox | null = null;
+        let layout: CutCtx["layout"] = null; let stackedCamH = 0; let stacked: { cam: FacecamBox; content: FacecamBox | null } | null = null; let contentOnly: FacecamBox | null = null; let seen: { cam: FacecamBox | null; content: FacecamBox | null; irl: boolean; tiny: boolean } | null = null;
         if (format === "vertical" && framingOf(st.framing) !== "person") {
           const still = (await stills(file, [Math.max(0.5, (m.start - from) + (m.end - m.start) / 2)], dir, `fc${m.rank}`))[0];
           const lay = still ? asLayout(await (deps.facecam ?? ((jpg) => findLayout(deps, jpg, u)))(still.jpg).catch(() => null)) : { cam: null, content: null };
           // a camera box over 15 % of the frame is the person themselves (an IRL stream): framed on them, never stacked
           const irl = !!lay.cam && lay.cam.w * lay.cam.h > FORMAT.irl_cam_share;
           const tiny = !!lay.cam && lay.cam.w < TINY_CAM_W;
-          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content, irl, tiny })}`);
+          log(`[live] layout ${JSON.stringify({ job: job.id, rank: m.rank, cam: lay.cam, content: lay.content, irl, tiny })}`); seen = { cam: lay.cam, content: lay.content, irl, tiny };
           if (lay.cam && !irl && !tiny) stacked = lay as { cam: FacecamBox; content: FacecamBox | null };
           // no camera worth a panel (none, or a tiny one) but a content box: the content fills the frame, the desktop around it goes
           else if (!irl && lay.content) contentOnly = lay.content;
@@ -878,7 +878,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         else if (contentOnly) { const content = contentOnly; layout = (info) => contentLayout(info, content); }
         const captionY = stackedCamH ? stackedCamH / FORMAT.h + FORMAT.caption.gap : FORMAT.caption.irl_y;
         const captions = ctxBase.captions ? { ...ctxBase.captions, style: { ...ctxBase.captions.style, y: captionY, maxWidth: Math.min(Number(ctxBase.captions.style?.maxWidth) || 1, FORMAT.caption.max_width) } } : null;
-        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout, captions }, m);
+        const r = await (deps.cut ?? cutClip)({ ...ctxBase, src, layout, captions, edit: { layout: stacked ? "stacked" : contentOnly ? "content" : "follow", ...(seen ?? {}), cam_h: stackedCamH || null } }, m);
         made.push({ rank: m.rank, asset_id: r.asset_id, seconds: r.seconds }); cutTimes.push([Math.round(r.seconds * 10) / 10, Math.round((Date.now() - tc) / 100) / 10]);
         await renew(sb, job, { clip_at: new Date().toISOString(), done: made.length, total: kept.length, message: made.length < kept.length ? `Cutting clip ${made.length + 1} of ${kept.length}` : "Finishing", made });
       } catch (err: any) {

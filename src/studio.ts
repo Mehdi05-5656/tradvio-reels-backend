@@ -1170,6 +1170,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       if (!a.data || a.data.status === "deleted") return res.status(404).json({ error: "asset_not_found" });
       const s = await sb.storage.from("studio-uploads").createSignedUrl(a.data.object_key, 900);
       if (s.error || !s.data) throw s.error ?? new Error("signing_failed");
+      // a link asked for to save the file (the app sends ?for=download): what happened to a clip (editor thread, studio_clip_outcomes)
+      if (req.query.for === "download") recordEvent({ user_id: u, kind: "feature", name: "clip_download", props: { asset_id: req.params.id } });
       res.json({ url: s.data.signedUrl, expires_in: 900 });
     } catch (e) { fail(res, e); }
   });
