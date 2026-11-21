@@ -36,7 +36,8 @@ export type EditDoc = {
     /** the moving crop of a followed person: clip-relative seconds, x as a fraction of the width (studio-clips.ts Seg) */ path: Seg[] };
   captions: { on: boolean; style: Record<string, unknown> | null; keywords: boolean; fillers: boolean; censor: boolean; words: string | null; keys: number[]; fixes: unknown[] };
   extras: { title: string | null; punch_in: number | null; pause_trim: boolean; bottom_loop: unknown | null };
-  sound: { level: number; limiter: boolean; muted: Array<{ from: number; to: number; why: string; locked: boolean }> };
+  sound: { level: number; limiter: boolean; muted: Array<{ from: number; to: number; why: string; locked: boolean }>;
+    /** swear words in the sound: left as said, silenced, or bleeped (the editor's smart tool; edit-smart.ts) */ bleep?: "off" | "mute" | "tone" };
   meta: { title: string; hook: string | null; hook_line: string | null; score: number | null };
 };
 

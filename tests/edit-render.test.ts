@@ -71,3 +71,41 @@ test("a real re-render from a kept recording: the right frame and length", { ski
     assert.ok(Math.abs(Number(j.format.duration) - 4) < 0.2, `duration ${j.format.duration}`);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("swear words: found as the captions find them, padded, joined, inside the clip", async () => {
+  const { swearRanges, isSwear } = await import("../src/edit-smart.js");
+  assert.equal(isSwear("Fuck!"), true); assert.equal(isSwear("shitake"), true); assert.equal(isSwear("duck"), false);
+  const r = swearRanges([{ text: "what", start: 0, end: 0.3 }, { text: "the", start: 0.3, end: 0.4 }, { text: "fuck,", start: 0.4, end: 0.7 }, { text: "shit", start: 0.72, end: 1.0 }, { text: "bitch", start: 9.9, end: 10.4 }], 10);
+  assert.deepEqual(r, [[0.34, 1.06], [9.84, 10]]);
+});
+
+test("a bleep: silence over the swear words, or a tone mixed over the silence", () => {
+  const d = base({});
+  assert.doesNotMatch(soundFilter(d, 30, [[1, 2]]), /between\(t,1\.000/); // off unless chosen
+  d.sound.bleep = "mute";
+  assert.match(soundFilter(d, 30, [[1, 2]]), /volume=enable='between\(t,1\.000,2\.000\)':volume=0/);
+  d.sound.bleep = "tone";
+  const r = renderArgs(d, "/k.mp4", info, "/o.mp4", null, [[1, 2]]);
+  const g = r.args[r.args.indexOf("-filter_complex") + 1];
+  assert.match(g, /sine=frequency=1000/); assert.match(g, /amix=inputs=2/);
+  assert.equal(r.args[r.args.indexOf("-map", r.args.indexOf("-map") + 1) + 1], "[a]");
+  assert.equal(r.args.includes("-af"), false);
+});
+
+test("a real render with a bleep tone", { skip: !hasFfmpeg && "no ffmpeg" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "edit-bleep-"));
+  try {
+    const src = join(dir, "keep.mp4"), out = join(dir, "out.mp4");
+    const g = spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:r=30:d=8", "-f", "lavfi", "-i", "sine=f=300:d=8", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", src]);
+    assert.equal(g.status, 0, String(g.stderr));
+    const d = clipDoc({ tool: "clips", jobId: "j", m: { ...m, start: 2, end: 6 }, info: { w: 320, h: 180, fps: 30 }, dur: 4, format: "vertical", frame: { w: 720, h: 1280 },
+      segs: [{ start: 0, end: 4, mode: "crop", x0: 0.5, x1: 0.5 }], seen: null, trim: null, captions: null, burned: false, keys: [], assetId: "a", limiter: true,
+      kept: { key: "k", seconds: 8, before: 2, expires: null }, origin: null });
+    d.sound.bleep = "tone";
+    const r = renderArgs(d, src, { w: 320, h: 180, fps: 30 }, out, null, [[1, 1.6]]);
+    const run = spawnSync("ffmpeg", r.args);
+    assert.equal(run.status, 0, String(run.stderr));
+    const p = spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", out]);
+    assert.deepEqual(String(p.stdout).trim().split("\n").sort(), ["audio", "video"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

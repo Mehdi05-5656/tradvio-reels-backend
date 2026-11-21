@@ -7,6 +7,7 @@
 import { buildClipFilter, type Seg } from "./studio-clips.js";
 import { contentLayout, stackedLayout } from "./studio-live-clips.js";
 import type { EditDoc } from "./studio-projects.js";
+import { during } from "./edit-smart.js";
 
 export type MediaInfo = { w: number; h: number; fps: number | null };
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
@@ -31,8 +32,10 @@ export function layoutGraph(doc: EditDoc, info: MediaInfo): { graph: string; w: 
 }
 
 /** The sound pass: loudness to the file's level, the optional limiter, soft edges, and any locked muted ranges silenced. */
-export function soundFilter(doc: EditDoc, seconds: number): string {
+export function soundFilter(doc: EditDoc, seconds: number, bleeps: Array<[number, number]> = []): string {
   const mutes = doc.sound.muted.map((m) => `volume=enable='between(t,${(m.from - doc.trim.in).toFixed(3)},${(m.to - doc.trim.in).toFixed(3)})':volume=0`);
+  // swear words: the voice is silenced there (and, for "tone", a bleep is laid over the gap by renderArgs)
+  if (bleeps.length && doc.sound.bleep && doc.sound.bleep !== "off") mutes.push(`volume=enable='${during(bleeps)}':volume=0`);
   return [
     ...mutes,
     `loudnorm=I=${doc.sound.level}:TP=-1.5:LRA=11`,
@@ -47,12 +50,18 @@ export const ENC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-th
 
 /** The ffmpeg arguments that render an edit file from its kept recording. `captionFilter` is the ASS filter when
  *  captions are on (studio-caption-video.ts assFilter on a file made by captionAss for this frame). */
-export function renderArgs(doc: EditDoc, source: string, info: MediaInfo, out: string, captionFilter: string | null = null): { args: string[]; seconds: number; frame: { w: number; h: number } } {
+export function renderArgs(doc: EditDoc, source: string, info: MediaInfo, out: string, captionFilter: string | null = null, bleeps: Array<[number, number]> = []): { args: string[]; seconds: number; frame: { w: number; h: number } } {
   const seconds = Math.max(0.5, doc.trim.out - doc.trim.in);
   const lay = layoutGraph(doc, info);
   let graph = lay.graph;
   if (captionFilter) graph = graph.replace(/\[v\]$/, `,${captionFilter}[v]`);
-  const args = ["-v", "error", "-nostdin", "-y", "-threads", "2", "-ss", doc.trim.in.toFixed(3), "-i", source, "-t", seconds.toFixed(3),
-    "-filter_complex_threads", "1", "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?", "-af", soundFilter(doc, seconds), ...ENC, out];
+  const head = ["-v", "error", "-nostdin", "-y", "-threads", "2", "-ss", doc.trim.in.toFixed(3), "-i", source, "-t", seconds.toFixed(3), "-filter_complex_threads", "1"];
+  const sound = soundFilter(doc, seconds, bleeps);
+  // a bleep tone: a 1 kHz sine heard only inside the swear words, mixed over the silenced voice
+  if (bleeps.length && doc.sound.bleep === "tone") {
+    graph += `;[0:a]${sound}[am];sine=frequency=1000:sample_rate=44100:duration=${seconds.toFixed(3)},volume=0.22,volume=enable='not(${during(bleeps)})':volume=0[bp];[am][bp]amix=inputs=2:duration=first:normalize=0[a]`;
+    return { args: [...head, "-filter_complex", graph, "-map", "[v]", "-map", "[a]", ...ENC, out], seconds, frame: { w: lay.w, h: lay.h } };
+  }
+  const args = [...head, "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0?", "-af", sound, ...ENC, out];
   return { args, seconds, frame: { w: lay.w, h: lay.h } };
 }

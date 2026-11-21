@@ -18,6 +18,7 @@ import { cutGate } from "./studio-capacity.js";
 import { recordEvent } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { renderArgs } from "./edit-render.js";
+import { swearRanges } from "./edit-smart.js";
 import { editorOn, SETTINGS, type Box, type EditDoc } from "./studio-projects.js";
 
 export type EditorDeps = { env?: Record<string, string | undefined>; log?: (l: string) => void; run?: (args: string[]) => Promise<unknown> };
@@ -65,7 +66,7 @@ export function cleanDoc(ai: EditDoc, next: any): EditDoc {
     captions: { ...ai.captions, on: next.captions?.on === true, style, keywords: next.captions?.keywords !== false, fillers: next.captions?.fillers !== false, censor: next.captions?.censor === true,
       fixes: Array.isArray(next.captions?.fixes) ? next.captions.fixes.slice(0, 500) : [] },
     extras: { title: typeof next.extras?.title === "string" ? next.extras.title.slice(0, 120) : null, punch_in: num(next.extras?.punch_in, 0, 600), pause_trim: next.extras?.pause_trim === true, bottom_loop: next.extras?.bottom_loop ?? null },
-    sound: { level: num(next.sound?.level, -24, -8) ?? ai.sound.level, limiter: ai.sound.limiter, muted: [...locked, ...own] },
+    sound: { level: num(next.sound?.level, -24, -8) ?? ai.sound.level, limiter: ai.sound.limiter, muted: [...locked, ...own], bleep: ["mute", "tone"].includes(next.sound?.bleep) ? next.sound.bleep : "off" },
   };
 }
 
@@ -203,17 +204,19 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
       // captions: the clip's words, moved to the edited clip's time, laid out for the frame the layout makes
       let captionFilter: string | null = null;
       const frame = renderArgs(doc, src, info, out).frame;
+      const cv = await import("./studio-caption-video.js");
+      const needWords = (doc.captions.on && doc.captions.style) || (doc.sound.bleep && doc.sound.bleep !== "off");
+      const wd = needWords ? await cv.readWords(sb, p.user_id, p.asset_id) : null;
+      const words = wd ? shiftWords(wd.words, ai, doc, wd.keys) : [];
+      const bleeps = doc.sound.bleep && doc.sound.bleep !== "off" ? swearRanges(words, doc.trim.out - doc.trim.in) : [];
       if (doc.captions.on && doc.captions.style) {
-        const cv = await import("./studio-caption-video.js");
-        const wd = await cv.readWords(sb, p.user_id, p.asset_id);
-        const words = wd ? shiftWords(wd.words, ai, doc, wd.keys) : [];
         if (words.length) {
           const ass = join(dir, "c.ass");
           await writeFile(ass, cv.captionAss(words, cv.cleanSettings({ style: doc.captions.style, keywords: doc.captions.keywords, fillers: doc.captions.fillers, censor: doc.captions.censor }), frame, env));
           captionFilter = cv.assFilter(ass, env);
         }
       }
-      const plan = renderArgs(doc, src, info, out, captionFilter);
+      const plan = renderArgs(doc, src, info, out, captionFilter, bleeps);
       await run(plan.args);
       await run(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, plan.seconds / 3).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still]);
       const fin = await probeLocal(out);
