@@ -202,9 +202,19 @@ export async function loadAffiliates(sb: SupabaseClient, env: Record<string, str
 
 /** Credits a new account to a code, once: the code on the account's metadata (set at sign-up) wins over the browser's. */
 export async function creditAffiliate(sb: SupabaseClient, userId: string, browserCode: string | null, now = Date.now()): Promise<{ credited: boolean; code?: string; reason?: string }> {
-  const cust = await sb.from("studio_customers").select("user_id,affiliate_code").eq("user_id", userId).maybeSingle();
+  let cust = await sb.from("studio_customers").select("user_id,affiliate_code").eq("user_id", userId).maybeSingle();
   if (cust.error) throw cust.error;
-  if (!cust.data) return { credited: false, reason: "no_account" };
+  if (!cust.data) {
+    // a brand-new person: their Studio row is written by the first sign-up answer, which can come after this claim.
+    // Make the empty row here (the answers then fill it), so the claim never has to wait for them.
+    const got0 = await (sb as any).auth?.admin?.getUserById?.(userId);
+    if (!got0?.data?.user) return { credited: false, reason: "no_account" };
+    const made = await sb.from("studio_customers").upsert({ user_id: userId }, { onConflict: "user_id", ignoreDuplicates: true });
+    if (made.error) throw made.error;
+    cust = await sb.from("studio_customers").select("user_id,affiliate_code").eq("user_id", userId).maybeSingle();
+    if (cust.error) throw cust.error;
+    if (!cust.data) return { credited: false, reason: "no_account" };
+  }
   if (cust.data.affiliate_code) return { credited: false, reason: "already_credited", code: cust.data.affiliate_code };
   const got = await (sb as any).auth?.admin?.getUserById?.(userId);
   const user = got?.data?.user;

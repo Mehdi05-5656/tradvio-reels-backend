@@ -33,6 +33,7 @@ function fakeSb(tables: Record<string, Row[]>, users: Record<string, Row>) {
     const q: any = {
       select: () => { if (op !== "select") wantRows = true; return q; },
       insert: (v: any) => { op = "insert"; payload = v; return q; }, update: (v: any) => { op = "update"; payload = v; return q; },
+      upsert: (v: any) => { const k = (v as Row).user_id; if (!rows().some((r) => r.user_id === k)) rows().push({ affiliate_code: null, ...v }); log.push({ op: "upsert", table, v }); return q; },
       eq: (k: string, v: any) => { filters.push((r) => get(r, k) === v); return q; }, is: (k: string, v: any) => { filters.push((r) => (get(r, k) ?? null) === v); return q; },
       not: (k: string, _o: string, v: any) => { filters.push((r) => (get(r, k) ?? null) !== v); return q; }, in: (k: string, vs: any[]) => { filters.push((r) => vs.includes(get(r, k))); return q; },
       order: () => q, limit: () => q, range: (a: number, b: number) => { lo = a; hi = b; return q; },
@@ -232,4 +233,15 @@ test("the click beacon passes both of the server's guards (no account, no write 
   assert.equal(selfAuthenticatedPost("/api/public/aff-click", "POST"), true);
   assert.equal(selfAuthenticatedPost("/api/public/aff-click/", "POST"), true);
   assert.equal(selfAuthenticatedPost("/api/public/aff-click", "GET"), false);
+});
+
+test("credit: a brand-new person whose Studio row is not written yet is still credited (the row is made by the claim)", async () => {
+  const { tables, users, sb } = base();
+  const FRESH = "44444444-4444-4444-8444-444444444444";
+  users[FRESH] = { id: FRESH, email: "fresh@example.com", created_at: iso(NOW - 2 * 60_000), user_metadata: { aff: "jake" } };
+  assert.equal(tables.studio_customers.some((c) => c.user_id === FRESH), false);
+  assert.deepEqual(await creditAffiliate(sb, FRESH, null, NOW), { credited: true, code: "jake" }, "the code saved at sign-up, with no row and no browser code (confirmation opened elsewhere)");
+  assert.equal(tables.studio_customers.find((c) => c.user_id === FRESH)!.affiliate_code, "jake");
+  assert.equal((await creditAffiliate(sb, "55555555-5555-4555-8555-555555555555", "jake", NOW)).reason, "no_account", "an id that is not a user never gets a row");
+  assert.equal(tables.studio_customers.some((c) => c.user_id === "55555555-5555-4555-8555-555555555555"), false);
 });
