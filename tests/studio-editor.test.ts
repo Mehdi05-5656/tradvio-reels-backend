@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { cleanDoc, makePreview, renderProject, shiftWords, EditorError } from "../src/studio-editor.js";
+import { cleanDoc, makePreview, renderProject, shiftWords, EditorError, clipFileKey, ASSET_KEY_RULE } from "../src/studio-editor.js";
 import { layoutGraph } from "../src/edit-render.js";
 import { clipDoc, type EditDoc } from "../src/studio-projects.js";
 
@@ -103,8 +103,8 @@ test("a re-render from the kept recording replaces the clip in the library", { s
     assert.equal(ok, true, state.project.render_error);
     assert.equal(state.project.render_state, "done");
     assert.equal(state.project.rendered_rev, 3);
-    assert.equal(state.asset.object_key, "u1/a1-r3.mp4");
-    assert.ok(state.uploads["u1/a1-r3.mp4"] > 1000);
+    assert.match(state.asset.object_key, /^u1\/[a-f0-9-]{36}\.mp4$/, "a new file under a fresh name");
+    assert.ok(state.uploads[state.asset.object_key] > 1000);
     assert.ok(state.uploads["u1/assets/a1-r3.jpg"] > 100); // a new poster per save, never a cached old one
     assert.equal(state.asset.probe.poster_key, "u1/assets/a1-r3.jpg");
     assert.deepEqual([state.asset.probe.clip.start, state.asset.probe.clip.end], [8, 14]); // where the edited clip now sits in the source: origin_at 6 + trim 2..8
@@ -128,4 +128,11 @@ test("no kept recording: the render fails cleanly and says why", async () => {
   assert.equal(await renderProject(sb, "p2", { env: {}, log: () => undefined }), false);
   assert.equal(state.project.render_state, "failed");
   assert.match(state.project.render_error, /kept recording/i);
+});
+
+test("a re-rendered clip's file name is one studio_assets accepts (Nov 20 2026: every save failed on it)", async () => {
+  const user = "166ee4e7-0de9-4038-b740-f6b3b609848c";
+  const a = clipFileKey(user), b = clipFileKey(user);
+  assert.match(a, ASSET_KEY_RULE); assert.notEqual(a, b);
+  assert.ok(!ASSET_KEY_RULE.test(`${user}/4686cf2a-ec4c-4ef5-9780-0612992b5de3-r2.mp4`), "the old form is what the database refused");
 });

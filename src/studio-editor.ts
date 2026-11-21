@@ -13,6 +13,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { ffmpeg, probeLocal } from "./studio-clips.js";
 import { cutGate } from "./studio-capacity.js";
 import { recordEvent } from "./studio-events.js";
@@ -280,7 +281,7 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
       const a = await sb.from("studio_assets").select("object_key,probe").eq("id", p.asset_id).maybeSingle();
       if (!a.data) throw new EditorError("clip_gone", "The clip was deleted from the library");
       const oldKey: string | null = a.data.object_key ?? null;
-      const key = `${p.user_id}/${p.asset_id}-r${p.rev}.mp4`;
+      const key = clipFileKey(p.user_id);
       const up = await sb.storage.from("studio-uploads").upload(key, await readFile(out), { contentType: "video/mp4", upsert: true });
       if (up.error) throw up.error;
       // a new poster under its own name (the old one may sit in a browser's cache), the clip's place in the source updated
@@ -311,7 +312,14 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
   }
 }
 
-/** A small copy of the kept recording the browser can play and scrub (640 wide, H.264, a keyframe a second). */
+/** The library file a re-render writes: a new name each time (a browser never plays a cached old cut), in the only form
+ *  studio_assets accepts (studio_assets_object_key_check: `<user uuid>/<uuid>.mp4`). Nov 20 2026: the first form,
+ *  `<user>/<asset>-r<rev>.mp4`, broke that rule and every save failed after the render. */
+export const ASSET_KEY_RULE = /^[a-f0-9-]{36}\/[a-f0-9-]{36}\.(mp4|mov|jpg|jpeg|png)$/;
+export const clipFileKey = (userId: string) => `${userId}/${randomUUID()}.mp4`;
+
+/** A copy of the kept recording the browser can play and scrub (up to 1280 wide, H.264, a keyframe a second). Nov 20
+ *  2026: 640 wide at CRF 28 made the editor look blurrier than the clip it edits. */
 const previews = new Set<string>();
 export async function makePreview(sb: SupabaseClient, id: string, deps: EditorDeps = {}): Promise<boolean> {
   if (previews.has(id)) return false;
@@ -328,8 +336,8 @@ export async function makePreview(sb: SupabaseClient, id: string, deps: EditorDe
     const dl = await sb.storage.from("studio-outputs").download(p.source_key);
     if (dl.error || !dl.data) throw new Error("kept recording unreadable");
     await writeFile(src, Buffer.from(await dl.data.arrayBuffer()));
-    await cutGate(deps.env ?? process.env).run(() => run(["-v", "error", "-nostdin", "-y", "-threads", "2", "-i", src, "-vf", "scale='min(640,iw)':-2,fps=30", "-c:v", "libx264", "-preset", "veryfast",
-      "-crf", "28", "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-movflags", "+faststart", out]));
+    await cutGate(deps.env ?? process.env).run(() => run(["-v", "error", "-nostdin", "-y", "-threads", "2", "-i", src, "-vf", "scale='min(1280,iw)':-2,fps=30", "-c:v", "libx264", "-preset", "veryfast",
+      "-crf", "23", "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-movflags", "+faststart", out]));
     const key = p.source_key.replace(/source\.mp4$/, "preview.mp4");
     const up = await sb.storage.from("studio-outputs").upload(key, await readFile(out), { contentType: "video/mp4", upsert: true });
     if (up.error) throw up.error;
