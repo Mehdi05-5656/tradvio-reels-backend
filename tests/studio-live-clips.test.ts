@@ -429,12 +429,13 @@ test("live: the quote marks a stream still on, prices its latest hour, and stays
   resetTwitchToken();
   // the same 4-hour broadcast, its channel live now (the stream started a minute after the recording)
   const live = ((inner: typeof fetch) => (async (url: any, init?: any) => String(url).includes("/helix/streams?user_id=123")
-    ? new Response(JSON.stringify({ data: [{ user_id: "123", user_login: "caseoh_", game_name: "Just Chatting", title: "LIVE", viewer_count: 5000, started_at: "2026-11-18T03:02:00Z" }] }), { status: 200, headers: { "content-type": "application/json" } })
+    ? new Response(JSON.stringify({ data: [{ user_id: "123", user_login: "caseoh_", game_name: "Just Chatting", title: "LIVE", viewer_count: 5000, started_at: "2026-11-18T03:02:00Z", thumbnail_url: "https://static-cdn.jtvnw.net/previews-ttv/live_user_caseoh_-{width}x{height}.jpg" }] }), { status: 200, headers: { "content-type": "application/json" } })
     : inner(url, init)) as typeof fetch)(twitchFetch());
   const url = "https://www.twitch.tv/videos/2932003293";
   const q = await quoteStreamClips({ env: { ...ENV, STUDIO_LIVE_NOW: "true" }, fetch: live }, PLANS, { url, length: "standard", count: 3 }, {});
   assert.equal(q.options.stream.live, true); assert.deepEqual(q.options.part, { from: 14443 - 3600, to: 14443, scope: "latest_60" });
   assert.equal(q.options.source.live, true); assert.deepEqual(q.options.source.part, q.options.part, "the run page knows where to pick up");
+  assert.match(q.options.source.thumbnail_url, /^https:\/\/static-cdn\.jtvnw\.net\/previews-ttv\/live_user_caseoh_-640x360\.jpg\?t=\d+$/, "a stream on now shows its live preview");
   assert.equal(q.options.price.analysis, 30, "an hour read is priced as an hour (the minimum)");
   assert.equal(q.options.likely, 4); assert.match(q.summary, /the latest hour of CaseOh_ \(live\) · up to 3 clips/);
   const half = await quoteStreamClips({ env: { ...ENV, STUDIO_LIVE_NOW: "true" }, fetch: live }, PLANS, { url, scope: "latest_30", count: 1 }, {});
@@ -478,4 +479,14 @@ test("live: a run reads only its part (the newest hour heard whole) and never ch
   const none = fakeSb();
   assert.equal(await runStreamClipsJob(none.sb, { ...deps, chat: async () => chatWith(900, 9000).filter((m) => m.t < 5400), pick: async () => [] }, job({ from: 5400, to: 9000, scope: "latest_60" })), "clips_none_found");
   assert.ok(!none.calls.some(([fn]: any) => fn === "studio_complete"), "nothing settled as made: the reservation goes back with the failure");
+});
+
+test("a recording still processing has no picture (Twitch's placeholder does not load)", async () => {
+  resetTwitchToken();
+  const inner = twitchFetch();
+  const f = (async (url: any, init?: any) => String(url).includes("/helix/videos?user_id=123")
+    ? new Response(JSON.stringify({ data: [{ id: "7", user_id: "123", user_login: "caseoh_", user_name: "CaseOh_", title: "on now", created_at: "2026-11-18T03:01:21Z", duration: "2h0m0s", view_count: 1, thumbnail_url: "https://vod-secure.twitch.tv/_404/404_processing_%{width}x%{height}.png", type: "archive" }] }), { status: 200, headers: { "content-type": "application/json" } })
+    : inner(url, init)) as typeof fetch;
+  const list = await twitchBroadcasts({ env: ENV, fetch: f }, "123");
+  assert.equal(list[0].thumbnail_url, null);
 });

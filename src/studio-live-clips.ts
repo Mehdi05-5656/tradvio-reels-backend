@@ -140,7 +140,7 @@ export async function resolveBroadcast(deps: LiveDeps, url: string): Promise<Bro
     const b = await twitchBroadcastById(deps, link.id!);
     if (!b) throw new ClipsError("link_no_media", "No past broadcast is at that link (Twitch keeps them 7 to 60 days)", 404);
     const now = b.channel_id ? await twitchLiveNow(deps, b.channel_id).catch(() => null) : null;
-    return isRecordingOf(b, now) ? { ...b, live: true } : b;
+    return isRecordingOf(b, now) ? { ...b, live: true, thumbnail_url: now!.thumbnail_url ?? b.thumbnail_url } : b;
   }
   const src = await kickBroadcastSource(deps, link.id!);
   const slug = link.login ?? ""; if (!slug) throw new ClipsError("pick_broadcast", "Use the broadcast's link from the channel's page (kick.com/<channel>/videos/…)", 400);
@@ -1037,7 +1037,7 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
         if (permission === "blocked") throw new ClipsError("streamer_blocked", `${user.display_name} has asked not to be clipped on Clone8`, 403);
         const [list, now] = await Promise.all([twitchBroadcasts(deps, user.id, 20), twitchLiveNow(deps, user.id).catch(() => null)]);
         // the stream on now is listed first, marked, however short it still is (the page says when it can be clipped)
-        const marked = list.map((b) => (isRecordingOf(b, now) ? { ...b, live: true } : b));
+        const marked = list.map((b) => (isRecordingOf(b, now) ? { ...b, live: true, thumbnail_url: now!.thumbnail_url ?? b.thumbnail_url } : b));
         return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission, live: !!now, viewers: now?.viewers ?? null, title: now?.title ?? null, category: now?.category ?? null },
           broadcasts: [...marked.filter((b) => b.live), ...marked.filter((b) => !b.live && b.seconds >= LIVE_LIMITS.min_seconds)], live_mode: liveMode });
       }

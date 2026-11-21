@@ -77,7 +77,8 @@ export async function helix(deps: LiveDeps, path: string, tries = 0): Promise<an
   return r.json();
 }
 const twitchDuration = (d: string): number => { const h = /(\d+)h/.exec(d), m = /(\d+)m/.exec(d), s = /(\d+)s/.exec(d); return (h ? +h[1] : 0) * 3600 + (m ? +m[1] : 0) * 60 + (s ? +s[1] : 0); };
-const twitchThumb = (t: string | null | undefined) => (t ? String(t).replace("%{width}", "640").replace("%{height}", "360").replace("{width}", "640").replace("{height}", "360") : null);
+// Twitch's "still processing" placeholder (a recording in progress, or just ended) is no picture: it does not load
+const twitchThumb = (t: string | null | undefined) => (t && !/\/_404\/|404_processing/.test(String(t)) ? String(t).replace("%{width}", "640").replace("%{height}", "360").replace("{width}", "640").replace("{height}", "360") : null);
 export async function twitchUser(deps: LiveDeps, login: string): Promise<{ id: string; login: string; display_name: string; profile_image_url: string | null } | null> {
   const b = await helix(deps, `users?login=${encodeURIComponent(login)}`);
   const u = b?.data?.[0]; return u ? { id: String(u.id), login: String(u.login), display_name: String(u.display_name ?? u.login), profile_image_url: u.profile_image_url ?? null } : null;
@@ -95,10 +96,13 @@ export async function twitchBroadcastById(deps: LiveDeps, id: string): Promise<B
   return twitchBroadcast(v);
 }
 /** The stream a Twitch channel has on right now, or null (official). */
-export async function twitchLiveNow(deps: LiveDeps, userId: string): Promise<{ started_at: string; title: string; viewers: number; category: string | null } | null> {
+export async function twitchLiveNow(deps: LiveDeps, userId: string): Promise<{ started_at: string; title: string; viewers: number; category: string | null; thumbnail_url: string | null } | null> {
   const b = await helix(deps, `streams?user_id=${encodeURIComponent(userId)}&type=live`);
   const s = b?.data?.[0]; if (!s) return null;
-  return { started_at: String(s.started_at ?? ""), title: String(s.title ?? "").slice(0, 160), viewers: Number(s.viewer_count) || 0, category: s.game_name ? String(s.game_name) : null };
+  // the stream's live preview (Twitch refreshes it every few minutes): the recording in progress has only a placeholder;
+  // stamped by the minute so a browser does not keep an old frame
+  const thumb = twitchThumb(s.thumbnail_url);
+  return { started_at: String(s.started_at ?? ""), title: String(s.title ?? "").slice(0, 160), viewers: Number(s.viewer_count) || 0, category: s.game_name ? String(s.game_name) : null, thumbnail_url: thumb ? `${thumb}${thumb.includes("?") ? "&" : "?"}t=${Math.floor(Date.now() / 60_000)}` : null };
 }
 /** Whether a past-broadcast entry is the recording of the stream on now: Twitch lists it among the archives while it
  *  grows, started within a few minutes of the stream (measured Nov 21 2026: zackrawrr 1 h 51 min in, the recording
