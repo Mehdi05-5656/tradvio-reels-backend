@@ -4,6 +4,7 @@
 // grants credits (studio_apply_subscription, studio_grant). Tools cost credits that are reserved when a
 // job is created and settled by the worker that runs it. Every route here is for the signed-in person
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
+import { registerBusy } from "./studio-busy.js";
 import { grantForYear } from "./studio-credits.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -620,6 +621,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     // the no-plan answer carries words too: build 12 of the iPhone app shows `detail` under the button as it is
     if (named?.[1] === "subscription_required") return res.status(409).json({ error: named[1], detail: "Making videos comes with a Clone8 plan. Pick a plan to start." });
+    // at the plan's limit: the app asks /api/studio/busy for what is going; the iPhone app shows `detail` as it is
+    if (named?.[1] === "too_many_jobs") return res.status(409).json({ error: named[1], detail: "Your plan's runs are all going. Upgrade for more at once, or wait for one to finish." });
     if (named) return res.status(named[1] === "job_not_found" ? 404 : 409).json({ error: named[1] });
     if (/relation .* does not exist|function .* does not exist/i.test(msg)) return res.status(503).json({ error: "studio_unavailable", detail: "The Studio migration has not been applied" });
     if (isNoSuchPrice(e)) { console.error(`[studio] ALERT a STRIPE_PRICE_* setting is not a price in this Stripe account: ${msg.slice(0, 160)}`); return res.status(503).json({ error: "billing_misconfigured", detail: "That plan is not set up in billing yet. We have been alerted." }); }
@@ -638,6 +641,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   registerCaptions(app, { sbFn, env, requireUser, fail, log });
   registerStunts(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
+  registerBusy(app, { sbFn, plans: PLANS, requireUser, fail });
   registerSplit(app, { sbFn, env, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
   registerReshoot(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
   registerBlueprints(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });

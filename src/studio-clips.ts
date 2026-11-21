@@ -286,12 +286,27 @@ export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now
   } else left += Math.max(stages[at][1] * 0.1, stages[at][1] - since);
   return Math.max(10, Math.round(left));
 }
-/** Every clips run waiting or working, in the order the servers take them: running first, then queued by age. */
+/** A plan's place in the queue, as studio_claim takes jobs (Nov 20 2026): Studio and the owner's pass first, then
+ *  Creator, then everyone else. Pure. */
+export function queueRank(c: { plan_id?: string | null; owner_pass?: boolean | null } | undefined): number {
+  return c?.owner_pass || c?.plan_id === "studio" ? 0 : c?.plan_id === "creator" ? 1 : 2;
+}
+/** Every clips run waiting or working, in the order the servers take them: running first, then queued by plan
+ *  (studio_claim's priority queue), oldest first within a plan. */
 export async function clipsQueue(sb: SupabaseClient): Promise<Array<{ id: string; status: string; created_at: string; options: any; progress: any }>> {
-  const r = await sb.from("studio_jobs").select("id,status,created_at,options,progress").eq("tool", "clips").in("status", ["queued", "running"]).order("created_at", { ascending: true }).limit(200);
+  const r = await sb.from("studio_jobs").select("id,user_id,status,created_at,options,progress").eq("tool", "clips").in("status", ["queued", "running"]).order("created_at", { ascending: true }).limit(200);
   if (r.error) throw r.error;
   const rows = (r.data ?? []) as any[];
-  return [...rows.filter((x) => x.status === "running"), ...rows.filter((x) => x.status === "queued")];
+  const queued = rows.filter((x) => x.status === "queued");
+  const users = [...new Set(queued.map((x) => x.user_id).filter(Boolean))];
+  const rank = new Map<string, number>();
+  if (users.length > 1) {
+    const c = await sb.from("studio_customers").select("user_id,plan_id,owner_pass").in("user_id", users);
+    for (const x of (c.data ?? []) as any[]) rank.set(x.user_id, queueRank(x));
+  }
+  const at = (x: any) => rank.get(x.user_id) ?? 2;
+  queued.sort((a, b) => at(a) - at(b) || String(a.created_at).localeCompare(String(b.created_at)));
+  return [...rows.filter((x) => x.status === "running"), ...queued];
 }
 /** What a run still needs before its cut (fetch, listen, choose: other servers' time, side by side with other runs)
  *  and of cutting (the shared cutter's time). */
