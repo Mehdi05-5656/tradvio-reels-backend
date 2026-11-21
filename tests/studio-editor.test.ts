@@ -61,7 +61,7 @@ test("a moved divider: the camera panel takes that share; the frame stays 1080x1
 
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
 function fakeSb(files: Record<string, Buffer>, project: any, asset: any) {
-  const state: any = { project: { ...project }, asset: { ...asset }, uploads: {} as Record<string, number>, removed: [] as string[] };
+  const state: any = { project: { ...project }, asset: { ...asset }, uploads: {} as Record<string, number>, bodies: {} as Record<string, any>, removed: [] as string[] };
   const table = (name: string) => {
     const row = () => (name === "studio_projects" ? state.project : state.asset);
     const q: any = {
@@ -75,7 +75,7 @@ function fakeSb(files: Record<string, Buffer>, project: any, asset: any) {
     from: table,
     storage: { from: () => ({
       download: async (k: string) => (files[k] ? { data: new Blob([files[k]]), error: null } : { data: null, error: { message: "missing" } }),
-      upload: async (k: string, b: Buffer) => { state.uploads[k] = b.length; return { error: null }; },
+      upload: async (k: string, b: Buffer) => { state.uploads[k] = b.length; if (k.endsWith('.json')) state.bodies[k] = JSON.parse(String(b)); return { error: null }; },
       remove: async (k: string[]) => { state.removed.push(...k); return { error: null }; },
     }) },
   };
@@ -92,9 +92,11 @@ test("a re-render from the kept recording replaces the clip in the library", { s
       seen: { layout: "stacked", cam: { x: 0, y: 0.5, w: 0.3, h: 0.5 }, content: null, irl: false, tiny: false, cam_h: 620 }, trim: null, captions: null, burned: false, keys: [], assetId: "a1", limiter: true,
       kept: { key: "u1/edit/p1/source.mp4", seconds: 12, before: 4, expires: null }, origin: null });
     const doc = cleanDoc(ai, { ...ai, trim: { in: 2, out: 8 }, layout: { ...ai.layout, divider: 0.45 } });
-    const { sb, state } = fakeSb({ "u1/edit/p1/source.mp4": await readFile(src) },
+    // the clip's words, relative to the AI's clip (which starts 4 s into the kept recording)
+    const words = { v: 1, words: [["hello", 0.5, 0.9, null], ["there", 1.0, 1.4, null], ["friend", 3.5, 3.9, null]], keys: [], language: "en", duration: 4, at: "x" };
+    const { sb, state } = fakeSb({ "u1/edit/p1/source.mp4": await readFile(src), "u1/captions/a1.json": Buffer.from(JSON.stringify(words)) },
       { id: "p1", user_id: "u1", asset_id: "a1", ai_doc: ai, doc, rev: 3, source_key: "u1/edit/p1/source.mp4", render_state: "queued" },
-      { object_key: "u1/a1.mp4", probe: { title: "t", poster_key: "u1/assets/a1.jpg" } });
+      { object_key: "u1/a1.mp4", probe: { title: "t", poster_key: "u1/assets/a1.jpg", clip: { start: 10, end: 14, rank: 1, job_id: "j" } } });
     const logs: string[] = [];
     const ok = await renderProject(sb, "p1", { env: { STUDIO_EDITOR_ENABLED: "true" }, log: (l) => logs.push(l) });
     assert.equal(ok, true, logs.join("\n"));
@@ -103,11 +105,16 @@ test("a re-render from the kept recording replaces the clip in the library", { s
     assert.equal(state.project.rendered_rev, 3);
     assert.equal(state.asset.object_key, "u1/a1-r3.mp4");
     assert.ok(state.uploads["u1/a1-r3.mp4"] > 1000);
-    assert.ok(state.uploads["u1/assets/a1.jpg"] > 100);
+    assert.ok(state.uploads["u1/assets/a1-r3.jpg"] > 100); // a new poster per save, never a cached old one
+    assert.equal(state.asset.probe.poster_key, "u1/assets/a1-r3.jpg");
+    assert.deepEqual([state.asset.probe.clip.start, state.asset.probe.clip.end], [8, 14]); // where the edited clip now sits in the source: origin_at 6 + trim 2..8
     assert.deepEqual(state.removed, ["u1/a1.mp4"]);
     assert.ok(Math.abs(state.asset.probe.duration - 6) < 0.25, `duration ${state.asset.probe.duration}`);
     assert.deepEqual([state.asset.probe.width, state.asset.probe.height], [1080, 1920]);
     assert.equal(state.asset.probe.edited.rev, 3);
+    // the AI cut's words kept beside the project; the library clip's word file now matches the edited clip (2 s earlier start)
+    assert.deepEqual(state.bodies["u1/edit/p1/words.json"].words, words.words);
+    assert.deepEqual(state.bodies["u1/captions/a1.json"].words.map((w: any) => [w[0], w[1]]), [["hello", 2.5], ["there", 3], ["friend", 5.5]]);
     // and the browser preview of the kept recording
     state.project.preview_state = "none";
     assert.equal(await makePreview(sb, "p1", { env: {}, log: () => undefined }), true);

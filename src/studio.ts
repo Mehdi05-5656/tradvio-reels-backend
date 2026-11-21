@@ -147,7 +147,9 @@ export function toolsEnabled(env: Record<string, string | undefined> = process.e
     // Blueprint versions: openings x looks of a person's own video (the Blueprint worker); open to everyone only when its own switch says so.
     blueprint_versions: blueprintsV2Open(env),
     // Live Clips: past Twitch/Kick broadcasts into clips (the owner sees it when switched on; everyone when open).
-    live_clips: liveClipsOpen(env) };
+    live_clips: liveClipsOpen(env),
+    // the editor (editor thread): the owner opens it while STUDIO_EDITOR_ENABLED is on; everyone with a plan once STUDIO_EDITOR_OPEN
+    editor: /^(1|true|yes|on)$/i.test(String(env.STUDIO_EDITOR_ENABLED ?? "")) && /^(1|true|yes|on)$/i.test(String(env.STUDIO_EDITOR_OPEN ?? "")) };
 }
 
 // ---------------------------------------------------------------------------------------------------

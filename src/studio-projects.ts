@@ -47,6 +47,11 @@ export type LiveSeen = { layout?: "stacked" | "content" | "follow"; cam?: Box | 
 export function editorOn(env: Record<string, string | undefined> = process.env): boolean {
   return /^(1|true|yes|on)$/i.test(String(env.STUDIO_EDITOR_ENABLED ?? ""));
 }
+/** The editor itself, for everyone with a plan: STUDIO_EDITOR_OPEN. Until then only the owner's account opens it
+ *  (projects are still recorded for every clip while STUDIO_EDITOR_ENABLED is on). */
+export function editorOpen(env: Record<string, string | undefined> = process.env): boolean {
+  return editorOn(env) && /^(1|true|yes|on)$/i.test(String(env.STUDIO_EDITOR_OPEN ?? ""));
+}
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 const okBox = (b: any): Box | null => (b && [b.x, b.y, b.w, b.h].every((v) => Number.isFinite(Number(v))) ? { x: r3(+b.x), y: r3(+b.y), w: r3(+b.w), h: r3(+b.h) } : null);
 

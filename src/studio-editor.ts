@@ -20,7 +20,7 @@ import { isStudioAdmin } from "./studio-admin-auth.js";
 import { renderArgs } from "./edit-render.js";
 import { deadSpaceArgs, deadSpaceBox, pausePlan, swearRanges } from "./edit-smart.js";
 import { trimRemap } from "./studio-clips.js";
-import { editorOn, SETTINGS, type Box, type EditDoc } from "./studio-projects.js";
+import { editorOn, editorOpen, SETTINGS, type Box, type EditDoc } from "./studio-projects.js";
 
 export type EditorDeps = { env?: Record<string, string | undefined>; log?: (l: string) => void; run?: (args: string[]) => Promise<unknown> };
 export class EditorError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }
@@ -80,6 +80,16 @@ export function shiftWords(words: Array<[string, number, number, string | null]>
     .filter((w) => w.end > 0 && w.start < len && w.text.trim());
 }
 
+/** The clip's words as the AI's cut heard them. The first save keeps a copy beside the project, because the library
+ *  clip's own word file is rewritten for the edited clip (so Captions and Publish line up with what is in the library). */
+const projectWordsKey = (u: string, id: string) => `${u}/edit/${id}/words.json`;
+type WordsDoc = { v: 1; words: Array<[string, number, number, string | null]>; keys: number[]; language: string | null; duration: number | null; at: string };
+export async function projectWords(sb: SupabaseClient, u: string, id: string, assetId: string): Promise<WordsDoc | null> {
+  const r = await sb.storage.from("studio-outputs").download(projectWordsKey(u, id));
+  if (!r.error && r.data) { try { const d = JSON.parse(Buffer.from(await r.data.arrayBuffer()).toString("utf8")); if (d?.v === 1 && Array.isArray(d.words)) return d; } catch { /* fall through */ } }
+  const cv = await import("./studio-caption-video.js");
+  return (await cv.readWords(sb, u, assetId)) as WordsDoc | null;
+}
 const today = () => new Date().toISOString().slice(0, 10);
 const PUBLIC = "id,asset_id,job_id,tool,auto_edit,setting,setting_by,setting_sure,source_ref,doc,ai_doc,rev,rendered_rev,source_key,source_expires_at,preview_key,preview_state,render_state,render_error,rendered_at,created_at,updated_at";
 
@@ -91,9 +101,11 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
     const u = userOf(req); if (!u) { res.status(401).json({ error: "unauthorized" }); return null; }
     if (!editorOn(env)) { res.status(503).json({ error: "tool_not_open", detail: "The editor is not switched on yet" }); return null; }
     const sb = sbFn();
+    const admin = await isStudioAdmin(req, sb, env);
+    if (!editorOpen(env) && !admin) { res.status(503).json({ error: "tool_not_open", detail: "The editor opens soon" }); return null; }
     const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
     const paying = !!c.data && (["active", "trialing"].includes(c.data.status) || !!c.data.owner_pass);
-    if (!paying && !(await isStudioAdmin(req, sb, env))) { res.status(402).json({ error: "subscription_required", detail: "The editor comes with a plan" }); return null; }
+    if (!paying && !admin) { res.status(402).json({ error: "subscription_required", detail: "The editor comes with a plan" }); return null; }
     return u;
   };
   const fail = (res: Response, err: any) => {
@@ -122,6 +134,17 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
   app.get("/api/studio/projects/:id", async (req, res) => {
     const u = await gate(req, res); if (!u) return;
     try { const sb = sbFn(); res.json(await view(sb, await load(sb, u, "id", req.params.id))); } catch (e) { fail(res, e); }
+  });
+
+  // the clip's words as the AI's cut heard them (never a new transcription: the editor reads what the cutter kept)
+  app.get("/api/studio/projects/:id/words", async (req, res) => {
+    const u = await gate(req, res); if (!u) return;
+    try {
+      const sb = sbFn();
+      const p = await load(sb, u, "id", req.params.id);
+      const wd = await projectWords(sb, u, p.id, p.asset_id);
+      res.json({ words: wd ? wd.words.map(([text, start, end, speaker], i) => ({ text, start, end, speaker, key: wd.keys.includes(i) })) : [], language: wd?.language ?? null });
+    } catch (e) { fail(res, e); }
   });
 
   app.put("/api/studio/projects/:id", async (req, res) => {
@@ -228,8 +251,9 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
       let captionFilter: string | null = null;
       const frame = renderArgs(doc, src, info, out).frame;
       const cv = await import("./studio-caption-video.js");
-      const needWords = (doc.captions.on && doc.captions.style) || (doc.sound.bleep && doc.sound.bleep !== "off") || doc.extras.pause_trim;
-      const wd = needWords ? await cv.readWords(sb, p.user_id, p.asset_id) : null;
+      const wd = await projectWords(sb, p.user_id, p.id, p.asset_id);
+      // the AI cut's words are kept beside the project before the library clip's own file is rewritten below
+      if (wd) await sb.storage.from("studio-outputs").upload(projectWordsKey(p.user_id, p.id), Buffer.from(JSON.stringify(wd)), { contentType: "text/plain", upsert: true });
       const len = doc.trim.out - doc.trim.in;
       let words = wd ? shiftWords(wd.words, ai, doc, wd.keys) : [];
       let bleeps = doc.sound.bleep && doc.sound.bleep !== "off" ? swearRanges(words, len) : [];
@@ -259,12 +283,20 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
       const key = `${p.user_id}/${p.asset_id}-r${p.rev}.mp4`;
       const up = await sb.storage.from("studio-uploads").upload(key, await readFile(out), { contentType: "video/mp4", upsert: true });
       if (up.error) throw up.error;
+      // a new poster under its own name (the old one may sit in a browser's cache), the clip's place in the source updated
+      const posterKey = `${p.user_id}/assets/${p.asset_id}-r${p.rev}.jpg`;
+      const pu = await sb.storage.from("studio-outputs").upload(posterKey, await readFile(still), { contentType: "image/jpeg", upsert: true });
+      const oldClip = (a.data.probe ?? {}).clip;
       const probe = { ...(a.data.probe ?? {}), duration: r3(fin.seconds || plan.seconds), width: fin.w, height: fin.h, edited: { rev: p.rev, at: new Date().toISOString() },
+        ...(pu.error ? {} : { poster_key: posterKey }),
+        ...(oldClip ? { clip: { ...oldClip, start: r3(doc.source.origin_at + doc.trim.in), end: r3(doc.source.origin_at + doc.trim.out) } } : {}),
         ...(doc.captions.on ? { captions: { style: (doc.captions.style as any)?.id ?? null, from: "editor", job_id: null } } : { captions: undefined }) };
-      if (probe.poster_key) await sb.storage.from("studio-outputs").upload(probe.poster_key, await readFile(still), { contentType: "image/jpeg", upsert: true });
       const ua = await sb.from("studio_assets").update({ object_key: key, bytes, probe, updated_at: new Date().toISOString() }).eq("id", p.asset_id);
       if (ua.error) { await sb.storage.from("studio-uploads").remove([key]); throw ua.error; }
       if (oldKey && oldKey !== key) await sb.storage.from("studio-uploads").remove([oldKey]).catch(() => undefined);
+      // the library clip's word file now describes the edited clip (Captions and Publish read it); fixed words included
+      if (words.length) await cv.saveWords(sb, p.user_id, p.asset_id, { words: words.map((w) => [w.text, r3(w.start), r3(w.end), w.speaker ?? null] as [string, number, number, string | null]),
+        keys: words.map((w, i) => (w.key ? i : -1)).filter((i) => i >= 0), language: wd?.language ?? null, duration: r3(fin.seconds || plan.seconds) }).catch(() => undefined);
       await sb.from("studio_projects").update({ render_state: "done", rendered_rev: p.rev, rendered_at: new Date().toISOString(), render_error: null }).eq("id", id);
       recordEvent({ user_id: p.user_id, kind: "feature", name: "editor_render", props: { project_id: id, asset_id: p.asset_id, rev: p.rev, seconds: r3(plan.seconds), ms: Date.now() - t0 } });
       return true;
