@@ -42,7 +42,7 @@ const TEXT_KEYS: Record<string, number> = { first_make: 400, goal_other: 160, he
 const STEP_IDS = new Set(["role", "about", "goals", "goal", "channels", "volume", "blocker", "stack", "heard", "first", "heard_account"]);
 /** The five screens asked today, in order, and how each reads in the admin panel. */
 export const STEPS: Array<[string, string]> = [["role", "Who they are"], ["goals", "What they want to do"], ["channels", "Where they post"], ["blocker", "What holds them back"], ["heard", "How they found us"]];
-const ATTRIBUTION = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "ref", "landing", "at"];
+const ATTRIBUTION = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "ref", "landing", "at", "aff"];
 
 const word = (v: unknown, max = 40) => (typeof v === "string" ? v.replace(/[^\w-]/g, "").slice(0, max) : "");
 const plain = (v: unknown, max: number) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "");

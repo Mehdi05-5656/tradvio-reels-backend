@@ -60,6 +60,7 @@ import { flushEvents, initEvents } from "./studio-events.js";
 import { registerStudioAdmin } from "./studio-admin.js";
 import { registerCommunity } from "./studio-community.js";
 import { registerLiveClips } from "./studio-live-clips.js";
+import { registerAffiliates } from "./studio-affiliates.js";
 import { registerEditor } from "./studio-editor.js";
 import { flushCosts, initCosts, registerStudioCosts } from "./studio-costs.js";
 import { registerContentPerf, startContentPerfLoop } from "./studio-content-perf-routes.js";
@@ -132,6 +133,7 @@ async function main() {
   registerLiveClips(app, getSb); // Live Clips: the Streams page and link lookups (off unless STUDIO_LIVE_CLIPS_ENABLED; owner-only unless STUDIO_LIVE_CLIPS_OPEN)
   registerStudioCosts(app, getSb); // the admin panel's Money tab: what Clone8 paid, by vendor, tool and step
   registerContentPerf(app, getSb); // the admin panel's Content tab: the organic accounts posting for Clone8 (STUDIO_CONTENT_PERF_ENABLED)
+  registerAffiliates(app, getSb); // the admin panel's Affiliate links tab, the site's click beacon and the sign-up claim (STUDIO_AFFILIATES_ENABLED)
   registerStoryExam(app, getSb, { plans: PLANS }); // the Stories practice exam (admin only; STORY_MASTER_PLAN.md phase 0)
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
