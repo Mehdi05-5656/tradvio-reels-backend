@@ -18,7 +18,7 @@ import { cutGate } from "./studio-capacity.js";
 import { recordEvent } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { renderArgs } from "./edit-render.js";
-import { pausePlan, swearRanges } from "./edit-smart.js";
+import { deadSpaceArgs, deadSpaceBox, pausePlan, swearRanges } from "./edit-smart.js";
 import { trimRemap } from "./studio-clips.js";
 import { editorOn, SETTINGS, type Box, type EditDoc } from "./studio-projects.js";
 
@@ -166,6 +166,28 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
       void renderProject(sb, p.id, deps);
       res.status(202).json(await view(sb, up.data));
     } catch (e) { fail(res, e); }
+  });
+
+  // a smart tool that reads the recording: the box inside any black bars or borders (free; ffmpeg only)
+  app.post("/api/studio/projects/:id/dead-space", async (req, res) => {
+    const u = await gate(req, res); if (!u) return;
+    let dir: string | null = null;
+    try {
+      const sb = sbFn();
+      const p = await load(sb, u, "id", req.params.id);
+      const r = await sb.from("studio_projects").select("source_key").eq("id", p.id).maybeSingle();
+      const key = (r.data as any)?.source_key;
+      if (!key) throw new EditorError("no_source", "The recording for this clip was not kept", 409);
+      dir = await mkdtemp(join(tmpdir(), "edit-ds-"));
+      const file = join(dir, "s.mp4");
+      const dl = await sb.storage.from("studio-outputs").download(key);
+      if (dl.error || !dl.data) throw new EditorError("no_source", "The kept recording could not be read", 409);
+      await writeFile(file, Buffer.from(await dl.data.arrayBuffer()));
+      const info = await probeLocal(file);
+      const log = await (deps.run ?? ((args: string[]) => ffmpeg(args, { timeoutMs: 60_000 })))(deadSpaceArgs(file));
+      res.json({ box: deadSpaceBox(String(log ?? ""), info) });
+    } catch (e) { fail(res, e); }
+    finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
   });
 
   // renders left queued by a restart are picked up again (once a minute, the oldest first)

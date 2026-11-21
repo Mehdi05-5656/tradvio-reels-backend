@@ -132,3 +132,20 @@ test("dead air: the pauses cut to a breath; the render runs only the kept stretc
     assert.ok(Math.abs(Number(String(p.stdout).trim()) - total) < 0.25, `duration ${String(p.stdout).trim()} vs ${total}`);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("dead space: the box inside black bars, found by ffmpeg on a real letterboxed video", { skip: !hasFfmpeg && "no ffmpeg" }, async () => {
+  const { deadSpaceArgs, deadSpaceBox } = await import("../src/edit-smart.js");
+  assert.equal(deadSpaceBox("crop=1920:1080:0:0", { w: 1920, h: 1080 }), null);
+  assert.deepEqual(deadSpaceBox("crop=1200:600:0:0\ncrop=1440:810:240:136\ncrop=1000:500:0:0", { w: 1920, h: 1080 }), { x: 0.125, y: 0.126, w: 0.75, h: 0.75 });
+  const dir = await mkdtemp(join(tmpdir(), "edit-ds-"));
+  try {
+    const src = join(dir, "lb.mp4");
+    // a 640x360 picture with a 480x270 image in the middle and black around it
+    const g = spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=480x270:r=30:d=3", "-vf", "pad=640:360:80:44:black", "-pix_fmt", "yuv420p", src]);
+    assert.equal(g.status, 0, String(g.stderr));
+    const run = spawnSync("ffmpeg", deadSpaceArgs(src));
+    const box = deadSpaceBox(String(run.stderr), { w: 640, h: 360 })!;
+    assert.ok(box, String(run.stderr).slice(-300));
+    assert.ok(Math.abs(box.x - 0.125) < 0.02 && Math.abs(box.w - 0.75) < 0.02 && Math.abs(box.y - 0.122) < 0.02 && Math.abs(box.h - 0.75) < 0.02, JSON.stringify(box));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

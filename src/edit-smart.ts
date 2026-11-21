@@ -24,3 +24,16 @@ export const during = (ranges: Array<[number, number]>) => ranges.map(([a, b]) =
 /** Dead air: the stretches of a clip that stay when every pause over `gap` seconds between words is cut down to a breath
  *  (the cutter's own trimPlan, studio-clips.ts). Null when nothing is worth cutting. */
 export { trimPlan as pausePlan } from "./studio-clips.js";
+
+/** Dead space: from ffmpeg cropdetect's last few "crop=w:h:x:y" lines over the recording, the box (as fractions) that
+ *  holds the picture without black bars or borders; null when the picture already fills the frame (within 2 %). */
+export function deadSpaceBox(log: string, src: { w: number; h: number }): { x: number; y: number; w: number; h: number } | null {
+  const crops = [...log.matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)].map((m) => m.slice(1).map(Number) as [number, number, number, number]).filter(([w, h]) => w > 16 && h > 16);
+  if (!crops.length || !(src.w > 0 && src.h > 0)) return null;
+  // the widest crop seen (a dark scene makes cropdetect shrink for a moment; the real bars never move)
+  const [w, h, x, y] = crops.reduce((best, c) => (c[0] * c[1] > best[0] * best[1] ? c : best));
+  if (w / src.w > 0.98 && h / src.h > 0.98) return null;
+  const r = (n: number) => Math.round(n * 1000) / 1000;
+  return { x: r(x / src.w), y: r(y / src.h), w: r(w / src.w), h: r(h / src.h) };
+}
+export const deadSpaceArgs = (file: string) => ["-v", "info", "-nostdin", "-threads", "2", "-i", file, "-t", "30", "-vf", "fps=2,cropdetect=limit=24:round=2:reset=0", "-an", "-f", "null", "-"];
