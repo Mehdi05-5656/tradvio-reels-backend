@@ -1,4 +1,5 @@
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,9 +22,10 @@ test("a media playlist: absolute segment URLs and start times summed from EXTINF
   assert.deepEqual(abs.segments.map((s) => s.url), ["https://other.example/a/1.ts?sig=x", "https://cdn.example/b/2.ts"]);
 });
 
-test("not plain MPEG-TS: a master list, an init segment, encryption or byte ranges read the old way", () => {
+test("not readable piece by piece: a master list, encryption, byte ranges or several init segments read the old way", () => {
   assert.equal(parseMediaPlaylist("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8", BASE), null);
-  assert.equal(parseMediaPlaylist("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\n1.m4s", BASE), null);
+  assert.equal(parseMediaPlaylist("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"720@0\"\n#EXTINF:4,\n1.m4s", BASE), null);
+  assert.equal(parseMediaPlaylist("#EXTM3U\n#EXT-X-MAP:URI=\"a.mp4\"\n#EXTINF:4,\n1.m4s\n#EXT-X-MAP:URI=\"b.mp4\"\n#EXTINF:4,\n2.m4s", BASE), null);
   assert.equal(parseMediaPlaylist("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:4,\n1.ts", BASE), null);
   assert.equal(parseMediaPlaylist("#EXTM3U\n#EXT-X-BYTERANGE:100@0\n#EXTINF:4,\n1.ts", BASE), null);
   assert.equal(parseMediaPlaylist("not a playlist", BASE), null);
@@ -87,14 +89,63 @@ test("a segment that fails twice is retried; one that is gone fails the stretch 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("an fMP4 or unreadable playlist gives null (the old playlist seek is used), and is not kept", async () => {
+test("an encrypted or unreadable playlist gives null (the old playlist seek is used), and is not kept", async () => {
   forgetMediaLists();
   const dir = await mkdtemp(join(tmpdir(), "hls-"));
   try {
-    assert.equal(await gatherStretch(BASE, 0, 30, join(dir, "a.ts"), { fetch: fakeFetch({ list: "#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\"\n#EXTINF:4,\n1.m4s" }) }), null);
+    assert.equal(await gatherStretch(BASE, 0, 30, join(dir, "a.ts"), { fetch: fakeFetch({ list: "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:4,\n1.ts" }) }), null);
     assert.ok(await mediaList(BASE, fakeFetch()));
     forgetMediaLists();
     assert.equal(await mediaList(BASE, (async () => new Response("no", { status: 403 })) as typeof fetch), null);
     assert.ok(await mediaList(BASE, fakeFetch()), "a failed read is not cached");
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+
+// Twitch's fragmented-MP4 recordings (a 16-hour one on Nov 20 2026: #EXT-X-MAP init-0.mp4, 0.mp4 ... 5734.mp4)
+test("a fragmented-MP4 playlist: its init segment kept, the fragments timed like any other", () => {
+  const text = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-TARGETDURATION:10", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-TWITCH-TOTAL-SECS:30.000", '#EXT-X-MAP:URI="init-0.mp4"',
+    "#EXTINF:10.000,", "0.mp4", "#EXTINF:10.000,", "1.mp4", "#EXTINF:10.000,", "2.mp4", "#EXT-X-ENDLIST"].join("\n");
+  const l = parseMediaPlaylist(text, "https://cdn.example/vod/160p30/index-muted-X.m3u8")!;
+  assert.equal(l.init, "https://cdn.example/vod/160p30/init-0.mp4");
+  assert.equal(l.segments.length, 3);
+  assert.equal(l.segments[2].start, 20);
+  assert.equal(l.seconds, 30);
+  assert.equal(parseMediaPlaylist(list47(), BASE)!.init, undefined);
+});
+
+test("gathering a fragmented-MP4 stretch writes the init segment first, then the covering fragments in order", async () => {
+  forgetMediaLists();
+  const text = ["#EXTM3U", '#EXT-X-MAP:URI="init-0.mp4"', ...Array.from({ length: 6 }, (_, k) => [`#EXTINF:10.000,`, `${k}.mp4`]).flat(), "#EXT-X-ENDLIST"].join("\n");
+  const asked: string[] = [];
+  const f: any = async (u: string) => { asked.push(u.split("/").pop()!); return new Response(u.endsWith(".m3u8") ? text : `[${u.split("/").pop()}]`); };
+  const dir = await mkdtemp(join(tmpdir(), "hls-fmp4-"));
+  try {
+    const out = join(dir, "s.src.ts");
+    const got = await gatherStretch("https://cdn.example/v/160p30/index.m3u8", 25, 20, out, { fetch: f });
+    assert.deepEqual(got, { offset: 5, segments: 3 });
+    assert.equal(String(await readFile(out)), "[init-0.mp4][2.mp4][3.mp4][4.mp4]");
+  } finally { await rm(dir, { recursive: true, force: true }); forgetMediaLists(); }
+});
+
+const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
+test("a real fragmented-MP4 recording: a stretch read piece by piece decodes at the right length", { skip: !hasFfmpeg && "no ffmpeg" }, async () => {
+  forgetMediaLists();
+  const dir = await mkdtemp(join(tmpdir(), "hls-fmp4-real-"));
+  try {
+    // 60 s of picture and sound cut into 10-second fragmented-MP4 pieces with one init segment, as Twitch serves them
+    const g = spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=160x90:r=30:d=60", "-f", "lavfi", "-i", "sine=f=440:d=60", "-c:v", "libx264", "-g", "30", "-c:a", "aac", "-shortest",
+      "-f", "hls", "-hls_time", "10", "-hls_playlist_type", "vod", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init-0.mp4", "-hls_segment_filename", join(dir, "%d.mp4"), join(dir, "index.m3u8")]);
+    assert.equal(g.status, 0, String(g.stderr));
+    const local: any = async (u: string) => new Response(await readFile(join(dir, u.split("/").pop()!)));
+    const out = join(dir, "w.src.ts");
+    const got = (await gatherStretch("https://cdn.example/v/160p30/index.m3u8", 32, 15, out, { fetch: local }))!;
+    assert.equal(got.segments, 2);
+    assert.equal(got.offset, 2);
+    const mp3 = join(dir, "w.mp3");
+    const r = spawnSync("ffmpeg", ["-v", "error", "-nostdin", "-y", "-ss", got.offset.toFixed(3), "-i", out, "-t", "15", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", mp3]);
+    assert.equal(r.status, 0, String(r.stderr));
+    const p = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", mp3]);
+    assert.ok(Math.abs(Number(String(p.stdout).trim()) - 15) < 0.3, `duration ${String(p.stdout).trim()}`);
+  } finally { await rm(dir, { recursive: true, force: true }); forgetMediaLists(); }
 });
