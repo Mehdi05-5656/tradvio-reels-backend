@@ -1277,6 +1277,11 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         const c = await sb.from("studio_customers").select("plan_id,owner_pass").eq("user_id", u).maybeSingle();
         if (!hdAllowed(c.data, owner)) throw new StudioError("quality_needs_plan", "1080p HD clips come with Creator and up. Pick 720p, or change your plan.", 402);
       }
+      // clipping a stream while it is still on: Creator and up, as HD (the quote marks it live only once it is open)
+      if (q.tool === "clips" && q.options?.stream?.live === true) {
+        const c = await sb.from("studio_customers").select("plan_id,owner_pass").eq("user_id", u).maybeSingle();
+        if (!hdAllowed(c.data, owner)) throw new StudioError("live_needs_plan", "Clipping a stream while it's live comes with Creator and up. Clip it once it ends, or change your plan.", 402);
+      }
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);

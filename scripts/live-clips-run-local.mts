@@ -1,7 +1,8 @@
 // Live Clips: one real past-stream run on this Mac, end to end, against a fake database (no job row, no credits), with
 // the real Twitch/Kick doors, ElevenLabs and Claude from ops/.env. Clips land in <out dir>/ instead of storage.
 // Usage: node .exp-build/run-local.mjs <twitch or kick broadcast url> <count> [out dir]
-// (LIVE_LENGTH=short|standard|long and LIVE_STRICTNESS=best|balanced|more repeat a customer's settings)
+// (LIVE_LENGTH=short|standard|long and LIVE_STRICTNESS=best|balanced|more repeat a customer's settings; a stream still on
+// is clipped as the owner sees it: LIVE_SCOPE=latest_30|latest_60|latest_120|all|since with LIVE_SINCE=<seconds>)
 import { readFile, writeFile, mkdir, copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { quoteStreamClips, runStreamClipsJob } from "../src/studio-live-clips.js";
@@ -14,7 +15,7 @@ const env: Record<string, string | undefined> = { ...process.env, STUDIO_LIVE_CL
 const url = process.argv[2]; const count = Number(process.argv[3] ?? 3); const out = process.argv[4] ?? join(process.cwd(), ".exp-build", "live-run");
 await mkdir(out, { recursive: true });
 const log = (l: string) => console.log(l);
-const q = await quoteStreamClips({ env, log }, PLANS, { url, count, length: (process.env.LIVE_LENGTH as any) || "standard", strictness: (process.env.LIVE_STRICTNESS as any) || "balanced" }, { owner: true });
+const q = await quoteStreamClips({ env, log }, PLANS, { url, count, length: (process.env.LIVE_LENGTH as any) || "standard", strictness: (process.env.LIVE_STRICTNESS as any) || "balanced", ...(process.env.LIVE_SCOPE ? { scope: process.env.LIVE_SCOPE, since: process.env.LIVE_SINCE } : {}) }, { owner: true });
 log(`quote: ${q.summary} · ${q.credits} credits (${q.options.price.analysis} reading + ${q.options.price.per_clip} a clip) · eta ${q.options.eta_seconds}s`);
 // a fake database and a cutter that stores to the folder instead of Supabase
 const calls: any[] = [];

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
-import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
+import { twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, isRecordingOf, type ChatMsg } from "../src/live-sources.js";
+import { partOf, liveNowOpen, checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { PLANS } from "../src/studio.js";
@@ -403,4 +403,79 @@ test("the content box loses the camera's corner when they overlap: the larger re
   assert.deepEqual(excludeCam({ x: 0, y: 0, w: 0.7, h: 0.5 }, { x: 0, y: 0, w: 0.15, h: 0.45 }), { x: 0.15, y: 0, w: 0.55, h: 0.5 }, "a tall camera at the left: beside it");
   assert.deepEqual(excludeCam({ x: 0.2, y: 0.1, w: 0.6, h: 0.8 }, { x: 0.02, y: 0.7, w: 0.15, h: 0.25 }), { x: 0.2, y: 0.1, w: 0.6, h: 0.8 }, "no overlap: unchanged");
   assert.equal(excludeCam(null, { x: 0, y: 0, w: 0.2, h: 0.2 }), null);
+});
+
+test("live: a stream still on is its newest part; the part's rules", () => {
+  // a live stream reads its latest hour by default; a past one the whole broadcast
+  assert.deepEqual(partOf({}, 9000, true), { from: 5400, to: 9000, scope: "latest_60" });
+  assert.equal(partOf({}, 9000, false), null);
+  assert.deepEqual(partOf({ scope: "latest_30" }, 9000, true), { from: 7200, to: 9000, scope: "latest_30" });
+  assert.deepEqual(partOf({ scope: "latest_120" }, 9000, true), { from: 1800, to: 9000, scope: "latest_120" });
+  assert.equal(partOf({ scope: "all" }, 9000, true), null, "the whole stream so far");
+  assert.equal(partOf({ scope: "latest_120" }, 5000, true), null, "a stream shorter than the part is read whole");
+  // since a run's end: the new part, at least ten minutes of it
+  assert.deepEqual(partOf({ scope: "since", since: 6000 }, 9000, true), { from: 6000, to: 9000, scope: "since" });
+  assert.throws(() => partOf({ scope: "since", since: 8700 }, 9000, true), (e: any) => e.code === "part_too_short" && /5 min/.test(e.message));
+  assert.throws(() => partOf({ scope: "since", since: 9000 }, 9000, true), (e: any) => e.code === "part_nothing_new");
+  assert.throws(() => partOf({ scope: "since" }, 9000, true), (e: any) => e.code === "part_nothing_new");
+  // the recording of the stream on now: started within 15 minutes of it
+  assert.equal(isRecordingOf({ started_at: "2026-11-21T18:26:53Z" }, { started_at: "2026-11-21T18:27:10Z" }), true);
+  assert.equal(isRecordingOf({ started_at: "2026-11-20T18:26:53Z" }, { started_at: "2026-11-21T18:27:10Z" }), false, "yesterday's broadcast");
+  assert.equal(isRecordingOf({ started_at: "2026-11-21T18:26:53Z" }, null), false, "nobody live");
+  assert.equal(liveNowOpen({}), false); assert.equal(liveNowOpen({ STUDIO_LIVE_NOW: "true" }), true);
+});
+
+test("live: the quote marks a stream still on, prices its latest hour, and stays as before until the switch (the owner sees it first)", async () => {
+  resetTwitchToken();
+  // the same 4-hour broadcast, its channel live now (the stream started a minute after the recording)
+  const live = ((inner: typeof fetch) => (async (url: any, init?: any) => String(url).includes("/helix/streams?user_id=123")
+    ? new Response(JSON.stringify({ data: [{ user_id: "123", user_login: "caseoh_", game_name: "Just Chatting", title: "LIVE", viewer_count: 5000, started_at: "2026-11-18T03:02:00Z" }] }), { status: 200, headers: { "content-type": "application/json" } })
+    : inner(url, init)) as typeof fetch)(twitchFetch());
+  const url = "https://www.twitch.tv/videos/2932003293";
+  const q = await quoteStreamClips({ env: { ...ENV, STUDIO_LIVE_NOW: "true" }, fetch: live }, PLANS, { url, length: "standard", count: 3 }, {});
+  assert.equal(q.options.stream.live, true); assert.deepEqual(q.options.part, { from: 14443 - 3600, to: 14443, scope: "latest_60" });
+  assert.equal(q.options.source.live, true); assert.deepEqual(q.options.source.part, q.options.part, "the run page knows where to pick up");
+  assert.equal(q.options.price.analysis, 30, "an hour read is priced as an hour (the minimum)");
+  assert.equal(q.options.likely, 4); assert.match(q.summary, /the latest hour of CaseOh_ \(live\) · up to 3 clips/);
+  const half = await quoteStreamClips({ env: { ...ENV, STUDIO_LIVE_NOW: "true" }, fetch: live }, PLANS, { url, scope: "latest_30", count: 1 }, {});
+  assert.match(half.summary, /the latest 30 min of CaseOh_/);
+  const since = await quoteStreamClips({ env: { ...ENV, STUDIO_LIVE_NOW: "true" }, fetch: live }, PLANS, { url, scope: "since", since: 12000, count: 1 }, {});
+  assert.deepEqual(since.options.part, { from: 12000, to: 14443, scope: "since" }); assert.match(since.summary, /41 new min of CaseOh_ \(live\)/);
+  const whole = await quoteStreamClips({ env: { ...ENV, STUDIO_LIVE_NOW: "true" }, fetch: live }, PLANS, { url, scope: "all", count: 3 }, {});
+  assert.equal(whole.options.part, undefined); assert.equal(whole.options.stream.live, true); assert.match(whole.summary, /4 h of CaseOh_ \(live\) so far/);
+  // switch off: customers clip the recording so far as before (no live mark, no part, no plan gate); the owner gets the live flow
+  const before = await quoteStreamClips({ env: ENV, fetch: live }, PLANS, { url, count: 3 }, {});
+  assert.equal(before.options.stream.live, undefined); assert.equal(before.options.part, undefined); assert.match(before.summary, /4 h of CaseOh_/);
+  const owner = await quoteStreamClips({ env: ENV, fetch: live }, PLANS, { url, count: 3 }, { owner: true });
+  assert.equal(owner.options.stream.live, true); assert.equal(owner.options.part.scope, "latest_60");
+});
+
+test("live: a run reads only its part (the newest hour heard whole) and never checks a moment before it", async () => {
+  const mk = (from: number, n = 48) => { const w: any[] = []; let t = from; for (let i = 0; i < n; i++) { w.push({ text: i % 8 === 7 ? "yeah." : "so", start: t, end: t + 0.3, speaker: "S1" }); t += i % 8 === 7 ? 1 : 0.5; } return w; };
+  const graded = (input: any) => ({ keep: true, score: 80, standalone: true, grades: { hook: 8, standalone: 8, payoff: 8, reaction: 7, quotable: 6, length: 8 }, hard_fail: "", start_line: input.lines[0].i, end_line: input.lines[Math.min(input.lines.length - 1, 7)].i, title: "T", hook: "", hook_line: "", caption: "", why: "", why_not: "", tags: [] });
+  const job = (part: any): any => ({ id: "job-l", user_id: U, lease_token: "t", asset_id: null, credits_reserved: 200, attempts: 1, progress: {},
+    options: { platform: "twitch", url: "https://www.twitch.tv/videos/1", stream: { platform: "twitch", vod_id: "1", login: "x", channel_id: "1", started_at: "2026-11-18T03:01:21Z", strictness: "balanced", live: true }, part, source: { title: "T", channel: "x" }, seconds: 9000, count: 2, length: "standard", format: "vertical", price: { analysis: 30, per_clip: 10, lite: 0 }, collection_id: "col-1" } });
+  // two chat bursts, one long before the part (900 s) and one in it (7000 s); the part's words hold a second moment at 8000 s
+  const chat = [...chatWith(900, 9000), ...chatWith(7000, 9000).filter((m) => m.t >= 7000 && m.t < 7012 && /[A-Z]{4}/.test(m.c))];
+  const fetched: Array<[number, number]> = []; const heads: string[] = []; const cuts: any[] = []; const hourSecs: number[] = [];
+  const deps: any = { env: ENV, log: () => undefined, plans: PLANS, drawtext: true, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), stills: async () => [],
+    fetchWindow: async (_u: string, start: number, sec: number) => { fetched.push([start, sec]); }, fetchStretch: async () => undefined, chat: async () => chat,
+    hear: async () => { const w = mk(30); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
+    hearHour: async (_f: string, sec: number) => { hourSecs.push(sec); return { words: [...mk(1580), ...mk(2580)], events: [], language: "en" }; },
+    pick: async (ls: any[]) => { const s = ls.find((l) => l.start >= 2580); const e = [...ls].reverse().find((l) => l.end <= 2610); return s && e ? [{ start_line: s.i, end_line: e.i, title: "New part", hook: "so", why: "talk", score: 70, tags: [] }] : []; },
+    verify: async (i: any) => { heads.push(i.head); return graded(i); }, cut: async (_c: any, m: any) => { cuts.push(m); return { asset_id: "l", bytes: 1, seconds: m.end - m.start }; } };
+  const out = await runStreamClipsJob(fakeSb().sb, deps, job({ from: 5400, to: 9000, scope: "latest_60" }));
+  assert.equal(out, "done");
+  assert.deepEqual(fetched[0], [5400, 3600], `the part itself was fetched whole for the hearing, not a clock hour: ${JSON.stringify(fetched)}`);
+  assert.deepEqual(hourSecs, [3600]);
+  const minutes = heads.map((h) => { const m = /Window: (\d+):(\d+)/.exec(h)!; return Number(m[1]) + Number(m[2]) / 60; });
+  assert.ok(minutes.length >= 2 && minutes.every((m) => m >= 88), `no check before the part (90 min in): ${minutes}`);
+  assert.ok(cuts.length >= 1 && cuts.every((m) => m.start >= 5400), `every clip from the part: ${cuts.map((m) => m.start)}`);
+  assert.ok(cuts.some((m) => m.start > 7900 && m.start < 8020), `the words' own moment in the part was clipped: ${cuts.map((m) => Math.round(m.start))}`);
+  // a part with a quiet chat still runs on its words; a part with neither stops cleanly
+  const quiet = await runStreamClipsJob(fakeSb().sb, { ...deps, chat: async () => chatWith(900, 9000) }, job({ from: 5400, to: 9000, scope: "latest_60" }));
+  assert.equal(quiet, "done");
+  const none = fakeSb();
+  assert.equal(await runStreamClipsJob(none.sb, { ...deps, chat: async () => chatWith(900, 9000).filter((m) => m.t < 5400), pick: async () => [] }, job({ from: 5400, to: 9000, scope: "latest_60" })), "clips_none_found");
+  assert.ok(!none.calls.some(([fn]: any) => fn === "studio_complete"), "nothing settled as made: the reservation goes back with the failure");
 });

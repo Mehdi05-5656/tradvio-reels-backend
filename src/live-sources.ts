@@ -15,7 +15,8 @@ export class LiveSourceError extends Error { constructor(public code: string, me
 /** One chat message, reduced: seconds into the broadcast, who (an id), the text, how many emotes it carried. */
 export type ChatMsg = { t: number; u: string; c: string; e: number };
 export type Platform = "twitch" | "kick";
-export type Broadcast = { platform: Platform; id: string; url: string; title: string; channel: string; login: string; channel_id: string; seconds: number; started_at: string; views: number | null; thumbnail_url: string | null };
+export type Broadcast = { platform: Platform; id: string; url: string; title: string; channel: string; login: string; channel_id: string; seconds: number; started_at: string; views: number | null; thumbnail_url: string | null;
+  /** the recording of the stream that is on right now (Twitch keeps writing it; its length is the stream so far) */ live?: boolean };
 export type LiveStream = { platform: Platform; login: string; channel: string; channel_id: string; title: string; category: string | null; viewers: number; started_at: string | null; language: string | null; thumbnail_url: string | null; url: string };
 
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -93,6 +94,17 @@ export async function twitchBroadcastById(deps: LiveDeps, id: string): Promise<B
   if (String(v.type ?? "archive") !== "archive") throw new LiveSourceError("not_a_broadcast", "That link is a highlight or an upload, not a past broadcast", 400);
   return twitchBroadcast(v);
 }
+/** The stream a Twitch channel has on right now, or null (official). */
+export async function twitchLiveNow(deps: LiveDeps, userId: string): Promise<{ started_at: string; title: string; viewers: number; category: string | null } | null> {
+  const b = await helix(deps, `streams?user_id=${encodeURIComponent(userId)}&type=live`);
+  const s = b?.data?.[0]; if (!s) return null;
+  return { started_at: String(s.started_at ?? ""), title: String(s.title ?? "").slice(0, 160), viewers: Number(s.viewer_count) || 0, category: s.game_name ? String(s.game_name) : null };
+}
+/** Whether a past-broadcast entry is the recording of the stream on now: Twitch lists it among the archives while it
+ *  grows, started within a few minutes of the stream (measured Nov 21 2026: zackrawrr 1 h 51 min in, the recording
+ *  6,710 s long, an open EVENT playlist level with live, the chat replay 230 s behind). */
+export const isRecordingOf = (b: Pick<Broadcast, "started_at">, live: { started_at: string } | null): boolean =>
+  !!live && Number.isFinite(Date.parse(b.started_at)) && Math.abs(Date.parse(b.started_at) - Date.parse(live.started_at)) < 15 * 60_000;
 /** The top live streams by viewers (official), with the category name. */
 export async function twitchTopStreams(deps: LiveDeps, first = 100): Promise<LiveStream[]> {
   const b = await helix(deps, `streams?type=live&first=${Math.min(100, first)}`);

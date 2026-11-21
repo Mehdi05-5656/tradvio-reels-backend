@@ -29,7 +29,7 @@ import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
-import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -39,6 +39,37 @@ import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChat
 export const liveClipsEnabled = (env: Record<string, string | undefined> = process.env) =>
   env.STUDIO_LIVE_CLIPS_ENABLED === "true" && !!env.ANTHROPIC_API_KEY && !!env.ELEVENLABS_API_KEY && !!env.TWITCH_CLIENT_ID && !!env.TWITCH_CLIENT_SECRET;
 export const liveClipsOpen = (env: Record<string, string | undefined> = process.env) => liveClipsEnabled(env) && env.STUDIO_LIVE_CLIPS_OPEN === "true";
+/** Clipping a stream while it is still on (Nov 21 2026): the recording Twitch keeps writing, read for its newest part.
+ *  Off: only the owner sees it; everyone else clips a live stream's recording as before (the whole stream so far). */
+export const liveNowOpen = (env: Record<string, string | undefined> = process.env) => env.STUDIO_LIVE_NOW === "true";
+
+/** The part of a broadcast a run reads. A live stream's default is its latest hour: the newest moments are the ones
+ *  nobody has posted yet (the competitor's reel of Nov 20 2026 sells exactly that). "since" picks up where a run on the
+ *  same stream stopped, so clips keep pace with the stream. */
+export type PartScope = "latest_30" | "latest_60" | "latest_120" | "since" | "all";
+export type Part = { from: number; to: number; scope: PartScope };
+export const PART_SCOPES: Record<Exclude<PartScope, "since" | "all">, number> = { latest_30: 1800, latest_60: 3600, latest_120: 7200 };
+export function partOf(opt: { scope?: unknown; since?: unknown }, seconds: number, live: boolean): Part | null {
+  const raw = String(opt?.scope ?? "");
+  const scope: PartScope = raw === "latest_30" || raw === "latest_60" || raw === "latest_120" || raw === "since" || raw === "all" ? raw : live ? "latest_60" : "all";
+  const to = Math.max(0, Math.floor(seconds));
+  if (scope === "all") return null;
+  if (scope === "since") {
+    const since = Math.floor(Number(opt?.since));
+    if (!Number.isFinite(since) || since < 0 || since >= to) throw new ClipsError("part_nothing_new", "Nothing new has been streamed since that run yet", 400);
+    if (to - since < LIVE_LIMITS.min_seconds) throw new ClipsError("part_too_short", `Only ${Math.max(1, Math.round((to - since) / 60))} min of new stream since that run; come back once there are 10`, 400);
+    return { from: since, to, scope };
+  }
+  const span = PART_SCOPES[scope];
+  return to <= span ? null : { from: to - span, to, scope };
+}
+const partWords = (p: Part | null, seconds: number, channel: string, live: boolean): string => {
+  const who = `${channel}${live ? " (live)" : ""}`;
+  if (!p) return `${Math.round((seconds / 3600) * 10) / 10} h of ${who}${live ? " so far" : ""}`;
+  const min = Math.round((p.to - p.from) / 60);
+  if (p.scope === "since") return `${min} new min of ${who}`;
+  return `the latest ${min >= 60 && min % 60 === 0 ? `${min / 60 === 1 ? "hour" : `${min / 60} hours`}` : `${min} min`} of ${who}`;
+};
 /** A broadcast of any length the platform still keeps (Twitch keeps up to 48 hours): the reading is by windows, so
  *  length only adds chat pages; the model checks are capped by verify_max whatever the length. */
 export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 4, verify_extra: 8, verify_max: 60 };
@@ -98,7 +129,7 @@ export function streamerPermission(platform: Platform, login: string, env: Recor
 // ---------------------------------------------------------------------------------------------------
 // Quotes
 // ---------------------------------------------------------------------------------------------------
-export type StreamSource = { platform: Platform; url: string; asset_id: null; title: string | null; channel: string | null; login: string; channel_id: string; vod_id: string; seconds: number; started_at: string; thumbnail_url: string | null; permission: Permission };
+export type StreamSource = { platform: Platform; url: string; asset_id: null; title: string | null; channel: string | null; login: string; channel_id: string; vod_id: string; seconds: number; started_at: string; thumbnail_url: string | null; permission: Permission; /** clipped while it was on, and which part */ live?: boolean; part?: Part };
 export type StreamQuote = { tool: "clips"; credits: number; options: Record<string, any>; summary: string };
 /** The broadcast behind a link: Twitch by id (official), Kick by uuid (the site's listing of its channel). */
 export async function resolveBroadcast(deps: LiveDeps, url: string): Promise<Broadcast> {
@@ -108,7 +139,8 @@ export async function resolveBroadcast(deps: LiveDeps, url: string): Promise<Bro
   if (link.platform === "twitch") {
     const b = await twitchBroadcastById(deps, link.id!);
     if (!b) throw new ClipsError("link_no_media", "No past broadcast is at that link (Twitch keeps them 7 to 60 days)", 404);
-    return b;
+    const now = b.channel_id ? await twitchLiveNow(deps, b.channel_id).catch(() => null) : null;
+    return isRecordingOf(b, now) ? { ...b, live: true } : b;
   }
   const src = await kickBroadcastSource(deps, link.id!);
   const slug = link.login ?? ""; if (!slug) throw new ClipsError("pick_broadcast", "Use the broadcast's link from the channel's page (kick.com/<channel>/videos/…)", 400);
@@ -126,30 +158,35 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const b = await resolveBroadcast(deps, String(opt.url ?? ""));
   const permission = streamerPermission(b.platform, b.login, env);
   if (permission === "blocked") throw new ClipsError("streamer_blocked", `${b.channel} has asked not to be clipped on Clone8`, 403);
-  if (b.seconds < LIVE_LIMITS.min_seconds) throw new ClipsError("clip_source_too_short", "That broadcast is under 10 minutes");
+  // a stream still on: its newest part, for Creator and up (the job route checks the plan) once STUDIO_LIVE_NOW is on
+  const live = !!b.live && (liveNowOpen(env) || !!o.owner);
+  const part = partOf(opt, b.seconds, live);
+  const span = part ? part.to - part.from : b.seconds;
+  if (b.seconds < LIVE_LIMITS.min_seconds) throw new ClipsError("clip_source_too_short", b.live ? "This stream started under 10 minutes ago; come back once there is more of it" : "That broadcast is under 10 minutes");
   if (b.seconds > LIVE_LIMITS.max_seconds) throw new ClipsError("clip_source_too_long", `That broadcast is ${Math.round(b.seconds / 3600)} hours; Live Clips reads up to 48 hours of a stream`);
   const length = lengthOf(opt.length), format: ClipFormat = opt.format === "original" ? "original" : "vertical";
-  const likely = likelyStreamClips(b.seconds), cap = streamCountCap(b.seconds);
+  const likely = likelyStreamClips(span), cap = streamCountCap(span);
   const asked = Math.round(Number(opt.count));
   const count = Number.isFinite(asked) && asked >= 1 ? Math.min(asked, cap) : Math.min(likely, 10);
-  const price = streamPrice(plans, { seconds: b.seconds, length, count, env });
+  const price = streamPrice(plans, { seconds: span, length, count, env });
   // captions are the person's choice (the owner, Nov 19 2026: not on by default), priced as on the Clips page; a clip made
   // without them keeps its words, so the Captions page can add them afterwards
   const captions = opt.captions && typeof opt.captions === "object" ? (await import("./studio-caption-video.js")).cleanSettings(opt.captions) : null;
   if (captions) price.per_clip += captionsPerClip(env);
-  const source: StreamSource = { platform: b.platform, url: b.url, asset_id: null, title: b.title || null, channel: b.channel || null, login: b.login, channel_id: b.channel_id, vod_id: b.id, seconds: b.seconds, started_at: b.started_at, thumbnail_url: b.thumbnail_url, permission };
-  const minutes = Math.ceil(b.seconds / 60), hours = Math.round((b.seconds / 3600) * 10) / 10;
-  const warning = Number.isFinite(asked) && asked > cap ? `A ${hours}-hour stream fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
-    : count > likely ? `A ${hours}-hour stream usually holds about ${likely} strong ${likely === 1 ? "clip" : "clips"}. We'll make as many as the chat really reacted to, up to ${count}; you're only charged for the clips we make.` : null;
+  const source: StreamSource = { platform: b.platform, url: b.url, asset_id: null, title: b.title || null, channel: b.channel || null, login: b.login, channel_id: b.channel_id, vod_id: b.id, seconds: b.seconds, started_at: b.started_at, thumbnail_url: b.thumbnail_url, permission, ...(live ? { live: true, part: part ?? { from: 0, to: b.seconds, scope: "all" as const } } : {}) };
+  const minutes = Math.ceil(span / 60), hours = Math.round((span / 3600) * 10) / 10;
+  const what = part ? `${hours}-hour stretch` : `${hours}-hour stream`;
+  const warning = Number.isFinite(asked) && asked > cap ? `A ${what} fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
+    : count > likely ? `A ${what} usually holds about ${likely} strong ${likely === 1 ? "clip" : "clips"}. We'll make as many as the chat really reacted to, up to ${count}; you're only charged for the clips we make.` : null;
   // how long, from the Nov 18 2026 live runs (a 7.8 h stream: chat in 15 s, 34 checks in 666 s, 5 cuts in 157 s; the
   // old formula promised 42 min for that 14-min run): the chat, then each candidate heard and checked, then the cuts
   const cands = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
-  const eta_seconds = Math.round(45 + b.seconds * 0.004 + cands * 22 + count * 35 + ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off" && b.seconds >= HYBRID.min_heard_s ? 240 : 0));
+  const eta_seconds = Math.round(45 + b.seconds * 0.004 + cands * 22 + count * 35 + ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off" && span >= HYBRID.min_heard_s ? (part ? 60 + span * 0.03 : 240) : 0));
   return {
     tool: "clips", credits: clipsCharge(price, count),
-    options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing) },
+    options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing), ...(live ? { live: true } : {}) }, ...(part ? { part } : {}),
       format, length, count, likely, cap, max_clips: count, seconds: b.seconds, minutes, source, youtube_direct: true, price, warning, language: "original", captions, eta_seconds, ahead: 0, quality: qualityOf(opt.quality) },
-    summary: `${hours} h of ${b.channel} · up to ${count} ${count === 1 ? "clip" : "clips"}`,
+    summary: `${part || live ? partWords(part, b.seconds, b.channel, live) : `${hours} h of ${b.channel}`} · up to ${count} ${count === 1 ? "clip" : "clips"}`,
   };
 }
 
@@ -406,8 +443,9 @@ export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, 
     .sort((a, b) => b[1] - a[1]).slice(0, max).map(([h]) => h).sort((a, b) => a - b);
 }
 /** One hour heard whole and read by Clips' picker: its words (seconds from the hour's start) and the moments (absolute). */
-async function readHour(deps: StreamDeps, b: Broadcast, audioUrl: string, hour: number, dir: string, u: string, length: ClipLength): Promise<{ read: HourRead; moments: Moment[] } | null> {
-  const start = hour * 3600, seconds = Math.min(3600, b.seconds - start), file = join(dir, `h${hour}.mp3`);
+async function readHour(deps: StreamDeps, b: Broadcast, audioUrl: string, hour: number, dir: string, u: string, length: ClipLength, stretch?: { start: number; seconds: number }): Promise<{ read: HourRead; moments: Moment[] } | null> {
+  // a clock hour, or a stretch of up to an hour (a live stream's newest part)
+  const start = stretch ? Math.max(0, Math.floor(stretch.start)) : hour * 3600, seconds = stretch ? Math.min(3600, stretch.seconds, b.seconds - start) : Math.min(3600, b.seconds - start), file = join(dir, `h${hour}.mp3`);
   const env = deps.env ?? process.env;
   try {
     await (deps.fetchWindow ?? fetchSound)(audioUrl, start, seconds, file);
@@ -636,6 +674,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
   try {
     if (!collectionId) throw new ClipsError("clips_invalid", "the run has no collection");
     dir = await mkdtemp(join(tmpdir(), "studio-live-"));
+    const part: Part | null = o.part && Number.isFinite(Number(o.part.from)) && Number.isFinite(Number(o.part.to)) && Number(o.part.to) > Number(o.part.from) ? { from: Number(o.part.from), to: Number(o.part.to), scope: o.part.scope } : null;
+    const inPart = (t: number) => !part || (t >= part.from && t <= part.to);
+    if (part) timing.part = [part.from, part.to, part.scope];
     const b: Broadcast = { platform: st.platform, id: String(st.vod_id), url: String(o.url), title: String(o.source?.title ?? ""), channel: String(o.source?.channel ?? st.login ?? ""), login: String(st.login ?? ""), channel_id: String(st.channel_id ?? ""), seconds: Number(o.seconds) || 0, started_at: String(st.started_at ?? ""), views: null, thumbnail_url: null };
     // A. the chat replay, reduced to signals; the broadcast's playlists
     await renew(sb, job, { collection_id: collectionId, stage: "reading", done: 0, total: 0, message: "Reading the chat replay" });
@@ -646,13 +687,14 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     timing.chat_s = Math.round((Date.now() - tChat) / 1000); timing.chat_messages = chat.length;
     const signals = chatSignals(chat, b.seconds);
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute) throw new ClipsError("chat_too_quiet", `This stream's chat was too quiet to read (${Math.round(signals.perMinute)} messages a minute); Live Clips needs a chat that reacts`, 422);
-    const cands = chatCandidates(signals, chat);
+    const cands = chatCandidates(signals, chat).filter((c) => inPart(c.t_event));
     // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
     // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked;
     // most of those were likely past the 26.5-hour timestamp wrap, not muted: see hls-stretch.ts)
     const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
-    if (!cands.length) throw new ClipsError("clips_none_found", "The chat never lit up: no moment in this stream stands out enough to clip", 422);
+    // a part is read whole below, so a quiet chat there does not end the run (the chat replay runs ~4 min behind live)
+    if (!cands.length && !(part && (deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off")) throw new ClipsError("clips_none_found", part ? "The chat never lit up in that part of the stream: no moment stands out enough to clip" : "The chat never lit up: no moment in this stream stands out enough to clip", 422);
     const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id, lines) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master), lines)))(b);
     // the stretches the platform muted (music it recognised): their moments cannot be heard or posted, so they are not checked
     const muted = deps.muted ?? (b.platform === "twitch" ? await mutedRanges(deps, pl.audio).catch(() => [] as Array<[number, number]>) : []);
@@ -662,12 +704,20 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // (a chat candidate within 90 s takes the picker's cut instead), the two orders interleaved, the chat's first
     const hourReads: HourRead[] = [];
     if ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off") {
-      const hours = hoursToRead(cands, b.seconds, mutedShare, hybridHours(deps.env ?? process.env));
+      // a part of up to the hybrid's hours is read whole, newest first (what nobody has clipped yet); otherwise the
+      // clock hours the chat reacted to most, inside the part
+      const maxHours = hybridHours(deps.env ?? process.env);
+      const stretches: Array<{ start: number; seconds: number }> = [];
+      if (part && part.to - part.from <= maxHours * 3600 + 60) {
+        for (let z = part.to; z - part.from >= HYBRID.min_heard_s && stretches.length < maxHours; z -= 3600) { const a = Math.max(part.from, z - 3600); if (mutedShare(a, z) <= 0.4) stretches.push({ start: a, seconds: z - a }); }
+        stretches.reverse();
+      }
+      const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours);
       if (hours.length) {
-        await renew(sb, job, { stage: "transcribing", message: `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
+        await renew(sb, job, { stage: "transcribing", message: stretches.length ? `Listening to the ${part!.scope === "since" ? "new part" : "latest part"} of the stream, every word` : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
         const tHours = Date.now();
-        const reads = (await Promise.all(hours.map((h) => readHour(deps, b, pl.audio, h, dir!, u, length)))).filter((r): r is NonNullable<typeof r> => !!r);
-        const picked = reads.flatMap((r) => r.moments).sort((x, y) => y.score - x.score);
+        const reads = (await Promise.all(hours.map((h, k) => readHour(deps, b, pl.audio, h, dir!, u, length, stretches[k])))).filter((r): r is NonNullable<typeof r> => !!r);
+        const picked = reads.flatMap((r) => r.moments).filter((m) => inPart(m.start)).sort((x, y) => y.score - x.score);
         hourReads.push(...reads.map((r) => r.read));
         const extra: Candidate[] = []; const pickScore = new Map<Candidate, number>();
         for (const m of picked) {
@@ -688,6 +738,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         log(`[live] hours ${JSON.stringify({ job: job.id, hours, read: reads.map((r) => r.read.hour), words: timing.hour_words, picked: picked.length, new: extra.length, seconds: timing.hours_s, top: picked.slice(0, 5).map((m) => [Math.round(m.start), m.score, m.title.slice(0, 40)]) })}`);
       }
     }
+    if (!cands.length) throw new ClipsError("clips_none_found", "Nothing in that part of the stream stands out enough to clip yet", 422);
     // B. each candidate's window heard, then checked by the model, until `count` are kept
     await renew(sb, job, { stage: "transcribing", message: `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
@@ -976,20 +1027,25 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
     try {
       const link = parseStreamLink(req.query.url);
       if (!link) throw new ClipsError("unsupported_link", "Paste a Twitch or Kick link: a channel, or one of its past broadcasts");
-      if (link.kind === "vod") { const b = await resolveBroadcast(deps, link.url); return res.json({ platform: b.platform, channel: { login: b.login, channel: b.channel, channel_id: b.channel_id, url: b.platform === "twitch" ? `https://www.twitch.tv/${b.login}` : `https://kick.com/${b.login}`, permission: streamerPermission(b.platform, b.login, env) }, broadcasts: [b] }); }
+      // live_mode: whether this person gets the live flow for a stream still on (STUDIO_LIVE_NOW, or the owner)
+      const liveMode = liveNowOpen(env) || (await isStudioAdmin(req, sbFn(), env).catch(() => false));
+      if (link.kind === "vod") { const b = await resolveBroadcast(deps, link.url); return res.json({ platform: b.platform, channel: { login: b.login, channel: b.channel, channel_id: b.channel_id, url: b.platform === "twitch" ? `https://www.twitch.tv/${b.login}` : `https://kick.com/${b.login}`, permission: streamerPermission(b.platform, b.login, env), live: !!b.live }, broadcasts: [b], live_mode: liveMode }); }
       if (link.platform === "twitch") {
         const user = await twitchUser(deps, link.login!);
         if (!user) throw new ClipsError("link_no_media", "No Twitch channel has that name", 404);
         const permission = streamerPermission("twitch", user.login, env);
         if (permission === "blocked") throw new ClipsError("streamer_blocked", `${user.display_name} has asked not to be clipped on Clone8`, 403);
-        const list = await twitchBroadcasts(deps, user.id, 20);
-        return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission }, broadcasts: list.filter((b) => b.seconds >= LIVE_LIMITS.min_seconds) });
+        const [list, now] = await Promise.all([twitchBroadcasts(deps, user.id, 20), twitchLiveNow(deps, user.id).catch(() => null)]);
+        // the stream on now is listed first, marked, however short it still is (the page says when it can be clipped)
+        const marked = list.map((b) => (isRecordingOf(b, now) ? { ...b, live: true } : b));
+        return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission, live: !!now, viewers: now?.viewers ?? null, title: now?.title ?? null, category: now?.category ?? null },
+          broadcasts: [...marked.filter((b) => b.live), ...marked.filter((b) => !b.live && b.seconds >= LIVE_LIMITS.min_seconds)], live_mode: liveMode });
       }
       const ch = await kickChannel(deps, link.login!);
       const permission = streamerPermission("kick", ch.slug, env);
       if (permission === "blocked") throw new ClipsError("streamer_blocked", `${ch.channel} has asked not to be clipped on Clone8`, 403);
       const list = await kickBroadcasts(deps, ch.slug, ch);
-      return res.json({ platform: "kick", channel: { login: ch.slug, channel: ch.channel, channel_id: ch.chat_id, url: `https://kick.com/${ch.slug}`, profile_image_url: ch.profile_image_url, permission, live: ch.live, viewers: ch.viewers, title: ch.title, category: ch.category }, broadcasts: list.filter((b) => b.seconds >= LIVE_LIMITS.min_seconds).slice(0, 20) });
+      return res.json({ platform: "kick", channel: { login: ch.slug, channel: ch.channel, channel_id: ch.chat_id, url: `https://kick.com/${ch.slug}`, profile_image_url: ch.profile_image_url, permission, live: ch.live, viewers: ch.viewers, title: ch.title, category: ch.category }, broadcasts: list.filter((b) => b.seconds >= LIVE_LIMITS.min_seconds).slice(0, 20), live_mode: liveMode });
     } catch (err) { fail(res, err); }
   });
 }
