@@ -5,6 +5,7 @@ import { AddressInfo } from "node:net";
 import { normalizeCode, codeFromName, deviceOf, canCredit, clickInput, summarizeAffiliates, creditAffiliate, registerAffiliates, affiliateLink, CLAIM_WINDOW_MS, type LinkRow, type ClickRow, type PersonRow } from "../src/studio-affiliates.js";
 import { sanitizeAnswers } from "../src/studio-onboarding.js";
 import { clearAdminCacheForTests } from "../src/studio-admin-auth.js";
+import { selfAuthenticatedPost } from "../src/account-access.js";
 
 const NOW = Date.parse("2026-11-21T20:00:00Z");
 const H = 3600_000, D = 24 * H;
@@ -225,4 +226,10 @@ test("routes: the claim credits the signed-in new account; signed out is 401; of
   try { assert.equal((await anon.call("POST", "/api/studio/affiliate/claim", { code: "jake" })).status, 401); } finally { await anon.close(); }
   const off = await serve(base().sb, NEWBIE, { STUDIO_AFFILIATES_ENABLED: "false" });
   try { assert.deepEqual((await off.call("POST", "/api/studio/affiliate/claim", { code: "jake" })).json, { credited: false, reason: "off" }); } finally { await off.close(); }
+});
+
+test("the click beacon passes both of the server's guards (no account, no write secret): it is a self-checked public POST", () => {
+  assert.equal(selfAuthenticatedPost("/api/public/aff-click", "POST"), true);
+  assert.equal(selfAuthenticatedPost("/api/public/aff-click/", "POST"), true);
+  assert.equal(selfAuthenticatedPost("/api/public/aff-click", "GET"), false);
 });

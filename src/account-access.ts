@@ -10,7 +10,7 @@ import { MCP_PATH, mcpChallenge } from "./studio-mcp.js";
 export function selfAuthenticatedPost(path: string, method: string): boolean {
   if (method !== "POST") return false;
   const p = path.replace(/\/+$/, "");
-  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/studio/stripe/webhook" || p === "/api/studio/social/webhook" || p === "/api/studio/email/unsubscribe" || p === "/api/studio/apple/notifications";
+  return p === "/api/creatorvault/webhook" || p === "/api/public/invite-requests" || p === "/api/public/funnel-events" || p === "/api/public/aff-click" || p === "/api/studio/stripe/webhook" || p === "/api/studio/social/webhook" || p === "/api/studio/email/unsubscribe" || p === "/api/studio/apple/notifications";
 }
 
 // Default-deny legacy/global routes. Ownership is checked on the server, never
@@ -29,8 +29,6 @@ export function accountAccess(sbFn: () => SupabaseClient) {
     // Email unsubscribe (GET shows a confirm page, POST is the RFC 8058 one-click): the signed token in the link is the
     // credential, and the only thing it can do is turn that person's optional notices off.
     if (path === "/api/studio/email/unsubscribe" && ["GET", "HEAD"].includes(req.method)) return next();
-    // An affiliate link's click, from the site's beacon (src/studio-affiliates.ts): a code and a random visitor id, nothing per person.
-    if (path === "/api/public/aff-click" && req.method === "POST") return next();
     // The plan catalog is public; it carries no account data.
     if (path === "/api/studio/plans" && ["GET", "HEAD"].includes(req.method)) return next();
     // The iPhone app: its update prompts (no account data) and the page Stripe returns app buyers to.
