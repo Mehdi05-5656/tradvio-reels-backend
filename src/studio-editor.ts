@@ -18,7 +18,8 @@ import { cutGate } from "./studio-capacity.js";
 import { recordEvent } from "./studio-events.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { renderArgs } from "./edit-render.js";
-import { swearRanges } from "./edit-smart.js";
+import { pausePlan, swearRanges } from "./edit-smart.js";
+import { trimRemap } from "./studio-clips.js";
 import { editorOn, SETTINGS, type Box, type EditDoc } from "./studio-projects.js";
 
 export type EditorDeps = { env?: Record<string, string | undefined>; log?: (l: string) => void; run?: (args: string[]) => Promise<unknown> };
@@ -205,10 +206,18 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
       let captionFilter: string | null = null;
       const frame = renderArgs(doc, src, info, out).frame;
       const cv = await import("./studio-caption-video.js");
-      const needWords = (doc.captions.on && doc.captions.style) || (doc.sound.bleep && doc.sound.bleep !== "off");
+      const needWords = (doc.captions.on && doc.captions.style) || (doc.sound.bleep && doc.sound.bleep !== "off") || doc.extras.pause_trim;
       const wd = needWords ? await cv.readWords(sb, p.user_id, p.asset_id) : null;
-      const words = wd ? shiftWords(wd.words, ai, doc, wd.keys) : [];
-      const bleeps = doc.sound.bleep && doc.sound.bleep !== "off" ? swearRanges(words, doc.trim.out - doc.trim.in) : [];
+      const len = doc.trim.out - doc.trim.in;
+      let words = wd ? shiftWords(wd.words, ai, doc, wd.keys) : [];
+      let bleeps = doc.sound.bleep && doc.sound.bleep !== "off" ? swearRanges(words, len) : [];
+      // dead air: pauses cut down to a breath; the words and the bleeps move to the cut clip's time
+      const keep = doc.extras.pause_trim && words.length ? pausePlan(words, len) : null;
+      if (keep) {
+        const { map } = trimRemap(keep);
+        words = words.map((w) => ({ ...w, start: map(w.start), end: Math.max(map(w.start) + 0.05, map(w.end)) }));
+        bleeps = bleeps.map(([a, b]) => [map(a), map(b)] as [number, number]).filter(([a, b]) => b > a);
+      }
       if (doc.captions.on && doc.captions.style) {
         if (words.length) {
           const ass = join(dir, "c.ass");
@@ -216,7 +225,7 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
           captionFilter = cv.assFilter(ass, env);
         }
       }
-      const plan = renderArgs(doc, src, info, out, captionFilter, bleeps);
+      const plan = renderArgs(doc, src, info, out, captionFilter, bleeps, keep);
       await run(plan.args);
       await run(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, plan.seconds / 3).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still]);
       const fin = await probeLocal(out);

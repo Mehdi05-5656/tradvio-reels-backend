@@ -109,3 +109,26 @@ test("a real render with a bleep tone", { skip: !hasFfmpeg && "no ffmpeg" }, asy
     assert.deepEqual(String(p.stdout).trim().split("\n").sort(), ["audio", "video"]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("dead air: the pauses cut to a breath; the render runs only the kept stretches", { skip: !hasFfmpeg && "no ffmpeg" }, async () => {
+  const { pausePlan } = await import("../src/edit-smart.js");
+  const words = [{ start: 0.1, end: 0.5 }, { start: 0.55, end: 1.0 }, { start: 3.0, end: 3.4 }, { start: 3.45, end: 3.9 }];
+  const keep = pausePlan(words, 4)!;
+  assert.ok(keep && keep.length === 2, JSON.stringify(keep));
+  const dir = await mkdtemp(join(tmpdir(), "edit-pause-"));
+  try {
+    const src = join(dir, "keep.mp4"), out = join(dir, "out.mp4");
+    const g = spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:r=30:d=8", "-f", "lavfi", "-i", "sine=f=300:d=8", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", src]);
+    assert.equal(g.status, 0, String(g.stderr));
+    const d = clipDoc({ tool: "clips", jobId: "j", m: { ...m, start: 2, end: 6 }, info: { w: 320, h: 180, fps: 30 }, dur: 4, format: "vertical", frame: { w: 720, h: 1280 },
+      segs: [{ start: 0, end: 4, mode: "crop", x0: 0.5, x1: 0.5 }], seen: null, trim: null, captions: null, burned: false, keys: [], assetId: "a", limiter: false,
+      kept: { key: "k", seconds: 8, before: 2, expires: null }, origin: null });
+    const r = renderArgs(d, src, { w: 320, h: 180, fps: 30 }, out, null, [], keep);
+    const total = keep.reduce((a, [x, y]) => a + y - x, 0);
+    assert.ok(Math.abs(r.seconds - total) < 1e-6 && total < 3.2);
+    const run = spawnSync("ffmpeg", r.args);
+    assert.equal(run.status, 0, String(run.stderr));
+    const p = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", out]);
+    assert.ok(Math.abs(Number(String(p.stdout).trim()) - total) < 0.25, `duration ${String(p.stdout).trim()} vs ${total}`);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

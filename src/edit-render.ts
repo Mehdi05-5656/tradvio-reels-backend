@@ -4,7 +4,7 @@
 // cutter makes: the same layout builders (Clips' crop path, Live Clips' stacked and content layouts), the same sound
 // pass, the same encoder. Pure where it can be: the graph and the ffmpeg arguments are built from the file alone, so
 // the browser preview (later, a shared engine) and this render can be tested against each other.
-import { buildClipFilter, type Seg } from "./studio-clips.js";
+import { buildClipFilter, trimRemap, type Seg } from "./studio-clips.js";
 import { contentLayout, stackedLayout } from "./studio-live-clips.js";
 import type { EditDoc } from "./studio-projects.js";
 import { during } from "./edit-smart.js";
@@ -32,8 +32,8 @@ export function layoutGraph(doc: EditDoc, info: MediaInfo): { graph: string; w: 
 }
 
 /** The sound pass: loudness to the file's level, the optional limiter, soft edges, and any locked muted ranges silenced. */
-export function soundFilter(doc: EditDoc, seconds: number, bleeps: Array<[number, number]> = []): string {
-  const mutes = doc.sound.muted.map((m) => `volume=enable='between(t,${(m.from - doc.trim.in).toFixed(3)},${(m.to - doc.trim.in).toFixed(3)})':volume=0`);
+export function soundFilter(doc: EditDoc, seconds: number, bleeps: Array<[number, number]> = [], remap: (t: number) => number = (t) => t): string {
+  const mutes = doc.sound.muted.map((m) => `volume=enable='between(t,${remap(m.from - doc.trim.in).toFixed(3)},${remap(m.to - doc.trim.in).toFixed(3)})':volume=0`);
   // swear words: the voice is silenced there (and, for "tone", a bleep is laid over the gap by renderArgs)
   if (bleeps.length && doc.sound.bleep && doc.sound.bleep !== "off") mutes.push(`volume=enable='${during(bleeps)}':volume=0`);
   return [
@@ -50,13 +50,23 @@ export const ENC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-th
 
 /** The ffmpeg arguments that render an edit file from its kept recording. `captionFilter` is the ASS filter when
  *  captions are on (studio-caption-video.ts assFilter on a file made by captionAss for this frame). */
-export function renderArgs(doc: EditDoc, source: string, info: MediaInfo, out: string, captionFilter: string | null = null, bleeps: Array<[number, number]> = []): { args: string[]; seconds: number; frame: { w: number; h: number } } {
-  const seconds = Math.max(0.5, doc.trim.out - doc.trim.in);
+/** `keep`: the stretches of the clip that stay (clip seconds, ascending) when the pauses are cut (edit-smart.ts
+ *  pausePlan); the picture and the sound skip the rest, and `bleeps` and the captions are already in the cut clip's time. */
+export function renderArgs(doc: EditDoc, source: string, info: MediaInfo, out: string, captionFilter: string | null = null, bleeps: Array<[number, number]> = [], keep: Array<[number, number]> | null = null): { args: string[]; seconds: number; frame: { w: number; h: number } } {
+  const full = Math.max(0.5, doc.trim.out - doc.trim.in);
+  const cut = keep && keep.length ? trimRemap(keep) : null;
+  const seconds = cut && cut.total > 1 ? cut.total : full;
   const lay = layoutGraph(doc, info);
   let graph = lay.graph;
+  let apre = "";
+  if (cut && cut.total > 1) {
+    const sel = keep!.map(([a, b]) => `between(t,${a.toFixed(3)},${b.toFixed(3)})`).join("+");
+    graph = `[0:v]select='${sel}',setpts=N/FRAME_RATE/TB[tv];${graph.replace("[0:v]", "[tv]")}`;
+    apre = `aselect='${sel}',asetpts=N/SR/TB,`;
+  }
   if (captionFilter) graph = graph.replace(/\[v\]$/, `,${captionFilter}[v]`);
-  const head = ["-v", "error", "-nostdin", "-y", "-threads", "2", "-ss", doc.trim.in.toFixed(3), "-i", source, "-t", seconds.toFixed(3), "-filter_complex_threads", "1"];
-  const sound = soundFilter(doc, seconds, bleeps);
+  const head = ["-v", "error", "-nostdin", "-y", "-threads", "2", "-ss", doc.trim.in.toFixed(3), "-i", source, "-t", full.toFixed(3), "-filter_complex_threads", "1"];
+  const sound = apre + soundFilter(doc, seconds, bleeps, cut ? cut.map : undefined);
   // a bleep tone: a 1 kHz sine heard only inside the swear words, mixed over the silenced voice
   if (bleeps.length && doc.sound.bleep === "tone") {
     graph += `;[0:a]${sound}[am];sine=frequency=1000:sample_rate=44100:duration=${seconds.toFixed(3)},volume=0.22,volume=enable='not(${during(bleeps)})':volume=0[bp];[am][bp]amix=inputs=2:duration=first:normalize=0[a]`;

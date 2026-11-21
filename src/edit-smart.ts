@@ -20,3 +20,7 @@ export function swearRanges(words: Timed[], len: number, pad = 0.06): Array<[num
 
 /** An ffmpeg `enable` expression true inside any of the ranges. */
 export const during = (ranges: Array<[number, number]>) => ranges.map(([a, b]) => `between(t,${a.toFixed(3)},${b.toFixed(3)})`).join("+");
+
+/** Dead air: the stretches of a clip that stay when every pause over `gap` seconds between words is cut down to a breath
+ *  (the cutter's own trimPlan, studio-clips.ts). Null when nothing is worth cutting. */
+export { trimPlan as pausePlan } from "./studio-clips.js";
