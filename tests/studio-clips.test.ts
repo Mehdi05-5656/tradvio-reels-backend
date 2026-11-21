@@ -407,7 +407,7 @@ test("a YouTube run: the video fetched once, every word and laugh heard, moments
     choose: async (x: any) => { seen.push(x); return choose(); },
     cut: async (ctx: any, m: any) => { cut.push([m.rank, ctx.src.video, ctx.collectionId, ctx.length, m.speech?.length]); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
-  assert.deepEqual(got, [["https://www.youtube.com/watch?v=L_Guz73e6fw", 1080]], "the whole video is fetched once (1080 lines under an hour)");
+  assert.deepEqual(got, [["https://www.youtube.com/watch?v=L_Guz73e6fw", 720]], "the whole video is fetched once (720 lines unless HD was chosen)");
   assert.deepEqual(cut.map((c) => c[0]).sort(), [1, 2]);
   assert.ok(cut.every((c) => String(c[1]).endsWith("youtube.mp4") && c[2] === "col1" && c[3] === "standard" && c[4] > 0), "cut from that file, with who-says-what for framing");
   const x = seen[0];
@@ -424,6 +424,26 @@ test("a YouTube run: the video fetched once, every word and laugh heard, moments
   const last = sb.calls.filter((c: any) => c.fn === "studio_renew").pop().args.p_progress;
   assert.deepEqual([last.outcome, last.made_count, last.asked, last.charged], ["fewer", 2, 5, PRICE.analysis + 2 * PRICE.per_clip], "what the email reads");
   assert.ok(last.stage_at && last.clip_at, "each stage and clip has its clock, for the time left");
+});
+
+test("HD (Creator and up): each stretch is fetched at 1080 lines at any frame rate and cut into a 1080x1920 frame", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  const asked: any[] = [], tall: boolean[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: () => {}, meta: META,
+    download: async () => { throw new Error("a lean run never fetches the whole video"); },
+    sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
+    stretch: async (_u: string, a: number, b: number, t: string, o: any) => { asked.push([o.maxHeight, o.sharp]); await writeFile(`${t}.webm`, "vp9"); return { file: `${t}.webm`, t0: a - 0.7 }; },
+    extractAudio: async (src: any, target: string) => { await writeStub(src, target); },
+    loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose,
+    cut: async (ctx: any, m: any) => { tall.push(!!ctx.tall); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800, quality: "1080" }) as any), "done");
+  assert.ok(asked.length && asked.every(([h, sharp]) => h === 1080 && sharp === true));
+  assert.ok(tall.length && tall.every(Boolean), "cut into the 1080x1920 frame");
+  // the switch holds every run at 720
+  const asked2: any[] = []; const sb2 = fakeSb(); sb2.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  await runClipsJob(sb2, { ...deps, env: { ...deps.env, STUDIO_CLIPS_HD: "off" }, stretch: async (_u: string, a: number, b: number, t: string, o: any) => { asked2.push(o.maxHeight); await writeFile(`${t}.webm`, "vp9"); return { file: `${t}.webm`, t0: a - 0.7 }; } }, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800, quality: "1080" }) as any);
+  assert.ok(asked2.length && asked2.every((h) => h === 720));
 });
 
 test("lean (STUDIO_CLIPS_LEAN): the sound alone is heard, each clip is cut from its own stretch with its offset, the whole video is never fetched", async () => {
@@ -443,7 +463,7 @@ test("lean (STUDIO_CLIPS_LEAN): the sound alone is heard, each clip is cut from 
     assert.ok(String(c.src.video).includes(`lean-${c.rank}.webm`) && String(c.src.audio).endsWith("lean-sound.webm"), "the clip's own stretch, under the whole sound track");
     assert.ok(c.src.offset < c.start && c.start - c.src.offset < 2, "the stretch's first frame time, so the cut seeks inside it");
   }
-  assert.ok(asked.every(([a, b, h, sharp]) => b - a > 10 && h === 1080 && sharp === false), "a second either side, the same lines as the whole download");
+  assert.ok(asked.every(([a, b, h, sharp]) => b - a > 10 && h === 720 && sharp === false), "a second either side, 720 lines unless HD was chosen");
   // inputArgs: the picture seeks into its stretch, the sound to the moment itself
   const args = inputArgs({ video: "s.webm", audio: "a.webm", proxy: null, width: 0, height: 0, fps: null, offset: 597.867 }, 600, 30);
   assert.deepEqual(args.slice(0, 4), ["-ss", "2.133", "-i", "s.webm"]);

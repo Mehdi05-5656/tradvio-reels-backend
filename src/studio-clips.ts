@@ -16,6 +16,7 @@
 //  - Price: reading the video (by its length) plus a price per clip, reserved for the clips asked for. A run is charged
 //    for the clips it makes; what it does not make goes back. About 2-2.5x OpusClip per video (CLIP_RATES), with
 //    safety nets so a vendor price change can never sell a run at a loss.
+import { cutLines, qualityOf } from "./studio-quality.js";
 import { studioFail } from "./studio-fail.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1186,7 +1187,7 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
   const language = typeof o.language === "string" && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(o.language) ? o.language : "original";
   // lean (the sound, then each clip's stretch) runs about twice as fast as the whole download: the estimate needs to know
   const lean = platform === "youtube" && youtube_direct && leanOn(env);
-  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, ...(lean ? { lean: true } : {}), price, warning, language, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
+  return { tool: "clips", credits, options: { platform, url, format, length, count, likely, cap, max_clips: count, seconds: Math.round(seconds), minutes, source, youtube_direct, quality: platform === "youtube" ? qualityOf(o.quality) : "720", ...(lean ? { lean: true } : {}), price, warning, language, captions: captions ? (await import("./studio-caption-video.js")).cleanSettings(captions) : null },
     summary: `${minutes} min · up to ${count} ${count === 1 ? "clip" : "clips"}` };
 }
 /** The re-run that cuts moments already chosen, from an uploaded copy of the same video: each clip, no reading. */
@@ -1319,6 +1320,9 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const o = job.options ?? {}, u = job.user_id;
   const collectionId: string = o.collection_id;
   const length = lengthOf(o.length), format = formatOf(o.format);
+  // HD: 1080 lines from a YouTube link when the person chose it (never for clips in the video's own shape: 720 is all
+  // they keep)
+  const hd = cutLines(qualityOf(o.quality), env) === 1080 && format !== "original";
   const setCollection = (f: Record<string, any>) => sb.from("studio_collections").update({ ...f, updated_at: new Date().toISOString() }).eq("id", collectionId).eq("user_id", u);
   let dir: string | null = null;
   let plan: Plan | null = null;
@@ -1329,9 +1333,10 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   const attemptAt = Date.now();
   const fetchYouTube = async (seconds: number) => {
     const file = join(dir!, "youtube.mp4");
-    // (clips in the video's own shape come out at most 1280 wide, so 720 lines carry every pixel they keep: about half
-    // the bytes of 1080; vertical clips crop a third of the width, so they need the 1080 lines under an hour)
-    const height = seconds > CLIP_COST.long_after_seconds || format === "original" ? 720 : 1080;
+    // 720 lines unless the person chose HD (Creator and up; studio-quality.ts). Clips in the video's own shape come out at
+    // most 1280 wide, so 720 lines carry every pixel they keep.
+    const height = hd ? 1080 : 720;
+    void seconds;
     const language = o.language && o.language !== "original" ? String(o.language) : null;
     const key = cacheBudget(env) > 0 ? videoCacheKey(o.url, height, language) : null, cdir = cacheDirOf(deps);
     // kept from an earlier run or attempt on this server: linked, nothing comes through the proxy
@@ -1391,7 +1396,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
   // STUDIO_CLIPS_LEAN_SHARP=on fetches the most lines up to 1080 at any frame rate (a 60 fps video's 1080 lines, not its
   // 720 at 30 fps): sharper vertical crops, still far fewer bytes than the whole video.
   const lean = youtube && env.STUDIO_CLIPS_LEAN === "on";
-  const sharp = env.STUDIO_CLIPS_LEAN_SHARP === "on";
+  const sharp = env.STUDIO_CLIPS_LEAN_SHARP === "on" || hd;
   let soundFile: string | null = null;
   const leanStat = { bytes: 0, sound_bytes: 0, calls: 0, sound_s: 0, stretch_s: 0, wait_s: 0, fallback: false };
   // lean: the sound could not be fetched after its tries; the run goes on the whole video (another route, its own tries)
@@ -1552,7 +1557,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: p.moments.length, message: `Cutting clip ${Math.min(made.length + 1, p.moments.length)} of ${p.moments.length}`, made, clip_s_total: sLeft, clip_s_left: sLeft, stage_at: new Date().toISOString() }); // a fresh clock for this attempt's cutting
     // C. Cut: each clip through the server's cutter (cutGate), which several runs share clip by clip, first come first
     //    served. Two renders at once on one CPU are no faster, and ran it out of memory (Oct 31 2026).
-    const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length, captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null };
+    const ctx: CutCtx = { sb, deps, u, dir, src, format, collectionId, sourceTitle: p.title, jobId: job.id, length, ...(hd ? { tall: true } : {}), captions: o.captions ? (await import("./studio-caption-video.js")).cleanSettings(o.captions) : null };
     let full: ClipsError | null = null;
     const cutOne = async (m: Moment, from: SourceInput) => {
       for (let attempt = 0; ; attempt++) {
@@ -1565,7 +1570,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const queue = [...todo];
     // lean: each clip's stretch (a second either side), fetched a few clips ahead; null when it could not be fetched
     let leanOff = !lean || soundFailed;
-    const stretchHeight = sharp ? 1080 : p.seconds > CLIP_COST.long_after_seconds || format === "original" ? 720 : 1080;
+    const stretchHeight = hd ? 1080 : 720;
     const stretches = new Map<number, Promise<{ file: string; t0: number } | null>>();
     const stretchOf = (m: Moment) => {
       let pr = stretches.get(m.rank);

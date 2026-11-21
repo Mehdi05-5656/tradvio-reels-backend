@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cutHeight, twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
+import { twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, type ChatMsg } from "../src/live-sources.js";
 import { checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
@@ -21,15 +21,14 @@ test("stream links: channels and past broadcasts on Twitch and Kick, nothing els
   assert.equal(parseStreamLink("not a link"), null);
 });
 
-test("an HLS master playlist gives its rungs, smallest first; the cut rung is the biggest at or under 1080 (720 on the switch)", () => {
+test("an HLS master playlist gives its rungs, smallest first; the cut rung is the biggest at or under 720, or 1080 for HD", () => {
   const master = `#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=9072504,RESOLUTION=1920x1080\n1080p60/playlist.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=230000,RESOLUTION=284x160\n160p/playlist.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3423000,RESOLUTION=1280x720\n720p60/playlist.m3u8\n`;
   const vs = parseMaster(master, "https://stream.kick.com/abc/master.m3u8");
   assert.deepEqual(vs.map((v) => v.height), [160, 720, 1080]);
   assert.equal(vs[0].url, "https://stream.kick.com/abc/160p/playlist.m3u8");
   const r = pickRungs(vs);
-  assert.equal(r.audio, vs[0].url); assert.equal(r.video, vs[2].url);
-  assert.equal(pickRungs(vs, 720).video, vs[1].url);
-  assert.equal(cutHeight({}), 1080); assert.equal(cutHeight({ STUDIO_LIVE_CUT_HEIGHT: "720" }), 720);
+  assert.equal(r.audio, vs[0].url); assert.equal(r.video, vs[1].url);
+  assert.equal(pickRungs(vs, 1080).video, vs[2].url);
   assert.match(twitchCutFormat(1080), /^1080p60\//); assert.match(twitchCutFormat(720), /^720p60\//);
   assert.equal(parseMaster("#EXTM3U\n#EXTINF:10,\nseg1.ts\n", "https://x/y.m3u8")[0].url, "https://x/y.m3u8");
   assert.equal(nicheOf("Grand Theft Auto VI (GTA)"), "gta"); assert.equal(nicheOf("Just Chatting"), "chatting"); assert.equal(nicheOf("Fortnite"), "shooters"); assert.equal(nicheOf("Chess"), "games");

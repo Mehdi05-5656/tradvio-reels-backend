@@ -4,6 +4,7 @@
 // grants credits (studio_apply_subscription, studio_grant). Tools cost credits that are reserved when a
 // job is created and settled by the worker that runs it. Every route here is for the signed-in person
 // themselves; nothing is operator-only except what the access gate already enforces elsewhere.
+import { hdAllowed } from "./studio-quality.js";
 import { registerBusy } from "./studio-busy.js";
 import { grantForYear } from "./studio-credits.js";
 import type { Express, Request, Response } from "express";
@@ -56,15 +57,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // ---------------------------------------------------------------------------------------------------
 export type PlanId = "starter" | "creator" | "studio";
 export type Interval = "month" | "year";
-export type Plan = { id: PlanId; name: string; tagline: string; monthly_usd: number; annual_usd_per_month: number; credits: number; parallel: number; features: string[]; popular?: boolean };
+export type Plan = { id: PlanId; name: string; tagline: string; monthly_usd: number; annual_usd_per_month: number; credits: number; parallel: number; features: string[]; popular?: boolean; /** 1080p HD clips from links (studio-quality.ts) */ hd_clips: boolean };
 
 export const PLANS: Plan[] = [
   { id: "starter", name: "Starter", tagline: "For one creator with a library to put to work", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000, parallel: 1,
-    features: ["Every tool: Blueprint, Swap, Recast, Styles, Trends, Characters", "Every model in Instruments: video, pictures, voice and sound", "The assistant: say what you want, it plans and runs it", "Post and schedule to 1 social account", "Performance dashboard with an AI overview", "Downloads in 1080×1920, no watermark", "1 job at a time", "Top-ups at 4¢ a credit"] },
+    features: ["Every tool: Blueprint, Swap, Recast, Styles, Trends, Characters", "Every model in Instruments: video, pictures, voice and sound", "The assistant: say what you want, it plans and runs it", "Post and schedule to 1 social account", "Performance dashboard with an AI overview", "Downloads in 1080×1920, no watermark", "Clips from YouTube and streams cut in 720p", "1 job at a time", "Top-ups at 4¢ a credit"], hd_clips: false },
   { id: "creator", name: "Creator", tagline: "For creators and small teams posting daily", monthly_usd: 79, annual_usd_per_month: 66, credits: 3500, parallel: 2, popular: true,
-    features: ["Everything in Starter", "Post and schedule to 3 social accounts", "2 jobs at a time, in the priority queue", "Top-ups at 3.5¢ a credit"] },
+    features: ["Everything in Starter", "1080p HD clips from YouTube and streams: sharper faces and text", "Post and schedule to 3 social accounts", "2 jobs at a time, in the priority queue", "Top-ups at 3.5¢ a credit"], hd_clips: true },
   { id: "studio", name: "Studio", tagline: "For brands and agencies running many accounts", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000, parallel: 4,
-    features: ["Everything in Creator", "Post and schedule to 10 social accounts", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"] },
+    features: ["Everything in Creator", "Post and schedule to 10 social accounts", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"], hd_clips: true },
 ];
 
 // What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the
@@ -1271,6 +1272,11 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       // Films before they open: the owner's own test films go through on the switch alone
       if (!(tools as any)[q.tool] && !(q.tool === "longform" && longformEnabled(env) && owner) && !(q.tool === "stunts" && stuntsEnabled(env) && owner) && !(q.tool === "splitscreen" && splitscreenEnabled(env) && owner) && !(q.tool === "reshoot" && reshootEnabled(env) && owner) && !(q.tool === "blueprint_versions" && blueprintsV2Enabled(env) && owner)) throw new StudioError("tool_not_open", "This tool is not taking jobs yet", 503);
       if ((q.tool === "recast" || q.tool === "swap" || q.tool === "trend") && q.options.model === "full" && !tools.recast_full) throw new StudioError("model_not_open", "The full model is not taking jobs yet", 503);
+      // 1080p HD clips: Creator and up (the page locks it for Starter; this is the rule itself)
+      if (q.tool === "clips" && q.options?.quality === "1080") {
+        const c = await sb.from("studio_customers").select("plan_id,owner_pass").eq("user_id", u).maybeSingle();
+        if (!hdAllowed(c.data, owner)) throw new StudioError("quality_needs_plan", "1080p HD clips come with Creator and up. Pick 720p, or change your plan.", 402);
+      }
       // Per-plan rate limit on job creation; the database function bounds how many run at once, this bounds how many start an hour.
       const limit = await checkJobRate(sb, u);
       if (limit) throw new StudioError(limit.code, limit.message, limit.status);

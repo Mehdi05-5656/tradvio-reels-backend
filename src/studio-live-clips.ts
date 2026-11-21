@@ -28,7 +28,8 @@ import { recordEvent } from "./studio-events.js";
 import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
-import { cutHeight, hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { cutLines, qualityOf } from "./studio-quality.js";
+import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -147,7 +148,7 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   return {
     tool: "clips", credits: clipsCharge(price, count),
     options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing) },
-      format, length, count, likely, cap, max_clips: count, seconds: b.seconds, minutes, source, youtube_direct: true, price, warning, language: "original", captions, eta_seconds, ahead: 0 },
+      format, length, count, likely, cap, max_clips: count, seconds: b.seconds, minutes, source, youtube_direct: true, price, warning, language: "original", captions, eta_seconds, ahead: 0, quality: qualityOf(opt.quality) },
     summary: `${hours} h of ${b.channel} · up to ${count} ${count === 1 ? "clip" : "clips"}`,
   };
 }
@@ -620,6 +621,8 @@ const clean = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").tr
 export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, job: Job): Promise<string> {
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
   const o = job.options ?? {}, u = job.user_id, st = o.stream ?? {};
+  // 720 lines, or 1080 when the person chose HD (Creator and up; checked when the run was started)
+  const lines = cutLines(qualityOf(o.quality), deps.env ?? process.env);
   const collectionId: string = o.collection_id;
   const length = lengthOf(o.length), format: ClipFormat = o.format === "original" ? "original" : "vertical";
   const len = CLIP_LENGTHS[length];
@@ -650,7 +653,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     if (!cands.length) throw new ClipsError("clips_none_found", "The chat never lit up: no moment in this stream stands out enough to clip", 422);
-    const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master), cutHeight(deps.env ?? process.env))))(b);
+    const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id, lines) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master), lines)))(b);
     // the stretches the platform muted (music it recognised): their moments cannot be heard or posted, so they are not checked
     const muted = deps.muted ?? (b.platform === "twitch" ? await mutedRanges(deps, pl.audio).catch(() => [] as Array<[number, number]>) : []);
     const mutedShare = (from: number, to: number) => muted.reduce((acc, [x, y]) => acc + Math.max(0, Math.min(to, y) - Math.max(from, x)), 0) / Math.max(1, to - from);
