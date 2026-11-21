@@ -10,19 +10,32 @@
 // 150 s from hour 40.5 in 5 s (the playlist seek: nothing after 300 s); sound, copy and stills exact on both sides of
 // the wrap.
 //
-// Plain MPEG-TS playlists only. A playlist with an init segment (fMP4: 64-bit timestamps, nothing wraps), encryption or
-// byte ranges returns null, and the caller reads it the old way.
+// MPEG-TS playlists, and fragmented-MP4 ones (one init segment, #EXT-X-MAP): those are read the same way, the init
+// segment first and then the covering fragments, joined into a short local .mp4. Twitch serves some recordings this way
+// (a 16-hour one on Nov 20 2026); the old whole-playlist seek on Render's ffmpeg 5.1 came back empty on every window and
+// hour of it, while the fragments read this way decode exactly. Encryption, byte ranges or several init segments return
+// null, and the caller reads the playlist the old way.
 import { open, rm } from "node:fs/promises";
 
 export type Segment = { url: string; start: number; dur: number };
-export type MediaList = { segments: Segment[]; seconds: number };
+export type MediaList = { segments: Segment[]; seconds: number; /** a fragmented-MP4 playlist's init segment (#EXT-X-MAP), absolute */ init?: string };
 
 /** A media playlist's segments with their start times (the sum of EXTINF before each), URLs made absolute against the
- *  playlist. null when it is not a plain MPEG-TS media playlist (a master list, an init segment, encryption, byte ranges). */
+ *  playlist. null when it is neither plain MPEG-TS nor fragmented MP4 with one init segment (a master list, encryption, byte ranges). */
 export function parseMediaPlaylist(text: string, base: string): MediaList | null {
   if (!/^#EXTM3U/.test(text.trimStart())) return null;
-  if (/#EXT-X-STREAM-INF|#EXT-X-MAP|#EXT-X-BYTERANGE/i.test(text)) return null;
+  if (/#EXT-X-STREAM-INF|#EXT-X-BYTERANGE/i.test(text)) return null;
   if (/#EXT-X-KEY:(?![^\n]*METHOD=NONE)/i.test(text)) return null;
+  // fragmented MP4: exactly one init segment, given by URI, with no byte range
+  const maps = [...text.matchAll(/^#EXT-X-MAP:(.*)$/gim)].map((m) => m[1]);
+  let init: string | undefined;
+  if (maps.length > 1) return null;
+  if (maps.length === 1) {
+    if (/BYTERANGE=/i.test(maps[0])) return null;
+    const uri = maps[0].match(/URI="([^"]+)"/i)?.[1];
+    if (!uri) return null;
+    try { init = new URL(uri, base).toString(); } catch { return null; }
+  }
   const segments: Segment[] = []; let t = 0, dur: number | null = null;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
@@ -32,7 +45,7 @@ export function parseMediaPlaylist(text: string, base: string): MediaList | null
     let url: string; try { url = new URL(line, base).toString(); } catch { return null; }
     segments.push({ url, start: t, dur }); t += dur; dur = null;
   }
-  return segments.length ? { segments, seconds: t } : null;
+  return segments.length ? { segments, seconds: t, ...(init ? { init } : {}) } : null;
 }
 
 /** The segments that cover [start, start + seconds) and how far into the first one the stretch begins. */
@@ -49,7 +62,7 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 const lists = new Map<string, { at: number; list: Promise<MediaList | null> }>();
 const LIST_TTL_MS = 30 * 60_000, LIST_MAX = 8;
 
-/** The playlist read once and kept (null when it is not plain MPEG-TS or cannot be read; the caller falls back). */
+/** The playlist read once and kept (null when it cannot be read this way; the caller falls back). */
 export function mediaList(url: string, f: Fetch = fetch): Promise<MediaList | null> {
   const now = Date.now();
   const had = lists.get(url);
@@ -83,7 +96,7 @@ async function segmentBytes(f: Fetch, s: Segment, k: number): Promise<Uint8Array
 
 /** The segments covering the stretch, fetched a few at a time and written in order to `target` (a .ts file; at most
  *  `parallel` segments are held at once). Gives how far into the file the stretch begins; null when the playlist is not
- *  plain MPEG-TS (the caller reads the playlist the old way). Throws when the stretch is past the end of the recording
+ *  readable this way (the caller reads the playlist the old way). Throws when the stretch is past the end of the recording
  *  or a segment cannot be read. */
 export async function gatherStretch(playlist: string, start: number, seconds: number, target: string, o: { fetch?: Fetch; parallel?: number } = {}): Promise<{ offset: number; segments: number } | null> {
   const f = o.fetch ?? fetch;
@@ -96,6 +109,8 @@ export async function gatherStretch(playlist: string, start: number, seconds: nu
   const begin = (k: number) => { if (k < segments.length && !pending[k]) { pending[k] = segmentBytes(f, segments[k], k); pending[k]!.catch(() => undefined); } };
   const fh = await open(target, "w");
   try {
+    // a fragmented-MP4 recording: its init segment (the codecs and the timescale) goes first, then the fragments
+    if (list.init) await fh.write(await segmentBytes(f, { url: list.init, start: 0, dur: 0 }, -1));
     for (let k = 0; k < Math.min(parallel, segments.length); k++) begin(k);
     for (let k = 0; k < segments.length; k++) {
       const bytes = await pending[k]!;
