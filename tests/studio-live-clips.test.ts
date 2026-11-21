@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { twitchCutFormat, parseStreamLink, parseMaster, pickRungs, nicheOf, twitchBroadcasts, twitchTopStreams, resetTwitchToken, isRecordingOf, twitchSearch, twitchFollowers, type ChatMsg } from "../src/live-sources.js";
-import { partOf, liveNowOpen, checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
+import { partOf, liveNowOpen, resetBrief, checklistScore, OVERSHOOT, chatSignals, chatCandidates, robustZ, firstCut, streamPrice, streamAnalysisUsd, streamClipUsd, quoteStreamClips, runStreamClipsJob, attributionFilter, streamerPermission, LIVE_RATES, LIVE_LIMITS, likelyStreamClips, streamCountCap, liveClipsEnabled, liveClipsOpen, VERIFY_BAR, hoursToRead, contentLayout, cleanFacecam, TINY_CAM_W, excludeCam } from "../src/studio-live-clips.js";
 import { linesFromWords, CLIP_LENGTHS, type Line } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { PLANS } from "../src/studio.js";
@@ -31,7 +31,7 @@ test("an HLS master playlist gives its rungs, smallest first; the cut rung is th
   assert.equal(pickRungs(vs, 1080).video, vs[2].url);
   assert.match(twitchCutFormat(1080), /^1080p60\//); assert.match(twitchCutFormat(720), /^720p60\//);
   assert.equal(parseMaster("#EXTM3U\n#EXTINF:10,\nseg1.ts\n", "https://x/y.m3u8")[0].url, "https://x/y.m3u8");
-  assert.equal(nicheOf("Grand Theft Auto VI (GTA)"), "gta"); assert.equal(nicheOf("Just Chatting"), "chatting"); assert.equal(nicheOf("Fortnite"), "shooters"); assert.equal(nicheOf("Chess"), "games");
+  assert.equal(nicheOf("Grand Theft Auto VI (GTA)"), "gta"); assert.equal(nicheOf("Just Chatting"), "chatting"); assert.equal(nicheOf("Fortnite"), "games", "shooters are games now (owner, Nov 21 2026)"); assert.equal(nicheOf("Chess"), "games"); assert.equal(nicheOf("IRL"), "irl"); assert.equal(nicheOf("Always On"), "chatting");
 });
 
 /** A chat that hums at a steady pace, with a burst of all-caps laughter at one moment. */
@@ -132,7 +132,7 @@ function twitchFetch(): typeof fetch {
 }
 
 test("Twitch through Helix with an app token: a channel's broadcasts, the top streams", async () => {
-  resetTwitchToken();
+  resetTwitchToken(); resetBrief();
   const deps = { env: ENV, fetch: twitchFetch() };
   const list = await twitchBroadcasts(deps, "123");
   assert.equal(list.length, 2); assert.equal(list[0].seconds, 14443); assert.equal(list[0].thumbnail_url, "https://t/640x360.jpg"); assert.equal(list[0].url, "https://www.twitch.tv/videos/2932003293");
@@ -141,7 +141,7 @@ test("Twitch through Helix with an app token: a channel's broadcasts, the top st
 });
 
 test("a quote for a past broadcast: the reading, the clips, the source the run page shows; gated by the switches", async () => {
-  resetTwitchToken();
+  resetTwitchToken(); resetBrief();
   const q = await quoteStreamClips({ env: ENV, fetch: twitchFetch() }, PLANS, { url: "https://www.twitch.tv/videos/2932003293", length: "standard", count: 8 }, {});
   assert.equal(q.tool, "clips");
   assert.equal(q.options.stream.platform, "twitch"); assert.equal(q.options.stream.vod_id, "2932003293"); assert.equal(q.options.stream.login, "caseoh_");
@@ -428,7 +428,7 @@ test("live: a stream still on is its newest part; the part's rules", () => {
 });
 
 test("live: the quote marks a stream still on, prices its latest hour, and stays as before until the switch (the owner sees it first)", async () => {
-  resetTwitchToken();
+  resetTwitchToken(); resetBrief();
   // the same 4-hour broadcast, its channel live now (the stream started a minute after the recording)
   const live = ((inner: typeof fetch) => (async (url: any, init?: any) => String(url).includes("/helix/streams?user_id=123")
     ? new Response(JSON.stringify({ data: [{ user_id: "123", user_login: "caseoh_", game_name: "Just Chatting", title: "LIVE", viewer_count: 5000, started_at: "2026-11-18T03:02:00Z", thumbnail_url: "https://static-cdn.jtvnw.net/previews-ttv/live_user_caseoh_-{width}x{height}.jpg" }] }), { status: 200, headers: { "content-type": "application/json" } })
@@ -449,6 +449,9 @@ test("live: the quote marks a stream still on, prices its latest hour, and stays
   // switch off: customers clip the recording so far as before (no live mark, no part, no plan gate); the owner gets the live flow
   const before = await quoteStreamClips({ env: ENV, fetch: live }, PLANS, { url, count: 3 }, {});
   assert.equal(before.options.stream.live, undefined); assert.equal(before.options.part, undefined); assert.match(before.summary, /4 h of CaseOh_/);
+  // a hand-made stretch of a stream still on is the whole stream so far where Live is not open to the person (audit, Nov 21 2026)
+  const crafted = await quoteStreamClips({ env: ENV, fetch: live }, PLANS, { url, scope: "range", from: 14443 - 3600, to: 14443, count: 3 }, {});
+  assert.equal(crafted.options.part, undefined); assert.equal(crafted.options.stream.live, undefined); assert.equal(crafted.options.price.analysis, 61, "priced as the whole stream");
   const owner = await quoteStreamClips({ env: ENV, fetch: live }, PLANS, { url, count: 3 }, { owner: true });
   assert.equal(owner.options.stream.live, true); assert.equal(owner.options.part.scope, "latest_60");
 });
@@ -484,7 +487,7 @@ test("live: a run reads only its part (the newest hour heard whole) and never ch
 });
 
 test("a recording still processing has no picture (Twitch's placeholder does not load)", async () => {
-  resetTwitchToken();
+  resetTwitchToken(); resetBrief();
   const inner = twitchFetch();
   const f = (async (url: any, init?: any) => String(url).includes("/helix/videos?user_id=123")
     ? new Response(JSON.stringify({ data: [{ id: "7", user_id: "123", user_login: "caseoh_", user_name: "CaseOh_", title: "on now", created_at: "2026-11-18T03:01:21Z", duration: "2h0m0s", view_count: 1, thumbnail_url: "https://vod-secure.twitch.tv/_404/404_processing_%{width}x%{height}.png", type: "archive" }] }), { status: 200, headers: { "content-type": "application/json" } })
@@ -494,7 +497,7 @@ test("a recording still processing has no picture (Twitch's placeholder does not
 });
 
 test("the Clips hub: creators by name, their followers, and any stretch of a past stream", async () => {
-  resetTwitchToken();
+  resetTwitchToken(); resetBrief();
   const deps = { env: ENV, fetch: twitchFetch() };
   const hits = await twitchSearch(deps, "caseoh");
   assert.deepEqual(hits, [{ platform: "twitch", login: "caseoh_", channel: "CaseOh_", channel_id: "123", live: true, category: "Just Chatting", profile_image_url: "https://p/c.png", url: "https://www.twitch.tv/caseoh_" }], "a hit without a login is dropped");

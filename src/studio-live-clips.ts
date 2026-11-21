@@ -29,7 +29,7 @@ import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
-import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -126,6 +126,7 @@ const framingOf = (v: unknown): Framing => (v === "stacked" || v === "person" ? 
 // ---------------------------------------------------------------------------------------------------
 export type Permission = "campaign" | "unknown" | "blocked";
 import registry from "./data/live-streamers.json" with { type: "json" };
+import { youtubeFeed } from "./youtube-feed.js";
 export function streamerPermission(platform: Platform, login: string, env: Record<string, string | undefined> = process.env): Permission {
   const key = `${platform}:${login.toLowerCase()}`;
   const blocked = new Set([...(registry.block ?? []), ...String(env.STUDIO_LIVE_BLOCK ?? "").split(/[\s,]+/).filter(Boolean)].map((x: string) => x.toLowerCase()));
@@ -139,8 +140,23 @@ export function streamerPermission(platform: Platform, login: string, env: Recor
 // ---------------------------------------------------------------------------------------------------
 export type StreamSource = { platform: Platform; url: string; asset_id: null; title: string | null; channel: string | null; login: string; channel_id: string; vod_id: string; seconds: number; started_at: string; thumbnail_url: string | null; permission: Permission; /** clipped while it was on, and which part */ live?: boolean; part?: Part };
 export type StreamQuote = { tool: "clips"; credits: number; options: Record<string, any>; summary: string };
+/** A minute's memory for what many people ask Twitch the same way (search, channels, broadcasts): Helix allows ~800 calls
+ *  a minute for the whole app, and a timeline drag or a busy hub must not spend it (audit, Nov 21 2026). */
+const brief = new Map<string, { at: number; v: Promise<any> }>();
+export function briefly<T>(key: string, ms: number, make: () => Promise<T>): Promise<T> {
+  const now = Date.now(), had = brief.get(key);
+  if (had && now - had.at < ms) return had.v;
+  const v = make(); brief.set(key, { at: now, v });
+  v.catch(() => { if (brief.get(key)?.v === v) brief.delete(key); });
+  if (brief.size > 2000) for (const [k, x] of brief) if (now - x.at > ms) brief.delete(k);
+  return v;
+}
+export const resetBrief = () => brief.clear();
 /** The broadcast behind a link: Twitch by id (official), Kick by uuid (the site's listing of its channel). */
-export async function resolveBroadcast(deps: LiveDeps, url: string): Promise<Broadcast> {
+export function resolveBroadcast(deps: LiveDeps, url: string): Promise<Broadcast> {
+  return briefly(`b:${url}`, 45_000, () => resolveBroadcastNow(deps, url));
+}
+async function resolveBroadcastNow(deps: LiveDeps, url: string): Promise<Broadcast> {
   const link = parseStreamLink(url);
   if (!link) throw new ClipsError("unsupported_link", "Live Clips takes a Twitch or Kick link to a past broadcast");
   if (link.kind !== "vod") throw new ClipsError("pick_broadcast", "That is a channel: pick one of its past broadcasts", 400);
@@ -168,7 +184,9 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   if (permission === "blocked") throw new ClipsError("streamer_blocked", `${b.channel} has asked not to be clipped on Clone8`, 403);
   // a stream still on: its newest part, for Creator and up (the job route checks the plan) once STUDIO_LIVE_NOW is on
   const live = !!b.live && (liveNowOpen(env) || !!o.owner);
-  const part = partOf(opt, b.seconds, live);
+  // a stream still on is read in parts only where Live is open to this person (Creator and up, in the job route); else it
+  // is the whole stream so far, as before (a hand-made "range" must not reach its newest part around the plan)
+  const part = b.live && !live ? null : partOf(opt, b.seconds, live);
   const span = part ? part.to - part.from : b.seconds;
   if (b.seconds < LIVE_LIMITS.min_seconds) throw new ClipsError("clip_source_too_short", b.live ? "This stream started under 10 minutes ago; come back once there is more of it" : "That broadcast is under 10 minutes");
   if (b.seconds > LIVE_LIMITS.max_seconds) throw new ClipsError("clip_source_too_long", `That broadcast is ${Math.round(b.seconds / 3600)} hours; Live Clips reads up to 48 hours of a stream`);
@@ -722,7 +740,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       }
       const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours);
       if (hours.length) {
-        await renew(sb, job, { stage: "transcribing", message: stretches.length ? `Listening to the ${part!.scope === "since" ? "new part" : "latest part"} of the stream, every word` : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
+        await renew(sb, job, { stage: "transcribing", message: stretches.length ? `Listening to the ${part!.scope === "since" ? "new part" : part!.scope === "range" ? "part you picked" : "latest part"} of the stream, every word` : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
         const tHours = Date.now();
         const reads = (await Promise.all(hours.map((h, k) => readHour(deps, b, pl.audio, h, dir!, u, length, stretches[k])))).filter((r): r is NonNullable<typeof r> => !!r);
         const picked = reads.flatMap((r) => r.moments).filter((m) => inPart(m.start)).sort((x, y) => y.score - x.score);
@@ -1002,8 +1020,23 @@ function speechOf(words: Array<{ text: string; start: number; end: number; speak
 let discovery: { at: number; streams: Array<LiveStream & { niche: string; permission: Permission }> } | null = null;
 export async function discoverStreams(deps: LiveDeps, env: Record<string, string | undefined>): Promise<Array<LiveStream & { niche: string; permission: Permission }>> {
   if (discovery && Date.now() - discovery.at < 120_000) return discovery.streams;
-  const [tw, kk] = await Promise.all([twitchTopStreams(deps, 100).catch(() => [] as LiveStream[]), kickTopStreams(deps, 100).catch(() => [] as LiveStream[])]);
-  const streams = [...tw, ...kk].map((s) => ({ ...s, niche: nicheOf(s.category), permission: streamerPermission(s.platform, s.login, env) })).filter((s) => s.permission !== "blocked").sort((a, b) => b.viewers - a.viewers);
+  // English streams; the top 100 of each platform, and IRL, Just Chatting and GTA VI read on their own so each fills up
+  // (Nov 21 2026: the top 100 held 3 IRL and 7 Just Chatting; each category on its own has ~100)
+  const none = [] as LiveStream[];
+  const gta = await twitchGameId(deps, "Grand Theft Auto VI").catch(() => null);
+  const [tw, twIrl, twChat, twGta, kkApi, kkSite, kkIrl, kkChat] = await Promise.all([
+    twitchTopStreams(deps, 100, { language: "en" }).catch(() => none), twitchTopStreams(deps, 100, { language: "en", gameId: TWITCH_GAME.irl }).catch(() => none),
+    twitchTopStreams(deps, 100, { language: "en", gameId: TWITCH_GAME.chatting }).catch(() => none), gta ? twitchTopStreams(deps, 100, { language: "en", gameId: gta }).catch(() => none) : Promise.resolve(none),
+    kickTopStreams(deps, 100).then((l) => l.filter((x) => !x.language || /^en/i.test(x.language))).catch(() => none),
+    kickSiteLive(deps, { pages: 6 }).catch(() => none), kickSiteLive(deps, { subcategory: "irl", pages: 5 }).catch(() => none), kickSiteLive(deps, { subcategory: "just-chatting", pages: 5 }).catch(() => none),
+  ]);
+  // Kick: its official list (when the keys are set) and its site's, and GTA VI on its own; most of Kick is not in English,
+  // so it takes more pages to fill
+  const kkGta = await kickSiteLive(deps, { subcategory: "grand-theft-auto-vi", pages: 5 }).catch(() => none);
+  const kk = [...kkApi, ...kkSite, ...kkIrl, ...kkChat, ...kkGta];
+  const seen = new Set<string>();
+  const all = [...tw, ...twIrl, ...twChat, ...twGta, ...kk].filter((s) => { const k = `${s.platform}:${s.login}`; if (!s.login || seen.has(k)) return false; seen.add(k); return true; });
+  const streams = all.map((s) => ({ ...s, niche: nicheOf(s.category), permission: streamerPermission(s.platform, s.login, env) })).filter((s) => s.permission !== "blocked").sort((a, b) => b.viewers - a.viewers);
   discovery = { at: Date.now(), streams };
   return streams;
 }
@@ -1021,13 +1054,18 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
     if (err instanceof ClipsError || err instanceof LiveSourceError) return res.status(err.status).json({ error: err.code, detail: err.message });
     console.error("[live]", err); return res.status(500).json({ error: "live_failed", detail: String(err?.message ?? err).slice(0, 200) });
   };
+  // YouTube on the hub: the newest long videos of the creators clippers work from (src/youtube-feed.ts)
+  app.get("/api/studio/live/youtube", async (req, res) => {
+    if (!(await gate(req, res))) return;
+    try { res.json(await youtubeFeed({ fetch: deps.fetch })); } catch (err) { fail(res, new ClipsError("youtube_feed_down", "YouTube's feeds did not answer; try again in a minute", 503)); }
+  });
   app.get("/api/studio/live/streams", async (req, res) => {
     if (!(await gate(req, res))) return;
     try {
       const streams = await discoverStreams(deps, env);
       const niche = typeof req.query.niche === "string" && NICHES.some((n) => n.id === req.query.niche) ? req.query.niche : null;
       const platform = req.query.platform === "twitch" || req.query.platform === "kick" ? req.query.platform : null;
-      res.json({ niches: NICHES.map((n) => ({ id: n.id, label: n.label, live: streams.filter((s) => s.niche === n.id).length })), streams: streams.filter((s) => (!niche || s.niche === niche) && (!platform || s.platform === platform)).slice(0, 60), fresh_at: new Date(discovery?.at ?? Date.now()).toISOString(), open: liveClipsOpen(env), live_mode: liveNowOpen(env) || (await isStudioAdmin(req, sbFn(), env).catch(() => false)) });
+      res.json({ niches: NICHES.map((n) => ({ id: n.id, label: n.label, live: streams.filter((s) => s.niche === n.id).length })), streams: streams.filter((s) => (!niche || s.niche === niche) && (!platform || s.platform === platform)).slice(0, 72), counts: Object.fromEntries((["twitch", "kick"] as const).map((p) => [p, Object.fromEntries(NICHES.map((n) => [n.id, streams.filter((s) => s.platform === p && s.niche === n.id).length]))])), fresh_at: new Date(discovery?.at ?? Date.now()).toISOString(), open: liveClipsOpen(env), live_mode: liveNowOpen(env) || (await isStudioAdmin(req, sbFn(), env).catch(() => false)) });
     } catch (err) { fail(res, err); }
   });
   // creators by name as someone types (Twitch's official search); blocked streamers are left out
@@ -1036,7 +1074,7 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
     try {
       const q = String(req.query.q ?? "").trim().replace(/^@/, "").slice(0, 40);
       if (q.length < 2) return res.json({ creators: [] });
-      const hits = await twitchSearch(deps, q, 8);
+      const hits = await briefly(`s:${q.toLowerCase()}`, 60_000, () => twitchSearch(deps, q.toLowerCase(), 8));
       res.json({ creators: hits.filter((c) => streamerPermission("twitch", c.login, env) !== "blocked") });
     } catch (err) { fail(res, err); }
   });
@@ -1049,14 +1087,14 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
       const liveMode = liveNowOpen(env) || (await isStudioAdmin(req, sbFn(), env).catch(() => false));
       if (link.kind === "vod") { const b = await resolveBroadcast(deps, link.url); return res.json({ platform: b.platform, channel: { login: b.login, channel: b.channel, channel_id: b.channel_id, url: b.platform === "twitch" ? `https://www.twitch.tv/${b.login}` : `https://kick.com/${b.login}`, permission: streamerPermission(b.platform, b.login, env), live: !!b.live }, broadcasts: [b], live_mode: liveMode }); }
       if (link.platform === "twitch") {
-        const user = await twitchUser(deps, link.login!);
+        const user = await briefly(`u:${link.login}`, 10 * 60_000, () => twitchUser(deps, link.login!));
         if (!user) throw new ClipsError("link_no_media", "No Twitch channel has that name", 404);
         const permission = streamerPermission("twitch", user.login, env);
         if (permission === "blocked") throw new ClipsError("streamer_blocked", `${user.display_name} has asked not to be clipped on Clone8`, 403);
-        const [list, now, followers] = await Promise.all([twitchBroadcasts(deps, user.id, 100), twitchLiveNow(deps, user.id).catch(() => null), twitchFollowers(deps, user.id)]);
+        const [list, now, followers] = await briefly(`c:${user.id}`, 60_000, () => Promise.all([twitchBroadcasts(deps, user.id, 100), twitchLiveNow(deps, user.id).catch(() => null), twitchFollowers(deps, user.id)]));
         // the stream on now is listed first, marked, however short it still is (the page says when it can be clipped)
         const marked = list.map((b) => (isRecordingOf(b, now) ? { ...b, live: true, thumbnail_url: now!.thumbnail_url ?? b.thumbnail_url } : b));
-        return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission, live: !!now, viewers: now?.viewers ?? null, title: now?.title ?? null, category: now?.category ?? null, followers, past_count: list.length, past_more: list.length >= 100 },
+        return res.json({ platform: "twitch", channel: { login: user.login, channel: user.display_name, channel_id: user.id, url: `https://www.twitch.tv/${user.login}`, profile_image_url: user.profile_image_url, permission, live: !!now, viewers: now?.viewers ?? null, title: now?.title ?? null, category: now?.category ?? null, followers, past_count: marked.filter((b) => !b.live && b.seconds >= LIVE_LIMITS.min_seconds).length, past_more: list.length >= 100 },
           broadcasts: [...marked.filter((b) => b.live), ...marked.filter((b) => !b.live && b.seconds >= LIVE_LIMITS.min_seconds)].slice(0, 40), live_mode: liveMode });
       }
       const ch = await kickChannel(deps, link.login!);

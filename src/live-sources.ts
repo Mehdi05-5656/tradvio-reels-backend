@@ -121,8 +121,8 @@ export async function twitchLiveNow(deps: LiveDeps, userId: string): Promise<{ s
 export const isRecordingOf = (b: Pick<Broadcast, "started_at">, live: { started_at: string } | null): boolean =>
   !!live && Number.isFinite(Date.parse(b.started_at)) && Math.abs(Date.parse(b.started_at) - Date.parse(live.started_at)) < 15 * 60_000;
 /** The top live streams by viewers (official), with the category name. */
-export async function twitchTopStreams(deps: LiveDeps, first = 100): Promise<LiveStream[]> {
-  const b = await helix(deps, `streams?type=live&first=${Math.min(100, first)}`);
+export async function twitchTopStreams(deps: LiveDeps, first = 100, o: { language?: string; gameId?: string } = {}): Promise<LiveStream[]> {
+  const b = await helix(deps, `streams?type=live&first=${Math.min(100, first)}${o.language ? `&language=${encodeURIComponent(o.language)}` : ""}${o.gameId ? `&game_id=${encodeURIComponent(o.gameId)}` : ""}`);
   return (Array.isArray(b?.data) ? b.data : []).map((s: any) => ({ platform: "twitch" as const, login: String(s.user_login ?? ""), channel: String(s.user_name ?? s.user_login ?? ""), channel_id: String(s.user_id ?? ""), title: String(s.title ?? "").slice(0, 160), category: s.game_name ? String(s.game_name) : null, viewers: Number(s.viewer_count) || 0, started_at: s.started_at ?? null, language: s.language ?? null, thumbnail_url: twitchThumb(s.thumbnail_url), url: `https://www.twitch.tv/${s.user_login}` }));
 }
 /** Viewer-made clips of a broadcast, with their offsets (the ground truth of docs/live-clips/research/experiment-1.md). */
@@ -347,13 +347,39 @@ export function pickRungs(vs: Variant[], maxHeight = 720): { audio: string; vide
 // ---------------------------------------------------------------------------------------------------
 // Discovery: niches over the platforms' categories
 // ---------------------------------------------------------------------------------------------------
+// The categories of "Live right now" (owner, Nov 21 2026): GTA VI while it trends, then games of every kind, IRL and Just
+// Chatting; shooters and "other games" are one "Games"
 export const NICHES: Array<{ id: string; label: string; match: RegExp }> = [
   { id: "gta", label: "GTA VI", match: /grand theft auto vi\b|\bgta ?6\b|\bgta vi\b/i },
   { id: "irl", label: "IRL", match: /^irl$|\birl\b|travel|outdoors|sports|food|pools, hot tubs/i },
-  { id: "chatting", label: "Just Chatting", match: /just chatting|talk shows|podcast/i },
-  { id: "shooters", label: "Shooters", match: /fortnite|call of duty|warzone|valorant|counter-strike|apex legends|battlefield|overwatch|rainbow six|pubg|escape from tarkov|marvel rivals/i },
-  { id: "games", label: "Other games", match: /./ },
+  { id: "chatting", label: "Just Chatting", match: /just chatting|talk shows|podcast|always on/i },
+  { id: "games", label: "Games", match: /./ },
 ];
+/** Twitch's own ids for the categories read one by one (so each fills up, not only the top 100's share). */
+export const TWITCH_GAME = { chatting: "509658", irl: "509672" } as const;
+let gtaId: { id: string | null; at: number } | null = null;
+export async function twitchGameId(deps: LiveDeps, name: string): Promise<string | null> {
+  if (gtaId && Date.now() - gtaId.at < 24 * 3600_000) return gtaId.id;
+  const b = await helix(deps, `games?name=${encodeURIComponent(name)}`).catch(() => null);
+  gtaId = { id: b?.data?.[0]?.id ? String(b.data[0].id) : null, at: Date.now() };
+  return gtaId.id;
+}
+/** Kick's own site listing of who is live (no key; the official API needs KICK_CLIENT_ID/SECRET): English streams, by
+ *  category slug or all, a page of 24 at a time. */
+export async function kickSiteLive(deps: LiveDeps, o: { subcategory?: string; pages?: number } = {}): Promise<LiveStream[]> {
+  const out: LiveStream[] = [];
+  for (let page = 1; page <= (o.pages ?? 2); page++) {
+    const b = await kickWeb(deps, `stream/livestreams/en?page=${page}&limit=24&sort=desc${o.subcategory ? `&subcategory=${encodeURIComponent(o.subcategory)}` : ""}`).catch(() => null);
+    const rows: any[] = Array.isArray(b?.data) ? b.data : [];
+    for (const s of rows) {
+      if (s?.language && !/^en(glish)?$/i.test(String(s.language))) continue;
+      const slug = String(s?.channel?.slug ?? ""); if (!slug) continue;
+      out.push({ platform: "kick", login: slug, channel: String(s?.channel?.user?.username ?? slug), channel_id: String(s?.channel?.id ?? s?.channel_id ?? ""), title: String(s?.session_title ?? "").slice(0, 160), category: s?.categories?.[0]?.name ? String(s.categories[0].name) : null, viewers: Number(s?.viewer_count ?? s?.viewers) || 0, started_at: s?.start_time ? new Date(String(s.start_time).replace(" ", "T") + "Z").toISOString() : null, language: "en", thumbnail_url: s?.thumbnail?.src ? String(s.thumbnail.src) : null, url: `https://kick.com/${slug}` });
+    }
+    if (!b?.next_page_url) break;
+  }
+  return out;
+}
 export function nicheOf(category: string | null): string {
   if (!category) return "chatting";
   for (const n of NICHES) if (n.match.test(category)) return n.id;
