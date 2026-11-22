@@ -35,13 +35,16 @@ const clean = (v: any, fallback: string) => String(v ?? fallback).replace(/zerni
 const nn = (v: any): number | null => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
 const iso = (v: any): string | null => { const t = Date.parse(String(v ?? "")); return Number.isFinite(t) ? new Date(t).toISOString() : null; };
 
-/** Zernio's per-network status as ours. */
+/** An account id as Zernio sends it: a string, or the account itself on a read-back. */
+export const idOf = (v: any): string | null => (typeof v === "string" && v ? v : v && typeof v === "object" && (v._id ?? v.id) ? String(v._id ?? v.id) : null);
+/** Zernio's per-account status as ours (one entry per account posted to; two TikToks are two entries). */
 function resultOf(p: any, scheduled: boolean): SocialResult {
   const st = String(p?.status ?? "").toLowerCase();
   const url = safeUrl(p?.platformPostUrl ?? p?.publishedUrl);
-  if (st === "published") return { platform: String(p.platform), status: "posted", url, error: null };
-  if (st === "failed" || st === "cancelled") return { platform: String(p.platform), status: "failed", url: null, error: friendlyError(p) };
-  return { platform: String(p.platform), status: scheduled ? "scheduled" : "pending", url, error: null };
+  const account_id = idOf(p?.accountId);
+  if (st === "published") return { platform: String(p.platform), account_id, status: "posted", url, error: null };
+  if (st === "failed" || st === "cancelled") return { platform: String(p.platform), account_id, status: "failed", url: null, error: friendlyError(p) };
+  return { platform: String(p.platform), account_id, status: scheduled ? "scheduled" : "pending", url, error: null };
 }
 /** What a person reads when a network refuses: relink cases say so, the rest keep the network's own words. */
 export function friendlyError(p: any): string {
@@ -119,7 +122,12 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
     if (r.status >= 300) fail(r, "accounts_failed", "Could not read the linked accounts");
     return (Array.isArray(r.body?.accounts) ? r.body.accounts : []).filter((a: any) => a && a.enabled !== false && a.notificationOnly !== true);
   };
-  const accountFor = async (profileId: string, platform: string) => (await rawAccounts(profileId)).find((a) => a.platform === platform && a.isActive !== false) ?? null;
+  /** That account when it is on this profile and network; otherwise the network's first active account. */
+  const accountFor = async (profileId: string, platform: string, id?: string) => {
+    const all = await rawAccounts(profileId);
+    if (id) return all.find((a) => String(a._id) === id && a.platform === platform) ?? null;
+    return all.find((a) => a.platform === platform && a.isActive !== false) ?? null;
+  };
   const offered = (): string[] => [...OAUTH_NETWORKS, ...(env.ZERNIO_OFFER_X === "true" ? ["twitter"] : [])];
 
   return {
@@ -153,12 +161,19 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       // posting + analytics by default; auto-replies add comments + messages (asked only when someone turns them on)
       const q = new URLSearchParams({ profileId: profileKey, welcome: "true", brandName: ZERNIO_BRAND.brandName, logoUrl: ZERNIO_BRAND.logoUrl, welcomeTheme: JSON.stringify(ZERNIO_BRAND.theme), scopes: opts.engage ? "posting,analytics,comments,messaging" : "posting,analytics" });
       if (opts.redirect) q.set("redirect_url", opts.redirect);
-      if (opts.engage) { const acc = await accountFor(profileKey, platform); if (acc) q.set("reconnectAccountId", String(acc._id)); }
-      // at the plan's limit only a network already linked may be linked again (it refreshes in place)
-      if (opts.only && !opts.engage) {
-        if (!opts.only.includes(platform)) throw new SocialError("account_limit", "Your plan's accounts are all in use; add one to your plan to link another network", 409);
+      // relinking (or asking an account for comments and messages): that account refreshes in place, nothing is added
+      if (opts.accountId || opts.engage) {
+        const acc = await accountFor(profileKey, platform, opts.accountId);
+        if (opts.accountId && !acc) throw new SocialError("not_linked", "That account is not linked any more", 404);
+        if (acc) q.set("reconnectAccountId", String(acc._id));
+      } else if (opts.only) {
+        // at the plan's limit only a network already linked may be linked again (it refreshes in place)
+        if (!opts.only.includes(platform)) throw new SocialError("account_limit", "Your plan's accounts are all in use; add one to your plan to link another", 409);
         const acc = await accountFor(profileKey, platform);
         if (acc) q.set("reconnectAccountId", String(acc._id));
+      } else if (opts.add && platform === "instagram") {
+        // another Instagram: Instagram would sign in with the account already open on the device; ask for the login
+        q.set("forceReauth", "true");
       }
       const r = await call("GET", `/connect/${encodeURIComponent(platform)}?${q}`);
       if (r.status === 402) throw new SocialError("linking_full", "Linking is paused for a moment while we add room. Try again soon.", 503);
@@ -168,13 +183,15 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
 
     async accounts(profileKey): Promise<SocialAccount[]> {
       return (await rawAccounts(profileKey)).filter((a) => offered().includes(a.platform)).map((a) => ({
-        platform: String(a.platform), username: a.username ? String(a.username) : null, display_name: a.displayName ? String(a.displayName) : null,
+        id: String(a._id), platform: String(a.platform), username: a.username ? String(a.username) : null, display_name: a.displayName ? String(a.displayName) : null,
         image_url: safeUrl(a.profilePicture), profile_url: safeUrl(a.profileUrl), refresh_required: a.needsReconnection === true || a.isActive === false,
       }));
     },
 
-    async disconnect(profileKey, platform) {
-      for (const a of (await rawAccounts(profileKey)).filter((x) => x.platform === platform)) {
+    async disconnect(profileKey, platform, accountId) {
+      const all = (await rawAccounts(profileKey)).filter((x) => x.platform === platform);
+      if (accountId && !all.some((x) => String(x._id) === accountId)) return; // already gone
+      for (const a of all.filter((x) => !accountId || String(x._id) === accountId)) {
         const d = await call("DELETE", `/accounts/${encodeURIComponent(a._id)}`);
         if (d.status >= 300 && d.status !== 404) fail(d, "unlink_failed", "Could not unlink");
       }
@@ -184,9 +201,13 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       const scheduled = !!req.scheduleAt;
       const accs = await rawAccounts(profileKey);
       const targets: any[] = [], missing: SocialResult[] = [];
-      for (const platform of req.platforms) {
-        const a = accs.find((x) => x.platform === platform && x.isActive !== false);
-        if (!a) { missing.push({ platform, status: "failed", url: null, error: `${platform.charAt(0).toUpperCase() + platform.slice(1)} is not linked. Link it in Accounts.` }); continue; }
+      const label = (p: string) => p.charAt(0).toUpperCase() + p.slice(1);
+      // the accounts asked for (two TikToks are two targets), or the first account of each network
+      const picks: Array<{ platform: string; a: any; id?: string }> = req.accounts?.length
+        ? req.accounts.map((id) => { const a = accs.find((x) => String(x._id) === id && x.isActive !== false); return { platform: String(a?.platform ?? accs.find((x) => String(x._id) === id)?.platform ?? ""), a, id }; })
+        : req.platforms.map((platform) => ({ platform, a: accs.find((x) => x.platform === platform && x.isActive !== false) }));
+      for (const { platform, a, id } of picks) {
+        if (!a) { missing.push({ platform: platform || "unknown", account_id: id ?? null, status: "failed", url: null, error: platform ? `That ${label(platform)} account is not linked any more. Link it again in Accounts.` : "That account is not linked any more. Link it again in Accounts." }); continue; }
         const t: any = { platform, accountId: String(a._id) };
         if (platform === "instagram") {
           const ig = req.options?.instagram ?? {};
@@ -207,11 +228,11 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       if (scheduled) body.scheduledFor = req.scheduleAt!.toISOString(); else body.publishNow = true;
       // TikTok's rules: the person saw the video and agreed to post it (the Publish page says so); public is the only
       // level on TikTok's Business app lane; duets and stitches off, comments on
-      if (req.platforms.includes("tiktok")) body.tiktokSettings = { privacy_level: "PUBLIC_TO_EVERYONE", allow_comment: true, allow_duet: false, allow_stitch: false, content_preview_confirmed: true, express_consent_given: true };
+      if (targets.some((t) => t.platform === "tiktok")) body.tiktokSettings = { privacy_level: "PUBLIC_TO_EVERYONE", allow_comment: true, allow_duet: false, allow_stitch: false, content_preview_confirmed: true, express_consent_given: true };
       const r = await call("POST", "/posts", { body, timeoutMs: 150_000, headers: req.idempotencyKey ? { "Idempotency-Key": req.idempotencyKey } : {} });
       const p = r.body?.post;
       if (r.status >= 500 && !p?._id) throw Object.assign(new SocialError("provider_failed", "The posting service had a problem", 502), { unknown: true });
-      if (!p?._id) return { providerPostId: null, status: "failed", results: [...missing, ...targets.map((t) => ({ platform: t.platform, status: "failed" as const, url: null, error: clean(r.body?.error ?? r.body?.message, "The post was refused") }))], error: clean(r.body?.error ?? r.body?.message, "The post was refused") };
+      if (!p?._id) return { providerPostId: null, status: "failed", results: [...missing, ...targets.map((t) => ({ platform: t.platform, account_id: t.accountId, status: "failed" as const, url: null, error: clean(r.body?.error ?? r.body?.message, "The post was refused") }))], error: clean(r.body?.error ?? r.body?.message, "The post was refused") };
       const results = [...((p.platforms ?? []) as any[]).map((x) => resultOf(x, scheduled)), ...missing];
       const status = scheduled && String(p.status) === "scheduled" ? "scheduled" : statusOf(results, scheduled);
       return { providerPostId: String(p._id), status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null };
@@ -259,20 +280,21 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
         const p = b.post;
         if (ev === "post.cancelled") return { kind: "post", event: { providerPostId: String(p.id), status: "canceled", results: [], error: null } };
         if (ev === "post.scheduled" || ev === "post.recycled") return null;
-        // a platform event (or a TikTok link arriving later) names only some networks: the row merges by network
-        const one = ev.startsWith("post.platform.") || ev === "post.tiktok.url.resolved";
-        const results = ((p.platforms ?? []) as any[]).filter((x) => !one || !b.platform || x.platform === b.platform).map((x) => resultOf(x, false));
+        // a platform event (or a TikTok link arriving later) names one account: the row merges by account
+        const one = ev.startsWith("post.platform.") || ev.startsWith("post.tiktok.url");
+        const acc = idOf(b.account);
+        const results = ((p.platforms ?? []) as any[]).filter((x) => !one || (acc && idOf(x.accountId) ? idOf(x.accountId) === acc : !b.platform || x.platform === b.platform)).map((x) => resultOf(x, false));
         const status = statusOf(results, false);
         return { kind: "post", event: { providerPostId: String(p.id), status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null, partial: true } };
       }
       if ((ev === "account.connected" || ev === "account.disconnected") && b.account?.profileId) {
-        return { kind: "account", refId: String(b.account.profileId), platform: String(b.account.platform ?? ""), change: ev === "account.connected" ? "link" : "unlink", bySystem: ev === "account.disconnected" && b.account?.disconnectionType !== "intentional" && b.disconnectionType !== "intentional" };
+        return { kind: "account", refId: String(b.account.profileId), platform: String(b.account.platform ?? ""), accountId: idOf(b.account), change: ev === "account.connected" ? "link" : "unlink", bySystem: ev === "account.disconnected" && b.account?.disconnectionType !== "intentional" && b.disconnectionType !== "intentional" };
       }
       return null;
     },
 
-    async recentPosts(profileKey, platform, limit): Promise<ProviderPost[]> {
-      const a = await accountFor(profileKey, platform);
+    async recentPosts(profileKey, platform, limit, accountId): Promise<ProviderPost[]> {
+      const a = await accountFor(profileKey, platform, accountId);
       if (!a) return [];
       const r = await call("GET", `/analytics?accountId=${encodeURIComponent(a._id)}&limit=${Math.min(Math.max(limit, 1), 100)}`, { timeoutMs: 60_000 });
       if (r.status >= 300) fail(r, "history_failed", "Could not read the posts");

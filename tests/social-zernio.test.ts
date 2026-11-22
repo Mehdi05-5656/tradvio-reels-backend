@@ -151,7 +151,7 @@ test("zernio: webhooks are verified (hex HMAC) and read into post and account ev
   const can = sign({ id: "e3", event: "post.cancelled", post: { id: "post-1" } });
   assert.equal((p.parseWebhook(can.h, can.raw) as any).event.status, "canceled");
   const off = sign({ id: "e4", event: "account.disconnected", account: { accountId: TT, profileId: PROFILE, platform: "tiktok", disconnectionType: "unintentional" } });
-  assert.deepEqual(p.parseWebhook(off.h, off.raw), { kind: "account", refId: PROFILE, platform: "tiktok", change: "unlink", bySystem: true });
+  assert.deepEqual(p.parseWebhook(off.h, off.raw), { kind: "account", refId: PROFILE, platform: "tiktok", accountId: null, change: "unlink", bySystem: true });
   const on = sign({ id: "e5", event: "account.connected", account: { accountId: TT, profileId: PROFILE, platform: "tiktok", username: "clone8.io" } });
   assert.equal((p.parseWebhook(on.h, on.raw) as any).change, "link");
   const t = sign({ id: "e6", event: "webhook.test", test: true });
@@ -249,4 +249,57 @@ test("routes with Zernio: an Ayrshare profile reads as not connected, linking ne
   assert.equal(JSON.stringify(c.body).includes(PROFILE), false, "the profile id never leaves the server");
   await s.close();
   resetZernioForTests();
+});
+
+test("zernio: two TikToks: each listed with its id, another one added, one relinked, both posted to, one unlinked", async () => {
+  const TT2 = "acc-tt2";
+  const two = (url: URL) => ({ body: { accounts: [
+    { _id: TT, platform: "tiktok", username: "clone8.io", isActive: true, enabled: true },
+    { _id: TT2, platform: "tiktok", username: "clone8.clips", isActive: true, enabled: true },
+    { _id: "acc-ig", platform: "instagram", username: "clone8", isActive: true, enabled: true },
+  ] } });
+  const { p, calls } = z({
+    "GET /accounts": (_b, url) => two(url),
+    "GET /connect/instagram": () => ({ body: { authUrl: "https://zernio.com/connect/welcome?ticket=ig" } }),
+    "POST /posts": (body) => ({ status: 201, body: { post: { _id: "post-2", status: "published", platforms: body.platforms.map((t: any) => ({ platform: t.platform, accountId: t.accountId, status: "processing" })) } } }),
+  });
+  const accs = await p.accounts(PROFILE);
+  assert.deepEqual(accs.map((a) => [a.id, a.platform, a.username]), [[TT, "tiktok", "clone8.io"], [TT2, "tiktok", "clone8.clips"], ["acc-ig", "instagram", "clone8"]]);
+  // adding another: no reconnect id (a different login becomes a new account); Instagram asks for the login
+  await p.connectUrl(PROFILE, { platform: "tiktok", add: true });
+  let c = calls.filter((x) => x.path === "/connect/tiktok").at(-1)!;
+  assert.equal(c.url.searchParams.get("reconnectAccountId"), null);
+  await p.connectUrl(PROFILE, { platform: "instagram", add: true });
+  c = calls.filter((x) => x.path === "/connect/instagram").at(-1)!;
+  assert.equal(c.url.searchParams.get("forceReauth"), "true");
+  // relinking the second one refreshes exactly that one; an id from elsewhere is refused
+  await p.connectUrl(PROFILE, { platform: "tiktok", accountId: TT2 });
+  c = calls.filter((x) => x.path === "/connect/tiktok").at(-1)!;
+  assert.equal(c.url.searchParams.get("reconnectAccountId"), TT2);
+  await assert.rejects(p.connectUrl(PROFILE, { platform: "tiktok", accountId: "acc-ig" }), /not linked/);
+  // at the limit, relinking a named account still works (no "add" happens)
+  await p.connectUrl(PROFILE, { platform: "tiktok", accountId: TT, only: ["tiktok"] });
+  c = calls.filter((x) => x.path === "/connect/tiktok").at(-1)!;
+  assert.equal(c.url.searchParams.get("reconnectAccountId"), TT);
+  // posting to both TikToks: two targets, one result per account; a gone account fails alone
+  const r = await p.publish(PROFILE, { text: "hi", platforms: ["tiktok"], accounts: [TT, TT2, "acc-gone"], mediaUrl: "https://x/v.mp4", scheduleAt: null });
+  const sent = calls.find((x) => x.method === "POST" && x.path === "/posts")!.body;
+  assert.deepEqual(sent.platforms.map((t: any) => t.accountId), [TT, TT2]);
+  assert.ok(sent.tiktokSettings, "TikTok consent flags go with any TikTok target");
+  assert.deepEqual(r.results.map((x) => [x.account_id, x.status]), [[TT, "pending"], [TT2, "pending"], ["acc-gone", "failed"]]);
+  // unlinking one removes only that one
+  await p.disconnect(PROFILE, "tiktok", TT2);
+  const dels = calls.filter((x) => x.method === "DELETE" && x.path.startsWith("/accounts/")).map((x) => x.path);
+  assert.deepEqual(dels, [`/accounts/${TT2}`]);
+});
+
+test("zernio: a per-account webhook names the account; a post event is split by account", () => {
+  const { p } = z();
+  const body = JSON.stringify({ event: "post.platform.published", platform: "tiktok", account: { id: "acc-tt2", platform: "tiktok" }, post: { id: "post-2", status: "publishing", platforms: [
+    { platform: "tiktok", accountId: "acc-tt", status: "processing" }, { platform: "tiktok", accountId: "acc-tt2", status: "published", publishedUrl: "https://www.tiktok.com/@clone8.clips/video/2" } ] } });
+  const sig = createHmac("sha256", "whsec").update(body).digest("hex");
+  const w = p.parseWebhook({ "x-zernio-signature": sig }, body);
+  assert.equal(w?.kind, "post");
+  const ev = (w as any).event;
+  assert.deepEqual(ev.results.map((x: any) => [x.account_id, x.status]), [["acc-tt2", "posted"]]);
 });

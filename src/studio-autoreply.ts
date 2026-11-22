@@ -80,7 +80,7 @@ export function publicRule(a: any, platformOf: (accountId: string) => string | n
   const s = a?.stats ?? {};
   const b0 = Array.isArray(a?.buttons) ? a.buttons.find((x: any) => x?.type === "url") : null;
   return {
-    id: String(a.id ?? a._id), name: a.name ?? "", platform: a.platform ?? platformOf(String(a.accountId)) ?? null, trigger: a.trigger ?? "comment",
+    id: String(a.id ?? a._id), name: a.name ?? "", platform: a.platform ?? platformOf(String(a.accountId)) ?? null, account_id: a.accountId ? String(a.accountId) : null, trigger: a.trigger ?? "comment",
     post: a.platformPostId ? { id: String(a.platformPostId), title: a.postTitle ?? null } : null,
     keywords: a.keywords ?? [], match: a.matchMode ?? "contains", exclude: a.excludeKeywords ?? [], typos: !!a.typoTolerance,
     dm_message: a.dmMessage ?? null, button: b0 ? { title: b0.title, url: b0.url } : null, comment_reply: a.commentReply ?? null,
@@ -138,6 +138,8 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
     return a;
   };
   const platformOf = (ctx: Awaited<ReturnType<typeof ctxOf>>) => (accountId: string) => ctx.accounts.find((x) => String(x._id) === accountId)?.platform ?? null;
+  const pickAccount = (ctx: Awaited<ReturnType<typeof ctxOf>>, id: unknown, platform: string) =>
+    (typeof id === "string" && id ? ctx.accounts.find((x) => String(x._id) === id) : ctx.accounts.find((x) => x.platform === platform)) ?? null;
 
   // The page: linked accounts with what each can do, the rules with their numbers, and the plan's room.
   app.get("/api/studio/autoreply", async (req, res) => {
@@ -149,7 +151,7 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
       const accounts = await Promise.all(ctx.accounts.map(async (a) => {
         const h = await ctx.c.call("GET", `/accounts/${encodeURIComponent(a._id)}/health`).catch(() => null);
         const can = capabilityOf(a.platform, h?.body);
-        return { platform: a.platform, username: a.username ?? null, display_name: a.displayName ?? null, image_url: a.profilePicture ?? null, dm: DM_NETWORKS.includes(a.platform), can_reply: can.reply, can_dm: can.dm };
+        return { id: String(a._id), platform: a.platform, username: a.username ?? null, display_name: a.displayName ?? null, image_url: a.profilePicture ?? null, dm: DM_NETWORKS.includes(a.platform), can_reply: can.reply, can_dm: can.dm };
       }));
       const rules = ctx.profileId ? (await rulesOf(ctx.c, ctx.profileId)).filter((a) => ctx.accounts.some((x) => String(x._id) === String(a.accountId))).map((a) => publicRule(a, platformOf(ctx))) : [];
       res.json({ enabled: true, accounts, rules, limit: limitOf(ctx.cust), used: rules.filter((r) => r.active).length });
@@ -162,9 +164,9 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn(), ctx = await ctxOf(sb, u);
-      const platform = String(req.query.platform ?? "");
-      const a = ctx.accounts.find((x) => x.platform === platform);
+      const a = pickAccount(ctx, req.query.account_id, String(req.query.platform ?? ""));
       if (!a) throw new SocialError("not_linked", "Link that account first", 409);
+      const platform = String(a.platform);
       const r = await ctx.c.call("GET", `/analytics?accountId=${encodeURIComponent(a._id)}&limit=30`, { timeoutMs: 60_000 });
       const posts = ((r.body?.posts ?? []) as any[]).map((p) => { const t = (p.platforms ?? []).find((x: any) => x.platform === platform) ?? p; return { id: t.platformPostId ?? null, title: String(p.content ?? "").slice(0, 120), thumb_url: p.thumbnailUrl ?? null, published_at: p.publishedAt ?? null, url: t.platformPostUrl ?? null }; }).filter((p) => p.id);
       res.json({ posts });
@@ -175,9 +177,9 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn(), ctx = await ctxOf(sb, u), b = req.body ?? {};
-      const platform = String(b.platform ?? "");
-      const a = ctx.accounts.find((x) => x.platform === platform);
+      const a = pickAccount(ctx, b.account_id, String(b.platform ?? ""));
       if (!a || !ctx.profileId) throw new SocialError("not_linked", "Link that account first", 409);
+      const platform = String(a.platform);
       const live = (await rulesOf(ctx.c, ctx.profileId)).filter((x) => x.isActive !== false && ctx.accounts.some((y) => String(y._id) === String(x.accountId))).length;
       if (b.active !== false && live >= limitOf(ctx.cust)) throw new SocialError("autoreply_limit", `Your plan runs ${limitOf(ctx.cust)} auto-replies at once. Pause one or upgrade for more.`, 409);
       const body: Record<string, any> = { ...cleanRule(b, platform), profileId: ctx.profileId, accountId: String(a._id) };
@@ -247,12 +249,12 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
 // ---------------------------------------------------------------------------------------------------
 /** What the person asked for alongside a post: one keyword set, the DM (Instagram, Facebook) and the public reply. */
 export type AutoReplySpec = { keywords?: string[]; dm_message?: string; button?: { title: string; url: string } | null; comment_reply?: string; name?: string };
-export type AttachResult = { on: Array<{ platform: string; scope: "post" | "account"; reused?: boolean }>; skipped: Array<{ platform: string; reason: "needs_permission" | "limit" | "no_reply_text" | "not_linked" | "failed"; detail?: string }> };
+export type AttachResult = { on: Array<{ platform: string; username?: string | null; scope: "post" | "account"; reused?: boolean }>; skipped: Array<{ platform: string; username?: string | null; reason: "needs_permission" | "limit" | "no_reply_text" | "not_linked" | "failed"; detail?: string }> };
 
 /** Turn on the auto-reply for posts just made. One post: a rule bound to that post on each network (it arms itself when
  *  a scheduled post goes out). Several posts (a batch of clips): one rule per account for every post, reused when the
  *  same keywords already have one. Never throws: the posts went out either way; what could not be set up is reported. */
-export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Array<{ provider_post_id: string | null; platforms: string[]; status: string }>, spec: AutoReplySpec, deps: SocialDeps & { via?: string } = {}): Promise<AttachResult> {
+export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Array<{ provider_post_id: string | null; platforms: string[]; options?: any; status: string }>, spec: AutoReplySpec, deps: SocialDeps & { via?: string } = {}): Promise<AttachResult> {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
   const out: AttachResult = { on: [], skipped: [] };
   try {
@@ -269,43 +271,48 @@ export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Ar
     const rules = ((listed.body?.automations ?? listed.body?.data ?? []) as any[]).filter((r) => accounts.some((a) => String(a._id) === String(r.accountId)));
     let room = limit - rules.filter((r) => r.isActive !== false).length;
     const keys = (spec.keywords ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean).sort().join("|");
-    for (const platform of nets) {
-      const acc = accounts.find((a) => a.platform === platform && a.isActive !== false);
+    // the accounts posted to (a post names them; older rows: the network's first account)
+    const sendsIn = (p: { platforms: string[]; options?: any }) => (Array.isArray(p.options?.accounts) && p.options.accounts.length ? (p.options.accounts as any[]).map((a) => ({ id: a?.id ? String(a.id) : null, platform: String(a?.platform ?? "") })) : p.platforms.map((platform) => ({ id: null as string | null, platform })));
+    const accOf = (t: { id: string | null; platform: string }) => (t.id ? accounts.find((a) => String(a._id) === t.id && a.isActive !== false) : accounts.find((a) => a.platform === t.platform && a.isActive !== false)) ?? null;
+    const wanted = new Map<string, { platform: string; acc: any }>();
+    for (const p of live) for (const t of sendsIn(p)) { const acc = accOf(t); const k = acc ? `a:${acc._id}` : `n:${t.platform}`; if (!wanted.has(k)) wanted.set(k, { platform: t.platform, acc }); }
+    for (const { platform, acc } of wanted.values()) {
       if (!acc) { out.skipped.push({ platform, reason: "not_linked" }); continue; }
+      const username = acc.username ? String(acc.username) : null;
       const dmNet = DM_NETWORKS.includes(platform);
-      if (!dmNet && !spec.comment_reply?.trim()) { out.skipped.push({ platform, reason: "no_reply_text" }); continue; }
+      if (!dmNet && !spec.comment_reply?.trim()) { out.skipped.push({ platform, username, reason: "no_reply_text" }); continue; }
       const h = await c.call("GET", `/accounts/${encodeURIComponent(acc._id)}/health`).catch(() => null);
       const can = capabilityOf(platform, h?.body);
-      if (dmNet ? !(can.dm && can.reply) : !can.reply) { out.skipped.push({ platform, reason: "needs_permission" }); continue; }
+      if (dmNet ? !(can.dm && can.reply) : !can.reply) { out.skipped.push({ platform, username, reason: "needs_permission" }); continue; }
       let fields: Record<string, any>;
       try { fields = cleanRule({ name: spec.name || `Keyword ${spec.keywords?.[0] ?? ""}`.trim(), keywords: spec.keywords, dm_message: dmNet ? spec.dm_message : undefined, button: dmNet ? spec.button ?? undefined : undefined, comment_reply: spec.comment_reply, match: "word" }, platform); }
-      catch (e: any) { out.skipped.push({ platform, reason: "failed", detail: e?.message }); continue; }
-      const mine = live.filter((p) => p.platforms.includes(platform));
+      catch (e: any) { out.skipped.push({ platform, username, reason: "failed", detail: e?.message }); continue; }
+      const mine = live.filter((p) => sendsIn(p).some((t) => accOf(t) && String(accOf(t)!._id) === String(acc._id)));
       if (mine.length > 1) {
         // a batch: one rule for every post on this account; the same keywords reuse the rule already there
         const same = rules.find((r) => String(r.accountId) === String(acc._id) && !r.platformPostId && !r.postId && (r.keywords ?? []).map((k: string) => k.toLowerCase()).sort().join("|") === keys);
         if (same) {
-          if (same.isActive === false) { if (room <= 0) { out.skipped.push({ platform, reason: "limit" }); continue; } room--; }
+          if (same.isActive === false) { if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; } room--; }
           await c.call("PATCH", `/comment-automations/${encodeURIComponent(same.id ?? same._id)}`, { body: { ...fields, isActive: true } });
-          out.on.push({ platform, scope: "account", reused: true }); continue;
+          out.on.push({ platform, username, scope: "account", reused: true }); continue;
         }
-        if (room <= 0) { out.skipped.push({ platform, reason: "limit" }); continue; }
+        if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; }
         const r = await c.call("POST", "/comment-automations", { body: { ...fields, name: `${fields.name} (every post)`.slice(0, 60), profileId, accountId: String(acc._id) } });
-        if (r.status >= 300) { out.skipped.push({ platform, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
-        room--; out.on.push({ platform, scope: "account" });
+        if (r.status >= 300) { out.skipped.push({ platform, username, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
+        room--; out.on.push({ platform, username, scope: "account" });
         continue;
       }
       // one post: bound to it; a scheduled post arms the rule when it goes out, a published one is bound by its network id
-      if (room <= 0) { out.skipped.push({ platform, reason: "limit" }); continue; }
+      if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; }
       const postId = String(mine[0].provider_post_id);
       let r = await c.call("POST", "/comment-automations", { body: { ...fields, profileId, accountId: String(acc._id), postId } });
       if (r.status >= 300 && r.status !== 403) {
         const got = await c.call("GET", `/posts/${encodeURIComponent(postId)}`);
-        const pid = ((got.body?.post?.platforms ?? []) as any[]).find((x) => x.platform === platform)?.platformPostId;
+        const pid = ((got.body?.post?.platforms ?? []) as any[]).find((x) => (x.accountId?._id ?? x.accountId) ? String(x.accountId?._id ?? x.accountId) === String(acc._id) : x.platform === platform)?.platformPostId;
         if (pid) r = await c.call("POST", "/comment-automations", { body: { ...fields, profileId, accountId: String(acc._id), platformPostId: String(pid) } });
       }
-      if (r.status >= 300) { out.skipped.push({ platform, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
-      room--; out.on.push({ platform, scope: "post" });
+      if (r.status >= 300) { out.skipped.push({ platform, username, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
+      room--; out.on.push({ platform, username, scope: "post" });
     }
     for (const x of out.on) recordEvent({ user_id: u, kind: "feature", name: "autoreply_created", props: { platform: x.platform, via: deps.via ?? "post", scope: x.scope, reused: !!x.reused, dm: DM_NETWORKS.includes(x.platform) } });
     for (const x of out.skipped) recordEvent({ user_id: u, kind: "feature", name: "autoreply_skipped", props: { platform: x.platform, via: deps.via ?? "post", reason: x.reason } });

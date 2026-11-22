@@ -4,7 +4,7 @@ import express from "express";
 import { createHmac } from "node:crypto";
 import { ayrshareProvider, friendlyError, statusOf, verifySignature } from "../src/social-ayrshare.js";
 import { getSocialProvider } from "../src/social-provider.js";
-import { registerSocial, socialTick, webhookUrl, cleanOptions } from "../src/studio-social.js";
+import { registerSocial, socialTick, webhookUrl, cleanOptions, applyEvent } from "../src/studio-social.js";
 import { accountAccess } from "../src/account-access.js";
 
 const ANN = "11111111-1111-4111-8111-111111111111", BOB = "22222222-2222-4222-8222-222222222222";
@@ -467,4 +467,57 @@ test("trial reels: Instagram-only trials may repeat a video up to 5 times; anyth
   const mixed = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram", "tiktok"], options: { instagram: { trial: "auto" } }, trial_copies: 3 });
   assert.equal(mixed.body.error, "already_posted", "a trial with another network is a normal post: repeats refused");
   await s.close();
+});
+
+test("several accounts of one network: post to two TikToks, a repeat to the same account is refused, the other account is fine, sends count per account", async () => {
+  const outputs = Array.from({ length: 3 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
+  const accs = [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }, { id: "yt1", platform: "youtube", username: "ann" }];
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "studio", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, provider: "zernio", profile_key: "pk-ann", accounts: accs, webhook_hash: "x" }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
+  const sb = fakeSb(tables);
+  const sent: any[] = [];
+  const provider: any = {
+    name: "zernio", linking: "per_network", offered: () => ["tiktok", "youtube", "instagram"],
+    accounts: async () => accs, registerWebhook: async () => undefined,
+    connectUrl: async (_k: string, o: any) => { sent.push({ connect: o }); return { url: "https://link", expiresInMinutes: 30 }; },
+    disconnect: async (_k: string, platform: string, id?: string) => { sent.push({ unlink: [platform, id] }); },
+    publish: async (_k: string, req: any) => { sent.push(req); return { providerPostId: `pp${sent.length}`, status: "sending", results: req.accounts.map((id: string) => ({ platform: accs.find((a) => a.id === id)!.platform, account_id: id, status: "pending", url: null, error: null })), error: null }; },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req: any, _res, next) => { req.auth = { user_id: ANN, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: ANN }; next(); });
+  registerSocial(app, () => sb, { env: { ...ENV, STUDIO_SOCIAL_DAILY_POSTS: "4" }, provider, log: () => {} });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const call = async (method: string, path: string, body?: any) => { const r = await fetch(base + path, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+  const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
+  try {
+    const both = await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["tt1", "tt2"] });
+    assert.equal(both.status, 201, JSON.stringify(both.body));
+    assert.deepEqual(sent.at(-1).accounts, ["tt1", "tt2"]); assert.deepEqual(sent.at(-1).platforms, ["tiktok"]);
+    assert.deepEqual(tables.studio_social_posts[0].options.accounts, [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }]);
+    const again = await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["tt2"] });
+    assert.equal(again.body.error, "already_posted"); assert.match(again.body.detail, /@ann\.clips/);
+    assert.equal((await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["yt1"] })).status, 201, "the same video to another account is fine");
+    const gone = await call("POST", "/api/studio/social/posts", { items: [item(2)], accounts: ["tt9"] });
+    assert.equal(gone.body.error, "account_not_linked");
+    // 3 sends so far (two TikToks + YouTube); two more accounts is over the 4 a day
+    const over = await call("POST", "/api/studio/social/posts", { items: [item(2)], accounts: ["tt1", "tt2"] });
+    assert.equal(over.body.error, "daily_limit");
+    // a webhook for one account merges into its own entry
+    await applyEvent(sb, { providerPostId: "pp1", status: "posted", results: [{ platform: "tiktok", account_id: "tt2", status: "posted", url: "https://t/2", error: null }], error: null, partial: true });
+    assert.deepEqual(tables.studio_social_posts[0].results.map((r: any) => [r.account_id, r.status]), [["tt1", "pending"], ["tt2", "posted"]]);
+    // link another TikTok, relink one, unlink one
+    await call("POST", "/api/studio/social/connect", { platform: "tiktok", mode: "add" });
+    assert.equal(sent.at(-1).connect.add, true);
+    await call("POST", "/api/studio/social/connect", { platform: "tiktok", account_id: "tt2" });
+    assert.equal(sent.at(-1).connect.accountId, "tt2");
+    assert.equal((await call("POST", "/api/studio/social/connect", { platform: "tiktok", account_id: "nope" })).status, 404);
+    await call("DELETE", "/api/studio/social/accounts/tiktok?account=tt2");
+    assert.deepEqual(sent.at(-1).unlink, ["tiktok", "tt2"]);
+    // a full plan refuses adding, still relinks
+    tables.studio_customers[0].plan_id = "starter";
+    const full = await call("POST", "/api/studio/social/connect", { platform: "tiktok", mode: "add" });
+    assert.equal(full.status, 409); assert.equal(full.body.error, "account_limit");
+    assert.equal((await call("POST", "/api/studio/social/connect", { platform: "tiktok", account_id: "tt1" })).status, 200);
+  } finally { await new Promise((r) => server.close(r)); }
 });

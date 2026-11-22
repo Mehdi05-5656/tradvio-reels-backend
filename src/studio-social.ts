@@ -151,7 +151,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     if (!p) return res.json({ enabled: false, connected: false, accounts: [], platforms: [] });
     try {
       const sb = sbFn();
-      const [prof, allowance] = await Promise.all([profileOf(sb, u), allowanceOf(sb, u, p.offered().length)]);
+      const [prof, allowance] = await Promise.all([profileOf(sb, u), allowanceOf(sb, u)]);
       if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered(), linking: p.linking ?? "page", allowance, cleared: await clearedNote(sb, u) });
       let accounts = prof.accounts ?? [], stale = false;
       try {
@@ -223,13 +223,20 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       let origin: string | undefined;
       try { origin = redirect ? new URL(redirect).origin : undefined; } catch { origin = undefined; }
       // at the plan's account limit the linking page only relinks what is there (more accounts are added to the plan first)
-      const allowance = await allowanceOf(sb, u, p.offered().length);
-      const linkedNow = (prof!.accounts ?? []).map((a) => a.platform);
+      const allowance = await allowanceOf(sb, u);
+      const linkedAccs = prof!.accounts ?? [];
+      const linkedNow = linkedAccs.map((a) => a.platform);
       const full = linkedNow.length >= allowance.total;
       if (full && !linkedNow.length) throw new SocialError("account_limit", "Your plan has no social accounts yet; add one to link it", 409);
+      // relink one account (account_id), or add another account of a network already linked (mode "add")
+      const accountId = typeof req.body?.account_id === "string" && req.body.account_id ? String(req.body.account_id) : undefined;
+      if (accountId && !linkedAccs.some((a) => a.id === accountId)) throw new SocialError("not_linked", "That account is not linked any more", 404);
+      const add = req.body?.mode === "add" && !accountId;
+      if (add && full) throw new SocialError("account_limit", `All ${allowance.total} account${allowance.total === 1 ? "" : "s"} on your plan are in use. Add one to your plan to link another.`, 409);
       // engage: ask the linked network for comments and messages too (auto-replies), refreshing that account in place
       const engage = req.body?.engage === true && !!platform && linkedNow.includes(platform);
-      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, platform, engage, ...(full && !engage ? { only: linkedNow } : {}) });
+      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, platform, engage, add, accountId, ...(full && !engage && !accountId ? { only: linkedNow } : {}) });
+      recordEvent({ user_id: u, kind: "feature", name: "social_connect_opened", props: { platform: platform ?? null, mode: accountId ? "relink" : add ? "add" : linkedNow.includes(platform ?? "") ? "same_network" : "new", engage, full, linked: linkedNow.length } });
       res.json({ url: link.url, expires_in_minutes: link.expiresInMinutes, relink_only: full });
     } catch (e) { fail(res, e); }
     finally { release(); if (connecting.get(u) === chain) connecting.delete(u); }
@@ -243,11 +250,12 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       if (!isSocialPlatform(platform) && platform !== "twitter") throw new SocialError("unknown_platform", "Not a network we post to");
       const prof = await profileOf(sb, u);
       if (!prof) throw new SocialError("not_connected", "Nothing is linked yet", 404);
-      await p.disconnect(prof.profile_key, platform);
-      const accounts = await p.accounts(prof.profile_key).catch(() => (prof.accounts ?? []).filter((a) => a.platform !== platform));
+      const account = typeof req.query.account === "string" && req.query.account ? String(req.query.account) : undefined;
+      await p.disconnect(prof.profile_key, platform, account);
+      const accounts = await p.accounts(prof.profile_key).catch(() => (prof.accounts ?? []).filter((a) => (account ? a.id !== account : a.platform !== platform)));
       await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
       await touchSocial(sb, u);
-      recordEvent({ user_id: u, kind: "feature", name: "social_network_changed", props: { platform, change: "unlinked", by: "person_in_clone8" } });
+      recordEvent({ user_id: u, kind: "feature", name: "social_network_changed", props: { platform, change: "unlinked", by: "person_in_clone8", one_account: !!account, left_on_network: accounts.filter((a) => a.platform === platform).length } });
       res.json({ accounts });
     } catch (e) { fail(res, e); }
   });
@@ -387,27 +395,45 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   if (!prof) throw new SocialError("not_connected", "Connect your socials first", 409);
   if (prof.provider && prof.provider !== p.name) throw new SocialError("not_connected", "Posting moved to a new connection. Link your accounts again (it takes a minute), then post.", 409);
   // more linked than the plan covers (linked several at once on the linking page): posting waits for a fix
-  const allowance = await allowanceOf(sb, u, p.offered().length);
+  const allowance = await allowanceOf(sb, u);
   const linkedCount = (prof.accounts ?? []).length;
   if (linkedCount > allowance.total) throw new SocialError("over_account_limit", `Your plan covers ${allowance.total} social account${allowance.total === 1 ? "" : "s"} and ${linkedCount} are linked. Add ${linkedCount - allowance.total} to your plan or unlink ${linkedCount - allowance.total === 1 ? "one" : "some"} to post.`, 409);
   let items: any[] = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
   if (!items.length) throw new SocialError("no_videos", "Pick at least one video");
   if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} videos at a time`);
+  const offered = new Set(p.offered());
+  const linkedAccs = prof.accounts ?? [];
+  // Several accounts of a network can be linked (two TikToks): the page sends the accounts picked. Without them (older
+  // pages, the chat), each network named goes to its first linked account.
+  const askedIds = [...new Set((Array.isArray(b.accounts) ? b.accounts : []).map(String).filter(Boolean))] as string[];
+  let targets: SocialAccount[];
+  if (askedIds.length) {
+    targets = askedIds.map((id) => linkedAccs.find((a) => a.id === id)).filter(Boolean) as SocialAccount[];
+    if (targets.length < askedIds.length) throw new SocialError("account_not_linked", "One of the accounts you picked is not linked any more. Refresh the page and pick again.", 409);
+    const off = targets.filter((a) => !offered.has(a.platform));
+    if (off.length) throw new SocialError("platform_unavailable", `${[...new Set(off.map((a) => a.platform))].join(", ")} is not available right now`);
+  } else {
+    const asked = [...new Set((Array.isArray(b.platforms) ? b.platforms : []).map(String))] as string[];
+    const nets = asked.filter((x) => isSocialPlatform(x) && offered.has(x));
+    if (asked.length && nets.length < asked.length) throw new SocialError("platform_unavailable", `${asked.filter((x) => !nets.includes(x)).join(", ")} is not available right now`);
+    const missing = nets.filter((x) => !linkedAccs.some((a) => a.platform === x));
+    if (missing.length) throw new SocialError("platform_not_linked", `Link ${missing.join(", ")} first`, 409);
+    targets = nets.map((x) => linkedAccs.find((a) => a.platform === x)!);
+  }
+  if (!targets.length) throw new SocialError("no_platforms", "Pick at least one account");
   // Trial Reels go to non-followers first, so the same video may go out more than once (up to 5 copies, Instagram only)
-  const trial = Array.isArray(b.platforms) && b.platforms.length === 1 && b.platforms[0] === "instagram" && (b.options?.instagram?.trial === "auto" || b.options?.instagram?.trial === "manual");
+  const trial = (askedIds.length ? true : Array.isArray(b.platforms) && b.platforms.length === 1 && b.platforms[0] === "instagram") && (b.options?.instagram?.trial === "auto" || b.options?.instagram?.trial === "manual");
   const copies = trial ? Math.min(Math.max(Math.floor(Number(b.trial_copies) || 1), 1), MAX_TRIAL_COPIES) : 1;
   if (copies > 1) {
     items = items.flatMap((it) => Array.from({ length: copies }, () => it));
     if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} posts at a time (videos x copies)`);
   }
-  const offered = new Set(p.offered());
-  const asked = [...new Set((Array.isArray(b.platforms) ? b.platforms : []).map(String))] as string[];
-  const platforms = asked.filter((x) => isSocialPlatform(x) && offered.has(x)) as any[];
-  if (asked.length && platforms.length < asked.length) throw new SocialError("platform_unavailable", `${asked.filter((x) => !platforms.includes(x)).join(", ")} is not available right now`);
-  if (!platforms.length) throw new SocialError("no_platforms", "Pick at least one network");
-  const linked = new Set((prof.accounts ?? []).map((a) => a.platform));
-  const missing = platforms.filter((x: string) => !linked.has(x));
-  if (missing.length) throw new SocialError("platform_not_linked", `Link ${missing.join(", ")} first`, 409);
+  if (trial && targets.some((a) => a.platform !== "instagram")) throw new SocialError("trial_instagram_only", "Trial Reels post to Instagram only. Pick only Instagram accounts, or turn Trial Reels off.");
+  const platforms = [...new Set(targets.map((a) => a.platform))] as any[];
+  const accountIds = targets.every((a) => a.id) ? targets.map((a) => a.id!) : null;
+  const accountsNote = targets.map((a) => ({ id: a.id ?? null, platform: a.platform, username: a.username ?? null }));
+  /** One send per account: `acct:<id>`, or `net:<platform>` for rows from before accounts were named. */
+  const tokenOf = (a: { id?: string | null; platform: string }) => (a.id ? `acct:${a.id}` : `net:${a.platform}`);
   const caption = String(b.caption ?? "").slice(0, 5000);
   // each video may bring its own caption and YouTube title (a batch of clips, each about something else)
   const captionOf = (i: number) => (typeof items[i]?.caption === "string" ? String(items[i].caption).slice(0, 5000) : caption);
@@ -420,27 +446,28 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   if (first && first.getTime() - now < MIN_LEAD_MS - 30_000) throw new SocialError("too_soon", "Pick a time at least 5 minutes from now");
   // 24-hour allowance per person, counted by network sends.
   const since = new Date(now - 86400_000).toISOString();
-  const recent = await sb.from("studio_social_posts").select("job_id,output_key,asset_id,platforms,status,results,error").eq("user_id", u).gte("created_at", since).limit(1000);
+  const recent = await sb.from("studio_social_posts").select("job_id,output_key,asset_id,platforms,options,status,results,error").eq("user_id", u).gte("created_at", since).limit(1000);
   if (recent.error) throw recent.error;
-  const rows24 = (recent.data ?? []) as Array<Pick<SocialPostRow, "job_id" | "output_key" | "asset_id" | "platforms" | "status" | "results" | "error">>;
+  const rows24 = (recent.data ?? []) as Array<Pick<SocialPostRow, "job_id" | "output_key" | "asset_id" | "platforms" | "options" | "status" | "results" | "error">>;
   const cap = dailyCap(env);
   const resolved = await resolveItems(sb, u, items);
-  // The same video to the same network twice in a day is refused: platforms treat it as a duplicate, and a send whose
-  // outcome is unknown may already be live.
+  // The same video to the same account twice in a day is refused: networks treat it as a duplicate, and a send whose
+  // outcome is unknown may already be live. Another account of the same network is fine.
   const keyOf = (x: { job_id: string | null; output_key: string | null; asset_id?: string | null }) => (x.asset_id ? `a:${x.asset_id}` : `o:${x.job_id}:${x.output_key}`);
   const taken = new Map<string, Set<string>>();
   for (const r of rows24) {
-    const nets = new Set<string>();
-    for (const n of r.platforms ?? []) {
-      const res = (r.results ?? []).find((x) => x.platform === n);
+    const sent = new Set<string>();
+    for (const t of sendsOf(r)) {
+      const res = (r.results ?? []).find((x) => (t.id && x.account_id ? x.account_id === t.id : x.platform === t.platform));
       const live = ["sending", "scheduled", "posted"].includes(r.status) || r.error === UNCONFIRMED || (res ? ["posted", "pending", "scheduled"].includes(res.status) : r.status === "partial");
-      if (live && r.status !== "canceled") nets.add(n);
+      if (live && r.status !== "canceled") sent.add(tokenOf(t));
     }
-    const k = keyOf(r); taken.set(k, new Set([...(taken.get(k) ?? []), ...nets]));
+    const k = keyOf(r); taken.set(k, new Set([...(taken.get(k) ?? []), ...sent]));
   }
   for (const x of trial ? [] : resolved) {
-    const again = platforms.filter((n: string) => taken.get(keyOf(x))?.has(n));
-    if (again.length) throw new SocialError("already_posted", `That video already went to ${again.join(", ")} today (or is on its way). Pick a different video or network.`, 409);
+    const t = taken.get(keyOf(x));
+    const again = targets.filter((a) => t?.has(tokenOf(a)) || t?.has(`net:${a.platform}`));
+    if (again.length) throw new SocialError("already_posted", `That video already went to ${again.map((a) => (a.username ? `@${a.username}` : a.platform)).join(", ")} today (or is on its way). Pick a different video or account.`, 409);
   }
   const seen = new Set<string>();
   if (!trial) for (const x of resolved) { if (seen.has(keyOf(x))) throw new SocialError("same_video_twice", "The same video is picked twice"); seen.add(keyOf(x)); }
@@ -454,21 +481,21 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const DAY = 86400_000, dayOf = (ms: number) => Math.floor(ms / DAY);
   const times = plan.map(({ at }) => at?.getTime() ?? now);
   const fromDay = dayOf(Math.min(...times)) * DAY;
-  const out = await sb.from("studio_social_posts").select("platforms,status,error,schedule_at,created_at").eq("user_id", u).neq("status", "canceled")
+  const out = await sb.from("studio_social_posts").select("platforms,options,status,error,schedule_at,created_at").eq("user_id", u).neq("status", "canceled")
     .or(`schedule_at.gte.${new Date(fromDay).toISOString()},and(schedule_at.is.null,created_at.gte.${new Date(fromDay).toISOString()})`).limit(5000);
   if (out.error) throw out.error;
   const perDay = new Map<number, number>();
   for (const r of (out.data ?? []) as any[]) {
     if (r.status === "failed" && r.error !== UNCONFIRMED) continue;
     const d = dayOf(Date.parse(r.schedule_at ?? r.created_at));
-    perDay.set(d, (perDay.get(d) ?? 0) + (r.platforms ?? []).length);
+    perDay.set(d, (perDay.get(d) ?? 0) + sendsOf(r).length);
   }
-  for (const t of times) perDay.set(dayOf(t), (perDay.get(dayOf(t)) ?? 0) + platforms.length);
+  for (const t of times) perDay.set(dayOf(t), (perDay.get(dayOf(t)) ?? 0) + targets.length);
   const overDay = [...perDay.entries()].find(([d, c]) => c > cap && times.some((t) => dayOf(t) === d));
   if (overDay) throw new SocialError("daily_limit", `That is over the limit of ${cap} posts a day on ${new Date(overDay[0] * DAY).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" })}. Spread the posts over more days or pick fewer accounts.`, 429);
   const made: SocialPostRow[] = [];
   for (const { x, at, caption, options } of plan) {
-    const ins = await sb.from("studio_social_posts").insert({ user_id: u, provider: p.name, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id, conversation_id: opts.conversationId ?? null, caption, platforms, options, schedule_at: at?.toISOString() ?? null, status: "sending" }).select("*").single();
+    const ins = await sb.from("studio_social_posts").insert({ user_id: u, provider: p.name, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id, conversation_id: opts.conversationId ?? null, caption, platforms, options: { ...options, accounts: accountsNote }, schedule_at: at?.toISOString() ?? null, status: "sending" }).select("*").single();
     if (ins.error) {
       // the ones already sent stay sent; stop here and report what went (never fail the whole call after a send)
       log(`[social] ${u} insert failed after ${made.length} post(s): ${String(ins.error.message ?? ins.error).slice(0, 160)}`);
@@ -481,7 +508,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
       const ttl = Math.ceil(Math.min(Math.max(7 * 86400_000, (at ? at.getTime() - now : 0) + 2 * 86400_000), (MAX_AHEAD_DAYS + 2) * 86400_000) / 1000);
       const s = await sb.storage.from(x.bucket).createSignedUrl(x.key, ttl);
       if (s.error || !s.data?.signedUrl) throw new SocialError("video_unavailable", "That video could not be read", 502);
-      const r = await p.publish(prof.profile_key, { text: caption, platforms, mediaUrl: s.data.signedUrl, scheduleAt: at, options, idempotencyKey: row.id });
+      const r = await p.publish(prof.profile_key, { text: caption, platforms, ...(accountIds ? { accounts: accountIds } : {}), mediaUrl: s.data.signedUrl, scheduleAt: at, options, idempotencyKey: row.id });
       const patch = { provider_post_id: r.providerPostId, status: r.status, results: r.results, error: r.error, updated_at: new Date().toISOString() };
       let upd = await sb.from("studio_social_posts").update(patch).eq("id", row.id).select("*").single();
       if (upd.error) upd = await sb.from("studio_social_posts").update(patch).eq("id", row.id).select("*").single();
@@ -501,7 +528,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
       made.push({ ...row, status: "failed", error: msg });
     }
   }
-  log(`[social] ${u} sent ${made.length} post(s) to ${platforms.join(",")}: ${made.map((m) => m.status).join(",")}`);
+  log(`[social] ${u} sent ${made.length} post(s) to ${targets.length} account(s) on ${platforms.join(",")}: ${made.map((m) => m.status).join(",")}`);
   await touchSocial(sb, u);
   // an auto-reply asked for with the post: set up after the send, never holding the post back
   let autoreply: Awaited<ReturnType<typeof attachAutoReplies>> | null = null;
@@ -509,10 +536,18 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const spec: AutoReplySpec = { keywords: Array.isArray(b.autoreply.keywords) ? b.autoreply.keywords.map(String) : [], dm_message: typeof b.autoreply.dm_message === "string" ? b.autoreply.dm_message : undefined, button: b.autoreply.button ?? null, comment_reply: typeof b.autoreply.comment_reply === "string" ? b.autoreply.comment_reply : undefined };
     autoreply = await attachAutoReplies(sb, u, made, spec, { env, log, via: typeof opts.via === "string" ? opts.via : opts.conversationId ? "chat" : "publish" });
   }
-  recordEvent({ user_id: u, kind: "feature", name: "social_post_sent", props: { videos: made.length, networks: platforms, scheduled: made.filter((m) => m.status === "scheduled").length, failed: made.filter((m) => m.status === "failed").length, from_chat: !!opts.conversationId } });
+  recordEvent({ user_id: u, kind: "feature", name: "social_post_sent", props: { videos: made.length, networks: platforms, accounts: targets.length, same_network_accounts: targets.length - platforms.length, scheduled: made.filter((m) => m.status === "scheduled").length, failed: made.filter((m) => m.status === "failed").length, from_chat: !!opts.conversationId } });
   const sent = await withPostPosters(sb, u, made);
   return Object.assign(sent, { autoreply });
 }
+
+/** The sends a post row made: one per account (rows from before accounts were named: one per network). */
+export function sendsOf(r: { platforms?: string[] | null; options?: any }): Array<{ id: string | null; platform: string }> {
+  const accs = Array.isArray(r.options?.accounts) ? (r.options.accounts as any[]).filter((a) => a && a.platform) : [];
+  return accs.length ? accs.map((a) => ({ id: a.id ? String(a.id) : null, platform: String(a.platform) })) : (r.platforms ?? []).map((platform) => ({ id: null, platform }));
+}
+/** A result's place in a row: its account, or its network for results that name none. */
+const resultKey = (r: { platform: string; account_id?: string | null }) => (r.account_id ? `acct:${r.account_id}` : `net:${r.platform}`);
 
 /** Post rows for the page, each with its video's poster (output posters sit next to the file; uploads keep theirs). */
 export async function withPostPosters(sb: SupabaseClient, u: string, rows: SocialPostRow[]) {
@@ -533,11 +568,11 @@ export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<
     sb.from("studio_social_profiles").select("accounts").eq("user_id", u).maybeSingle(),
     sb.from("studio_social_prefs").select("connect_dismissed_at,connect_dismissals").eq("user_id", u).maybeSingle(),
   ]);
-  const linked = ((pr.data?.accounts ?? []) as SocialAccount[]).map((a) => a.platform);
+  const linked = [...new Set(((pr.data?.accounts ?? []) as SocialAccount[]).map((a) => a.platform))];
   // "Not now" to linking quiets the unasked offer for two weeks; three of them, for good (asking still works).
   const d = pf.data as { connect_dismissed_at: string | null; connect_dismissals: number } | null;
   const quiet = !linked.length && !!d && (d.connect_dismissals >= 3 || (!!d.connect_dismissed_at && Date.now() - Date.parse(d.connect_dismissed_at) < 14 * 86400_000));
-  const allowance = await allowanceOf(sb, u, getSocialProvider({ env })?.offered().length).catch(() => undefined);
+  const allowance = await allowanceOf(sb, u).catch(() => undefined);
   return { enabled: true, linked, quiet, allowance };
 }
 
@@ -545,15 +580,18 @@ export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<
  *  delivery that names only some networks (TikTok reports on its own) is merged by network, and the overall status is
  *  worked out again from all of them. */
 export async function applyEvent(sb: SupabaseClient, ev: SocialEvent): Promise<number> {
-  const cur = await sb.from("studio_social_posts").select("id,status,results,platforms,schedule_at").eq("provider_post_id", ev.providerPostId).neq("status", "canceled");
+  const cur = await sb.from("studio_social_posts").select("id,status,results,platforms,options,schedule_at").eq("provider_post_id", ev.providerPostId).neq("status", "canceled");
   if (cur.error) throw cur.error;
   let moved = 0;
   for (const row of (cur.data ?? []) as any[]) {
     let results = ev.results, status = ev.status, error = ev.error;
     if (ev.partial && ev.status !== "canceled") {
-      const by = new Map<string, SocialResult>(((row.results ?? []) as SocialResult[]).map((r) => [r.platform, r]));
-      for (const r of ev.results) by.set(r.platform, r);
-      for (const n of (row.platforms ?? []) as string[]) if (!by.has(n)) by.set(n, { platform: n, status: "pending", url: null, error: null });
+      const by = new Map<string, SocialResult>(((row.results ?? []) as SocialResult[]).map((r) => [resultKey(r), r]));
+      for (const r of ev.results) { if (r.account_id) by.delete(`net:${r.platform}`); by.set(resultKey(r), r); }
+      for (const t of sendsOf(row)) {
+        const k = resultKey({ platform: t.platform, account_id: t.id });
+        if (!by.has(k) && !(t.id && by.has(`net:${t.platform}`)) && ![...by.values()].some((r) => !t.id && r.platform === t.platform)) by.set(k, { platform: t.platform, account_id: t.id, status: "pending", url: null, error: null });
+      }
       results = [...by.values()];
       const future = !!row.schedule_at && Date.parse(row.schedule_at) > Date.now();
       status = statusOf(results, future);

@@ -11,12 +11,16 @@ export type SocialPlatform = (typeof SOCIAL_PLATFORMS)[number];
 export const isSocialPlatform = (p: unknown): p is SocialPlatform => typeof p === "string" && (SOCIAL_PLATFORMS as readonly string[]).includes(p);
 
 /** A network the person linked, as the provider reports it. */
-export type SocialAccount = { platform: string; username: string | null; display_name: string | null; image_url: string | null; profile_url: string | null; refresh_required?: boolean };
+/** `id` is the provider's account id: several accounts of one network can be linked (two TikToks), so posts, unlinks
+ *  and relinks name the account, not only the network. */
+export type SocialAccount = { id?: string; platform: string; username: string | null; display_name: string | null; image_url: string | null; profile_url: string | null; refresh_required?: boolean };
 /** The outcome on one network. */
-export type SocialResult = { platform: string; status: "scheduled" | "posted" | "failed" | "pending"; url: string | null; error: string | null };
+export type SocialResult = { platform: string; account_id?: string | null; status: "scheduled" | "posted" | "failed" | "pending"; url: string | null; error: string | null };
 export type SocialPostStatus = "sending" | "scheduled" | "posted" | "partial" | "failed" | "canceled";
 export type PublishRequest = {
   text: string; platforms: SocialPlatform[]; mediaUrl: string; scheduleAt: Date | null;
+  /** the exact linked accounts to post to (provider ids); without it, the first linked account of each network */
+  accounts?: string[];
   /** unique per post: a retried request is refused instead of posting twice */
   idempotencyKey?: string;
   /** network options the provider understands: { youtube: { title, visibility }, tiktok: {...}, instagram: {...} } */
@@ -38,7 +42,7 @@ export function statusOf(results: SocialResult[], scheduled: boolean): SocialPos
 
 
 /** A webhook delivery we act on: a post settled, or a network was linked, unlinked or needs relinking. */
-export type SocialWebhook = { kind: "post"; event: SocialEvent } | { kind: "account"; refId: string; platform: string; change: "link" | "unlink" | "refresh"; bySystem: boolean };
+export type SocialWebhook = { kind: "post"; event: SocialEvent } | { kind: "account"; refId: string; platform: string; accountId?: string | null; change: "link" | "unlink" | "refresh"; bySystem: boolean };
 
 /** A post on a linked account, with what the provider reports about it (private analytics where the network shares them). */
 export type ProviderPost = {
@@ -62,9 +66,12 @@ export interface SocialProvider {
   createProfile(title: string, externalId?: string): Promise<{ profileKey: string; refId: string | null }>;
   deleteProfile(profileKey: string): Promise<void>;
   /** A short-lived link where the person links or unlinks their own networks. */
-  connectUrl(profileKey: string, opts?: { redirect?: string; origin?: string; only?: string[]; platform?: string; engage?: boolean }): Promise<{ url: string; expiresInMinutes: number | null }>;
+  /** `add`: link another account of a network already linked (asks the network for a login); `accountId`: relink that
+   *  account in place; `only`: at the plan's limit, the networks that may be relinked (nothing new is added). */
+  connectUrl(profileKey: string, opts?: { redirect?: string; origin?: string; only?: string[]; platform?: string; engage?: boolean; add?: boolean; accountId?: string }): Promise<{ url: string; expiresInMinutes: number | null }>;
   accounts(profileKey: string): Promise<SocialAccount[]>;
-  disconnect(profileKey: string, platform: string): Promise<void>;
+  /** Unlink one account (accountId) or, without it, every account of the network. */
+  disconnect(profileKey: string, platform: string, accountId?: string): Promise<void>;
   publish(profileKey: string, req: PublishRequest): Promise<PublishResult>;
   status(profileKey: string, providerPostId: string): Promise<SocialEvent | null>;
   cancel(profileKey: string, providerPostId: string): Promise<void>;
@@ -73,7 +80,7 @@ export interface SocialProvider {
   /** Read a webhook delivery; null when it is not one we act on. Throws SocialError("webhook_unverified") when it fails verification. */
   parseWebhook(headers: Record<string, string | undefined>, rawBody: string): SocialWebhook | null;
   /** Recent posts on a linked network, including ones published outside Clone8, with their analytics. */
-  recentPosts?(profileKey: string, platform: string, limit: number): Promise<ProviderPost[]>;
+  recentPosts?(profileKey: string, platform: string, limit: number, accountId?: string): Promise<ProviderPost[]>;
   /** Followers and account totals per network. */
   accountStats?(profileKey: string, platforms: string[]): Promise<ProviderAccountStats[]>;
 }

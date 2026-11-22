@@ -36,7 +36,7 @@ test("capability: replies need a comments permission, DMs a messages permission 
 test("public rule: the page's own shape with a click-through rate", () => {
   const r = publicRule({ id: "a1", name: "Guide", accountId: "acc-ig", keywords: ["guide"], matchMode: "word", dmMessage: "hi", buttons: [{ type: "url", title: "Go", url: "https://x.y" }], isActive: true, stats: { triggered: 10, dmsSent: 9, uniqueContacts: 9, trackedSends: 8, uniqueClicks: 2, linkClicks: 3 } }, () => "instagram");
   assert.equal(r.platform, "instagram"); assert.deepEqual(r.button, { title: "Go", url: "https://x.y" }); assert.equal(r.stats.ctr, 25); assert.equal(r.stats.sent, 9);
-  assert.equal(JSON.stringify(r).includes("acc-ig"), false, "account ids stay on the server");
+  assert.equal(r.account_id, "acc-ig", "a rule names its account (two Instagrams each have their own rules); routes check it is the person's");
 });
 
 /** A fake posting service holding ANN's two accounts and BOB's one, and their rules. */
@@ -157,16 +157,16 @@ test("attach: one post binds a rule to it; a batch makes one rule per account an
   const sb = sbFor("starter");
   const spec = { keywords: ["GUIDE"], dm_message: "Here it is", comment_reply: "Sent you a DM 📩" };
   const one = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000a1", platforms: ["instagram", "tiktok"], status: "scheduled" }], spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "publish" });
-  assert.deepEqual(one.on, [{ platform: "instagram", scope: "post" }]);
+  assert.deepEqual(one.on, [{ platform: "instagram", username: "ann", scope: "post" }]);
   assert.deepEqual(one.skipped.map((x) => [x.platform, x.reason]), [["tiktok", "needs_permission"]]);
   const made = svc.calls.filter((c) => c.method === "POST" && c.path === "/comment-automations");
   assert.equal(made[0].body.postId, "zpost000000000000000000a1", "bound to the post, armed when it goes out");
   assert.equal(made[0].body.dmMessage, "Here it is");
   const batch = [1, 2, 3].map((i) => ({ provider_post_id: `zpost00000000000000000b${i}`, platforms: ["instagram"], status: "scheduled" }));
   const b1 = await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "clips" });
-  assert.deepEqual(b1.on, [{ platform: "instagram", scope: "account" }]);
+  assert.deepEqual(b1.on, [{ platform: "instagram", username: "ann", scope: "account" }]);
   const b2 = await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "clips" });
-  assert.deepEqual(b2.on, [{ platform: "instagram", scope: "account", reused: true }], "the same keywords reuse the batch rule");
+  assert.deepEqual(b2.on, [{ platform: "instagram", username: "ann", scope: "account", reused: true }], "the same keywords reuse the batch rule");
   const third = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000c1", platforms: ["instagram"], status: "scheduled" }], { ...spec, keywords: ["NEW"] }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
   assert.equal(third.on.length, 1, "the third rule fits Starter's 3");
   const full = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000c2", platforms: ["instagram"], status: "scheduled" }], { ...spec, keywords: ["MORE"] }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
