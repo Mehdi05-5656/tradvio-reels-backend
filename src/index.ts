@@ -47,6 +47,7 @@ import { PLANS } from "./studio.js";
 import { registerAssistant, startAssistantLoop } from "./studio-assistant.js";
 import { registerAutomations } from "./studio-automations.js";
 import { registerSocial, startSocialLoop } from "./studio-social.js";
+import { registerAutoReplies } from "./studio-autoreply.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerOutputAsset } from "./studio-output-asset.js";
 import { registerPeople } from "./studio-people.js";
@@ -138,6 +139,7 @@ async function main() {
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
   registerSocial(app, getSb); // Studio self-serve posting to the person's own socials; off until STUDIO_SOCIAL_ENABLED=true. Not Publer.
+  registerAutoReplies(app, getSb); // keyword comments and DMs answered on the person's own accounts (posting service rules)
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
   registerOutputAsset(app, getSb); // a finished video into the library, so any other tool can take it
   registerPeople(app, getSb); // who is in a clip: faces for the chat card and the Swap page

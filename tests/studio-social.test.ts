@@ -451,3 +451,20 @@ test("social accounts: the plan's allowance, relink-only linking at the limit, p
   assert.ok(ayr.calls.filter((c) => c.path === "/profiles/link-sessions").at(-1)!.body.allowedSocial.length > 2, "room left: every network is offered");
   await s.close();
 });
+
+test("trial reels: Instagram-only trials may repeat a video up to 5 times; anything else still refuses repeats", async () => {
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "studio", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann", ref_id: "ref-ann", accounts: [{ platform: "instagram" }, { platform: "tiktok" }], webhook_hash: "x" }], studio_jobs: [doneJob()], studio_social_posts: [] };
+  const sb = fakeSb(tables);
+  const ayr = fakeAyr({ "GET /user": () => ({ body: { activeSocialAccounts: ["instagram", "tiktok"], displayNames: [{ platform: "instagram", username: "ann" }, { platform: "tiktok", username: "ann" }] } }) });
+  const s = await serve(sb, ayr.fetchFn);
+  const item = { job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4` };
+  const plain = await s.call("POST", "/api/studio/social/posts", { items: [item, item], platforms: ["instagram"] });
+  assert.equal(plain.body.error, "same_video_twice", "outside a trial, the same video twice is refused");
+  const trial = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } }, trial_copies: 3, spacing_minutes: 30 });
+  assert.equal(trial.status, 201); assert.equal(trial.body.posts.length, 3, "three trial copies of one video");
+  const again = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "manual" } }, trial_copies: 9 });
+  assert.equal(again.status, 201); assert.equal(again.body.posts.length, 5, "copies are capped at 5");
+  const mixed = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram", "tiktok"], options: { instagram: { trial: "auto" } }, trial_copies: 3 });
+  assert.equal(mixed.body.error, "already_posted", "a trial with another network is a normal post: repeats refused");
+  await s.close();
+});

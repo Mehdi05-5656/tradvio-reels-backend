@@ -70,6 +70,30 @@ function metricsOf(a: any): Pick<ProviderPost, "views" | "likes" | "comments" | 
 
 let webhookReady: string | null = null; // the URL registered in this process (one workspace endpoint)
 
+/** The bare HTTP client (also used by studio-autoreply.ts), or null without a key. */
+export function zernioClient(deps: SocialDeps = {}) {
+  const env = deps.env ?? process.env;
+  const key = env.ZERNIO_API_KEY;
+  if (!key) return null;
+  const f = deps.fetch ?? fetch;
+  const call = async (method: string, path: string, opts: { body?: any; timeoutMs?: number; headers?: Record<string, string> } = {}): Promise<{ status: number; body: any }> => {
+    let r: Response;
+    try {
+      r = await f(`${BASE}${path}`, { method, headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...(opts.headers ?? {}) }, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined, signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000) });
+    } catch { throw Object.assign(new SocialError("provider_unreachable", "The posting service did not answer", 504), { unknown: true }); }
+    let text = "";
+    try { text = await r.text(); } catch { throw Object.assign(new SocialError("provider_unreachable", "The posting service did not answer", 504), { unknown: true }); }
+    let j: any = null; try { j = text ? JSON.parse(text) : null; } catch { j = null; }
+    return { status: r.status, body: j ?? {} };
+  };
+  const rawAccounts = async (profileId: string): Promise<any[]> => {
+    const r = await call("GET", `/accounts?profileId=${encodeURIComponent(profileId)}`);
+    if (r.status >= 300) throw new SocialError("accounts_failed", clean(r.body?.error ?? r.body?.message, "Could not read the linked accounts"), 502);
+    return (Array.isArray(r.body?.accounts) ? r.body.accounts : []).filter((a: any) => a && a.enabled !== false && a.notificationOnly !== true);
+  };
+  return { call, rawAccounts, clean };
+}
+
 export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
   const env = deps.env ?? process.env;
   const key = env.ZERNIO_API_KEY;
@@ -126,10 +150,12 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
     async connectUrl(profileKey, opts = {}) {
       const platform = opts.platform;
       if (!platform || !offered().includes(platform)) throw new SocialError("pick_network", "Pick the network to link", 400);
-      const q = new URLSearchParams({ profileId: profileKey, welcome: "true", brandName: ZERNIO_BRAND.brandName, logoUrl: ZERNIO_BRAND.logoUrl, welcomeTheme: JSON.stringify(ZERNIO_BRAND.theme), scopes: "posting,analytics" });
+      // posting + analytics by default; auto-replies add comments + messages (asked only when someone turns them on)
+      const q = new URLSearchParams({ profileId: profileKey, welcome: "true", brandName: ZERNIO_BRAND.brandName, logoUrl: ZERNIO_BRAND.logoUrl, welcomeTheme: JSON.stringify(ZERNIO_BRAND.theme), scopes: opts.engage ? "posting,analytics,comments,messaging" : "posting,analytics" });
       if (opts.redirect) q.set("redirect_url", opts.redirect);
+      if (opts.engage) { const acc = await accountFor(profileKey, platform); if (acc) q.set("reconnectAccountId", String(acc._id)); }
       // at the plan's limit only a network already linked may be linked again (it refreshes in place)
-      if (opts.only) {
+      if (opts.only && !opts.engage) {
         if (!opts.only.includes(platform)) throw new SocialError("account_limit", "Your plan's accounts are all in use; add one to your plan to link another network", 409);
         const acc = await accountFor(profileKey, platform);
         if (acc) q.set("reconnectAccountId", String(acc._id));
@@ -162,6 +188,14 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
         const a = accs.find((x) => x.platform === platform && x.isActive !== false);
         if (!a) { missing.push({ platform, status: "failed", url: null, error: `${platform.charAt(0).toUpperCase() + platform.slice(1)} is not linked. Link it in Accounts.` }); continue; }
         const t: any = { platform, accountId: String(a._id) };
+        if (platform === "instagram") {
+          const ig = req.options?.instagram ?? {};
+          const d: Record<string, any> = {};
+          // Trial Reels: shown to non-followers first; SS_PERFORMANCE lets Instagram share a good one with followers
+          if (ig.trial === "auto" || ig.trial === "manual") d.trialParams = { graduationStrategy: ig.trial === "auto" ? "SS_PERFORMANCE" : "MANUAL" };
+          if (typeof ig.first_comment === "string" && ig.first_comment.trim()) d.firstComment = ig.first_comment.trim().slice(0, 2200);
+          if (Object.keys(d).length) t.platformSpecificData = d;
+        }
         if (platform === "youtube") {
           const yt = req.options?.youtube ?? {};
           t.platformSpecificData = { title: Array.from(String(yt.title || req.text || "New video")).slice(0, 100).join(""), visibility: yt.visibility ?? "public" };

@@ -54,7 +54,7 @@ export async function flushEvents(): Promise<number> {
 // ---------------------------------------------------------------------------------------------------
 export const TRACKED_PAGES = new Set(["home", "chat", "automations", "publish", "performance", "blueprint", "recast", "swap", "styles", "trends", "characters", "instruments", "instrument", "library", "pricing", "account", "onboarding", "managed", "admin",
   // added Nov 10 2026: every page that has shipped since the list was written was being dropped
-  "clips", "captions", "accounts", "kage", "stories", "films", "influencer", "earn"]);
+  "clips", "captions", "accounts", "kage", "stories", "films", "influencer", "earn", "replies"]);
 const perMinute = new Map<string, { at: number; n: number }>();
 /** Accept up to 30 page views a minute per person; returns how many were kept. */
 export function recordPageViews(userId: string, items: unknown, now = Date.now()): number {

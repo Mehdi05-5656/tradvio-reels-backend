@@ -71,9 +71,19 @@ export async function allowanceOf(sb: SupabaseClient, u: string, networks?: numb
 export function usableExtra(included: number, networks?: number): number {
   return networks == null ? MAX_SOCIAL_EXTRA : Math.max(0, Math.min(MAX_SOCIAL_EXTRA, networks - included));
 }
-/** Network options the person may set, cleaned: today a YouTube title (required there) and its visibility. */
+/** Network options the person may set, cleaned: a YouTube title (required there) and its visibility; on Instagram a
+ *  Trial Reel ("auto": Instagram shares a good one with followers, "manual": the person does it in the app) and a
+ *  first comment posted under the post (the place for "Comment GUIDE" that an auto-reply answers). */
+export const MAX_TRIAL_COPIES = 5;
 export function cleanOptions(platforms: string[], raw: any, caption: string): Record<string, any> {
   const out: Record<string, any> = {};
+  if (platforms.includes("instagram")) {
+    const ig: Record<string, any> = {};
+    if (raw?.instagram?.trial === "auto" || raw?.instagram?.trial === "manual") ig.trial = raw.instagram.trial;
+    const fc = typeof raw?.instagram?.first_comment === "string" ? raw.instagram.first_comment.trim().slice(0, 2200) : "";
+    if (fc) ig.first_comment = fc;
+    if (Object.keys(ig).length) out.instagram = ig;
+  }
   if (platforms.includes("youtube")) {
     const title = String(raw?.youtube?.title ?? "").trim() || caption.split("\n")[0].slice(0, 100) || "New video";
     const visibility = ["public", "unlisted", "private"].includes(raw?.youtube?.visibility) ? raw.youtube.visibility : "public";
@@ -216,7 +226,9 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const linkedNow = (prof!.accounts ?? []).map((a) => a.platform);
       const full = linkedNow.length >= allowance.total;
       if (full && !linkedNow.length) throw new SocialError("account_limit", "Your plan has no social accounts yet; add one to link it", 409);
-      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, platform, ...(full ? { only: linkedNow } : {}) });
+      // engage: ask the linked network for comments and messages too (auto-replies), refreshing that account in place
+      const engage = req.body?.engage === true && !!platform && linkedNow.includes(platform);
+      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, platform, engage, ...(full && !engage ? { only: linkedNow } : {}) });
       res.json({ url: link.url, expires_in_minutes: link.expiresInMinutes, relink_only: full });
     } catch (e) { fail(res, e); }
     finally { release(); if (connecting.get(u) === chain) connecting.delete(u); }
@@ -377,9 +389,16 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const allowance = await allowanceOf(sb, u, p.offered().length);
   const linkedCount = (prof.accounts ?? []).length;
   if (linkedCount > allowance.total) throw new SocialError("over_account_limit", `Your plan covers ${allowance.total} social account${allowance.total === 1 ? "" : "s"} and ${linkedCount} are linked. Add ${linkedCount - allowance.total} to your plan or unlink ${linkedCount - allowance.total === 1 ? "one" : "some"} to post.`, 409);
-  const items: any[] = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
+  let items: any[] = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
   if (!items.length) throw new SocialError("no_videos", "Pick at least one video");
   if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} videos at a time`);
+  // Trial Reels go to non-followers first, so the same video may go out more than once (up to 5 copies, Instagram only)
+  const trial = Array.isArray(b.platforms) && b.platforms.length === 1 && b.platforms[0] === "instagram" && (b.options?.instagram?.trial === "auto" || b.options?.instagram?.trial === "manual");
+  const copies = trial ? Math.min(Math.max(Math.floor(Number(b.trial_copies) || 1), 1), MAX_TRIAL_COPIES) : 1;
+  if (copies > 1) {
+    items = items.flatMap((it) => Array.from({ length: copies }, () => it));
+    if (items.length > MAX_ITEMS) throw new SocialError("too_many_videos", `Up to ${MAX_ITEMS} posts at a time (videos x copies)`);
+  }
   const offered = new Set(p.offered());
   const asked = [...new Set((Array.isArray(b.platforms) ? b.platforms : []).map(String))] as string[];
   const platforms = asked.filter((x) => isSocialPlatform(x) && offered.has(x)) as any[];
@@ -418,12 +437,12 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     }
     const k = keyOf(r); taken.set(k, new Set([...(taken.get(k) ?? []), ...nets]));
   }
-  for (const x of resolved) {
+  for (const x of trial ? [] : resolved) {
     const again = platforms.filter((n: string) => taken.get(keyOf(x))?.has(n));
     if (again.length) throw new SocialError("already_posted", `That video already went to ${again.join(", ")} today (or is on its way). Pick a different video or network.`, 409);
   }
   const seen = new Set<string>();
-  for (const x of resolved) { if (seen.has(keyOf(x))) throw new SocialError("same_video_twice", "The same video is picked twice"); seen.add(keyOf(x)); }
+  if (!trial) for (const x of resolved) { if (seen.has(keyOf(x))) throw new SocialError("same_video_twice", "The same video is picked twice"); seen.add(keyOf(x)); }
   const latest = now + MAX_AHEAD_DAYS * 86400_000;
   const plan = resolved.map((x, i) => {
     const at = first ? new Date(first.getTime() + i * spacing * 60_000) : spacing ? new Date(now + MIN_LEAD_MS + i * spacing * 60_000) : null;
