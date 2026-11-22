@@ -56,7 +56,7 @@ export const lookById = (id: unknown): Look | null => LOOKS.find((l) => l.id ===
 // ---------------------------------------------------------------------------------------------------
 /** A hook: the title card text (words in *stars* get the accent font) and the source stretch played first.
  *  start = end = null keeps the video's own opening and only adds the title. */
-export type Hook = { id: string; title: string; start: number | null; end: number | null };
+export type Hook = { id: string; title: string; start: number | null; end: number | null; /** v3: the opening's named angle (studio-blueprints-purpose.ts ANGLES) */ angle?: string | null };
 export type Segment = { a: number; b: number; zoom: number; at: number; hook?: boolean };
 export type Timeline = { segments: Segment[]; words: CapWord[]; duration: number; hookEnd: number };
 

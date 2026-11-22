@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { blueprintsV2Enabled, blueprintsV2Open, blueprintVersionCredits, buildPlan, cleanOptions, lineOf, quoteBlueprints, readFor, readKey, writePlan } from "../src/studio-blueprints-routes.js";
+import { blueprintsV2Enabled, blueprintsV2Open, blueprintVersionCredits, buildPlan, captionsKey, cleanOptions, lineOf, quoteBlueprints, readFor, readKey, versionCaptionsFor, writePlan } from "../src/studio-blueprints-routes.js";
 import { toolsEnabled } from "../src/studio.js";
 import { PLANS } from "../src/studio.js";
 import type { CapWord } from "../src/caption-engine.js";
@@ -11,6 +11,7 @@ const ON = { ...KEYS, STUDIO_BLUEPRINTS_V2_ENABLED: "true" }, OPEN = { ...ON, ST
 const ASSET = { id: A, kind: "video", name: "kitkat.mp4", probe: { duration: 36 } };
 const WORDS: CapWord[] = Array.from({ length: 60 }, (_, i) => ({ text: `w${i}`, start: i * 0.6, end: i * 0.6 + 0.5, key: i % 9 === 0 }));
 const HOOK = (id = "h1", start = 13.8, end = 15.3) => ({ id, title: "I counted every *KitKat* here", start, end });
+const LOOK = { captions: false, format: "talking_head", people: 1, speaks_to_camera: true, facecam_over_gameplay: false, landscape_source: false, product_or_app: false, call_to_action: false } as const;
 
 test("switches: off by default, enabled needs both keys, open needs enabled", () => {
   assert.equal(blueprintsV2Enabled({}), false);
@@ -88,8 +89,10 @@ test("read: openings with their lines and the face track, kept; read again from 
   const sb = fakeSb(); let calls = 0, faceCalls = 0, capCalls = 0;
   const deps: any = { env: ON, words: async () => WORDS, stills: async () => [{ at: 1, jpeg: Buffer.from("x") }],
     hooks: async () => { calls++; return calls === 1 ? [HOOK("h1", 13.8, 15.3)] : [HOOK("h1", 13.8, 15.3), HOOK("h2", 23, 26)]; },
-    faces: async () => { faceCalls++; return [{ t: 1, cx: 0.5, cy: 0.4, h: 0.5 }]; }, captionsCheck: async () => { capCalls++; return true; } };
+    faces: async () => { faceCalls++; return [{ t: 1, cx: 0.5, cy: 0.4, h: 0.5 }]; }, lookRead: async () => { capCalls++; return { ...LOOK, captions: true }; } };
   const first = await readFor(sb, deps, U, A);
+  assert.equal(first.purpose, "own", "a talking head with no role: my own content");
+  assert.equal(first.doc.hooks[0].purpose, "own");
   assert.equal(first.cached, false);
   assert.equal(first.doc.hooks.length, 1);
   assert.match(first.doc.hooks[0].line, /^w23 w24/);
@@ -102,7 +105,8 @@ test("read: openings with their lines and the face track, kept; read again from 
   assert.equal(fresh.doc.hooks.length, 2);
   assert.equal(faceCalls, 1, "the face track is read once");
   assert.equal(first.doc.has_captions, true);
-  assert.equal(capCalls, 1, "the captions check runs once and is kept");
+  assert.equal(capCalls, 1, "the look read runs once and is kept");
+  assert.equal(first.doc.look?.format, "talking_head");
   await assert.rejects(readFor(sb, deps, U, A, { fresh: true, allowNew: false }), /a lot of reading/);
 });
 
@@ -120,19 +124,76 @@ test("writePlan: the plan is uploaded as text under the person's folder and its 
   assert.equal(plan.asset_id, A);
 });
 
-test("read: a read kept before the captions check gets it once; Clone8 Captions videos skip the call", async () => {
-  const sb = fakeSb(); let capCalls = 0;
-  sb.files.set(`studio-outputs/${readKey(U, A)}`, JSON.stringify({ v: 1, at: "x", seconds: 36, hooks: [{ ...HOOK(), line: "w" }], focus: [] }));
-  const deps: any = { env: ON, stills: async () => [{ at: 1, jpeg: Buffer.from("x") }], captionsCheck: async () => { capCalls++; return false; }, hooks: async () => { throw new Error("no new openings expected"); } };
+test("read: a read kept before v3 gets the look read once and openings for its purpose; Clone8-captioned videos are captioned", async () => {
+  const sb = fakeSb(); let looks = 0, writes = 0;
+  sb.files.set(`studio-outputs/${readKey(U, A)}`, JSON.stringify({ v: 1, at: "x", seconds: 36, hooks: [{ ...HOOK(), line: "w" }], focus: [{ t: 1, cx: 0.5, cy: 0.4, h: 0.3 }] }));
+  const deps: any = { env: ON, words: async () => WORDS, stills: async () => [{ at: 1, jpeg: Buffer.from("x") }], lookRead: async () => { looks++; return LOOK; },
+    hooks: async (_w: any, _n: any, _u: any, purpose: string) => { writes++; return [{ ...HOOK("h1", 23, 26), angle: purpose === "own" ? "question" : "reaction" }]; }, faces: async () => { throw new Error("face track kept"); } };
   const a = await readFor(sb, deps, U, A);
-  assert.equal(a.cached, true); assert.equal(a.doc.has_captions, false); assert.equal(capCalls, 1);
+  assert.equal(a.cached, false); assert.equal(writes, 1); assert.equal(looks, 1);
+  assert.equal(a.doc.has_captions, false);
+  assert.equal(a.doc.hooks.length, 2, "the old opening is kept beside the new one");
   const b = await readFor(sb, deps, U, A);
-  assert.equal(b.doc.has_captions, false); assert.equal(capCalls, 1, "kept");
-  // a video Clone8 captioned: known without a look
+  assert.equal(b.cached, true); assert.equal(looks, 1, "kept"); assert.equal(writes, 1);
+  // a video Clone8 captioned: captioned whatever the stills say
   const sb2 = fakeSb(); const from = sb2.from;
-  sb2.from = (t: string) => t === "studio_assets" ? { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { id: A, kind: "video", name: "x.mp4", object_key: `${U}/${A}.mp4`, status: "ready", probe: { duration: 36, captions: true } }, error: null }) }) }) }) } : from(t);
-  const c = await readFor(sb2, { ...deps, words: async () => WORDS, hooks: async () => [HOOK()], faces: async () => [] }, U, A);
-  assert.equal(c.doc.has_captions, true); assert.equal(capCalls, 1, "no look needed");
+  sb2.from = (t: string) => t === "studio_assets" ? { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { id: A, kind: "video", name: "x.mp4", object_key: `${U}/${A}.mp4`, status: "ready", probe: { duration: 36, captions: { style: "bold_pop" }, source: "clips" } }, error: null }) }) }) }) } : from(t);
+  const c = await readFor(sb2, { ...deps, faces: async () => [] }, U, A);
+  assert.equal(c.doc.has_captions, true);
+  assert.equal(c.purpose, "clip", "made by Clips: a clip");
+});
+
+test("read: openings are kept per purpose; switching purpose writes its own set, switching back is free", async () => {
+  const sb = fakeSb(); const asked: string[] = [];
+  const deps: any = { env: ON, words: async () => WORDS, stills: async () => [{ at: 1, jpeg: Buffer.from("x") }], lookRead: async () => LOOK, faces: async () => [],
+    hooks: async (_w: any, _n: any, _u: any, purpose: string) => { asked.push(purpose); return purpose === "clip" ? [{ ...HOOK("h1", 23, 26), angle: "reaction" }] : [{ ...HOOK(), angle: "result" }]; } };
+  const own = await readFor(sb, deps, U, A, { role: "creator" });
+  assert.equal(own.purpose, "own"); assert.equal(own.suggested, "own");
+  const clip = await readFor(sb, deps, U, A, { purpose: "clip", role: "creator" });
+  assert.equal(clip.purpose, "clip"); assert.equal(clip.suggested, "own");
+  assert.deepEqual(clip.added.map((h) => h.angle), ["reaction"]);
+  const back = await readFor(sb, deps, U, A, { purpose: "own" });
+  assert.equal(back.cached, true);
+  assert.deepEqual(asked, ["own", "clip"]);
+  assert.equal(back.doc.hooks.filter((h) => h.purpose === "own").length, 1);
+  assert.equal(back.doc.hooks.filter((h) => h.purpose === "clip").length, 1);
+  assert.equal(new Set(back.doc.hooks.map((h) => h.id)).size, 2, "ids stay unique across purposes");
+});
+
+test("options: the purpose and each opening's angle are kept when they fit; anything else is dropped", () => {
+  const o = cleanOptions({ purpose: "own", hooks: [{ ...HOOK(), angle: "question" }, { ...HOOK("h2", 23, 26), angle: "reaction" }], looks: ["clean"] }, 36);
+  assert.equal(o.purpose, "own");
+  assert.equal(o.hooks[0].angle, "question");
+  assert.equal(o.hooks[1].angle, undefined, "a clip angle on an own set is dropped");
+  assert.equal(cleanOptions({ purpose: "nope", hooks: [HOOK()], looks: ["clean"] }, 36).purpose, null);
+  const q = quoteBlueprints(ON, PLANS, ASSET, { purpose: "brand", hooks: [{ ...HOOK(), angle: "benefit" }], looks: ["card"] }, { owner: true });
+  assert.equal(q.options.purpose, "brand");
+  assert.equal(q.options.hooks[0].angle, "benefit");
+  assert.equal("purpose" in quoteBlueprints(ON, PLANS, ASSET, { hooks: [HOOK()], looks: ["card"] }, { owner: true }).options, false);
+});
+
+test("version captions: one call for the set, kept per job and networks; not before the versions exist", async () => {
+  const sb = fakeSb(); const J = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"; let calls = 0, seen: any = null;
+  const job: any = { id: J, user_id: U, tool: "blueprint_versions", status: "done", asset_id: A,
+    options: { purpose: "own", hooks: [{ ...HOOK("h1", 13.8, 15.3), angle: "question" }, { ...HOOK("h2", 23, 26), angle: "result" }] },
+    outputs: [{ index: 1, hook_id: "h1", look_id: "clean" }, { index: 2, hook_id: "h1", look_id: "editorial" }, { index: 3, hook_id: "h2", look_id: "clean" }] };
+  const from = sb.from;
+  sb.from = (t: string) => t === "studio_jobs" ? { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: job, error: null }) }) }) }) } : from(t);
+  const deps: any = { env: ON, words: async () => WORDS, captions: async (o: any) => { calls++; seen = o; return o.versions.map((v: any) => ({ index: v.index, caption: `c${v.index}`, hashtags: ["#a"], youtube_title: null })); } };
+  const out = await versionCaptionsFor(sb, deps, U, J, ["instagram"]);
+  assert.deepEqual(out.map((c) => c.caption), ["c1", "c2", "c3"]);
+  assert.equal(seen.purpose, "own");
+  assert.deepEqual(seen.versions.map((v: any) => [v.index, v.angle, v.look]), [[1, "question", "Clean"], [2, "question", "Editorial"], [3, "result", "Clean"]]);
+  assert.match(seen.versions[0].line, /^w23 w24/);
+  assert.ok(sb.files.has(`studio-outputs/${captionsKey(U, J, ["instagram"])}`));
+  await versionCaptionsFor(sb, deps, U, J, ["instagram"]);
+  assert.equal(calls, 1, "kept");
+  await versionCaptionsFor(sb, deps, U, J, ["instagram"], { fresh: true });
+  assert.equal(calls, 2, "fresh writes again");
+  job.outputs = [];
+  await assert.rejects(versionCaptionsFor(sb, deps, U, J, ["tiktok"]), /once the versions are made/);
+  job.tool = "clips";
+  await assert.rejects(versionCaptionsFor(sb, deps, U, J, ["tiktok"]), /not in your account/);
 });
 
 test("captions off: the quote keeps it, the plan adds no captions and keeps the whole frame", () => {

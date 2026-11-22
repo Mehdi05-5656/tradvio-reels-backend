@@ -3,7 +3,9 @@
 // storage, the calls and the checks. The Blueprint worker (tradvio-features-worker, blueprint_job.py) renders the plan.
 //
 //   GET  /api/studio/blueprints/config  the price of a version, the limits, the looks
-//   POST /api/studio/blueprints/read    { asset_id, fresh? } -> { seconds, hooks } (kept; fresh writes more openings)
+//   POST /api/studio/blueprints/read    { asset_id, purpose?, fresh? } -> { seconds, hooks, purpose, suggested_purpose,
+//                                       format, has_captions, looks_default, angles } (kept per video and purpose)
+//   POST /api/studio/blueprints/captions { job_id, platforms } -> { captions: [{ index, caption, hashtags, youtube_title }] }
 //   tool "blueprint_versions" through /api/studio/quote and /api/studio/jobs; the job's options carry plan_key, the
 //   edit plan of every version, uploaded before the job is created.
 // Switches: STUDIO_BLUEPRINTS_V2_ENABLED (owner only; needs the Claude and ElevenLabs keys) and
@@ -24,7 +26,9 @@ import { readSubjects } from "./studio-splitscreen.js";
 import { loopById } from "./studio-splitscreen-library.js";
 import type { LibraryHelpers } from "./studio-library.js";
 import { BLUEPRINT_LIMITS, LOOKS, lookById, planVersion, type Edl, type Hook, type LookId } from "./studio-blueprints.js";
-import { focusTrack, hasBurnedCaptions, writeHooks } from "./studio-blueprints-read.js";
+import { focusTrack, writeHooks } from "./studio-blueprints-read.js";
+import { ANGLES, angleOk, defaultLooks, isPurpose, readLook, suggestPurpose, writeVersionCaptions, type LookRead, type Purpose, type VersionCaption } from "./studio-blueprints-purpose.js";
+import { allowCaption } from "./studio-captions.js";
 
 type Env = Record<string, string | undefined>;
 export class BlueprintsError extends ClipsError {}
@@ -35,8 +39,9 @@ export const blueprintsV2Open = (env: Env = process.env) => blueprintsV2Enabled(
 /** What a version costs us, USD: the read (one Sonnet call for the openings, one Haiku read of the stills, words
  *  already kept by Captions or heard once at $0.22 an hour) measured at $0.0101 on a 36 s video (Nov 16 2026, local,
  *  metered tokens), spread over at least one version, plus about 1 minute of the $25/month worker and the files kept
- *  30 days. Rounded up to $0.012. To be replaced by the cost ledger's rows once jobs run. */
-export const BLUEPRINT_VERSION_COST_USD = 0.012;
+ *  30 days: $0.012. v3 adds the set's post captions (one Sonnet call, estimated $0.02 a set, at most $0.004 a version
+ *  on sets of 5+): $0.016. Still under the 12-credit floor. To be replaced by the cost ledger's rows once jobs run. */
+export const BLUEPRINT_VERSION_COST_USD = 0.016;
 /** Credits a version: the margin rule at the cheapest credit, never under today's Blueprint copy floor (12). */
 export const blueprintVersionCredits = (plans: PlanLike[]) => Math.max(PRICE_FLOORS.blueprint_copy, creditsForCost(BLUEPRINT_VERSION_COST_USD, creditValueFloor(plans)));
 export const BLUEPRINT_READ = { per_day: 20, title_max: 70, ids: /^[a-z0-9-]{1,40}$/ } as const;
@@ -45,15 +50,19 @@ export const SPLIT_GAME = { id: "subway-official", start: 10 } as const;
 
 export const readKey = (u: string, assetId: string) => `${u}/blueprints/read/${assetId}.json`;
 export const planKey = (u: string) => `${u}/blueprints/plans/${randomUUID()}.json`;
-export type ReadDoc = { v: 1; at: string; seconds: number; hooks: Array<Hook & { line: string }>; focus: Edl["focus_track"]; has_captions?: boolean };
+/** hooks: every opening written for this video; v3 ones carry the purpose they were written for (older ones none).
+ *  look: the small model's read of the stills (captions + format), v3. */
+export type ReadDoc = { v: 1; at: string; seconds: number; hooks: Array<Hook & { line: string; purpose?: Purpose }>; focus: Edl["focus_track"]; has_captions?: boolean; look?: LookRead | null };
+export const hooksFor = (doc: ReadDoc, purpose: Purpose | null) => (purpose ? doc.hooks.filter((h) => h.purpose === purpose) : doc.hooks.filter((h) => !h.purpose));
 
 // ---------------------------------------------------------------------------------------------------
 // Options and the quote
 // ---------------------------------------------------------------------------------------------------
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : Number.NaN);
 /** The openings and looks as sent by the page, made safe. Throws with a sentence the page shows. */
-export function cleanOptions(raw: any, seconds: number): { hooks: Hook[]; looks: LookId[]; captions: boolean } {
+export function cleanOptions(raw: any, seconds: number): { hooks: Hook[]; looks: LookId[]; captions: boolean; purpose: Purpose | null } {
   const L = BLUEPRINT_LIMITS;
+  const purpose = isPurpose(raw?.purpose) ? raw.purpose : null;
   const hooks: Hook[] = [];
   for (const h of Array.isArray(raw?.hooks) ? raw.hooks : []) {
     const id = String(h?.id ?? "").toLowerCase(), start = num(h?.start), end = num(h?.end);
@@ -62,7 +71,8 @@ export function cleanOptions(raw: any, seconds: number): { hooks: Hook[]; looks:
     if (!title.replace(/\*/g, "").trim()) throw new BlueprintsError("invalid_hooks", "Every opening needs a title");
     if (!(start >= 0 && end <= seconds + 0.05 && end - start >= L.hook_min - 0.01 && end - start <= L.hook_max + 0.01)) throw new BlueprintsError("invalid_hooks", "An opening is outside the video; read it again");
     const starred = [...title.matchAll(/\*([^*]+)\*/g)].length, odd = (title.match(/\*/g) ?? []).length % 2;
-    hooks.push({ id, title: starred > 2 || odd ? title.replace(/\*/g, "") : title, start: Math.round(start * 1000) / 1000, end: Math.round(end * 1000) / 1000 });
+    hooks.push({ id, title: starred > 2 || odd ? title.replace(/\*/g, "") : title, start: Math.round(start * 1000) / 1000, end: Math.round(end * 1000) / 1000,
+      ...(purpose && angleOk(purpose, h?.angle) ? { angle: String(h.angle) } : {}) });
   }
   const looks: LookId[] = [];
   for (const l of Array.isArray(raw?.looks) ? raw.looks : []) { const look = lookById(l); if (look && !looks.includes(look.id)) looks.push(look.id); }
@@ -71,7 +81,7 @@ export function cleanOptions(raw: any, seconds: number): { hooks: Hook[]; looks:
   if (!looks.length) throw new BlueprintsError("invalid_looks", "Pick at least one look");
   if (hooks.length * looks.length > L.max_versions) throw new BlueprintsError("too_many_versions", `At most ${L.max_versions} versions in one run`);
   // false when the video already has captions of its own: none added, the whole picture kept in every look
-  return { hooks, looks, captions: raw?.captions !== false };
+  return { hooks, looks, captions: raw?.captions !== false, purpose };
 }
 
 export type BlueprintsQuote = { tool: "blueprint_versions"; credits: number; options: Record<string, any>; summary: string };
@@ -80,9 +90,9 @@ export function quoteBlueprints(env: Env, plans: PlanLike[], asset: { id: string
   if (!asset || asset.kind !== "video") throw new BlueprintsError("asset_required", "Pick a video first");
   const seconds = Number(asset.probe?.duration) || 0;
   checkLength(seconds);
-  const { hooks, looks, captions } = cleanOptions(raw, seconds);
+  const { hooks, looks, captions, purpose } = cleanOptions(raw, seconds);
   const per = blueprintVersionCredits(plans), versions = hooks.length * looks.length;
-  return { tool: "blueprint_versions", credits: per * versions, options: { hooks, looks, captions, versions, per_version: per, seconds, name: String(raw?.name ?? asset.name ?? "").slice(0, 120) },
+  return { tool: "blueprint_versions", credits: per * versions, options: { hooks, looks, captions, ...(purpose ? { purpose } : {}), versions, per_version: per, seconds, name: String(raw?.name ?? asset.name ?? "").slice(0, 120) },
     summary: `${hooks.length} ${hooks.length === 1 ? "opening" : "openings"} × ${looks.length} ${looks.length === 1 ? "look" : "looks"} × ${per}` };
 }
 function checkLength(seconds: number) {
@@ -96,9 +106,11 @@ function checkLength(seconds: number) {
 export type BlueprintsDeps = ClipsDeps & {
   /** the words, kept by Captions (tests replace it) */ words?: (sb: SupabaseClient, u: string, assetId: string) => Promise<CapWord[]>;
   /** stills of the video for the face reader */ stills?: (url: string, seconds: number, dir: string) => Promise<Array<{ at: number; jpeg: Buffer }>>;
-  hooks?: (words: CapWord[], n: number, userId: string) => Promise<Hook[]>;
+  hooks?: (words: CapWord[], n: number, userId: string, purpose?: Purpose) => Promise<Hook[]>;
   faces?: (frames: Array<{ t: number; jpg: Buffer }>, userId: string) => Promise<Edl["focus_track"]>;
-  captionsCheck?: (frames: Array<{ t: number; jpg: Buffer }>, userId: string) => Promise<boolean>;
+  /** the small model's read of the stills: burned-in captions + format (tests replace it) */
+  lookRead?: (frames: Array<{ t: number; jpg: Buffer }>, userId: string) => Promise<LookRead | null>;
+  captions?: (o: Parameters<typeof writeVersionCaptions>[1], userId: string) => Promise<VersionCaption[]>;
 };
 /** The words said between two times, for the opening's quote on the page. */
 export const lineOf = (words: CapWord[], a: number, b: number) => words.filter((w) => (w.start + w.end) / 2 >= a && (w.start + w.end) / 2 <= b).map((w) => w.text).join(" ").slice(0, 240);
@@ -122,52 +134,64 @@ async function keep(sb: SupabaseClient, u: string, assetId: string, doc: ReadDoc
   if (r) log?.(`[blueprints] read not kept for ${assetId}: ${String(r?.message ?? r).slice(0, 120)}`);
 }
 
-/** The openings and the face track for one library video: kept ones, or read now (and kept). `fresh` writes more
- *  openings and adds the new ones to the kept set (the face track is kept as it was). */
-export async function readFor(sb: SupabaseClient, deps: BlueprintsDeps, u: string, assetId: string, o: { fresh?: boolean; allowNew?: boolean; n?: number } = {}): Promise<{ doc: ReadDoc; added: ReadDoc["hooks"]; cached: boolean }> {
+/** The openings, the face track and the look read for one library video: kept ones, or read now (and kept).
+ *  Openings are kept per purpose: asking for a purpose that has none yet writes them (that counts as a read).
+ *  With no purpose asked, the purpose is suggested from where the video came from, the sign-up role and the look read.
+ *  `fresh` writes more openings for the purpose and adds the new ones (the face track and look read stay). */
+export async function readFor(sb: SupabaseClient, deps: BlueprintsDeps, u: string, assetId: string, o: { fresh?: boolean; allowNew?: boolean; n?: number; purpose?: Purpose | null; role?: string | null } = {}): Promise<{ doc: ReadDoc; added: ReadDoc["hooks"]; cached: boolean; purpose: Purpose; suggested: Purpose }> {
   const { url, asset } = await signed(sb, u, assetId);
   const seconds = Number(asset.probe?.duration) || 0;
   checkLength(seconds);
   const old = await kept(sb, u, assetId);
   const dir = await mkdtemp(join(tmpdir(), "studio-bp-read-"));
   try {
-    // the stills, read once and shared by the face reader and the captions check
+    // the stills, read once and shared by the face reader and the look read
     let shots: Promise<Array<{ t: number; jpg: Buffer }>> | null = null;
     const stills = () => (shots ??= (deps.stills ?? keyStills)(url, seconds, dir).then((s) => s.filter((x) => x.jpeg?.length).map((x) => ({ t: x.at, jpg: x.jpeg })), () => []));
-    const captioned = async (): Promise<boolean> => {
-      if (asset.probe?.captions) return true; // captioned by Clone8 Captions
+    const lookNow = async (): Promise<LookRead | null> => {
       const frames = await stills();
-      if (!frames.length) return false;
-      return (deps.captionsCheck ? deps.captionsCheck(frames, u) : hasBurnedCaptions(deps, frames, u)).catch((e) => { deps.log?.(`[blueprints] no captions check for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return false; });
+      if (!frames.length) return null;
+      return (deps.lookRead ? deps.lookRead(frames, u) : readLook(deps, frames, u)).catch((e) => { deps.log?.(`[blueprints] no look read for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return null; });
     };
-    if (old && !o.fresh) {
-      if (typeof old.has_captions === "boolean") return { doc: old, added: old.hooks, cached: true };
-      // a read kept before the captions check existed: add it once, keep the rest
-      const doc: ReadDoc = { ...old, has_captions: await captioned() };
-      await keep(sb, u, assetId, doc, deps.log);
-      return { doc, added: doc.hooks, cached: true };
+    // the look read is cheap ($0.0004) and kept: a read kept before it existed gets it once
+    const look = old?.look !== undefined && old.look !== null ? old.look : await lookNow();
+    // captioned by Clone8 Captions or Clips, or seen in the stills
+    const has_captions = !!asset.probe?.captions || (look ? look.captions : old?.has_captions === true);
+    const suggested = suggestPurpose({ probe: asset.probe, role: o.role, look });
+    const purpose: Purpose = o.purpose ?? suggested;
+    const have = old ? hooksFor(old, purpose) : [];
+    const lookChanged = !old || old.look !== look || old.has_captions !== has_captions;
+    if (old && have.length && !o.fresh) {
+      const doc: ReadDoc = { ...old, look, has_captions };
+      if (lookChanged) await keep(sb, u, assetId, doc, deps.log);
+      return { doc, added: have, cached: true, purpose, suggested };
     }
     if (o.allowNew === false) throw new BlueprintsError("blueprints_rate_limited", "That is a lot of reading for one day; try again tomorrow", 429);
     const t0 = Date.now();
     const words = deps.words ? await deps.words(sb, u, assetId) : docWords(await wordsFor(sb, deps, u, assetId));
     if (words.length < 6) throw new BlueprintsError("blueprints_no_speech", "There is not enough speech in this video to write openings", 422);
     const n = o.n ?? 5;
-    const write = deps.hooks ? deps.hooks(words, n, u) : writeHooks(deps, words, { n, userId: u });
+    const write = deps.hooks ? deps.hooks(words, n, u, purpose) : writeHooks(deps, words, { n, userId: u, purpose });
     const faces = old?.focus ? Promise.resolve(old.focus) : (async () => {
       const frames = await stills();
       if (!frames.length) return [];
       return deps.faces ? deps.faces(frames, u) : focusTrack(await readSubjects(deps, frames, u));
     })().catch((e) => { deps.log?.(`[blueprints] no face read for ${assetId}: ${String(e?.message ?? e).slice(0, 120)}`); return []; });
-    const caps = typeof old?.has_captions === "boolean" ? Promise.resolve(old.has_captions) : captioned();
-    const [hooks, focus, has_captions] = await Promise.all([write, faces, caps]);
-    const seen = new Set((old?.hooks ?? []).map((h) => `${h.start}-${h.end}`));
+    const [hooks, focus] = await Promise.all([write, faces]);
+    const seen = new Set(have.map((h) => `${h.start}-${h.end}`));
+    const ids = new Set((old?.hooks ?? []).map((h) => h.id));
     const stamp = Date.now().toString(36);
-    const added = hooks.filter((h) => !seen.has(`${h.start}-${h.end}`)).map((h, i) => ({ ...h, id: old ? `${h.id}-${stamp}-${i}`.slice(0, 40) : h.id, line: lineOf(words, h.start ?? 0, h.end ?? 0) })) as ReadDoc["hooks"];
-    if (!added.length && !old) throw new BlueprintsError("blueprints_no_hooks", "No line in this video works as an opening; try a video with more speech", 422);
-    const doc: ReadDoc = { v: 1, at: new Date().toISOString(), seconds, hooks: [...(old?.hooks ?? []), ...added].slice(0, 30), focus: focus ?? [], has_captions };
+    const added = hooks.filter((h) => !seen.has(`${h.start}-${h.end}`)).map((h, i) => {
+      const id = ids.has(h.id) || old ? `${h.id}-${purpose}-${stamp}-${i}`.slice(0, 40) : h.id;
+      return { ...h, id, purpose, line: lineOf(words, h.start ?? 0, h.end ?? 0) };
+    }) as ReadDoc["hooks"];
+    if (!added.length && !have.length) throw new BlueprintsError("blueprints_no_hooks", "No line in this video works as an opening; try a video with more speech", 422);
+    // the newest 30 per purpose are kept, older purposes' openings stay
+    const mine = [...have, ...added].slice(-30);
+    const doc: ReadDoc = { v: 1, at: new Date().toISOString(), seconds, hooks: [...(old?.hooks ?? []).filter((h) => h.purpose !== purpose), ...mine], focus: focus ?? [], has_captions, look };
     await keep(sb, u, assetId, doc, deps.log);
-    deps.log?.(`[blueprints] read ${JSON.stringify({ asset: assetId, seconds: Math.round(seconds), words: words.length, hooks: added.length, faces: doc.focus.length, has_captions, fresh: !!o.fresh, ms: Date.now() - t0 })}`);
-    return { doc, added, cached: false };
+    deps.log?.(`[blueprints] read ${JSON.stringify({ asset: assetId, seconds: Math.round(seconds), words: words.length, purpose, suggested, format: look?.format ?? null, hooks: added.length, faces: doc.focus.length, has_captions, fresh: !!o.fresh, ms: Date.now() - t0 })}`);
+    return { doc, added, cached: false, purpose, suggested };
   } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 
@@ -219,14 +243,62 @@ export function registerBlueprints(app: Express, h: Pick<LibraryHelpers, "sbFn" 
       const owner = await gate(req, sb);
       const assetId = String(req.body?.asset_id ?? "");
       if (!/^[0-9a-f-]{36}$/i.test(assetId)) throw new BlueprintsError("video_not_found", "Pick a video", 404);
-      const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
+      const c = await sb.from("studio_customers").select("status,owner_pass,onboarding").eq("user_id", u).maybeSingle();
       if (!(owner || (c.data && (["active", "trialing"].includes(c.data.status) || c.data.owner_pass)))) throw new BlueprintsError("subscription_required", "Blueprint versions come with a plan", 409);
       const since = new Date(Date.now() - 86400_000).toISOString();
       const n = await sb.from("studio_events").select("id", { count: "exact", head: true }).eq("user_id", u).eq("name", "blueprints_read").gte("created_at", since);
-      const out = await readFor(sb, { ...deps, env: h.env, log: h.log }, u, assetId, { fresh: req.body?.fresh === true, allowNew: owner || (n.count ?? 0) < BLUEPRINT_READ.per_day });
-      if (!out.cached) recordEvent({ user_id: u, kind: "feature", name: "blueprints_read", props: { asset: assetId, hooks: out.added.length, seconds: out.doc.seconds } });
+      const purpose = isPurpose(req.body?.purpose) ? req.body.purpose : null;
+      const role = typeof (c.data as any)?.onboarding?.role === "string" ? (c.data as any).onboarding.role : null;
+      const out = await readFor(sb, { ...deps, env: h.env, log: h.log }, u, assetId, { fresh: req.body?.fresh === true, purpose, role, allowNew: owner || (n.count ?? 0) < BLUEPRINT_READ.per_day });
+      if (!out.cached) recordEvent({ user_id: u, kind: "feature", name: "blueprints_read", props: { asset: assetId, hooks: out.added.length, seconds: out.doc.seconds, purpose: out.purpose, suggested: out.suggested, format: out.doc.look?.format ?? null } });
       // a fresh read answers with the new openings only (the page adds them to the ones on screen)
-      res.json({ seconds: out.doc.seconds, hooks: req.body?.fresh === true ? out.added : out.doc.hooks, has_captions: out.doc.has_captions === true });
+      const strip = (x: ReadDoc["hooks"]) => x.map(({ purpose: _p, ...rest }) => rest);
+      res.json({ seconds: out.doc.seconds, hooks: strip(req.body?.fresh === true ? out.added : hooksFor(out.doc, out.purpose)), has_captions: out.doc.has_captions === true,
+        purpose: out.purpose, suggested_purpose: out.suggested, format: out.doc.look?.format ?? null, looks_default: defaultLooks(out.purpose, out.doc.look), angles: ANGLES[out.purpose] });
     } catch (e) { h.fail(res, e); }
   });
+  // A different post caption for every version of a finished set (kept per job and networks: asking again is free)
+  app.post("/api/studio/blueprints/captions", async (req, res) => {
+    const u = h.requireUser(req, res); if (!u) return;
+    try {
+      const sb = h.sbFn();
+      await gate(req, sb);
+      const jobId = String(req.body?.job_id ?? "");
+      if (!/^[0-9a-f-]{36}$/i.test(jobId)) throw new BlueprintsError("job_not_found", "Pick a set of versions", 404);
+      const platforms = [...new Set<string>((Array.isArray(req.body?.platforms) ? req.body.platforms : []).map(String))].filter((x) => /^[a-z]{1,12}$/.test(x)).slice(0, 8).sort();
+      const out = await versionCaptionsFor(sb, { ...deps, env: h.env, log: h.log }, u, jobId, platforms, { fresh: req.body?.fresh === true });
+      res.json({ captions: out });
+    } catch (e) { h.fail(res, e); }
+  });
+}
+
+export const captionsKey = (u: string, jobId: string, platforms: string[]) => `${u}/blueprints/captions/${jobId}-${platforms.join("_") || "default"}.json`;
+/** The captions of a finished set: kept ones, or written now in one call from the video's words and each version's
+ *  opening (line, title, angle) and look. */
+export async function versionCaptionsFor(sb: SupabaseClient, deps: BlueprintsDeps, u: string, jobId: string, platforms: string[], o: { fresh?: boolean } = {}): Promise<VersionCaption[]> {
+  const j = await sb.from("studio_jobs").select("id,user_id,tool,status,asset_id,options,outputs").eq("id", jobId).eq("user_id", u).maybeSingle();
+  if (j.error) throw j.error;
+  const job = j.data as any;
+  if (!job || job.tool !== "blueprint_versions") throw new BlueprintsError("job_not_found", "That set of versions is not in your account", 404);
+  const outs: any[] = Array.isArray(job.outputs) ? job.outputs : [];
+  if (!outs.length) throw new BlueprintsError("job_not_ready", "Captions come once the versions are made", 409);
+  const key = captionsKey(u, jobId, platforms);
+  if (!o.fresh) {
+    const r = await sb.storage.from("studio-outputs").download(key);
+    if (!r.error && r.data) { try { const d = JSON.parse(await r.data.text()); if (Array.isArray(d?.captions) && d.captions.length) return d.captions; } catch { /* write again */ } }
+  }
+  if (!allowCaption(u)) throw new BlueprintsError("caption_rate_limited", "That is a lot of captions for one hour; try again soon", 429);
+  const words = job.asset_id ? (deps.words ? await deps.words(sb, u, job.asset_id) : docWords(await wordsFor(sb, deps, u, job.asset_id))) : [];
+  const hooks: Hook[] = Array.isArray(job.options?.hooks) ? job.options.hooks : [];
+  const purpose: Purpose = isPurpose(job.options?.purpose) ? job.options.purpose : "own";
+  const versions = outs.map((x) => {
+    const hk = hooks.find((y) => y.id === x.hook_id);
+    return { index: Number(x.index), title: hk?.title ?? "", line: hk ? lineOf(words, hk.start ?? 0, hk.end ?? 0) : "", angle: hk?.angle ?? null, look: lookById(x.look_id)?.name ?? String(x.look_id ?? "") };
+  }).filter((v) => Number.isInteger(v.index));
+  const input = { purpose, words, versions, platforms };
+  const captions = deps.captions ? await deps.captions(input, u) : await writeVersionCaptions(deps, input, u);
+  if (!captions.length) throw new BlueprintsError("captions_failed", "The captions could not be written; try again", 502, true);
+  const w = await sb.storage.from("studio-outputs").upload(key, Buffer.from(JSON.stringify({ at: new Date().toISOString(), captions })), { contentType: "text/plain", upsert: true }).then((x: any) => x?.error ?? null, (e: any) => e);
+  if (w) deps.log?.(`[blueprints] captions not kept for ${jobId}: ${String(w?.message ?? w).slice(0, 120)}`);
+  return captions;
 }

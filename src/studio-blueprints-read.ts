@@ -8,11 +8,15 @@ import type { CapWord } from "./caption-engine.js";
 import { claudeJson, type ClipsDeps } from "./studio-clips.js";
 import { BLUEPRINT_LIMITS, type Hook } from "./studio-blueprints.js";
 import type { Subject } from "./splitscreen-layout.js";
+import { ALL_ANGLES, ANGLES, PURPOSE_PROMPT, angleOk, type Purpose } from "./studio-blueprints-purpose.js";
 
+/** The schema for a purpose: the angle can only be one of that purpose's angles (no purpose: any). */
+export const hookSchema = (purpose?: Purpose | null) => ({ ...HOOK_SCHEMA, properties: { hooks: { ...HOOK_SCHEMA.properties.hooks, items: { ...HOOK_SCHEMA.properties.hooks.items,
+  properties: { ...HOOK_SCHEMA.properties.hooks.items.properties, angle: { type: "string", enum: purpose ? ANGLES[purpose].map((a) => a.id) : ALL_ANGLES } } } } } });
 export const HOOK_SCHEMA = {
   type: "object", additionalProperties: false, required: ["hooks"],
-  properties: { hooks: { type: "array", items: { type: "object", additionalProperties: false, required: ["first", "last", "title", "why"],
-    properties: { first: { type: "integer" }, last: { type: "integer" }, title: { type: "string" }, why: { type: "string" } } } } },
+  properties: { hooks: { type: "array", items: { type: "object", additionalProperties: false, required: ["first", "last", "title", "why", "angle"],
+    properties: { first: { type: "integer" }, last: { type: "integer" }, title: { type: "string" }, why: { type: "string" }, angle: { type: "string", enum: ALL_ANGLES } } } } },
 };
 
 export const HOOK_SYSTEM = `You edit short vertical videos (Reels, TikTok, Shorts). You are given the exact words of one video, numbered, with the second each word starts. You write cold opens for new versions of it.
@@ -26,19 +30,19 @@ For each cold open give:
 - title: 3 to 9 words, in the video's language, in the creator's own voice (first person when they speak in the first person). Put the one or two words that carry it between *stars*, like: I counted every *KitKat* in this store. It must be true to what the video shows and says: never invent a number, a place, a product or an outcome that is not in the words or clearly implied by them. No emoji, no hashtags, no capitals for shouting, no question marks unless it is a real question.
 - why: a few words on why this one stops a scroll.
 
-Spread them over the whole video (its middle and its end too, where payoffs usually are), each on a different moment and with a different angle in its title. Best first.`;
+Spread them over the whole video (its middle and its end too, where payoffs usually are), each on a different moment and with a different angle in its title. The titles must not read alike: no shared main word, no two built the same way ("I ... the ..."), each one would make a different person stop. Best first.`;
 
 /** The words as the model reads them: "[12 @3.40] word". */
-export function hookMessage(words: CapWord[], n: number, goal?: string | null): string {
+export function hookMessage(words: CapWord[], n: number, goal?: string | null, purpose?: Purpose | null): string {
   const lines = words.map((w, i) => `[${i} @${w.start.toFixed(2)}] ${w.text}`).join("\n");
   const end = words.length ? words[words.length - 1].end : 0;
-  return `The video lasts ${end.toFixed(1)} s. ${goal ? `The creator says it is for: ${goal.slice(0, 200)}\n` : ""}Write ${n} cold opens.\n\nWords:\n${lines}`;
+  return `${purpose ? `${PURPOSE_PROMPT[purpose]}\n\n` : ""}The video lasts ${end.toFixed(1)} s. ${goal ? `The creator says it is for: ${goal.slice(0, 200)}\n` : ""}Write ${n} cold opens.\n\nWords:\n${lines}`;
 }
 
 const STARS = /\*([^*]+)\*/g;
 /** What came back, made safe: real word ranges inside the limits, not in the opening, no two on the same moment,
  *  titles short with at most two starred words. Bad entries are dropped, never repaired into something unsaid. */
-export function cleanHooks(raw: unknown, words: CapWord[], n: number): Hook[] {
+export function cleanHooks(raw: unknown, words: CapWord[], n: number, purpose?: Purpose | null): Hook[] {
   const list: any[] = Array.isArray((raw as any)?.hooks) ? (raw as any).hooks : [];
   const out: Hook[] = [];
   for (const h of list) {
@@ -57,23 +61,24 @@ export function cleanHooks(raw: unknown, words: CapWord[], n: number): Hook[] {
     const plain = title.replace(/\*/g, "");
     const count = plain.split(" ").filter(Boolean).length;
     if (!plain || plain.length > 70 || count < 2 || count > 12 || /[#\u{1F300}-\u{1FAFF}]/u.test(plain)) continue;
-    out.push({ id: `h${out.length + 1}`, title, start: Math.round(a * 1000) / 1000, end: Math.round(b * 1000) / 1000 });
+    const angle = purpose && angleOk(purpose, h?.angle) ? String(h.angle) : null;
+    out.push({ id: `h${out.length + 1}`, title, start: Math.round(a * 1000) / 1000, end: Math.round(b * 1000) / 1000, ...(purpose ? { angle } : {}) });
     if (out.length >= n) break;
   }
   return out;
 }
 
-export async function writeHooks(deps: ClipsDeps, words: CapWord[], opts: { n: number; goal?: string | null; userId?: string }): Promise<Hook[]> {
+export async function writeHooks(deps: ClipsDeps, words: CapWord[], opts: { n: number; goal?: string | null; userId?: string; purpose?: Purpose | null }): Promise<Hook[]> {
   const env = deps.env ?? process.env;
   const n = Math.max(1, Math.min(BLUEPRINT_LIMITS.max_hooks, Math.floor(opts.n)));
   if (words.length < 6) return [];
   const out = await claudeJson(deps, {
     model: env.STUDIO_BLUEPRINTS_HOOK_MODEL || "claude-sonnet-5-5", max_tokens: 4000, system: HOOK_SYSTEM,
-    output_config: { effort: env.STUDIO_BLUEPRINTS_HOOK_EFFORT || "medium", format: { type: "json_schema", schema: HOOK_SCHEMA } },
+    output_config: { effort: env.STUDIO_BLUEPRINTS_HOOK_EFFORT || "medium", format: { type: "json_schema", schema: hookSchema(opts.purpose) } },
     // ask for a few extra: some may fail the checks
-    messages: [{ role: "user", content: hookMessage(words, Math.min(BLUEPRINT_LIMITS.max_hooks, n + 2), opts.goal) }],
+    messages: [{ role: "user", content: hookMessage(words, Math.min(BLUEPRINT_LIMITS.max_hooks, n + 2), opts.goal, opts.purpose) }],
   }, "blueprints_hooks", opts.userId);
-  return cleanHooks(out, words, n);
+  return cleanHooks(out, words, n, opts.purpose);
 }
 
 /** The face reads as a framing track. A face's crop centre is nudged up by a fifth of the face's height, so the eyes
