@@ -1296,9 +1296,10 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
     try {
       const sb = sbFn();
       const p = getSocialProvider({ env, fetch: deps.fetch, log });
-      const prof = p ? await sb.from("studio_social_profiles").select("profile_key").eq("user_id", u).maybeSingle() : null;
+      const prof = p ? await sb.from("studio_social_profiles").select("profile_key,provider").eq("user_id", u).maybeSingle() : null;
       let linked: string[] = [];
-      if (p && prof?.data?.profile_key) {
+      // a profile from the previous provider (before the move to Zernio) is not read with the new one
+      if (p && prof?.data?.profile_key && (!(prof.data as any).provider || (prof.data as any).provider === p.name)) {
         const accounts = await p.accounts(prof.data.profile_key);
         await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
         linked = accounts.map((a) => a.platform);

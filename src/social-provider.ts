@@ -3,6 +3,7 @@
 // of SocialProvider and returning it from getSocialProvider, nothing else.
 // Not used by the managed service: that keeps posting through Publer (publer*.ts).
 import { ayrshareProvider } from "./social-ayrshare.js";
+import { zernioProvider } from "./social-zernio.js";
 
 /** Networks the Studio offers. Pinterest (needs a board) and Reddit (needs a subreddit) wait for their own options. */
 export const SOCIAL_PLATFORMS = ["tiktok", "instagram", "youtube", "facebook", "twitter", "linkedin", "threads", "bluesky"] as const;
@@ -52,14 +53,16 @@ export type ProviderAccountStats = { platform: string; followers: number | null;
 export class SocialError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }
 
 export interface SocialProvider {
-  readonly name: "ayrshare";
+  readonly name: "ayrshare" | "zernio";
+  /** "page": one hosted page links every network (Ayrshare); "per_network": one link per network (Zernio). */
+  readonly linking?: "page" | "per_network";
   /** The networks this provider can post to with the current configuration. */
   offered(): string[];
   /** A provider profile for one person; `title` must be unique per provider account. */
-  createProfile(title: string): Promise<{ profileKey: string; refId: string | null }>;
+  createProfile(title: string, externalId?: string): Promise<{ profileKey: string; refId: string | null }>;
   deleteProfile(profileKey: string): Promise<void>;
   /** A short-lived link where the person links or unlinks their own networks. */
-  connectUrl(profileKey: string, opts?: { redirect?: string; origin?: string; only?: string[] }): Promise<{ url: string; expiresInMinutes: number | null }>;
+  connectUrl(profileKey: string, opts?: { redirect?: string; origin?: string; only?: string[]; platform?: string }): Promise<{ url: string; expiresInMinutes: number | null }>;
   accounts(profileKey: string): Promise<SocialAccount[]>;
   disconnect(profileKey: string, platform: string): Promise<void>;
   publish(profileKey: string, req: PublishRequest): Promise<PublishResult>;
@@ -77,9 +80,14 @@ export interface SocialProvider {
 
 export type SocialDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (s: string) => void };
 
-/** The configured provider, or null when self-serve posting is off (no keys). */
+/** The configured provider, or null when self-serve posting is off (no keys). SOCIAL_PROVIDER=zernio picks Zernio
+ *  (owner's decision Nov 21 2026); anything else keeps Ayrshare until the switch is made on Render. */
 export function getSocialProvider(deps: SocialDeps = {}): SocialProvider | null {
   const env = deps.env ?? process.env;
   if (env.STUDIO_SOCIAL_ENABLED !== "true") return null;
-  return ayrshareProvider(deps);
+  return env.SOCIAL_PROVIDER === "zernio" ? zernioProvider({ ...deps, env }) : ayrshareProvider(deps);
+}
+/** The provider a stored profile was made with, when it is not the current one (to remove it there). */
+export function providerNamed(name: string, deps: SocialDeps = {}): SocialProvider | null {
+  return name === "zernio" ? zernioProvider(deps) : name === "ayrshare" ? ayrshareProvider(deps) : null;
 }

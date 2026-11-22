@@ -315,8 +315,8 @@ test("routes: post now and scheduled with spacing; ownership, linking and the 30
 test("tick: reads back sends and overdue schedules the webhook did not settle", async () => {
   const old = new Date(Date.now() - 3600_000).toISOString();
   const tables: Record<string, any[]> = { studio_social_profiles: [{ user_id: ANN, profile_key: "pk-ann" }], studio_social_posts: [
-    { id: "p1", user_id: ANN, provider_post_id: "post-1", status: "sending", schedule_at: null, updated_at: old },
-    { id: "p2", user_id: ANN, provider_post_id: "post-2", status: "scheduled", schedule_at: new Date(Date.now() + 86400_000).toISOString(), updated_at: old },
+    { id: "p1", user_id: ANN, provider: "ayrshare", provider_post_id: "post-1", status: "sending", schedule_at: null, updated_at: old },
+    { id: "p2", user_id: ANN, provider: "ayrshare", provider_post_id: "post-2", status: "scheduled", schedule_at: new Date(Date.now() + 86400_000).toISOString(), updated_at: old },
   ] };
   const ayr = fakeAyr();
   const moved = await socialTick(fakeSb(tables), { env: ENV, fetch: ayr.fetchFn, log: () => {} });

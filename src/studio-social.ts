@@ -9,7 +9,7 @@ import { SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, MAX_SOCIAL_EXTRA } from "./studio-pri
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftCaption, type CaptionDraft } from "./studio-captions.js";
-import { getSocialProvider, isSocialPlatform, SocialError, statusOf, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult } from "./social-provider.js";
+import { getSocialProvider, providerNamed, isSocialPlatform, SocialError, statusOf, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult } from "./social-provider.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import { CLEAR_MESSAGE, clearProfile, keepUntil, recordSocialCosts, socialUpkeep, touchSocial, upkeepFacts, upkeepSettings, type ClearReason } from "./studio-social-upkeep.js";
@@ -94,10 +94,20 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     res.status(500).json({ error: "social_failed", detail: "Something went wrong on our side; try again in a moment" });
   };
   const need = (): SocialProvider => { const p = provider(); if (!p) throw new SocialError("social_off", "Social posting is not switched on yet", 503); return p; };
+  // A row made with another provider (Ayrshare before the Nov 21 2026 move to Zernio) counts as not connected here;
+  // it is retired when the person links again, or by the hourly upkeep.
   const profileOf = async (sb: SupabaseClient, u: string) => {
     const r = await sb.from("studio_social_profiles").select("*").eq("user_id", u).maybeSingle();
     if (r.error) throw r.error;
-    return r.data as { user_id: string; profile_key: string; accounts: SocialAccount[]; webhook_registered_at: string | null; webhook_hash?: string | null } | null;
+    const row = r.data as { user_id: string; provider?: string; profile_key: string; accounts: SocialAccount[]; webhook_registered_at: string | null; webhook_hash?: string | null; created_at?: string } | null;
+    const p = provider();
+    return row && p && row.provider && row.provider !== p.name ? null : row;
+  };
+  const retireForeign = async (sb: SupabaseClient, p: SocialProvider, u: string) => {
+    const r = await sb.from("studio_social_profiles").select("user_id,provider,profile_key,accounts,created_at").eq("user_id", u).maybeSingle();
+    const row = r.data as any;
+    if (!row || !row.provider || row.provider === p.name) return;
+    await clearProfile(sb, providerNamed(row.provider, { env, fetch: deps.fetch, log }), row, "provider_moved", log, { from: row.provider, to: p.name, on: "connect" });
   };
   const requirePlan = async (sb: SupabaseClient, u: string) => {
     const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
@@ -131,7 +141,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     try {
       const sb = sbFn();
       const [prof, allowance] = await Promise.all([profileOf(sb, u), allowanceOf(sb, u, p.offered().length)]);
-      if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered(), allowance, cleared: await clearedNote(sb, u) });
+      if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered(), linking: p.linking ?? "page", allowance, cleared: await clearedNote(sb, u) });
       let accounts = prof.accounts ?? [], stale = false;
       try {
         accounts = await p.accounts(prof.profile_key);
@@ -142,7 +152,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const s = upkeepSettings(env);
       const f = (await upkeepFacts(sb, [u], s.idleDays).catch(() => null))?.get(u);
       const keep_until = s.mode === "on" && f ? keepUntil({ ...(prof as any), accounts }, f.lastPostAt, { idleDays: s.idleDays, held: f.held }) : null;
-      res.json({ enabled: true, connected: accounts.length > 0, accounts, stale, platforms: p.offered(), allowance, keep_until, idle_days: s.idleDays });
+      res.json({ enabled: true, connected: accounts.length > 0, accounts, stale, platforms: p.offered(), linking: p.linking ?? "page", allowance, keep_until, idle_days: s.idleDays });
     } catch (e) { fail(res, e); }
   });
 
@@ -160,8 +170,12 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     try {
       const p = need(), sb = sbFn();
       await requirePlan(sb, u);
+      // one link per network with some providers: the page sends which network to link
+      const platform = typeof req.body?.platform === "string" ? String(req.body.platform) : undefined;
+      if (p.linking === "per_network" && (!platform || !p.offered().includes(platform))) throw new SocialError("pick_network", "Pick the network to link", 400);
       let prof = await profileOf(sb, u);
       if (!prof) {
+        await retireForeign(sb, p, u);
         // The provider plan holds a fixed number of profiles; stop cleanly (and say so in the log) before it is full.
         const cap = Number(env.STUDIO_SOCIAL_PROFILE_CAP) || 0;
         if (cap) {
@@ -174,12 +188,12 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
         const email = req.auth && "email" in req.auth ? String((req.auth as any).email ?? "") : "";
         let title = `Clone8 · ${email || u.slice(0, 8)}`;
         let made;
-        try { made = await p.createProfile(title); }
+        try { made = await p.createProfile(title, u); }
         catch (e) {
           if (!(e instanceof SocialError && e.code === "profile_title_taken")) throw e;
           title = `Clone8 · ${email || u.slice(0, 8)} · ${Date.now().toString(36)}`; // an orphan from an earlier failed save
           log(`[social] profile title taken for ${u}; using ${title}`);
-          made = await p.createProfile(title);
+          made = await p.createProfile(title, u);
         }
         const ins = await sb.from("studio_social_profiles").insert({ user_id: u, provider: p.name, profile_key: made.profileKey, ref_id: made.refId, title }).select("*").single();
         if (ins.error) {
@@ -202,7 +216,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const linkedNow = (prof!.accounts ?? []).map((a) => a.platform);
       const full = linkedNow.length >= allowance.total;
       if (full && !linkedNow.length) throw new SocialError("account_limit", "Your plan has no social accounts yet; add one to link it", 409);
-      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, ...(full ? { only: linkedNow } : {}) });
+      const link = await p.connectUrl(prof!.profile_key, { redirect, origin, platform, ...(full ? { only: linkedNow } : {}) });
       res.json({ url: link.url, expires_in_minutes: link.expiresInMinutes, relink_only: full });
     } catch (e) { fail(res, e); }
     finally { release(); if (connecting.get(u) === chain) connecting.delete(u); }
@@ -354,10 +368,11 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
   if (c.error) throw c.error;
   if (!hasPlanAccess(c.data)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
-  const pr = await sb.from("studio_social_profiles").select("profile_key,accounts").eq("user_id", u).maybeSingle();
+  const pr = await sb.from("studio_social_profiles").select("provider,profile_key,accounts").eq("user_id", u).maybeSingle();
   if (pr.error) throw pr.error;
-  const prof = pr.data as { profile_key: string; accounts: SocialAccount[] } | null;
+  const prof = pr.data as { provider?: string; profile_key: string; accounts: SocialAccount[] } | null;
   if (!prof) throw new SocialError("not_connected", "Connect your socials first", 409);
+  if (prof.provider && prof.provider !== p.name) throw new SocialError("not_connected", "Posting moved to a new connection. Link your accounts again (it takes a minute), then post.", 409);
   // more linked than the plan covers (linked several at once on the linking page): posting waits for a fix
   const allowance = await allowanceOf(sb, u, p.offered().length);
   const linkedCount = (prof.accounts ?? []).length;
@@ -540,7 +555,7 @@ export async function socialTick(sb: SupabaseClient, deps: SocialDeps & { provid
   else if ((lost.data ?? []).length) log(`[social] ${(lost.data ?? []).length} send(s) closed as unconfirmed`);
   const due = new Date(Date.now() - 10 * 60_000).toISOString();
   const r = await sb.from("studio_social_posts").select("id,user_id,provider_post_id,status,schedule_at,created_at,updated_at")
-    .in("status", ["scheduled", "sending"]).not("provider_post_id", "is", null).or(`schedule_at.is.null,schedule_at.lt.${due}`).lt("updated_at", due).order("updated_at", { ascending: true }).limit(50);
+    .eq("provider", p.name).in("status", ["scheduled", "sending"]).not("provider_post_id", "is", null).or(`schedule_at.is.null,schedule_at.lt.${due}`).lt("updated_at", due).order("updated_at", { ascending: true }).limit(50);
   if (r.error) throw r.error;
   let moved = 0;
   const keys = new Map<string, string | null>();
@@ -584,8 +599,10 @@ export function startSocialLoop(sbFn: () => SupabaseClient, deps: SocialDeps = {
 export async function releaseSocialProfile(sb: SupabaseClient, u: string, deps: SocialDeps = {}): Promise<boolean> {
   const p = getSocialProvider(deps);
   if (!p) return false;
-  const r = await sb.from("studio_social_profiles").select("user_id,profile_key,accounts,created_at").eq("user_id", u).maybeSingle();
+  const r = await sb.from("studio_social_profiles").select("user_id,provider,profile_key,accounts,created_at").eq("user_id", u).maybeSingle();
   if (r.error || !r.data) return false;
+  const row = r.data as any;
+  const owner = row.provider && row.provider !== p.name ? providerNamed(row.provider, deps) : p;
   // a refusal keeps the row; the hourly upkeep removes it later (no plan), so it never stays billed unnoticed
-  return clearProfile(sb, p, r.data as any, "plan_ended", deps.log ?? ((s: string) => console.log(s)));
+  return clearProfile(sb, owner, row, "plan_ended", deps.log ?? ((s: string) => console.log(s)));
 }

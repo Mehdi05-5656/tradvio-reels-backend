@@ -13,7 +13,7 @@
 // Once a day the service's bill is written to the cost ledger (studio_costs), one row per profile with its share of
 // the day, so the Money tab shows what posting costs and for whom. Switch: STUDIO_SOCIAL_CLEANUP=on (default) | dry | off.
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getSocialProvider, type SocialDeps, type SocialProvider } from "./social-provider.js";
+import { getSocialProvider, providerNamed, type SocialDeps, type SocialProvider } from "./social-provider.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import { recordCost } from "./studio-costs.js";
@@ -53,6 +53,15 @@ export function ayrshareBill(profiles: number, o: { plan?: "launch" | "business"
   return { plan, interval, profiles: n, usd_month: now, per_profile_usd: n ? Math.round((now / n) * 100) / 100 : now, next_profile_usd: Math.round((next - now) * 100) / 100 };
 }
 
+/** Zernio (zernio.com/pricing, read Nov 21 2026): per linked network account per month, graduated, prorated daily:
+ *  the first 2 free, $6 each to 10, $3 each to 100, $1 each after (enterprise discounts from 2,000). */
+export const ZERNIO_PRICES = { checked: "2026-11-21", tiers: [[2, 0], [10, 6], [100, 3], [Infinity, 1]] as Array<[number, number]> };
+export function zernioBill(accounts: number): { accounts: number; usd_month: number; per_account_usd: number; next_account_usd: number } {
+  const usd = (k: number) => { let t = 0, from = 0; for (const [upTo, rate] of ZERNIO_PRICES.tiers) { if (k > from) t += (Math.min(k, upTo) - from) * rate; from = upTo; } return Math.round(t * 100) / 100; };
+  const n = Math.max(0, Math.floor(accounts));
+  return { accounts: n, usd_month: usd(n), per_account_usd: n ? Math.round((usd(n) / n) * 100) / 100 : 0, next_account_usd: Math.round((usd(n + 1) - usd(n)) * 100) / 100 };
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------------------------------
@@ -68,12 +77,13 @@ export const upkeepSettings = (env: Env) => ({
 // ---------------------------------------------------------------------------------------------------
 // When a profile counts as used
 // ---------------------------------------------------------------------------------------------------
-export type ClearReason = "never_linked" | "idle" | "no_plan" | "plan_ended";
+export type ClearReason = "never_linked" | "idle" | "no_plan" | "plan_ended" | "provider_moved";
 export const CLEAR_MESSAGE: Record<ClearReason, string> = {
   never_linked: "Nothing was linked, so the connection was closed. Connect again any time.",
   idle: "Your accounts were unlinked after 14 days without posting from Clone8. Connect again any time; it takes a minute.",
   no_plan: "Your accounts were unlinked because your plan ended. Pick a plan to post again.",
   plan_ended: "Your accounts were unlinked because your plan ended. Pick a plan to post again.",
+  provider_moved: "Posting moved to a new, faster connection. Link your accounts again; it takes a minute.",
 };
 
 /** Mark that the person used posting just now (posted, scheduled, canceled, relinked, drafted a caption, opened stats).
@@ -156,11 +166,18 @@ export async function socialUpkeep(sb: SupabaseClient, deps: SocialDeps & { prov
   const p = deps.provider !== undefined ? deps.provider : getSocialProvider({ ...deps, env });
   const out: UpkeepResult = { profiles: 0, cleared: [], would_clear: [], kept: 0, mode: s.mode };
   if (!p || s.mode === "off") return out;
-  let r = await sb.from("studio_social_profiles").select("user_id,profile_key,accounts,created_at,last_active_at,perf_viewed_at").limit(5000);
-  if (r.error && /last_active_at/.test(String(r.error.message ?? ""))) r = await sb.from("studio_social_profiles").select("user_id,profile_key,accounts,created_at,perf_viewed_at").limit(5000) as any;
+  let r = await sb.from("studio_social_profiles").select("user_id,provider,profile_key,accounts,created_at,last_active_at,perf_viewed_at").limit(5000);
+  if (r.error && /last_active_at/.test(String(r.error.message ?? ""))) r = await sb.from("studio_social_profiles").select("user_id,provider,profile_key,accounts,created_at,perf_viewed_at").limit(5000) as any;
   if (r.error) throw r.error;
-  const rows = (r.data ?? []) as Array<ProfileFacts & { profile_key: string }>;
-  out.profiles = rows.length;
+  const all = (r.data ?? []) as Array<ProfileFacts & { profile_key: string; provider?: string }>;
+  // profiles made with the previous provider: removed there (when its key is still set) and here; the person links again
+  const foreign = all.filter((x) => x.provider && x.provider !== p.name);
+  for (const row of foreign) {
+    if (s.mode === "dry") { out.would_clear.push({ user_id: row.user_id, reason: "provider_moved" }); continue; }
+    if (await clearProfile(sb, providerNamed(row.provider!, { env, fetch: deps.fetch, log }), row, "provider_moved", log, { from: row.provider, to: p.name })) out.cleared.push({ user_id: row.user_id, reason: "provider_moved" });
+  }
+  const rows = all.filter((x) => !x.provider || x.provider === p.name);
+  out.profiles = all.length;
   const facts = await upkeepFacts(sb, rows.map((x) => x.user_id), s.idleDays, now);
   for (const row of rows) {
     const f = facts.get(row.user_id)!;
@@ -179,9 +196,15 @@ export async function socialUpkeep(sb: SupabaseClient, deps: SocialDeps & { prov
     if (await clearProfile(sb, p, row, reason, log, { idle_days: Math.round((now - lastUse(row, f.lastPostAt)) / 86400_000) })) out.cleared.push({ user_id: row.user_id, reason });
     else out.kept++;
   }
-  const after = out.profiles - out.cleared.length, bill = ayrshareBill(after, { plan: s.plan, interval: s.interval });
-  log(`[social] upkeep ${JSON.stringify({ mode: s.mode, profiles: out.profiles, cleared: out.cleared.length, would_clear: out.would_clear.length, now: after, bill_usd_month: bill.usd_month, plan: bill.plan })}`);
-  if (bill.plan === "launch" && after >= AYRSHARE_PRICES.launch.max_profiles - 1) log(`[social] ALERT ${after} of ${AYRSHARE_PRICES.launch.max_profiles} posting profiles in use; the next ones need the posting service's Business plan (+$300 a month)`);
+  const after = out.profiles - out.cleared.length;
+  if (p.name === "ayrshare") {
+    const bill = ayrshareBill(after, { plan: s.plan, interval: s.interval });
+    log(`[social] upkeep ${JSON.stringify({ mode: s.mode, profiles: out.profiles, cleared: out.cleared.length, would_clear: out.would_clear.length, now: after, bill_usd_month: bill.usd_month, plan: bill.plan })}`);
+    if (bill.plan === "launch" && after >= AYRSHARE_PRICES.launch.max_profiles - 1) log(`[social] ALERT ${after} of ${AYRSHARE_PRICES.launch.max_profiles} posting profiles in use; the next ones need the posting service's Business plan (+$300 a month)`);
+  } else {
+    const linked = rows.filter((x) => !out.cleared.some((c) => c.user_id === x.user_id)).reduce((a, x) => a + (x.accounts ?? []).length, 0);
+    log(`[social] upkeep ${JSON.stringify({ provider: p.name, mode: s.mode, profiles: out.profiles, cleared: out.cleared.length, would_clear: out.would_clear.length, now: after, linked_accounts: linked, bill_usd_month: zernioBill(linked).usd_month })}`);
+  }
   return out;
 }
 
@@ -191,6 +214,7 @@ const daysInMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCM
  *  UTC day; skipped before billing began. Returns the rows written. */
 export async function recordSocialCosts(sb: SupabaseClient, deps: { env?: Env; now?: number; log?: (s: string) => void } = {}): Promise<number> {
   const env = deps.env ?? process.env, now = deps.now ?? Date.now(), log = deps.log ?? ((s: string) => console.log(s));
+  if (env.SOCIAL_PROVIDER === "zernio") return recordZernioCosts(sb, { env, now, log });
   if (now < Date.parse(`${AYRSHARE_BILLING_FROM}T00:00:00Z`)) return 0;
   const day = dayStart(now);
   const done = await sb.from("studio_costs").select("provider", { count: "exact", head: true }).eq("provider", "ayrshare").gte("spent_at", day.toISOString());
@@ -207,4 +231,24 @@ export async function recordSocialCosts(sb: SupabaseClient, deps: { env?: Env; n
   for (const u of users) recordCost({ ...base, user_id: u, units: { profiles: users.length, days: 1 }, usd: today / users.length, ref: `ayrshare:${day.toISOString().slice(0, 10)}` });
   log(`[social] cost ${JSON.stringify({ day: day.toISOString().slice(0, 10), profiles: users.length, usd_today: Math.round(today * 100) / 100, plan: bill.plan })}`);
   return users.length;
+}
+
+/** Zernio's bill for today, one row per person who has linked accounts, by their share of the accounts (each account
+ *  is what Zernio bills). Basis "list": the published rate; once a day. */
+export async function recordZernioCosts(sb: SupabaseClient, deps: { env?: Env; now?: number; log?: (s: string) => void } = {}): Promise<number> {
+  const now = deps.now ?? Date.now(), log = deps.log ?? ((s: string) => console.log(s));
+  const day = dayStart(now);
+  const done = await sb.from("studio_costs").select("provider", { count: "exact", head: true }).eq("provider", "zernio").gte("spent_at", day.toISOString());
+  if (done.error) { log(`[social] cost check failed: ${done.error.message}`); return 0; }
+  if ((done.count ?? 0) > 0) return 0;
+  const r = await sb.from("studio_social_profiles").select("user_id,provider,accounts").eq("provider", "zernio").limit(5000);
+  if (r.error) throw r.error;
+  const rows = ((r.data ?? []) as any[]).map((x) => ({ user_id: x.user_id as string, n: Array.isArray(x.accounts) ? x.accounts.length : 0 })).filter((x) => x.n > 0);
+  const total = rows.reduce((a, x) => a + x.n, 0), bill = zernioBill(total);
+  if (!total || !bill.usd_month) return 0;
+  const today = bill.usd_month / daysInMonth(day);
+  const note = `${total} linked account(s): $${bill.usd_month}/month at Zernio's graduated rate (2 free, $6 to 10, $3 to 100, $1 after), prorated daily`;
+  for (const x of rows) recordCost({ spent_at: day.toISOString(), provider: "zernio", product: "linked social account", source: "social posting: daily share of the monthly bill", user_id: x.user_id, tool: "social", units: { accounts: x.n, accounts_total: total, days: 1 }, usd: (today * x.n) / total, basis: "list", note, ref: `zernio:${day.toISOString().slice(0, 10)}` });
+  log(`[social] cost ${JSON.stringify({ provider: "zernio", day: day.toISOString().slice(0, 10), accounts: total, people: rows.length, usd_today: Math.round(today * 100) / 100 })}`);
+  return rows.length;
 }
