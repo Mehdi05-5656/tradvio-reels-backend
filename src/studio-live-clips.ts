@@ -211,7 +211,9 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   // how long, from the Nov 18 2026 live runs (a 7.8 h stream: chat in 15 s, 34 checks in 666 s, 5 cuts in 157 s; the
   // old formula promised 42 min for that 14-min run): the chat, then each candidate heard and checked, then the cuts
   const cands = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
-  const eta_seconds = Math.round(45 + b.seconds * 0.004 + cands * 22 + count * 35 + ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off" && span >= HYBRID.min_heard_s ? (part ? 60 + span * 0.03 : 240) : 0));
+  // Kick's chat replay is read at Kick's pace (~2 calls a second, ~3 s of chat each: about a sixth of the stream's
+  // length, measured Nov 22 2026 on a 3.4 h stream); Twitch's comes in a few big pages
+  const eta_seconds = Math.round(45 + (b.platform === "kick" ? b.seconds / 6 : b.seconds * 0.004) + cands * 22 + count * 35 + ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off" && span >= HYBRID.min_heard_s ? (part ? 60 + span * 0.03 : 240) : 0));
   return {
     tool: "clips", credits: clipsCharge(price, count),
     options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing), ...(live ? { live: true } : {}) }, ...(part ? { part } : {}),
@@ -1108,7 +1110,7 @@ export function registerLiveClips(app: Express, sbFn: () => SupabaseClient, deps
       const permission = streamerPermission("kick", ch.slug, env);
       if (permission === "blocked") throw new ClipsError("streamer_blocked", `${ch.channel} has asked not to be clipped on Clone8`, 403);
       const list = await kickBroadcasts(deps, ch.slug, ch);
-      return res.json({ platform: "kick", channel: { login: ch.slug, channel: ch.channel, channel_id: ch.chat_id, url: `https://kick.com/${ch.slug}`, profile_image_url: ch.profile_image_url, permission, live: ch.live, viewers: ch.viewers, title: ch.title, category: ch.category }, broadcasts: list.filter((b) => b.seconds >= LIVE_LIMITS.min_seconds).slice(0, 20), live_mode: liveMode });
+      return res.json({ platform: "kick", channel: { login: ch.slug, channel: ch.channel, channel_id: ch.id, url: `https://kick.com/${ch.slug}`, profile_image_url: ch.profile_image_url, permission, live: ch.live, viewers: ch.viewers, title: ch.title, category: ch.category }, broadcasts: list.filter((b) => b.seconds >= LIVE_LIMITS.min_seconds).slice(0, 20), live_mode: liveMode });
     } catch (err) { fail(res, err); }
   });
 }
