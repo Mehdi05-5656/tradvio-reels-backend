@@ -12,6 +12,7 @@ import { draftCaption, type CaptionDraft } from "./studio-captions.js";
 import { getSocialProvider, providerNamed, isSocialPlatform, SocialError, statusOf, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult } from "./social-provider.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
+import { attachAutoReplies, type AutoReplySpec } from "./studio-autoreply.js";
 import { CLEAR_MESSAGE, clearProfile, keepUntil, recordSocialCosts, socialUpkeep, touchSocial, upkeepFacts, upkeepSettings, type ClearReason } from "./studio-social-upkeep.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -267,8 +268,8 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
   app.post("/api/studio/social/posts", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const posts = await createPosts(sbFn(), need(), u, req.body ?? {}, { log, env });
-      res.status(201).json({ posts });
+      const posts = await createPosts(sbFn(), need(), u, req.body ?? {}, { log, env, via: typeof req.body?.via === "string" ? req.body.via.slice(0, 20) : "publish" });
+      res.status(201).json({ posts, autoreply: posts.autoreply ?? null });
     } catch (e) { fail(res, e); }
   });
 
@@ -375,7 +376,7 @@ async function resolveItems(sb: SupabaseClient, u: string, items: any[]): Promis
 }
 
 /** Post or schedule videos for a person; every path that posts (the Publish page, the chat's card) comes through here. */
-export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: string, b: any, opts: { conversationId?: string | null; log?: (s: string) => void; env?: Record<string, string | undefined> } = {}) {
+export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: string, b: any, opts: { conversationId?: string | null; log?: (s: string) => void; env?: Record<string, string | undefined>; via?: string } = {}) {
   const log = opts.log ?? ((s: string) => console.log(s)), env = opts.env ?? process.env;
   const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
   if (c.error) throw c.error;
@@ -502,8 +503,15 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   }
   log(`[social] ${u} sent ${made.length} post(s) to ${platforms.join(",")}: ${made.map((m) => m.status).join(",")}`);
   await touchSocial(sb, u);
+  // an auto-reply asked for with the post: set up after the send, never holding the post back
+  let autoreply: Awaited<ReturnType<typeof attachAutoReplies>> | null = null;
+  if (b.autoreply && typeof b.autoreply === "object" && made.some((m) => m.provider_post_id && m.status !== "failed")) {
+    const spec: AutoReplySpec = { keywords: Array.isArray(b.autoreply.keywords) ? b.autoreply.keywords.map(String) : [], dm_message: typeof b.autoreply.dm_message === "string" ? b.autoreply.dm_message : undefined, button: b.autoreply.button ?? null, comment_reply: typeof b.autoreply.comment_reply === "string" ? b.autoreply.comment_reply : undefined };
+    autoreply = await attachAutoReplies(sb, u, made, spec, { env, log, via: typeof opts.via === "string" ? opts.via : opts.conversationId ? "chat" : "publish" });
+  }
   recordEvent({ user_id: u, kind: "feature", name: "social_post_sent", props: { videos: made.length, networks: platforms, scheduled: made.filter((m) => m.status === "scheduled").length, failed: made.filter((m) => m.status === "failed").length, from_chat: !!opts.conversationId } });
-  return withPostPosters(sb, u, made);
+  const sent = await withPostPosters(sb, u, made);
+  return Object.assign(sent, { autoreply });
 }
 
 /** Post rows for the page, each with its video's poster (output posters sit next to the file; uploads keep theirs). */

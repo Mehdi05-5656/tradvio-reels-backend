@@ -12,7 +12,7 @@ import { PLAYBOOK } from "./data/social-playbook.js";
 import { analyze, type Analysis, type PerfDeps, type PostRow, type PostStats } from "./studio-performance.js";
 
 export const INSIGHT_MODEL = "claude-opus-5-5";
-export const MOVE_TOOLS = ["blueprint", "swap", "recast", "restyle", "trend", "publish", "chat"] as const;
+export const MOVE_TOOLS = ["blueprint", "swap", "recast", "restyle", "trend", "publish", "chat", "replies"] as const;
 export type InsightMove = { title: string; detail: string; tool: (typeof MOVE_TOOLS)[number]; post_id: string | null; prompt: string | null };
 export type Insight = {
   headline: string;
@@ -49,7 +49,7 @@ Rules:
 - "Why" ties their result to a mechanism that a platform insider disclosed or a large study measured, from the playbook below, named briefly (who, when). Never invent a statistic or a source. Use only sources from the playbook, and list the ones you used.
 - No generic advice ("be consistent", "use trending audio", "engage with your audience") unless their own data points to it and you say exactly how much.
 - Look at the thumbnails and captions of the top and the weakest posts and say what differs (subject, framing, text on screen, first words, length, format) when it is visible.
-- Moves map to Clone8 tools: blueprint (many originals of one video, each its own file, for more posts and accounts without reposting the same file), swap (put a character or person into their video), recast (rebuild the person on screen as a character), restyle (redraw in a style), trend (perform a trend with their character), publish (post or schedule, e.g. at their best time), chat (anything else, give the prompt). Prefer starting from their best posts. Three to five moves, most valuable first.
+- Moves map to Clone8 tools: blueprint (many originals of one video, each its own file, for more posts and accounts without reposting the same file), swap (put a character or person into their video), recast (rebuild the person on screen as a character), restyle (redraw in a style), trend (perform a trend with their character), publish (post or schedule, e.g. at their best time), chat (anything else, give the prompt). Prefer starting from their best posts. Three to five moves, most valuable first. replies (an auto-reply: people who comment a keyword get a DM with a link on Instagram and Facebook, a public reply elsewhere; suggest it for posts whose comments ask for something, like a recipe, a link, the full video, a price).
 - Plain words, short sentences, no hype, no emoji, no markdown. Never mention Clone8's suppliers or how Blueprint changes a file.`;
 
 /** The posts the model reads closely: the best by their own baseline, and the weakest. */

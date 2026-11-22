@@ -241,3 +241,78 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
     } catch (e) { fail(res, e); }
   });
 }
+
+// ---------------------------------------------------------------------------------------------------
+// An auto-reply attached to what was just posted (Publish, Clips scheduling, the chat card, "Post with auto-DM")
+// ---------------------------------------------------------------------------------------------------
+/** What the person asked for alongside a post: one keyword set, the DM (Instagram, Facebook) and the public reply. */
+export type AutoReplySpec = { keywords?: string[]; dm_message?: string; button?: { title: string; url: string } | null; comment_reply?: string; name?: string };
+export type AttachResult = { on: Array<{ platform: string; scope: "post" | "account"; reused?: boolean }>; skipped: Array<{ platform: string; reason: "needs_permission" | "limit" | "no_reply_text" | "not_linked" | "failed"; detail?: string }> };
+
+/** Turn on the auto-reply for posts just made. One post: a rule bound to that post on each network (it arms itself when
+ *  a scheduled post goes out). Several posts (a batch of clips): one rule per account for every post, reused when the
+ *  same keywords already have one. Never throws: the posts went out either way; what could not be set up is reported. */
+export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Array<{ provider_post_id: string | null; platforms: string[]; status: string }>, spec: AutoReplySpec, deps: SocialDeps & { via?: string } = {}): Promise<AttachResult> {
+  const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
+  const out: AttachResult = { on: [], skipped: [] };
+  try {
+    const c = env.SOCIAL_PROVIDER === "zernio" ? zernioClient({ env, fetch: deps.fetch, log }) : null;
+    const prof = await sb.from("studio_social_profiles").select("provider,profile_key").eq("user_id", u).maybeSingle();
+    const cust = await sb.from("studio_customers").select("plan_id,owner_pass").eq("user_id", u).maybeSingle();
+    const live = posts.filter((p) => p.provider_post_id && p.status !== "failed");
+    const nets = [...new Set(live.flatMap((p) => p.platforms))];
+    if (!c || prof.data?.provider !== "zernio" || !live.length) { for (const n of nets) out.skipped.push({ platform: n, reason: "failed", detail: "Auto-replies are not available right now" }); return out; }
+    const profileId = String(prof.data.profile_key);
+    const accounts = await c.rawAccounts(profileId);
+    const limit = (cust.data as any)?.owner_pass ? 100 : AUTOREPLY_LIMITS[(cust.data as any)?.plan_id] ?? AUTOREPLY_LIMITS.starter;
+    const listed = await c.call("GET", `/comment-automations?profileId=${encodeURIComponent(profileId)}`);
+    const rules = ((listed.body?.automations ?? listed.body?.data ?? []) as any[]).filter((r) => accounts.some((a) => String(a._id) === String(r.accountId)));
+    let room = limit - rules.filter((r) => r.isActive !== false).length;
+    const keys = (spec.keywords ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean).sort().join("|");
+    for (const platform of nets) {
+      const acc = accounts.find((a) => a.platform === platform && a.isActive !== false);
+      if (!acc) { out.skipped.push({ platform, reason: "not_linked" }); continue; }
+      const dmNet = DM_NETWORKS.includes(platform);
+      if (!dmNet && !spec.comment_reply?.trim()) { out.skipped.push({ platform, reason: "no_reply_text" }); continue; }
+      const h = await c.call("GET", `/accounts/${encodeURIComponent(acc._id)}/health`).catch(() => null);
+      const can = capabilityOf(platform, h?.body);
+      if (dmNet ? !(can.dm && can.reply) : !can.reply) { out.skipped.push({ platform, reason: "needs_permission" }); continue; }
+      let fields: Record<string, any>;
+      try { fields = cleanRule({ name: spec.name || `Keyword ${spec.keywords?.[0] ?? ""}`.trim(), keywords: spec.keywords, dm_message: dmNet ? spec.dm_message : undefined, button: dmNet ? spec.button ?? undefined : undefined, comment_reply: spec.comment_reply, match: "word" }, platform); }
+      catch (e: any) { out.skipped.push({ platform, reason: "failed", detail: e?.message }); continue; }
+      const mine = live.filter((p) => p.platforms.includes(platform));
+      if (mine.length > 1) {
+        // a batch: one rule for every post on this account; the same keywords reuse the rule already there
+        const same = rules.find((r) => String(r.accountId) === String(acc._id) && !r.platformPostId && !r.postId && (r.keywords ?? []).map((k: string) => k.toLowerCase()).sort().join("|") === keys);
+        if (same) {
+          if (same.isActive === false) { if (room <= 0) { out.skipped.push({ platform, reason: "limit" }); continue; } room--; }
+          await c.call("PATCH", `/comment-automations/${encodeURIComponent(same.id ?? same._id)}`, { body: { ...fields, isActive: true } });
+          out.on.push({ platform, scope: "account", reused: true }); continue;
+        }
+        if (room <= 0) { out.skipped.push({ platform, reason: "limit" }); continue; }
+        const r = await c.call("POST", "/comment-automations", { body: { ...fields, name: `${fields.name} (every post)`.slice(0, 60), profileId, accountId: String(acc._id) } });
+        if (r.status >= 300) { out.skipped.push({ platform, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
+        room--; out.on.push({ platform, scope: "account" });
+        continue;
+      }
+      // one post: bound to it; a scheduled post arms the rule when it goes out, a published one is bound by its network id
+      if (room <= 0) { out.skipped.push({ platform, reason: "limit" }); continue; }
+      const postId = String(mine[0].provider_post_id);
+      let r = await c.call("POST", "/comment-automations", { body: { ...fields, profileId, accountId: String(acc._id), postId } });
+      if (r.status >= 300 && r.status !== 403) {
+        const got = await c.call("GET", `/posts/${encodeURIComponent(postId)}`);
+        const pid = ((got.body?.post?.platforms ?? []) as any[]).find((x) => x.platform === platform)?.platformPostId;
+        if (pid) r = await c.call("POST", "/comment-automations", { body: { ...fields, profileId, accountId: String(acc._id), platformPostId: String(pid) } });
+      }
+      if (r.status >= 300) { out.skipped.push({ platform, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
+      room--; out.on.push({ platform, scope: "post" });
+    }
+    for (const x of out.on) recordEvent({ user_id: u, kind: "feature", name: "autoreply_created", props: { platform: x.platform, via: deps.via ?? "post", scope: x.scope, reused: !!x.reused, dm: DM_NETWORKS.includes(x.platform) } });
+    for (const x of out.skipped) recordEvent({ user_id: u, kind: "feature", name: "autoreply_skipped", props: { platform: x.platform, via: deps.via ?? "post", reason: x.reason } });
+    if (out.on.length) await touchSocial(sb, u);
+  } catch (e: any) {
+    log(`[autoreply] attach for ${u} failed: ${String(e?.message ?? e).slice(0, 160)}`);
+    for (const p of [...new Set(posts.flatMap((x) => x.platforms))]) if (!out.on.some((o) => o.platform === p) && !out.skipped.some((s) => s.platform === p)) out.skipped.push({ platform: p, reason: "failed" });
+  }
+  return out;
+}

@@ -148,3 +148,35 @@ test("trial reels: Instagram target carries trialParams and a first comment; eng
   const q = calls.at(-1).url.searchParams;
   assert.equal(q.get("scopes"), "posting,analytics,comments,messaging"); assert.equal(q.get("reconnectAccountId"), "acc-ig");
 });
+
+import { attachAutoReplies } from "../src/studio-autoreply.js";
+import { suggestReply } from "../src/studio-assistant.js";
+
+test("attach: one post binds a rule to it; a batch makes one rule per account and reuses it; limits and permissions reported", async () => {
+  const svc = fakeService();
+  const sb = sbFor("starter");
+  const spec = { keywords: ["GUIDE"], dm_message: "Here it is", comment_reply: "Sent you a DM 📩" };
+  const one = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000a1", platforms: ["instagram", "tiktok"], status: "scheduled" }], spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "publish" });
+  assert.deepEqual(one.on, [{ platform: "instagram", scope: "post" }]);
+  assert.deepEqual(one.skipped.map((x) => [x.platform, x.reason]), [["tiktok", "needs_permission"]]);
+  const made = svc.calls.filter((c) => c.method === "POST" && c.path === "/comment-automations");
+  assert.equal(made[0].body.postId, "zpost000000000000000000a1", "bound to the post, armed when it goes out");
+  assert.equal(made[0].body.dmMessage, "Here it is");
+  const batch = [1, 2, 3].map((i) => ({ provider_post_id: `zpost00000000000000000b${i}`, platforms: ["instagram"], status: "scheduled" }));
+  const b1 = await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "clips" });
+  assert.deepEqual(b1.on, [{ platform: "instagram", scope: "account" }]);
+  const b2 = await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "clips" });
+  assert.deepEqual(b2.on, [{ platform: "instagram", scope: "account", reused: true }], "the same keywords reuse the batch rule");
+  const third = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000c1", platforms: ["instagram"], status: "scheduled" }], { ...spec, keywords: ["NEW"] }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
+  assert.equal(third.on.length, 1, "the third rule fits Starter's 3");
+  const full = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000c2", platforms: ["instagram"], status: "scheduled" }], { ...spec, keywords: ["MORE"] }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
+  assert.deepEqual(full.skipped.map((x) => x.reason), ["limit"], "the fourth is over the limit; the post still went out");
+  const failed = await attachAutoReplies(sb, ANN, [{ provider_post_id: null, platforms: ["instagram"], status: "failed" }], spec, { env: ENV, fetch: svc.fetchFn, log: () => {} });
+  assert.equal(failed.on.length, 0, "nothing is attached to a post that did not go out");
+});
+
+test("chat: the assistant's suggested auto-reply is cleaned", () => {
+  assert.deepEqual(suggestReply({ keyword: "recipe!!", dm_message: "Here you go {{first_name}}", comment_reply: "Sent 📩" }), { keyword: "RECIPE", dm_message: "Here you go {{first_name}}", comment_reply: "Sent 📩" });
+  assert.equal(suggestReply({ keyword: "   " }), null);
+  assert.equal(suggestReply(null), null);
+});

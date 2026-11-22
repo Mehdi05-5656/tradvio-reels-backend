@@ -61,11 +61,11 @@ export type Plan = { id: PlanId; name: string; tagline: string; monthly_usd: num
 
 export const PLANS: Plan[] = [
   { id: "starter", name: "Starter", tagline: "For one creator with a library to put to work", monthly_usd: 29, annual_usd_per_month: 24, credits: 1000, parallel: 1,
-    features: ["Every tool: Blueprint, Swap, Recast, Styles, Trends, Characters", "Every model in Instruments: video, pictures, voice and sound", "The assistant: say what you want, it plans and runs it", "Post and schedule to 1 social account", "Performance dashboard with an AI overview", "Downloads in 1080×1920, no watermark", "Clips from YouTube and streams cut in 720p", "1 job at a time", "Top-ups at 4¢ a credit"], hd_clips: false },
+    features: ["Every tool: Blueprint, Swap, Recast, Styles, Trends, Characters", "Every model in Instruments: video, pictures, voice and sound", "The assistant: say what you want, it plans and runs it", "Post and schedule to 1 social account", "Auto-replies: keyword comments answered by DM, 3 on at once", "Performance dashboard with an AI overview", "Downloads in 1080×1920, no watermark", "Clips from YouTube and streams cut in 720p", "1 job at a time", "Top-ups at 4¢ a credit"], hd_clips: false },
   { id: "creator", name: "Creator", tagline: "For creators and small teams posting daily", monthly_usd: 79, annual_usd_per_month: 66, credits: 3500, parallel: 2, popular: true,
-    features: ["Everything in Starter", "1080p HD clips from YouTube and streams: sharper faces and text", "Post and schedule to 3 social accounts", "2 jobs at a time, in the priority queue", "Top-ups at 3.5¢ a credit"], hd_clips: true },
+    features: ["Everything in Starter", "1080p HD clips from YouTube and streams: sharper faces and text", "Post and schedule to 3 social accounts", "10 auto-replies on at once", "2 jobs at a time, in the priority queue", "Top-ups at 3.5¢ a credit"], hd_clips: true },
   { id: "studio", name: "Studio", tagline: "For brands and agencies running many accounts", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000, parallel: 4,
-    features: ["Everything in Creator", "Post and schedule to 5 social accounts", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"], hd_clips: true },
+    features: ["Everything in Creator", "Post and schedule to 5 social accounts", "25 auto-replies on at once", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"], hd_clips: true },
 ];
 
 // What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the

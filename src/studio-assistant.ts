@@ -69,7 +69,7 @@ export type PeopleCard = { id: string; asset_id: string; asset_name: string; rea
 export type PublishItem = { job_id?: string | null; output_key?: string | null; asset_id?: string | null; poster_key?: string | null; url?: string | null };
 export type PublishCard = {
   id: string; items: PublishItem[]; status: "open" | "sending" | "sent" | "ignored"; auto?: boolean; sending_at?: string | null;
-  suggested?: { action?: "now" | "schedule" | null; schedule_at?: string | null; platforms?: string[]; caption?: string | null; note?: string | null };
+  suggested?: { action?: "now" | "schedule" | null; schedule_at?: string | null; platforms?: string[]; caption?: string | null; note?: string | null; autoreply?: { keyword: string; dm_message: string | null; comment_reply: string | null } | null };
   /** networks already acknowledged in this chat, so a new link is announced once */
   linked_seen?: string[]; post_ids?: string[]; outcome?: string | null;
 };
@@ -188,6 +188,11 @@ export const TOOLS = [
         platforms: { type: "array", items: { type: "string", enum: ["tiktok", "instagram", "youtube", "facebook", "linkedin", "threads", "bluesky", "twitter"] }, description: "Networks they named; leave out to let them tick" },
         caption: { type: "string", description: "Only the exact caption text they gave you" },
         note: { type: "string", description: "Their wishes for the caption (tone, a call to action, a product name), for the caption writer" },
+        autoreply: { type: "object", additionalProperties: false, description: "Suggest a keyword auto-reply when the video offers something people would ask for (a recipe, a guide, a link, a product, the full stream): people who comment the keyword get a DM on Instagram and Facebook, a public reply elsewhere. The card shows it as a suggestion the person turns on; it never runs on its own. Leave out when nothing fits.", properties: {
+          keyword: { type: "string", description: "One short word in capitals people would comment, e.g. RECIPE, GUIDE, LINK" },
+          dm_message: { type: "string", description: "The DM, under 300 characters, may use {{first_name}}; no link (the person adds theirs)" },
+          comment_reply: { type: "string", description: "A short public reply under the comment, e.g. 'Sent you a DM 📩'" },
+        } },
       },
     },
   },
@@ -713,7 +718,7 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
           const items = await publishItems(sb, convo, ctx, (Array.isArray(use.input?.videos) ? use.input.videos : []).map(String));
           if (!items.length) throw new AssistantError("plan_invalid", "No finished video matches; use \"latest\", a job id from this chat or a library video asset id");
           const named = (Array.isArray(use.input?.platforms) ? use.input.platforms : []).map(String);
-          publish = { id: randomUUID(), items, status: "open", linked_seen: social.linked, suggested: { action: use.input?.action === "schedule" ? "schedule" : use.input?.action === "now" ? "now" : null, schedule_at: typeof use.input?.schedule_at === "string" && !Number.isNaN(Date.parse(use.input.schedule_at)) ? new Date(use.input.schedule_at).toISOString() : null, platforms: named, caption: use.input?.caption ? String(use.input.caption).slice(0, 2200) : null, note: use.input?.note ? String(use.input.note).slice(0, 300) : null } };
+          publish = { id: randomUUID(), items, status: "open", linked_seen: social.linked, suggested: { action: use.input?.action === "schedule" ? "schedule" : use.input?.action === "now" ? "now" : null, schedule_at: typeof use.input?.schedule_at === "string" && !Number.isNaN(Date.parse(use.input.schedule_at)) ? new Date(use.input.schedule_at).toISOString() : null, platforms: named, caption: use.input?.caption ? String(use.input.caption).slice(0, 2200) : null, note: use.input?.note ? String(use.input.note).slice(0, 300) : null, autoreply: suggestReply(use.input?.autoreply) } };
           const unlinked = named.filter((n: string) => !social.linked.includes(n));
           result = { ok: true, videos: items.length, linked: social.linked, note: social.linked.length ? `The card is shown with ${social.linked.join(", ")} to tick${unlinked.length ? `; ${unlinked.join(", ")} ${unlinked.length === 1 ? "is" : "are"} not linked, the card lets them link it` : ""}. In one short line, say what happens next (pick, caption, Post or Schedule). Do not list the card's contents.` : "Nothing is linked yet: the card asks them to connect their socials first, on a secure page in a new tab. Say that in one line; you will be told when something is linked." };
         } else if (use.name === "preview_voices") {
@@ -1156,6 +1161,14 @@ const isVideoOutput = (o: any) => !!o && (o.kind ? o.kind === "video" : /\.mp4$/
 const NETWORK_NAMES: Record<string, string> = { tiktok: "TikTok", instagram: "Instagram", youtube: "YouTube", facebook: "Facebook", twitter: "X", linkedin: "LinkedIn", threads: "Threads", bluesky: "Bluesky" };
 const listNames = (xs: string[]) => { const n = xs.map((x) => NETWORK_NAMES[x] ?? x); return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`; };
 
+/** An auto-reply the assistant suggests on a post card, cleaned (the person turns it on; it never runs by itself). */
+export function suggestReply(x: any): { keyword: string; dm_message: string | null; comment_reply: string | null } | null {
+  const k = typeof x?.keyword === "string" ? x.keyword.replace(/[^\p{L}\p{N}_-]/gu, "").slice(0, 24).toUpperCase() : "";
+  if (!k) return null;
+  const t = (v: any, n: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : null);
+  return { keyword: k, dm_message: t(x.dm_message, 600), comment_reply: t(x.comment_reply, 200) };
+}
+
 /** The videos an offer_post call points at: "latest" (this chat's finished results, else the newest finished video),
  *  a job id (its videos) or a library video. Only the person's own, finished, at most 25. */
 export async function publishItems(sb: SupabaseClient, convo: Conversation, ctx: Ctx, refs: string[]): Promise<PublishItem[]> {
@@ -1254,7 +1267,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       });
       // 2. post (outside any lock); 3. record the outcome on a fresh copy
       let posts: any[] = [], failure: any = null;
-      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options }, { conversationId: req.params.id, log, env }); }
+      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options, trial_copies: b.trial_copies, autoreply: b.autoreply }, { conversationId: req.params.id, log, env, via: "chat" }); }
       catch (e: any) { failure = e; }
       const ok = posts.filter((x) => x.status !== "failed"), nets = listNames([...new Set(posts.flatMap((x) => x.platforms as string[]))]);
       const unsure = posts.filter((x) => x.error === UNCONFIRMED).length;
@@ -1269,6 +1282,12 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
         say(conv, schedule
           ? `Scheduled: ${n} go${ok.length > 1 ? "" : "es"} out${when ? ` ${when}` : ""} on ${nets}${ok.length > 1 && gap ? `, ${gap >= 60 ? `${Math.round(gap / 60)} h` : `${gap} min`} apart` : ""}. You can change or cancel ${ok.length > 1 ? "them" : "it"} on the Publish page.${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}${unsure ? ` ${unsure === posts.length ? "The posting service did not confirm it yet" : `${unsure} did not get a confirmation yet`}; check Publish before sending again.` : ""}`
           : `${unsure === posts.length ? `Sent, but the posting service did not confirm it yet. Check ${nets} before posting it again; Publish shows when it settles.` : `On its way to ${nets}. The links show on the card as each network finishes; TikTok takes a minute or two.`}${posts.length > ok.length ? ` ${posts.length - ok.length} failed; see Publish.` : ""}`);
+        // what the auto-reply asked with the post did (it never held the post back)
+        const ar = (posts as any).autoreply as { on: Array<{ platform: string }>; skipped: Array<{ platform: string; reason: string }> } | null | undefined;
+        if (ar && (ar.on.length || ar.skipped.length)) {
+          const why: Record<string, string> = { needs_permission: "allow DMs and replies for it on the Auto-replies page", limit: "your plan's auto-replies are all on; pause one on the Auto-replies page", no_reply_text: "it needs a public reply text there", not_linked: "that account is not linked", failed: "it could not be set up" };
+          say(conv, [ar.on.length ? `Auto-reply on for ${listNames(ar.on.map((x) => x.platform))}: every matching comment gets answered.` : "", ar.skipped.length ? `No auto-reply on ${ar.skipped.map((x) => `${x.platform} (${why[x.reason] ?? "not set up"})`).join(", ")}.` : ""].filter(Boolean).join(" "));
+        }
       });
       if (failure) { if (failure instanceof SocialError) throw new AssistantError(failure.code, failure.message, failure.status ?? 400); throw failure; }
       log(`[assistant] publish card ${req.params.cardId} ${schedule ? "scheduled" : "sent"} ${ok.length}/${posts.length}`);
