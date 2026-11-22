@@ -56,7 +56,10 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
       const now = deps.now?.() ?? Date.now();
       if (!cache || now - cache.at > 60_000 || req.query.fresh === "1") cache = { at: now, data: await load(sb, { since: now - 400 * 86400_000, isInternal: (e) => isInternalEmail(e, env) }) };
       const tracking = cache.data.accounts.map((a) => a.tracking_since).filter(Boolean).sort()[0] ?? null;
-      const summary = summarize({ ...cache.data, range: rangeFor(days, tz, now, tracking), hide_pre: req.query.hide_pre === "1", include_internal: req.query.internal === "1" });
+      // "all time" reaches back to the oldest post of an account that counts its history
+      const history = new Set(cache.data.accounts.filter((a) => a.count_history).map((a) => a.id));
+      const earliest = cache.data.videos.filter((v) => history.has(v.account_id) && v.posted_at).map((v) => v.posted_at!).sort()[0] ?? null;
+      const summary = summarize({ ...cache.data, range: rangeFor(days, tz, now, tracking, earliest), hide_pre: req.query.hide_pre === "1", include_internal: req.query.internal === "1" });
       // the page lists at most MAX_VIDEOS videos (the biggest gains first, every one that brought a sign-up kept): the
       // stress test put 12,000 videos at 9 MB a response, which no page needs
       const videos_total = summary.videos.length;

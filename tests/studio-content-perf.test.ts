@@ -91,7 +91,8 @@ test("summarize: sign-ups named at sign-up count as stated, a link's utm_source 
 test("rangeFor: whole local days back from now; 'all' starts at tracking", () => {
   const r = rangeFor(7, PT, NOW);
   assert.equal(new Date(r.since).toISOString(), "2026-11-13T08:00:00.000Z", "7 days back to midnight PT");
-  assert.equal(rangeFor(null, PT, NOW, "2026-11-18T19:00:00Z").since, Date.parse("2026-11-18T19:00:00Z"));
+  assert.equal(rangeFor(null, PT, NOW, "2026-11-18T19:00:00Z").since, Date.parse("2026-11-18T08:00:00Z"), "'all' starts at the local midnight of the tracking start, so the chart shows whole days");
+  assert.equal(rangeFor(null, PT, NOW, "2026-11-18T19:00:00Z", "2026-11-03T15:00:00Z").since, Date.parse("2026-11-03T08:00:00Z"), "or at the oldest post of an account that counts its history");
   assert.equal(median([3, 1, 2]), 2); assert.equal(median([]), null);
 });
 
@@ -285,4 +286,24 @@ test("thinning: readings older than a week keep the last one per video per day; 
   const n = await thinSnapshots(sb, NOW);
   assert.equal(n, 5, "two of three readings dropped on each old day of v1, one of two for v2");
   assert.deepEqual(tables.content_snapshots.map((r) => r.id).sort((a, b) => a - b), [3, 6, 8, 9, 10, 11], "the last reading of each old day stays; this week's three stay");
+});
+
+test("an account that counts its history: a video's earlier views sit on its posting day, the readings after; the all-time range reaches that day; the usual day ignores them", () => {
+  const posted = NOW - 20 * DAY, seen = NOW - 2 * DAY;
+  const v = video("h1", { posted_at: iso(posted), first_seen_at: iso(seen), base_views: 90000, views: 90500 });
+  const snaps = [snap("h1", seen, 90000), snap("h1", NOW - HOUR, 90500)];
+  const hist = account({ count_history: true }), plain = account();
+  const all = summarize({ accounts: [hist], videos: [v], snapshots: snaps, account_snapshots: [], signups: [], range: rangeFor(null, PT, NOW, hist.tracking_since, iso(posted)) });
+  assert.equal(all.kpis.views, 90500, "all time: the 90,000 from before tracking plus the 500 since");
+  const postDay = all.daily.find((d) => d.day === new Date(posted + PT * 60_000).toISOString().slice(0, 10))!;
+  assert.equal(postDay.views, 90000, "the earlier views are shown on the posting day");
+  assert.equal(all.daily.reduce((a, d) => a + d.views, 0), 90500);
+  assert.ok(Date.parse(all.range.since) <= posted, "the all-time range starts at that post");
+  const week = summarize({ accounts: [hist], videos: [v], snapshots: snaps, account_snapshots: [], signups: [], range: rangeFor(7, PT, NOW) });
+  assert.equal(week.kpis.views, 500, "the last 7 days hold only what the readings saw");
+  assert.equal(week.videos[0].total_gain.views, 90500, "the video's own total is all time");
+  assert.equal(week.accounts[0].count_history, true);
+  const off = summarize({ accounts: [plain], videos: [v], snapshots: snaps, account_snapshots: [], signups: [], range: rangeFor(null, PT, NOW, plain.tracking_since) });
+  assert.equal(off.kpis.views, 500, "the same account without the switch counts from the first reading only");
+  assert.deepEqual(sanitizeAccountInput({ count_history: 1 }), { count_history: true });
 });

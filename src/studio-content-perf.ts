@@ -42,6 +42,9 @@ export type AccountRow = {
   cost_usd_per_video: number | null; cost_usd_per_month: number | null; default_feature: string | null; enabled: boolean;
   tracking_since: string | null; followers: number | null; avatar_key: string | null; latest_posted_at: string | null;
   last_pulled_at: string | null; last_profile_at: string | null; last_deep_at?: string | null; last_status: string | null; last_error: string | null;
+  /** count the views a video already had at our first reading (an account that only ever posted for Clone8): those views
+   *  sit on the day the video was posted; off, a video counts from its first reading only (the default) */
+  count_history?: boolean | null;
 };
 export type VideoRow = {
   id: string; account_id: string; platform: string; platform_post_id: string; url: string; caption: string | null; posted_at: string | null; duration_s: number | null;
@@ -227,6 +230,8 @@ export type AccountOut = {
   videos: number; videos_pre: number; gain: Gain; median_views: number | null; best_video_id: string | null; engagement: number | null;
   /** what one of this account's videos gains in a typical day (median over videos tracked 12 h or more, since their first reading); null under 3 such videos */
   usual_daily: number | null;
+  /** the views its videos had before tracking count (on the day each was posted) */
+  count_history: boolean;
   signups_stated: number; signups_link: number; paid: number; net_usd: number; conversion: number | null; cost_usd: number | null; cpm_usd: number | null; cost_per_signup: number | null; cost_per_paid: number | null;
 };
 export type Summary = {
@@ -269,9 +274,18 @@ function readingAt(v: VideoRow, snaps: SnapshotRow[], t: number): Counts | null 
   if (best >= 0) { const b = snaps[best]; return { views: b.views, likes: b.likes, comments: b.comments, shares: b.shares, saves: b.saves }; }
   return { views: v.base_views, likes: v.base_likes, comments: v.base_comments, shares: v.base_shares, saves: v.base_saves };
 }
+/** A video's counts at an instant, when the account counts its history: nothing before the post, the first reading's
+ *  counts from the post until that reading (those views sit on the posting day), the readings after. */
+function readingAtH(v: VideoRow, snaps: SnapshotRow[], t: number, history: boolean): Counts | null {
+  if (!history) return readingAt(v, snaps, t);
+  const posted = v.posted_at ? Date.parse(v.posted_at) : Date.parse(v.first_seen_at);
+  if (t < Math.min(posted, Date.parse(v.first_seen_at))) return { views: 0, likes: 0, comments: 0, shares: 0, saves: 0 };
+  if (t < Date.parse(v.first_seen_at)) return { views: v.base_views, likes: v.base_likes, comments: v.base_comments, shares: v.base_shares, saves: v.base_saves };
+  return readingAt(v, snaps, t);
+}
 /** Gains between two instants, never below zero (a platform that revises a count down is flagged, not subtracted). */
-function gainBetween(v: VideoRow, snaps: SnapshotRow[], from: number, to: number): Gain {
-  const a = readingAt(v, snaps, from), b = readingAt(v, snaps, to);
+function gainBetween(v: VideoRow, snaps: SnapshotRow[], from: number, to: number, history = false): Gain {
+  const a = readingAtH(v, snaps, from, history), b = readingAtH(v, snaps, to, history);
   const g = zeroGain();
   if (!b) return g;
   for (const k of COUNTS) {
@@ -292,7 +306,7 @@ const startOfLocalDay = (t: number, off: number) => { const d = new Date(t + off
 
 export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; snapshots: SnapshotRow[]; account_snapshots: AccountSnapshotRow[]; signups: SignupRow[]; pulls?: Array<{ at: string; usd: number }>; range: Range; hide_pre?: boolean; include_internal?: boolean }): Summary {
   const { range } = input, off = range.tz_offset_min, until = range.until, since = range.since, prevSince = since - (until - since);
-  const accounts = input.accounts, byAccount = new Map(accounts.map((a) => [a.id, a]));
+  const accounts = input.accounts, byAccount = new Map(accounts.map((a) => [a.id, a])), videoById = new Map(input.videos.map((v) => [v.id, v]));
   const snapsBy = new Map<string, SnapshotRow[]>();
   for (const s of input.snapshots) { const l = snapsBy.get(s.video_id) ?? []; l.push(s); snapsBy.set(s.video_id, l); }
   for (const l of snapsBy.values()) l.sort((x, y) => Date.parse(x.captured_at) - Date.parse(y.captured_at));
@@ -323,15 +337,15 @@ export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; s
 
   const videoOut = (v: VideoRow): VideoOut => {
     const snaps = snapsBy.get(v.id) ?? [];
-    const gain = gainBetween(v, snaps, since, until), total = gainBetween(v, snaps, 0, until);
-    const a = byAccount.get(v.account_id)!;
+    const a = byAccount.get(v.account_id)!, hist = !!a.count_history;
+    const gain = gainBetween(v, snaps, since, until, hist), total = gainBetween(v, snaps, 0, until, hist);
     const eng = gain.likes + gain.comments + gain.shares + gain.saves;
     const cost = v.cost_usd ?? (a.cost_usd_per_video ?? null);
     return {
       id: v.id, account_id: v.account_id, platform: v.platform, handle: a.handle, url: v.url, caption: v.caption, posted_at: v.posted_at, duration_s: v.duration_s, thumb_key: v.thumb_key,
       first_seen_at: v.first_seen_at, pre_tracking: v.pre_tracking, hidden: v.hidden, feature: v.tags?.feature ?? null, tag_source: v.tag_source, tags: v.tags ?? {},
       gain, total_gain: total, latest: { views: v.views, likes: v.likes, comments: v.comments, shares: v.shares, saves: v.saves },
-      velocity_1h: gainBetween(v, snaps, until - HOUR, until).views, velocity_6h: gainBetween(v, snaps, until - 6 * HOUR, until).views, velocity_24h: gainBetween(v, snaps, until - DAY, until).views,
+      velocity_1h: gainBetween(v, snaps, until - HOUR, until, hist).views, velocity_6h: gainBetween(v, snaps, until - 6 * HOUR, until, hist).views, velocity_24h: gainBetween(v, snaps, until - DAY, until, hist).views,
       engagement: rate(eng, gain.views), signups_stated: 0, signups_link: 0, paid: 0, net_usd: 0, cost_usd: cost, cpm_usd: cost != null && gain.views > 0 ? (cost / gain.views) * 1000 : null,
     };
   };
@@ -369,7 +383,8 @@ export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; s
       cost_usd_per_video: a.cost_usd_per_video, cost_usd_per_month: a.cost_usd_per_month, default_feature: a.default_feature,
       videos: own.length, videos_pre: input.videos.filter((v) => v.account_id === a.id && v.pre_tracking && !v.hidden).length, gain,
       median_views: median(own.filter((v) => Date.parse(v.first_seen_at) <= until).map((v) => v.gain.views)), best_video_id: best && best.gain.views > 0 ? best.id : null, engagement: rate(eng, gain.views),
-      usual_daily: (() => { const xs = own.filter((v) => until - Date.parse(v.first_seen_at) >= 12 * HOUR).map((v) => v.total_gain.views / Math.max(0.5, (until - Date.parse(v.first_seen_at)) / DAY)); return xs.length >= 3 ? median(xs) : null; })(),
+      usual_daily: (() => { const xs = own.filter((v) => until - Date.parse(v.first_seen_at) >= 12 * HOUR).map((v) => Math.max(0, (v.latest.views ?? 0) - (videoById.get(v.id)?.base_views ?? 0)) / Math.max(0.5, (until - Date.parse(v.first_seen_at)) / DAY)); return xs.length >= 3 ? median(xs) : null; })(),
+      count_history: !!a.count_history,
       signups_stated: stated.length, signups_link: link.length, paid: payers.length, net_usd: net, conversion: n >= MIN_SIGNUPS ? payers.length / n : null,
       cost_usd: cost, cpm_usd: cost != null && gain.views > 0 ? (cost / gain.views) * 1000 : null, cost_per_signup: cost != null && n > 0 ? cost / n : null, cost_per_paid: cost != null && payers.length > 0 ? cost / payers.length : null,
     };
@@ -383,12 +398,12 @@ export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; s
     const dayEnd = Math.min(t + DAY, until);
     const by: Record<string, number> = {};
     let views = 0;
-    for (const v of videos) { const g = gainBetween(v, snapsBy.get(v.id) ?? [], Math.max(t, since), dayEnd).views; if (g) { by[v.account_id] = (by[v.account_id] ?? 0) + g; views += g; } }
+    for (const v of videos) { const g = gainBetween(v, snapsBy.get(v.id) ?? [], Math.max(t, since), dayEnd, !!byAccount.get(v.account_id)?.count_history).views; if (g) { by[v.account_id] = (by[v.account_id] ?? 0) + g; views += g; } }
     const ss = S.filter((s) => inRange(s.created_at, Math.max(t, since), dayEnd));
     daily.push({ day: localDay(t, off), views, signups: ss.length, signups_stated: ss.filter((s) => accountById(s)).length, paid: ss.filter((s) => s.paid).length, by_account: by });
   }
   // the previous period, for the deltas
-  const prevViews = videos.reduce((s, v) => s + gainBetween(v, snapsBy.get(v.id) ?? [], prevSince, since).views, 0);
+  const prevViews = videos.reduce((s, v) => s + gainBetween(v, snapsBy.get(v.id) ?? [], prevSince, since, !!byAccount.get(v.account_id)?.count_history).views, 0);
   const posted = (from: number, to: number) => videos.filter((v) => v.posted_at && inRange(v.posted_at, from, to)).length;
   const stated = S.filter((s) => accountById(s)).length, link = S.filter((s) => !accountById(s) && linkAccount(s)).length;
   const paidAll = S.filter((s) => s.paid), paidAttr = S.filter((s) => s.paid && (accountById(s) || linkAccount(s)));
@@ -482,9 +497,12 @@ export async function loadContent(sb: SupabaseClient, opts: { since: number; isI
 }
 
 /** The range from the page's "days" and the viewer's time zone: whole local days back from now ("all" = since tracking). */
-export function rangeFor(days: number | null, tz_offset_min: number, now = Date.now(), trackingSince: string | null = null): Range {
+export function rangeFor(days: number | null, tz_offset_min: number, now = Date.now(), trackingSince: string | null = null, earliestPost: string | null = null): Range {
   const until = now;
-  if (days == null) return { days: null, since: trackingSince ? Date.parse(trackingSince) : now - 365 * DAY, until, tz_offset_min };
+  if (days == null) {
+    const starts = [trackingSince, earliestPost].filter(Boolean).map((x) => Date.parse(x!)).filter(Number.isFinite);
+    return { days: null, since: starts.length ? startOfLocalDay(Math.min(...starts), tz_offset_min) : now - 365 * DAY, until, tz_offset_min };
+  }
   return { days, since: startOfLocalDay(now, tz_offset_min) - (days - 1) * DAY, until, tz_offset_min };
 }
 
@@ -503,6 +521,7 @@ export function sanitizeAccountInput(input: any): Partial<AccountRow> | { error:
   for (const k of ["cost_usd_per_video", "cost_usd_per_month"]) if (k in (input ?? {})) { const v = input[k]; if (v === null || v === "") out[k] = null; else { const n = Number(v); if (!Number.isFinite(n) || n < 0 || n > 100000) return { error: `invalid_${k}` }; out[k] = Math.round(n * 100) / 100; } }
   if ("default_feature" in (input ?? {})) { const f = input.default_feature; if (f === null || f === "") out.default_feature = null; else if (FEATURE_IDS.has(String(f))) out.default_feature = String(f); else return { error: "invalid_feature" }; }
   if (input?.enabled != null) out.enabled = !!input.enabled;
+  if (input?.count_history != null) out.count_history = !!input.count_history;
   return out;
 }
 /** A handle and platform from a pasted profile link, when the owner gives a link instead of a handle. */
