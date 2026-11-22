@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { ensureYtDlp } from "./studio-youtube.js";
 
-export type LiveDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void };
+export type LiveDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; /** tests: kick.com answers and waits without the network or the clock */ kickCurl?: (path: string) => Promise<{ code: number | null; so: string; se: string }>; sleep?: (ms: number) => Promise<void> };
 export class LiveSourceError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 /** One chat message, reduced: seconds into the broadcast, who (an id), the text, how many emotes it carried. */
 export type ChatMsg = { t: number; u: string; c: string; e: number };
@@ -237,13 +237,41 @@ export async function kickTopStreams(deps: LiveDeps, limit = 100): Promise<LiveS
   return (Array.isArray(b?.data) ? b.data : []).map((s: any) => ({ platform: "kick" as const, login: String(s.slug ?? ""), channel: String(s.slug ?? ""), channel_id: String(s.broadcaster_user_id ?? s.channel_id ?? ""), title: String(s.stream_title ?? "").slice(0, 160), category: s.category?.name ? String(s.category.name) : null, viewers: Number(s.viewer_count) || 0, started_at: s.started_at ?? null, language: s.language ?? null, thumbnail_url: s.thumbnail ?? null, url: `https://kick.com/${s.slug}` }));
 }
 /** kick.com's own JSON through curl (its TLS fingerprint passes Cloudflare; Node's does not). */
+// Every call to kick.com goes through one pace (Nov 22 2026: the first Kick run in production read its chat with eight
+// readers at once, ~65 calls a second from one server; Kick answered 429 after 4 s and the run failed). One call starts
+// at a time with KICK_PACE.gap_ms between starts; a 429 pauses every Kick call for a cool-down that doubles each time
+// (up to KICK_PACE.max_cool_ms) and widens the gap, which narrows back as calls succeed.
+export const KICK_PACE = { gap_ms: 250, max_gap_ms: 2000, cool_ms: 2000, max_cool_ms: 30_000, tries: 4 };
+let kickGap = KICK_PACE.gap_ms, kickCool = 0, kickNextAt = 0, kickQueue: Promise<void> = Promise.resolve();
+export const resetKickPace = () => { kickGap = KICK_PACE.gap_ms; kickCool = 0; kickNextAt = 0; kickQueue = Promise.resolve(); };
+function kickTurn(deps: LiveDeps): Promise<void> {
+  const wait = (ms: number) => (deps.sleep ? deps.sleep(ms) : new Promise<void>((ok) => setTimeout(ok, ms)));
+  const turn = kickQueue.then(async () => { const now = Date.now(); if (kickNextAt > now) await wait(kickNextAt - now); kickNextAt = Date.now() + kickGap; });
+  kickQueue = turn.catch(() => undefined);
+  return turn;
+}
+function kickBusy() { kickCool = Math.min(KICK_PACE.max_cool_ms, Math.max(KICK_PACE.cool_ms, kickCool * 2)); kickGap = Math.min(KICK_PACE.max_gap_ms, kickGap * 2); kickNextAt = Math.max(kickNextAt, Date.now() + kickCool); }
+function kickFine() { kickCool = 0; kickGap = Math.max(KICK_PACE.gap_ms, Math.round(kickGap * 0.9)); }
+/** Counts for the checks and the logs: calls made, 429s met. */
+export const kickStats = { calls: 0, busy: 0 };
+/** One call to kick.com, in turn (the pace above); a 429 is waited out and tried again here, up to KICK_PACE.tries times,
+ *  so every caller (a lookup, a list, the chat reader) rides out Kick slowing us down. */
 export async function kickWeb(deps: LiveDeps, path: string): Promise<any> {
-  const r = await run("curl", ["-sS", "-m", "25", "-w", "\n%{http_code}", "-A", UA, "-H", "Accept: application/json", "-H", "Accept-Language: en-US,en;q=0.9", `https://kick.com/${path.replace(/^\//, "")}`], 40_000);
+  for (let k = 1; ; k++) {
+    try { return await kickOnce(deps, path); }
+    catch (e: any) { if (e?.code !== "kick_busy" || k >= KICK_PACE.tries) throw e; }
+  }
+}
+async function kickOnce(deps: LiveDeps, path: string): Promise<any> {
+  await kickTurn(deps); kickStats.calls++;
+  const r = deps.kickCurl ? await deps.kickCurl(path) : await run("curl", ["-sS", "-m", "25", "-w", "\n%{http_code}", "-A", UA, "-H", "Accept: application/json", "-H", "Accept-Language: en-US,en;q=0.9", `https://kick.com/${path.replace(/^\//, "")}`], 40_000);
   const lines = r.so.trim().split("\n"); const status = Number(lines.pop()); const body = lines.join("\n");
   if (r.code !== 0 && !status) throw new LiveSourceError("kick_down", "Kick did not answer", 502, true);
+  if (status === 429) { kickBusy(); kickStats.busy++; throw new LiveSourceError("kick_busy", "Kick is asking us to slow down; try again in a few minutes", 503, true); }
   if (status === 404) throw new LiveSourceError("kick_not_found", "Nothing is at that Kick link", 404);
   if (status === 403) throw new LiveSourceError("kick_blocked", "Kick refused our servers for the moment; try again in a minute", 503, true);
   if (status !== 200) throw new LiveSourceError("kick_error", `Kick answered ${status}`, 502, status >= 500);
+  kickFine();
   try { return JSON.parse(body); } catch { throw new LiveSourceError("kick_error", "Kick sent something that is not JSON", 502, true); }
 }
 export type KickChannel = { id: string; chat_id: string; slug: string; channel: string; followers: number | null; live: boolean; title: string | null; category: string | null; viewers: number | null; playback_url: string | null; profile_image_url: string | null };
@@ -268,19 +296,24 @@ export async function kickBroadcastSource(deps: LiveDeps, uuid: string): Promise
   return { master: String(b.source), started_at: started ? new Date(kickStart(String(started))).toISOString() : "", livestream_id: b?.livestream?.id != null ? String(b.livestream.id) : b?.live_stream_id != null ? String(b.live_stream_id) : null };
 }
 /** The chat replay of a Kick broadcast, walked forward on `start_time` (about 12-25 messages a page), in parallel slices. */
+export const KICK_CHAT_RETRIES = 6;
 export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIso: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; maxCalls?: number } = {}): Promise<ChatMsg[]> {
   const t0 = Date.parse(startedAtIso);
   if (!Number.isFinite(t0)) throw new LiveSourceError("chat_unreadable", "The broadcast's start time is unknown", 502);
-  const slices = Math.max(1, Math.min(8, o.slices ?? Math.ceil(seconds / 1800)));
+  // a few readers at once: the pace (kickWeb) sets the speed, more readers only queue
+  const slices = Math.max(1, Math.min(3, o.slices ?? Math.ceil(seconds / 1800)));
   const span = seconds / slices, maxCalls = o.maxCalls ?? 6000;
   const out: ChatMsg[][] = Array.from({ length: slices }, () => []); const done = new Array(slices).fill(0); let calls = 0;
   await Promise.all(out.map(async (bucket, k) => {
     const from = Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : Math.floor((k + 1) * span);
-    let T = from; const seen = new Set<string>(); let stuck = 0;
+    let T = from; const seen = new Set<string>(); let stuck = 0, fails = 0;
     while (T < to && calls < maxCalls && !o.signal?.aborted) {
       const iso = new Date(t0 + T * 1000).toISOString().replace(/\.\d{3}Z$/, ".000Z");
       let d: any;
-      try { d = (await kickWeb(deps, `api/v2/channels/${encodeURIComponent(chatId)}/messages?start_time=${encodeURIComponent(iso)}`))?.data; } catch (err: any) { if (err?.retry) { await new Promise((ok) => setTimeout(ok, 3000)); calls++; continue; } throw err; }
+      // a refusal that may pass (Kick slowing us, a 5xx, no answer) is tried again at the same point, waiting longer each
+      // time (the pace above also cools down); only after KICK_CHAT_RETRIES in a row does the run stop
+      try { d = (await kickWeb(deps, `api/v2/channels/${encodeURIComponent(chatId)}/messages?start_time=${encodeURIComponent(iso)}`))?.data; fails = 0; }
+      catch (err: any) { if (err?.retry && ++fails <= KICK_CHAT_RETRIES) { await (deps.sleep ?? ((ms: number) => new Promise<void>((ok) => setTimeout(ok, ms))))(Math.min(30_000, 2000 * 2 ** (fails - 1))); continue; } throw err; }
       calls++;
       let fresh = 0, last = T;
       for (const m of d?.messages ?? []) {
@@ -293,7 +326,6 @@ export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIs
       }
       if (fresh === 0 || last <= T) { stuck++; T += stuck < 3 ? 1 : 10; } else { stuck = 0; T = last; }
       done[k] = Math.min(1, (T - from) / Math.max(1, to - from)); o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices);
-      await new Promise((ok) => setTimeout(ok, 120));
     }
   }));
   return out.flat().sort((a, b) => a.t - b.t);
