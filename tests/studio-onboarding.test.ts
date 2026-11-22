@@ -88,7 +88,7 @@ test("today's roles, blockers and sources are kept", () => {
 // ---- version 3 (Nov 10 2026): the same five screens, re-worded for what Clone8 does now ----
 // The same lists are in the dashboard's tests/onboarding.test.ts: an id on one side only is dropped from the save.
 const V3 = {
-  role: ["creator", "clipper", "yt_automation", "pages", "ugc", "ai_influencer", "business", "agency", "exploring"],
+  role: ["personal_brand", "creator", "clipper", "yt_automation", "pages", "ugc", "ai_influencer", "business", "agency", "exploring"],
   goals: ["clips", "stories", "films", "captions", "multiply", "remake", "swap", "character", "trends", "ads", "earn", "publish", "managed", "other"],
   platforms: ["tiktok", "instagram", "youtube", "facebook", "x", "linkedin", "threads", "snapchat", "none"],
   accounts: ["one", "2_5", "6_20", "21_100", "gt100"],
