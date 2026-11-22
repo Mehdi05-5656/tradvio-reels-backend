@@ -43,8 +43,8 @@ test("a discount we get is our margin: prices stay at list whatever HIGGSFIELD_D
   assert.equal(quote("recast", { character: "noah" }, { kind: "video", probe: { duration: 10 } }, studioCosts({ HIGGSFIELD_DISCOUNT: "0.5" }, PLANS)).credits, 11 * 53, "a 10 s file bills 11 at Higgsfield, at list");
 });
 
-test("social accounts: 1, 3 and 10 with the plan; an extra one is $19 a month ($17 on annual), 50% over the posting service's $8.99", () => {
-  assert.deepEqual(SOCIAL_ACCOUNTS, { starter: 1, creator: 3, studio: 10 });
+test("social accounts: 1, 3 and 5 with the plan; an extra one is $19 a month ($17 on annual), 50% over the posting service's $8.99", () => {
+  assert.deepEqual(SOCIAL_ACCOUNTS, { starter: 1, creator: 3, studio: 5 });
   for (const [price, cost] of [[SOCIAL_SEAT_USD.month, 8.99], [SOCIAL_SEAT_USD.year_per_month, 7.99]]) assert.ok((price * 0.971 - cost) / (price * 0.971) >= 0.5, `${price} keeps half after Stripe`);
 });
 

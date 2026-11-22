@@ -173,6 +173,6 @@ export function logClaudeCost(log: ((l: string) => void) | undefined, feature: s
  *  Our cost is the posting service's profile: $8.99 a month each on its Business tier ($7.99 on annual billing). At
  *  the 50% margin after Stripe's 2.9%: $8.99 x 2 / 0.971 = $18.52, so $19 a month; $7.99 x 2 / 0.971 = $16.46, so $17 a
  *  month on annual plans. Included accounts are Clone8's own cost. */
-export const SOCIAL_ACCOUNTS: Record<string, number> = { starter: 1, creator: 3, studio: 10 };
+export const SOCIAL_ACCOUNTS: Record<string, number> = { starter: 1, creator: 3, studio: 5 }; // Studio 10 → 5 on Nov 21 2026 (owner); more can always be added at SOCIAL_SEAT_USD each
 export const SOCIAL_SEAT_USD = { month: 19, year_per_month: 17 } as const;
 export const MAX_SOCIAL_EXTRA = 50;

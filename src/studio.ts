@@ -65,7 +65,7 @@ export const PLANS: Plan[] = [
   { id: "creator", name: "Creator", tagline: "For creators and small teams posting daily", monthly_usd: 79, annual_usd_per_month: 66, credits: 3500, parallel: 2, popular: true,
     features: ["Everything in Starter", "1080p HD clips from YouTube and streams: sharper faces and text", "Post and schedule to 3 social accounts", "2 jobs at a time, in the priority queue", "Top-ups at 3.5¢ a credit"], hd_clips: true },
   { id: "studio", name: "Studio", tagline: "For brands and agencies running many accounts", monthly_usd: 199, annual_usd_per_month: 166, credits: 10000, parallel: 4,
-    features: ["Everything in Creator", "Post and schedule to 10 social accounts", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"], hd_clips: true },
+    features: ["Everything in Creator", "Post and schedule to 5 social accounts", "4 jobs at a time, in the priority queue", "Top-ups at 3¢ a credit, our lowest rate", "A path to managed distribution"], hd_clips: true },
 ];
 
 // What a tool costs, in credits: derived in studio-pricing.ts from Higgsfield's rates, our plan prices and the
