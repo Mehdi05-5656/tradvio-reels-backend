@@ -85,7 +85,11 @@ export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips
  *  candidate windows an hour heard and checked), at least the minimum; and each clip, which carries the two or three
  *  extra windows it took to find it (experiment 1: a third to a half of the checked windows become clips), so a stream
  *  clip is 10 credits where a Clips clip is 5. */
-export const LIVE_RATES = { per_hour: 15, min: 30, /** the reading is charged for the first hours only: our cost of reading does not grow past this (the checks are capped) */ hours_cap: 8, per_clip: { short: 10, standard: 10, long: 12, minute: 12 } as Record<ClipLength, number> };
+export const LIVE_RATES = { per_hour: 15, min: 30, /** the reading is charged for the first hours only: our cost of reading does not grow past this (the checks are capped) */ hours_cap: 8, per_clip: { short: 10, standard: 10, long: 12, minute: 12 } as Record<ClipLength, number>,
+  /** a stream still on: the reading is at least this much per clip asked for. The checks grow with the clips asked
+   *  (about $0.10 each, measured on the 16 stream runs to Nov 21 2026) while only clips made are charged, and a live
+   *  part is short, so its 30-credit reading alone did not cover a run that found 2 of 10 (owner's yes, Nov 21 2026) */
+  live_per_asked: 4 };
 /** What it costs us, at list (6.4): the chat (calls), each candidate's window heard (2.5 min of Scribe at $0.20/h) and
  *  verified (Sonnet 5.5 with six stills), the worker's time; four windows an hour in the reading, two more per clip. */
 export const LIVE_COST = { chat_usd_per_hour: 0.002, worker_usd_per_hour: 0.006, listen_usd_per_candidate: 0.0083, verify_usd_per_candidate: 0.02, candidates_per_hour: 4, extra_candidates_per_clip: 2 };
@@ -97,11 +101,11 @@ export function streamAnalysisUsd(seconds: number): number {
   return hours * (LIVE_COST.chat_usd_per_hour + LIVE_COST.worker_usd_per_hour + LIVE_COST.candidates_per_hour * windowUsd());
 }
 export const streamClipUsd = (length: ClipLength, env: Record<string, string | undefined>) => perClipUsd(length, env, false) + LIVE_COST.extra_candidates_per_clip * windowUsd();
-export function streamPrice(plans: PlanLike[], p: { seconds: number; length: ClipLength; count?: number; env: Record<string, string | undefined> }): ClipsPrice {
+export function streamPrice(plans: PlanLike[], p: { seconds: number; length: ClipLength; count?: number; env: Record<string, string | undefined>; /** a stream still on, read in its newest part */ live?: boolean }): ClipsPrice {
   const floor = plans.length ? creditValueFloor(plans) : 0.016;
   const hours = Math.min(p.seconds / 3600, LIVE_RATES.hours_cap);
   return {
-    analysis: Math.max(LIVE_RATES.min, Math.ceil(hours * LIVE_RATES.per_hour), credits(streamAnalysisUsd(hours * 3600), floor, LIVE_SAFETY_MARGIN.analysis)),
+    analysis: Math.max(LIVE_RATES.min, Math.ceil(hours * LIVE_RATES.per_hour), credits(streamAnalysisUsd(hours * 3600), floor, LIVE_SAFETY_MARGIN.analysis), p.live && p.count ? p.count * LIVE_RATES.live_per_asked : 0),
     per_clip: Math.max(LIVE_RATES.per_clip[p.length], credits(streamClipUsd(p.length, p.env), floor, LIVE_SAFETY_MARGIN.clip)),
     lite: 0,
   };
@@ -194,7 +198,7 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const likely = likelyStreamClips(span), cap = streamCountCap(span);
   const asked = Math.round(Number(opt.count));
   const count = Number.isFinite(asked) && asked >= 1 ? Math.min(asked, cap) : Math.min(likely, 10);
-  const price = streamPrice(plans, { seconds: span, length, count, env });
+  const price = streamPrice(plans, { seconds: span, length, count, env, live });
   // captions are the person's choice (the owner, Nov 19 2026: not on by default), priced as on the Clips page; a clip made
   // without them keeps its words, so the Captions page can add them afterwards
   const captions = opt.captions && typeof opt.captions === "object" ? (await import("./studio-caption-video.js")).cleanSettings(opt.captions) : null;

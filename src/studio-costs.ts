@@ -6,6 +6,7 @@
 // here by studio-events.ts), the Kage/Stories worker (kage-motion worker/costs.ts) and, later, the Films worker.
 // Who reads it: the admin panel's Money tab (GET /api/studio/admin/costs), the owner's account only.
 // Rows are buffered and written every few seconds in one insert. Recording never throws and never slows a request.
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Express } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
@@ -38,7 +39,7 @@ export function cleanCost(c: CostRow, now = new Date()): Required<Omit<CostRow, 
 /** Record one cost. Synchronous and safe to call anywhere. */
 export function recordCost(c: CostRow) {
   if (!sink || !c?.provider || buffer.length >= MAX_BUFFER) return;
-  buffer.push(cleanCost(c));
+  buffer.push(cleanCost(withRun(c)));
   if (!timer) timer = setTimeout(() => { timer = null; void flushCosts(); }, FLUSH_MS);
 }
 /** Write what is buffered (also called on shutdown and by tests). */
@@ -51,6 +52,18 @@ export async function flushCosts(): Promise<number> {
 
 /** The cost row of an event the code already records (studio-events.ts): a Claude call with its tokens, or a call to
  *  another paid service at its assumed price. Null for events that carry no dollars. */
+/** The run a piece of work belongs to (owner, Nov 21 2026: stream clipping's costs had no run on them). A job loop
+ *  runs its job inside `withCostRun`; every cost recorded inside it, however deep (a Claude call, a transcription), gets
+ *  that job, its person and its tool when it does not name them itself. */
+const costRun = new AsyncLocalStorage<{ job_id: string; user_id: string | null; tool: string }>();
+export const withCostRun = <T>(run: { job_id: string; user_id: string | null; tool: string }, fn: () => T): T => costRun.run(run, fn);
+export const currentCostRun = () => costRun.getStore() ?? null;
+/** A row without a job gets the run it was recorded in (withCostRun), if any. */
+export function withRun(c: CostRow): CostRow {
+  const run = costRun.getStore();
+  if (!run || c.job_id) return c;
+  return { ...c, job_id: run.job_id, user_id: c.user_id ?? run.user_id, tool: c.tool ?? run.tool };
+}
 export function costFromEvent(e: { user_id?: string | null; kind: string; name: string; usd?: number | null; props?: Record<string, any> }): CostRow | null {
   if ((e.kind !== "claude" && e.kind !== "vendor") || e.usd == null || !Number.isFinite(Number(e.usd))) return null;
   const p = e.props ?? {}; const job = typeof p.job === "string" ? p.job : typeof p.job_id === "string" ? p.job_id : null;

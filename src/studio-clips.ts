@@ -16,6 +16,7 @@
 //  - Price: reading the video (by its length) plus a price per clip, reserved for the clips asked for. A run is charged
 //    for the clips it makes; what it does not make goes back. About 2-2.5x OpusClip per video (CLIP_RATES), with
 //    safety nets so a vendor price change can never sell a run at a loss.
+import { withCostRun } from "./studio-costs.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
 import { studioFail } from "./studio-fail.js";
 import { spawn } from "node:child_process";
@@ -1743,7 +1744,8 @@ export function startClipsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = {},
         // sent, so every run with a step over 10 minutes was taken again by a second attempt while the first went on)
         const lost = new AbortController(); job.signal = lost.signal;
         const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then((r) => { if (!r.error && r.data !== true) lost.abort(); }, () => undefined); }, 4 * 60_000);
-        runClipsJob(sb, { ...deps, log }, job).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`))
+        // every cost recorded while the run works carries its job (the cost ledger: studio-costs.ts withCostRun)
+        withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: "clips" }, () => runClipsJob(sb, { ...deps, log }, job)).then((s) => log(`[clips] ${s} ${job.id}`)).catch((e) => log(`[clips] crashed ${job.id} ${e?.message ?? e}`))
           .finally(() => { clearInterval(keep); active.delete(job.id); busy.clips = active.size > 0; });
       }
     } catch (e: any) { log(`[clips] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
