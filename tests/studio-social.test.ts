@@ -615,3 +615,11 @@ test("posting groups (owner's test): Group A = IG A + TikTok A, Group B = IG B +
     assert.equal((await call("DELETE", `/api/studio/social/groups/${B}`)).status, 200);
   } finally { await new Promise((r) => server.close(r)); }
 });
+
+test("media check: the posting service's size limits per network, read as 'too large for'", async () => {
+  const { readMediaCheck } = await import("../src/studio-post-uploads.js");
+  const r = readMediaCheck("a1", { valid: true, size: 400_000_000, format: "mp4", platformLimits: { tiktok: { limit: 4_000_000_000, withinLimit: true }, instagram: { limit: 300_000_000, withinLimit: false }, bluesky: { limit: 50_000_000 } } });
+  assert.deepEqual(r.over.map((x: any) => x.platform), ["instagram", "bluesky"]);
+  assert.equal(r.ok, true); assert.equal(r.format, "mp4");
+  assert.equal(readMediaCheck("a2", { valid: false, code: "MEDIA_UNDECODABLE" }).error, "MEDIA_UNDECODABLE");
+});
