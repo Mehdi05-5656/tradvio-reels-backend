@@ -6,7 +6,7 @@ import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, outputSize, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, settledAnalysis, clipsPrice, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
-  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
+  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, cutRateOf, mezzFps, sourceFps, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError, downloadFormat, downloadSort } from "../src/studio-youtube.js";
@@ -793,4 +793,48 @@ test("a video whose best is 720 lines is kept for both a vertical (1080) and an 
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800, format: "vertical" }) as any), "done");
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url, seconds: 1800, format: "original", collection_id: "col2" }, { id: "job2" }) as any), "done");
   assert.equal(downloads, 1);
+});
+
+test("HD runs (1080 lines at the source's own rate) are timed apart from 720 runs: a43cb8fc was quoted 12.9 min and took 28.5", () => {
+  const run720 = { timing: { video_s: 1800, fetch_s: 25, listen_s: 60, choose_s: 40, cuts: [[30, 5 + 0.7 * 30], [40, 5 + 0.65 * 40], [35, 5 + 0.7 * 35]], lean: { height: 720, sharp: false, fallback: false } } };
+  const runHd = { timing: { video_s: 3151, fetch_s: 27, listen_s: 90, choose_s: 60, cuts: [[30, 5 + 2.1 * 30], [24, 5 + 2.0 * 24], [33, 5 + 2.2 * 33]], lean: { height: 1080, sharp: true, fallback: false } } };
+  // before the Nov 21 change, "1080" runs fetched 30 fps tracks: they count with the ordinary lean rate
+  const old1080 = { timing: { video_s: 1200, fetch_s: 20, listen_s: 40, choose_s: 30, cuts: [[30, 5 + 1.2 * 30]], lean: { height: 1080, sharp: false, fallback: false } } };
+  const t = timingFrom([run720, runHd, old1080]);
+  assert.ok(t.lean_cut_per_s > 0.6 && t.lean_cut_per_s < 1.25, `720 rate from 720 runs: ${t.lean_cut_per_s}`);
+  assert.ok(Math.abs(t.lean_hd_cut_per_s - 2.1) < 0.01, `HD rate from HD runs only: ${t.lean_hd_cut_per_s}`);
+  assert.ok(Math.abs(timingFrom([run720]).lean_hd_cut_per_s - DEFAULT_TIMING.lean_hd_cut_per_s) < 1e-9, "no HD run yet: the default");
+  const yt = { platform: "youtube", lean: true };
+  assert.equal(cutRateOf({ ...yt, quality: "1080" }, t), t.lean_hd_cut_per_s);
+  assert.equal(cutRateOf({ ...yt, quality: "1080", format: "original" }, t), t.lean_cut_per_s, "the video's own shape is cut at 720");
+  assert.equal(cutRateOf({ ...yt, quality: "720" }, t), t.lean_cut_per_s);
+  assert.equal(cutRateOf({ ...yt }, t), t.lean_cut_per_s, "no quality: 720");
+  assert.equal(cutRateOf({ platform: "youtube", quality: "1080" }, t), t.cut_per_s, "not lean: the whole-video rate");
+  assert.equal(cutRateOf({ ...yt, quality: "1080" }, { ...t, lean_hd_cut_per_s: undefined as any }), t.lean_cut_per_s, "a model without the HD rate falls back");
+  // the run itself: 53 min, 15 standard clips, HD
+  const o = { platform: "youtube", lean: true, seconds: 3151, length: "standard", count: 15 };
+  const hd = remainingSeconds({ options: { ...o, quality: "1080" }, status: "queued" }, DEFAULT_TIMING);
+  const sd = remainingSeconds({ options: o, status: "queued" }, DEFAULT_TIMING);
+  assert.ok(hd > 1200 && hd < 1500, `HD quote near the measured 28.5 min (less the restart): ${hd}`);
+  assert.ok(sd < hd * 0.75, `720 stays quicker: ${sd}`);
+});
+
+test("the first cut step brings a source over 30 fps to 30 (the clip is 30 fps either way); 30 and under are left alone", async () => {
+  assert.equal(mezzFps(60), ",fps=30");
+  assert.equal(mezzFps(59.94), ",fps=30");
+  assert.equal(mezzFps(50), ",fps=30");
+  assert.equal(mezzFps(30), "");
+  assert.equal(mezzFps(29.97), "");
+  assert.equal(mezzFps(24), "");
+  assert.equal(mezzFps(null), "");
+  const src = (video: string, fps: number | null = null) => ({ video, audio: null, proxy: null, width: 0, height: 0, fps });
+  let probed: string[] = [];
+  const probe = async (f: string) => { probed.push(f); if (f.includes("bad")) throw new Error("unreadable"); return { fps: 60 }; };
+  assert.equal(await sourceFps(src("/tmp/x/st-1.mp4", 25), probe), 25, "a known rate is used as is");
+  assert.equal(await sourceFps(src("https://storage/x.mp4?token=1"), probe), null, "a network source is not probed");
+  assert.equal(await sourceFps(src(""), probe), null);
+  assert.deepEqual(probed, []);
+  assert.equal(await sourceFps(src("/tmp/x/st-2.mp4"), probe), 60, "a local stretch is read");
+  assert.equal(await sourceFps(src("/tmp/x/bad.mp4"), probe), null, "an unreadable file keeps today's path");
+  assert.deepEqual(probed, ["/tmp/x/st-2.mp4", "/tmp/x/bad.mp4"]);
 });
