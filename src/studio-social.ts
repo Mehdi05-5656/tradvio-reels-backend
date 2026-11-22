@@ -604,5 +604,5 @@ export async function releaseSocialProfile(sb: SupabaseClient, u: string, deps: 
   const row = r.data as any;
   const owner = row.provider && row.provider !== p.name ? providerNamed(row.provider, deps) : p;
   // a refusal keeps the row; the hourly upkeep removes it later (no plan), so it never stays billed unnoticed
-  return clearProfile(sb, owner, row, "plan_ended", deps.log ?? ((s: string) => console.log(s)));
+  return clearProfile(sb, owner, row, "plan_ended", deps.log ?? ((s: string) => console.log(s)), owner === p ? {} : { retired: true });
 }

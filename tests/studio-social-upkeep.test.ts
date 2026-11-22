@@ -167,3 +167,13 @@ test("provider: a refused profile delete is an error; already gone is done", asy
   await ayrshareProvider({ env, fetch: fetchWith(400, { status: "error", message: "Profile not found" }) })!.deleteProfile("pk");
   await ayrshareProvider({ env, fetch: fetchWith(200, { status: "success" }) })!.deleteProfile("pk");
 });
+
+test("sweep: a profile at a provider we left is removed here even when that provider refuses (cancelled account)", async () => {
+  const sb = fakeSb({ studio_social_profiles: [{ user_id: uid(1), provider: "ayrshare", profile_key: "ayr-1", accounts: [{ platform: "tiktok" }], created_at: ago(20 * DAY) }], studio_customers: [{ user_id: uid(1), status: "active" }], studio_social_posts: [], studio_creator_accounts: [], studio_social_prefs: [] });
+  const zp = fakeProvider(); (zp.p as any).name = "zernio";
+  const ayrDown = async () => new Response(JSON.stringify({ status: "error", message: "API Key not valid" }), { status: 400 });
+  const r = await socialUpkeep(sb, { provider: zp.p, env: { STUDIO_SOCIAL_ENABLED: "true", AYRSHARE_API_KEY: "old" }, fetch: ayrDown as any, now: NOW, log: () => {} });
+  assert.deepEqual(r.cleared.map((c) => c.reason), ["provider_moved"]);
+  assert.equal(sb.tables.studio_social_profiles.length, 0);
+  assert.equal(sb.tables.studio_social_prefs[0].cleared_reason, "provider_moved");
+});

@@ -115,10 +115,13 @@ export function clearReason(p: ProfileFacts, f: { hasPlan: boolean; held: boolea
 
 /** Remove one person's profile at the service and here, remember why for the Publish page, and record the event. */
 export async function clearProfile(sb: SupabaseClient, p: SocialProvider | null, row: { user_id: string; profile_key: string; accounts?: any[] | null; created_at?: string }, reason: ClearReason, log: (s: string) => void, extra: Record<string, any> = {}): Promise<boolean> {
+  // a profile at a provider we have left (Ayrshare, cancelled Nov 21 2026) is gone with that account: its refusal does
+  // not keep our row, or the row would be retried forever
+  const retired = reason === "provider_moved" || extra.retired === true;
   if (p) {
     // the provider treats "already gone" as done; any other failure keeps the row so the next round tries again
     try { await p.deleteProfile(row.profile_key); }
-    catch (e: any) { log(`[social] clearing ${row.user_id} failed at the service: ${String(e?.message ?? e).slice(0, 160)}`); return false; }
+    catch (e: any) { log(`[social] clearing ${row.user_id} failed at the service: ${String(e?.message ?? e).slice(0, 160)}${retired ? " (left provider; removed here anyway)" : ""}`); if (!retired) return false; }
   }
   const d = await sb.from("studio_social_profiles").delete().eq("user_id", row.user_id).eq("profile_key", row.profile_key);
   if (d.error) { log(`[social] clearing ${row.user_id}: ${d.error.message}`); return false; }
