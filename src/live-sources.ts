@@ -121,9 +121,14 @@ export async function twitchLiveNow(deps: LiveDeps, userId: string): Promise<{ s
 export const isRecordingOf = (b: Pick<Broadcast, "started_at">, live: { started_at: string } | null): boolean =>
   !!live && Number.isFinite(Date.parse(b.started_at)) && Math.abs(Date.parse(b.started_at) - Date.parse(live.started_at)) < 15 * 60_000;
 /** The top live streams by viewers (official), with the category name. */
-export async function twitchTopStreams(deps: LiveDeps, first = 100, o: { language?: string; gameId?: string } = {}): Promise<LiveStream[]> {
-  const b = await helix(deps, `streams?type=live&first=${Math.min(100, first)}${o.language ? `&language=${encodeURIComponent(o.language)}` : ""}${o.gameId ? `&game_id=${encodeURIComponent(o.gameId)}` : ""}`);
-  return (Array.isArray(b?.data) ? b.data : []).map((s: any) => ({ platform: "twitch" as const, login: String(s.user_login ?? ""), channel: String(s.user_name ?? s.user_login ?? ""), channel_id: String(s.user_id ?? ""), title: String(s.title ?? "").slice(0, 160), category: s.game_name ? String(s.game_name) : null, viewers: Number(s.viewer_count) || 0, started_at: s.started_at ?? null, language: s.language ?? null, thumbnail_url: twitchThumb(s.thumbnail_url), url: `https://www.twitch.tv/${s.user_login}` }));
+export async function twitchTopStreams(deps: LiveDeps, first = 100, o: { language?: string; gameId?: string; /** pages of `first` (Helix's cursor), for more than 100 */ pages?: number } = {}): Promise<LiveStream[]> {
+  const rows: any[] = []; let cursor = "";
+  for (let page = 0; page < Math.max(1, Math.min(5, o.pages ?? 1)); page++) {
+    const b = await helix(deps, `streams?type=live&first=${Math.min(100, first)}${o.language ? `&language=${encodeURIComponent(o.language)}` : ""}${o.gameId ? `&game_id=${encodeURIComponent(o.gameId)}` : ""}${cursor ? `&after=${encodeURIComponent(cursor)}` : ""}`);
+    rows.push(...(Array.isArray(b?.data) ? b.data : []));
+    cursor = b?.pagination?.cursor ?? ""; if (!cursor) break;
+  }
+  return rows.map((s: any) => ({ platform: "twitch" as const, login: String(s.user_login ?? ""), channel: String(s.user_name ?? s.user_login ?? ""), channel_id: String(s.user_id ?? ""), title: String(s.title ?? "").slice(0, 160), category: s.game_name ? String(s.game_name) : null, viewers: Number(s.viewer_count) || 0, started_at: s.started_at ?? null, language: s.language ?? null, thumbnail_url: twitchThumb(s.thumbnail_url), url: `https://www.twitch.tv/${s.user_login}` }));
 }
 /** Viewer-made clips of a broadcast, with their offsets (the ground truth of docs/live-clips/research/experiment-1.md). */
 export async function twitchClipsOf(deps: LiveDeps, broadcasterId: string, videoId: string, startedAt: string, seconds: number): Promise<Array<{ id: string; views: number; offset: number; duration: number; title: string }>> {
@@ -379,6 +384,21 @@ export async function kickSiteLive(deps: LiveDeps, o: { subcategory?: string; pa
     if (!b?.next_page_url) break;
   }
   return out;
+}
+/** Kick's English game streams sit in each game's own list (its front page is mostly other languages); the games most
+ *  streamed there in English, checked Nov 21 2026 (a slug Kick does not know answers its front page, so the category
+ *  is checked too). */
+export const KICK_GAMES = ["call-of-duty-warzone", "fortnite", "grand-theft-auto-v", "marvel-rivals", "arc-raiders", "escape-from-tarkov", "apex-legends", "rust", "counter-strike-2", "minecraft", "valorant", "rocket-league", "ea-sports-fc-26", "battlefield-6", "chess"];
+export async function kickGames(deps: LiveDeps, slugs = KICK_GAMES, parallel = 5): Promise<LiveStream[]> {
+  const out: LiveStream[][] = slugs.map(() => []); let next = 0;
+  await Promise.all(Array.from({ length: parallel }, async () => {
+    for (let k = next++; k < slugs.length; k = next++) {
+      const first = slugs[k].split("-")[0];
+      out[k] = (await kickSiteLive(deps, { subcategory: slugs[k], pages: 1 }).catch(() => [] as LiveStream[]))
+        .filter((s) => s.viewers >= 5 && (s.category ?? "").toLowerCase().split(/[^a-z0-9]+/)[0] === first);
+    }
+  }));
+  return out.flat();
 }
 export function nicheOf(category: string | null): string {
   if (!category) return "chatting";

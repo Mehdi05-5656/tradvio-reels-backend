@@ -29,7 +29,7 @@ import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
-import { hlsVariants, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { hlsVariants, kickGames, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -1017,26 +1017,29 @@ function speechOf(words: Array<{ text: string; start: number; end: number; speak
 // ---------------------------------------------------------------------------------------------------
 // Routes: the Streams page (top live streams by niche) and a link's channel or broadcast
 // ---------------------------------------------------------------------------------------------------
+const OFF_TOPIC = /slots|casino|gambl|poker|betting|crypto|trading/i;
 let discovery: { at: number; streams: Array<LiveStream & { niche: string; permission: Permission }> } | null = null;
 export async function discoverStreams(deps: LiveDeps, env: Record<string, string | undefined>): Promise<Array<LiveStream & { niche: string; permission: Permission }>> {
   if (discovery && Date.now() - discovery.at < 120_000) return discovery.streams;
   // English streams; the top 100 of each platform, and IRL, Just Chatting and GTA VI read on their own so each fills up
-  // (Nov 21 2026: the top 100 held 3 IRL and 7 Just Chatting; each category on its own has ~100)
+  // (Nov 21 2026: the top 100 held 3 IRL and 7 Just Chatting; each category on its own has ~100); Twitch's top 300, so
+  // Games fills too, and Kick's games read one by one
   const none = [] as LiveStream[];
   const gta = await twitchGameId(deps, "Grand Theft Auto VI").catch(() => null);
   const [tw, twIrl, twChat, twGta, kkApi, kkSite, kkIrl, kkChat] = await Promise.all([
-    twitchTopStreams(deps, 100, { language: "en" }).catch(() => none), twitchTopStreams(deps, 100, { language: "en", gameId: TWITCH_GAME.irl }).catch(() => none),
+    twitchTopStreams(deps, 100, { language: "en", pages: 3 }).catch(() => none), twitchTopStreams(deps, 100, { language: "en", gameId: TWITCH_GAME.irl }).catch(() => none),
     twitchTopStreams(deps, 100, { language: "en", gameId: TWITCH_GAME.chatting }).catch(() => none), gta ? twitchTopStreams(deps, 100, { language: "en", gameId: gta }).catch(() => none) : Promise.resolve(none),
     kickTopStreams(deps, 100).then((l) => l.filter((x) => !x.language || /^en/i.test(x.language))).catch(() => none),
     kickSiteLive(deps, { pages: 6 }).catch(() => none), kickSiteLive(deps, { subcategory: "irl", pages: 5 }).catch(() => none), kickSiteLive(deps, { subcategory: "just-chatting", pages: 5 }).catch(() => none),
   ]);
   // Kick: its official list (when the keys are set) and its site's, and GTA VI on its own; most of Kick is not in English,
   // so it takes more pages to fill
-  const kkGta = await kickSiteLive(deps, { subcategory: "grand-theft-auto-vi", pages: 5 }).catch(() => none);
-  const kk = [...kkApi, ...kkSite, ...kkIrl, ...kkChat, ...kkGta];
+  const [kkGta, kkGames] = await Promise.all([kickSiteLive(deps, { subcategory: "grand-theft-auto-vi", pages: 5 }).catch(() => none), kickGames(deps).catch(() => none)]);
+  const kk = [...kkApi, ...kkSite, ...kkIrl, ...kkChat, ...kkGta, ...kkGames];
   const seen = new Set<string>();
   const all = [...tw, ...twIrl, ...twChat, ...twGta, ...kk].filter((s) => { const k = `${s.platform}:${s.login}`; if (!s.login || seen.has(k)) return false; seen.add(k); return true; });
-  const streams = all.map((s) => ({ ...s, niche: nicheOf(s.category), permission: streamerPermission(s.platform, s.login, env) })).filter((s) => s.permission !== "blocked").sort((a, b) => b.viewers - a.viewers);
+  // gambling and trading streams are not offered (Kick's front page has many; they would fill "Games")
+  const streams = all.filter((s) => !OFF_TOPIC.test(s.category ?? "")).map((s) => ({ ...s, niche: nicheOf(s.category), permission: streamerPermission(s.platform, s.login, env) })).filter((s) => s.permission !== "blocked").sort((a, b) => b.viewers - a.viewers);
   discovery = { at: Date.now(), streams };
   return streams;
 }
