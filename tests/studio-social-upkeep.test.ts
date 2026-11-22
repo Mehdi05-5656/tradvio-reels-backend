@@ -113,7 +113,7 @@ function world() {
   ];
   const customers = profiles.map((p) => ({ user_id: p.user_id, status: p.user_id === uid(7) ? "canceled" : "active" }));
   const posts = [
-    { user_id: uid(4), created_at: ago(20 * DAY), status: "posted" },
+    { user_id: uid(4), created_at: ago(35 * DAY), status: "posted" },
     { user_id: uid(5), created_at: ago(20 * DAY), status: "scheduled" },
     { user_id: uid(9), created_at: ago(3 * DAY), status: "posted" },
   ];
@@ -176,4 +176,12 @@ test("sweep: a profile at a provider we left is removed here even when that prov
   assert.deepEqual(r.cleared.map((c) => c.reason), ["provider_moved"]);
   assert.equal(sb.tables.studio_social_profiles.length, 0);
   assert.equal(sb.tables.studio_social_prefs[0].cleared_reason, "provider_moved");
+});
+
+test("rules: the default is 30 quiet days (owner, Nov 21 2026)", () => {
+  const p = { user_id: uid(1), created_at: ago(90 * DAY), accounts: [{ platform: "tiktok" }] };
+  const f = (days: number) => ({ hasPlan: true, held: false, lastPostAt: ago(days * DAY), linked: 1 });
+  const s = { idleDays: 30, unlinkedHours: 2 };
+  assert.equal(clearReason(p, f(29), s, NOW), null);
+  assert.equal(clearReason(p, f(31), s, NOW), "idle");
 });

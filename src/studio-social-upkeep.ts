@@ -3,7 +3,8 @@
 // The posting service (Ayrshare) bills one "profile" per person who presses "Connect your socials", whatever they
 // link and whether they link anything at all. Its bill is the month's highest daily count of profiles. So:
 //   - a profile with no linked network is removed a couple of hours after the last "Connect" press (STUDIO_SOCIAL_UNLINKED_HOURS);
-//   - a profile whose person has not posted, scheduled, opened their stats or relinked for 14 days is removed
+//   - a profile whose person has not posted, scheduled, opened their stats or relinked for 30 days is removed (owner,
+//     Nov 21 2026: 14 days at first, 30 since the move to Zernio)
 //     (STUDIO_SOCIAL_IDLE_DAYS); never while a post is scheduled or on its way, never for an account in the creator program;
 //   - a profile whose person no longer has a plan is removed (the plan-end hook usually did it already).
 // Removing a profile unlinks the networks at the service; the person's post history stays, and "Connect your
@@ -68,7 +69,7 @@ export function zernioBill(accounts: number): { accounts: number; usd_month: num
 type Env = Record<string, string | undefined>;
 export const upkeepSettings = (env: Env) => ({
   mode: (["off", "dry"].includes(String(env.STUDIO_SOCIAL_CLEANUP ?? "").toLowerCase()) ? String(env.STUDIO_SOCIAL_CLEANUP).toLowerCase() : "on") as "on" | "dry" | "off",
-  idleDays: Math.max(1, Number(env.STUDIO_SOCIAL_IDLE_DAYS) || 14),
+  idleDays: Math.max(1, Number(env.STUDIO_SOCIAL_IDLE_DAYS) || 30),
   unlinkedHours: Math.max(0.5, Number(env.STUDIO_SOCIAL_UNLINKED_HOURS) || 2),
   plan: (env.AYRSHARE_PLAN === "business" ? "business" : env.AYRSHARE_PLAN === "launch" ? "launch" : "auto") as "launch" | "business" | "auto",
   interval: (env.AYRSHARE_BILLING_INTERVAL === "year" ? "year" : "month") as "month" | "year",
@@ -79,11 +80,11 @@ export const upkeepSettings = (env: Env) => ({
 // ---------------------------------------------------------------------------------------------------
 export type ClearReason = "never_linked" | "idle" | "no_plan" | "plan_ended" | "provider_moved";
 export const CLEAR_MESSAGE: Record<ClearReason, string> = {
-  never_linked: "Nothing was linked, so the connection was closed. Connect again any time.",
-  idle: "Your accounts were unlinked after 14 days without posting from Clone8. Connect again any time; it takes a minute.",
-  no_plan: "Your accounts were unlinked because your plan ended. Pick a plan to post again.",
-  plan_ended: "Your accounts were unlinked because your plan ended. Pick a plan to post again.",
-  provider_moved: "Posting moved to a new, faster connection. Link your accounts again; it takes a minute.",
+  never_linked: "Nothing was linked, so the connection was closed. Reconnect any time.",
+  idle: "Your accounts were disconnected after 30 days without posting or scheduling. Reconnect them to keep posting from Clone8.",
+  no_plan: "Your accounts were disconnected because your plan ended. Pick a plan to post again.",
+  plan_ended: "Your accounts were disconnected because your plan ended. Pick a plan to post again.",
+  provider_moved: "We upgraded how Clone8 connects to your socials, so your accounts were disconnected. Reconnect them to keep posting and scheduling.",
 };
 
 /** Mark that the person used posting just now (posted, scheduled, canceled, relinked, drafted a caption, opened stats).
