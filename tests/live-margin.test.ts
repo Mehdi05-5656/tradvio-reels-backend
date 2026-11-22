@@ -47,6 +47,8 @@ test("the moment checker never marks a clip down for its language", () => {
 import { unsafeNote, UNSAFE } from "../src/studio-live-clips.js";
 test("when many moments were explicit or slurs, the run's note says so and why it protects the person", () => {
   assert.equal(unsafeNote(1, 23), "", "one is not worth a word");
+  assert.match(unsafeNote(1, 1), /^ It was explicit content or slurs/, "the only moment: it is said");
+  assert.match(unsafeNote(4, 4), /^ All 4 were explicit content or slurs/);
   assert.equal(unsafeNote(3, 40), "", "a few among many: not the reason for fewer clips");
   assert.match(unsafeNote(6, 23), /6 of the moments we passed on were explicit content or slurs/);
   assert.match(unsafeNote(6, 23), /TikTok, Instagram and YouTube take posts like that down/);

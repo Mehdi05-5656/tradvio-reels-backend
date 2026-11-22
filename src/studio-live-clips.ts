@@ -366,8 +366,8 @@ export function hybridHours(env: Record<string, string | undefined> = process.en
 export const UNSAFE = /sexual|explicit|nudity|nude|porn|slur|homophob|racis|drug|self-harm|suicide|real violence|gore/i;
 /** Owner, Nov 22 2026: when a stream's moments were turned down for this, say so, and why it protects them. */
 export function unsafeNote(unsafe: number, checked: number): string {
-  if (unsafe < 2 || unsafe < checked * 0.2) return "";
-  return ` ${unsafe} of the moments we passed on were explicit content or slurs. We leave those out on purpose: TikTok, Instagram and YouTube take posts like that down and can restrict or ban the account that posts them.`;
+  if (!(unsafe >= 2 || (unsafe >= 1 && unsafe === checked)) || unsafe < checked * 0.2) return "";
+  return ` ${unsafe === checked ? (unsafe === 1 ? "It was" : `All ${unsafe} were`) : `${unsafe} of the moments we passed on were`} explicit content or slurs. We leave those out on purpose: TikTok, Instagram and YouTube take posts like that down and can restrict or ban the account that posts them.`;
 }
 export const VERIFY_SYSTEM = `You are the best short-form video editor alive, checking ONE candidate moment from a live stream before it is cut into a 20-55 second vertical clip for TikTok, Reels and Shorts. The moment was found by the stream's own chat reacting (the burst is marked on the transcript) and by the sound. You see the transcript of the window with its signals, and stills from it. Decide whether this is a clip a stranger would stop for, and where exactly it should start and end.
 
@@ -920,7 +920,8 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         words: inside.map((w) => [w.text, round2(w.start + start), round2(w.end + start), w.speaker ?? null] as [string, number, number, string | null]) });
     }
     timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls; timing.unheard = unheard; timing.skipped_muted = skippedMuted; timing.deferred = deferred; timing.extended = extended;
-    if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked} times, but none of those moments stands alone as a clip` : "No moment in this stream stands out enough to be a clip", 422);
+    // (no clip at all: the reason still says when it was the stream's content, as the fewer-clips note does)
+    if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked === 1 ? "once" : `${checked} times`}, but none of those moments stands alone as a clip.${unsafeNote(unsafe, checked)}`.replace(/\.$/, "") : "No moment in this stream stands out enough to be a clip", 422);
     kept.sort((x, y) => y.score - x.score || x.start - y.start);
     // more kept than asked for: one head-to-head look settles the order (model grades bunch), and the extra ones go
     if (kept.length > count) {

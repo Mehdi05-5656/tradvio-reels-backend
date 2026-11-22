@@ -215,6 +215,13 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   assert.equal(out5, "done"); assert.equal(cut5[0].score, 73, "the checklist score (72.5 rounded), not the felt 80"); assert.equal(cut5[0].hook_line, "He bet it all"); assert.match(cut5[0].caption, /whole round/); assert.equal(cut5[0].grades.hook, 8);
   const out6 = await runStreamClipsJob(fakeSb().sb, { ...deps, verify: async (i: any) => graded("Music", { hard_fail: "copyrighted music is the main sound" })(i) }, { ...job, progress: {} });
   assert.equal(out6, "clips_none_found", "a hard fail vetoes a well-graded moment");
+  // every moment explicit: no clip, and the reason says why that protects them (owner, Nov 22 2026)
+  const fx = fakeSb();
+  const outX = await runStreamClipsJob(fx.sb, { ...deps, verify: async (i: any) => graded("Scene", { hard_fail: "explicit sexual content is the point of the clip" })(i) }, { ...job, progress: {} });
+  assert.equal(outX, "clips_none_found");
+  const noteX = JSON.stringify([...fx.updates, ...fx.calls]);
+  assert.match(noteX, /It was explicit content or slurs/, "the person is told the moment was left out for its content");
+  assert.match(noteX, /TikTok, Instagram and YouTube take posts like that down/);
   const out7 = await runStreamClipsJob(fakeSb().sb, { ...deps, verify: async (i: any) => graded("Needs it", { grades: { hook: 9, standalone: 4, payoff: 9, reaction: 9, quotable: 9, length: 9 } })(i) }, { ...job, progress: {} });
   assert.equal(out7, "clips_none_found", "a stranger must understand it: standalone under 6 is out");
   // more kept than asked: the rerank picks, and only `count` are cut (two bursts 300 s apart, one clip asked)
