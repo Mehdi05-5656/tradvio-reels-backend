@@ -1267,7 +1267,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       });
       // 2. post (outside any lock); 3. record the outcome on a fresh copy
       let posts: any[] = [], failure: any = null;
-      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options, trial_copies: b.trial_copies, autoreply: b.autoreply }, { conversationId: req.params.id, log, env, via: "chat" }); }
+      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, accounts: Array.isArray(b.accounts) ? b.accounts : undefined, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options, trial_copies: b.trial_copies, autoreply: b.autoreply }, { conversationId: req.params.id, log, env, via: "chat" }); }
       catch (e: any) { failure = e; }
       const ok = posts.filter((x) => x.status !== "failed"), nets = listNames([...new Set(posts.flatMap((x) => x.platforms as string[]))]);
       const unsure = posts.filter((x) => x.error === UNCONFIRMED).length;
