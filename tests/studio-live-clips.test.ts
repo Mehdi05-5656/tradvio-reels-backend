@@ -318,13 +318,13 @@ test("the hybrid: the strongest hours are heard whole and read by Clips' picker;
   // hour 0 (the burst's) has talk at the burst and, with no burst, at 1500 s; the picker finds the latter
   const hourWords = [...mk(880), ...mk(1300), ...mk(1500)];
   let hears = 0, picks = 0; const hourReads: number[] = []; const heads: string[] = []; const bodies: string[] = []; const cutH: any[] = [];
-  const base: any = { env: ENV, log: () => undefined, plans: PLANS, drawtext: true, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), fetchWindow: async () => undefined, fetchStretch: async () => undefined, stills: async () => [],
+  const base: any = { env: { ...ENV, STUDIO_LIVE_QUIET: "off" }, log: () => undefined, plans: PLANS, drawtext: true, playlists: async () => ({ audio: "a.m3u8", video: "v.m3u8" }), fetchWindow: async () => undefined, fetchStretch: async () => undefined, stills: async () => [],
     hear: async () => { hears++; const w = mk(30); return { words: w, events: [], lines: linesFromWords(w), excess: null, language: "en" }; },
     hearHour: async (_f: string, sec: number) => { hourReads.push(sec); return { words: hourWords, events: [], language: "en" }; },
     pick: async (ls: any[]) => { picks++; const s = ls.find((l) => l.start >= 1500); const e = [...ls].reverse().find((l) => l.end <= 1530); return s && e ? [{ start_line: s.i, end_line: e.i, title: "Car talk", hook: "so", why: "talk", score: 70, tags: ["irl"] }] : []; },
     verify: async (i: any) => { heads.push(i.head); bodies.push(i.body); return graded(i); }, cut: async (ctx: any, m: any) => { cutH.push(m); return { asset_id: "h", bytes: 1, seconds: m.end - m.start }; } };
   const out = await runStreamClipsJob(fakeSb().sb, { ...base, chat: async () => chatWith(900, 7200) }, job(2, 7200));
-  assert.equal(out, "done"); assert.deepEqual(hourReads, [3600], "hour 0 (the burst's) heard whole; hour 1, with no candidate, not");
+  assert.equal(out, "done"); assert.deepEqual(hourReads, [3600], "hour 0 (the burst's) heard whole; hour 1, with no candidate, not (the quiet-chat rule is off here: its own test is in live-margin.test.ts)");
   assert.ok(picks >= 1, "the picker read the hour"); assert.equal(hears, 0, "both windows sit inside the read hour: nothing fetched or heard again");
   assert.equal(cutH.length, 2, `the chat's moment and the picker's: ${cutH.map((m) => m.start)}`);
   assert.ok(cutH.some((m) => m.start > 1450 && m.start < 1520), `the picker's moment was cut: ${cutH.map((m) => m.start)}`);

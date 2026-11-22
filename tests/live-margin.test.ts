@@ -29,3 +29,29 @@ test("a cost recorded inside a run carries that run; one that names its own job 
   await Promise.all(["a", "b"].map((id) => withCostRun({ job_id: id, user_id: null, tool: "clips" }, async () => { await new Promise((r) => setTimeout(r, id === "a" ? 10 : 1)); seen.push(`${id}:${withRun(row).job_id}`); })));
   assert.deepEqual(seen.sort(), ["a:a", "b:b"]);
 });
+
+import { hoursToRead, isQuiet, QUIET, VERIFY_SYSTEM } from "../src/studio-live-clips.js";
+test("a quiet chat: every hour is heard, the hours the chat reacted to first; a busy one: only its top hours", () => {
+  const none = () => 0;
+  const cands = [{ t_event: 7300, score: 9 }, { t_event: 7400, score: 5 }, { t_event: 200, score: 3 }];
+  assert.deepEqual(hoursToRead(cands, 12170, none, 2), [0, 2], "busy: the 2 hours with moments");
+  assert.deepEqual(hoursToRead(cands, 12170, none, QUIET.max_hours, true), [0, 1, 2, 3], "quiet: every hour of the 3.4 h stream");
+  assert.equal(isQuiet(18, 15, 10), true, "Nov 22 2026 gattouz0: 18 a minute, 15 moments for 10 asked");
+  assert.equal(isQuiet(400, 60, 10), false);
+  assert.equal(isQuiet(400, 12, 10), true, "busy chat but too few moments for 10 clips");
+});
+test("the moment checker never marks a clip down for its language", () => {
+  assert.match(VERIFY_SYSTEM, /never marked down for not being in English/);
+});
+
+import { unsafeNote, UNSAFE } from "../src/studio-live-clips.js";
+test("when many moments were explicit or slurs, the run's note says so and why it protects the person", () => {
+  assert.equal(unsafeNote(1, 23), "", "one is not worth a word");
+  assert.equal(unsafeNote(3, 40), "", "a few among many: not the reason for fewer clips");
+  assert.match(unsafeNote(6, 23), /6 of the moments we passed on were explicit content or slurs/);
+  assert.match(unsafeNote(6, 23), /TikTok, Instagram and YouTube take posts like that down/);
+  assert.ok(UNSAFE.test("explicit sexual content (GTA threesome scene)") && UNSAFE.test("homophobic slur repeated") && !UNSAFE.test("needs the previous five minutes"));
+});
+test("a little mixing of languages is normal and never a reason to turn a moment down", () => {
+  assert.match(VERIFY_SYSTEM, /A little mixing is never a reason to lower a grade/);
+});

@@ -361,13 +361,21 @@ export const HYBRID = { hours: 2, min_heard_s: 600, wanted_per_window: 5, near_s
 /** How many hours a run reads: HYBRID.hours, or STUDIO_LIVE_HYBRID_HOURS (the first run of Nov 19 2026 read three for $1.47
  *  a run against $2.40 at the floor, 39 %; two is about $1.15, 52 %). */
 export function hybridHours(env: Record<string, string | undefined> = process.env): number { const n = Number(env.STUDIO_LIVE_HYBRID_HOURS); return Number.isFinite(n) && n > 0 ? Math.min(6, Math.round(n)) : HYBRID.hours; }
+/** A moment turned down because posting it would be taken down or get the account restricted (the checker's hard fail
+ *  or its reason): explicit sexual content, slurs, drugs, self-harm, real violence. */
+export const UNSAFE = /sexual|explicit|nudity|nude|porn|slur|homophob|racis|drug|self-harm|suicide|real violence|gore/i;
+/** Owner, Nov 22 2026: when a stream's moments were turned down for this, say so, and why it protects them. */
+export function unsafeNote(unsafe: number, checked: number): string {
+  if (unsafe < 2 || unsafe < checked * 0.2) return "";
+  return ` ${unsafe} of the moments we passed on were explicit content or slurs. We leave those out on purpose: TikTok, Instagram and YouTube take posts like that down and can restrict or ban the account that posts them.`;
+}
 export const VERIFY_SYSTEM = `You are the best short-form video editor alive, checking ONE candidate moment from a live stream before it is cut into a 20-55 second vertical clip for TikTok, Reels and Shorts. The moment was found by the stream's own chat reacting (the burst is marked on the transcript) and by the sound. You see the transcript of the window with its signals, and stills from it. Decide whether this is a clip a stranger would stop for, and where exactly it should start and end.
 
 Keep it only if ALL hold: it stands alone (no context needed from earlier in the stream, no "as I said"); it has a payoff (a laugh, a shock, a win, a fail, a reveal, a line that lands) and the clip ends right after it; it is not a sponsor read, an ad break, a "be right back" screen, music only, or the streamer reading a chat message that needs the chat to be seen; it is not just the game's cutscene with the streamer silent unless the picture itself is the payoff.
 
 The proposed cut is only a first guess from the chat's timing. YOUR job is to find the best clip inside the whole window: if the payoff comes later than the proposed end (the chat often reacts before the moment finishes), move end_line to the line where the payoff lands plus the reaction it earns. Open on the hook: start_line is the first line a stranger needs, as late as possible. A line that only exists because the stream was running (a transaction, a greeting, "okay so", waiting, small talk, the streamer reading chat) is never the first line; setup lines stay only when the payoff makes no sense without them, and then the fewest. A clip that opens on the stake or the turn itself and lets the reaction run beats one that opens ten seconds before it. End right after the reaction the payoff earns; never trail into the next topic. The clip must be 20 to 55 seconds and start where a thought starts. Judge the moment with YOUR boundaries, not the proposed ones.
 
-Grade six things, each 0-10, strictly (10 is the best clip of the month, 5 is ordinary, 2 is weak):
+Language: judge every clip for viewers who speak the stream's language. A stream in French, Arabic, Spanish or any other language is never marked down for not being in English, and a mix is normal: many streamers (an American streamer with an Arab, Latino or other background, say) drop words or lines of another language into their talk. A little mixing is never a reason to lower a grade or turn a moment down; "a stranger" below means a stranger who follows the stream's main language.\n\nGrade six things, each 0-10, strictly (10 is the best clip of the month, 5 is ordinary, 2 is weak):
 - hook: does the first line or the first picture of YOUR cut already show the stakes or the reaction, with no greeting, no dead air, no warm-up?
 - standalone: would a stranger who never saw this stream understand it with no context? 8+ means fully; under 6 means it needs the stream.
 - payoff: is there a clear turn (a fail, a win, a reveal, a punchline, a shock) that lands in the second half, best in the last ten seconds (where the clips that win on TikTok put it), with the reaction after it inside the clip and nothing after the reaction?
@@ -468,8 +476,16 @@ async function fromSegments(url: string, start: number, seconds: number, src: st
 }
 export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"]; /** the door that heard it: a window reuses the words only when it was Scribe (exact words for the verdict and the cut) */ door: "scribe" | "groq" };
 /** The hours to read whole: the strongest by the chat's candidates (their scores summed), not muted, in stream order. */
-export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours): number[] {
+/** A quiet chat (owner, Nov 22 2026: a 3.4 h Kick stream at 18 messages a minute gave 15 chat moments and 8 more from the
+ *  2 hours heard; 2 of the 23 passed, for 10 asked, and 1.4 h was never heard): when the chat is quiet or its moments are
+ *  too few for the clips asked, every hour is heard (up to `max_hours`), not only the hours the chat reacted to. Hearing
+ *  an hour costs ~$0.05 (Groq + Haiku's picker). Off with STUDIO_LIVE_QUIET=off. */
+export const QUIET = { per_minute: 60, cands_per_clip: 3, max_hours: 6 };
+export const isQuiet = (perMinute: number, candidates: number, asked: number) => perMinute < QUIET.per_minute || candidates < asked * QUIET.cands_per_clip;
+export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours, everyHour = false): number[] {
   const score = new Map<number, number>();
+  // every hour is a choice when the chat is quiet; the ones it reacted to still come first
+  if (everyHour) for (let h = 0; h * 3600 < seconds; h++) score.set(h, 0);
   for (const c of cands) { const h = Math.floor(c.t_event / 3600); score.set(h, (score.get(h) ?? 0) + c.score); }
   return [...score.entries()].filter(([h]) => Math.min(3600, seconds - h * 3600) >= HYBRID.min_heard_s && mutedShare(h * 3600, Math.min(seconds, (h + 1) * 3600)) <= 0.4)
     .sort((a, b) => b[1] - a[1]).slice(0, max).map(([h]) => h).sort((a, b) => a - b);
@@ -738,13 +754,15 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     if ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off") {
       // a part of up to the hybrid's hours is read whole, newest first (what nobody has clipped yet); otherwise the
       // clock hours the chat reacted to most, inside the part
-      const maxHours = hybridHours(deps.env ?? process.env);
+      const quiet = (deps.env ?? process.env).STUDIO_LIVE_QUIET !== "off" && isQuiet(signals.perMinute, cands.length, count);
+      const maxHours = quiet ? Math.max(hybridHours(deps.env ?? process.env), QUIET.max_hours) : hybridHours(deps.env ?? process.env);
       const stretches: Array<{ start: number; seconds: number }> = [];
       if (part && part.to - part.from <= maxHours * 3600 + 60) {
         for (let z = part.to; z - part.from >= HYBRID.min_heard_s && stretches.length < maxHours; z -= 3600) { const a = Math.max(part.from, z - 3600); if (mutedShare(a, z) <= 0.4) stretches.push({ start: a, seconds: z - a }); }
         stretches.reverse();
       }
-      const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours);
+      const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours, quiet);
+      if (quiet) log(`[live] quiet ${JSON.stringify({ job: job.id, per_minute: Math.round(signals.perMinute), candidates: cands.length, asked: count, hearing: hours.length })}`);
       if (hours.length) {
         await renew(sb, job, { stage: "transcribing", message: stretches.length ? `Listening to the ${part!.scope === "since" ? "new part" : part!.scope === "range" ? "part you picked" : "latest part"} of the stream, every word` : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
         const tHours = Date.now();
@@ -775,7 +793,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     await renew(sb, job, { stage: "transcribing", message: `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
     const baseAt = (abs: number) => { const bin = Math.floor(abs / 10); const h = signals.rate.slice(Math.max(0, bin - 60), Math.max(1, bin)).slice().sort((a, c) => a - c); return h.length ? h[Math.floor(h.length / 2)] : 0; };
-    const kept: Moment[] = []; let checked = 0, heardOk = 0; const tListen = Date.now(); let claudeCalls = 0;
+    const kept: Moment[] = []; let checked = 0, heardOk = 0, unsafe = 0; const tListen = Date.now(); let claudeCalls = 0;
     const hear = deps.hear ?? ((f, d, sec) => hearWindow(deps, f, d, u, sec));
     const verify = deps.verify ?? ((input) => verifyWithClaude(deps, input, u));
     const stills = deps.stills ?? stillsFrom;
@@ -889,6 +907,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const score = checklistScore(v);
       const standalone = v.grades ? v.grades.standalone >= 5 : v.standalone;
       const keep = v.keep && !v.hard_fail && standalone && score >= bar && d >= len.min && d <= len.max + 3;
+      if (!keep && UNSAFE.test(`${v.hard_fail ?? ""} ${v.why_not ?? ""}`)) unsafe++;
       log(`[live] moment ${JSON.stringify({ job: job.id, rank: c.rank, t: c.t_event, score, felt: v.score, grades: v.grades ?? undefined, keep, cut: [round2(start + a), round2(start + z)], title: v.title.slice(0, 60), hook_line: v.hook_line?.slice(0, 40), why_not: keep ? undefined : v.hard_fail?.slice(0, 80) || v.why_not.slice(0, 80) || (d < len.min - 3 ? "too short" : d > len.max + 3 ? "too long" : "under the bar") })}`);
       const hv = verdicts.get(hourOf(c)) ?? { n: 0, kept: 0 }; if (!c.cut && c.source !== "words") hv.n++; if (keep) hv.kept++; verdicts.set(hourOf(c), hv);
       if (!keep && !hv.kept && hv.n === COLD.after) log(`[live] cold ${JSON.stringify({ job: job.id, hour: hourOf(c), after: hv.n })}`);
@@ -979,7 +998,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const asked = Number(o.count ?? o.max_clips) || kept.length;
     const word = (n: number) => `${n} ${n === 1 ? "clip" : "clips"}`;
     const note = skipped.length ? `${word(made.length)} made; ${skipped.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
-      : made.length < asked ? `The chat pointed at ${checked} moments and ${word(made.length)} stood alone as clips, of the ${asked} you asked for. You were charged for ${word(made.length)}; the rest went back.` : null;
+      : made.length < asked ? `The chat pointed at ${checked} moments and ${word(made.length)} stood alone as clips, of the ${asked} you asked for.${unsafeNote(unsafe, checked)} You were charged for ${word(made.length)}; the rest went back.` : null;
     await setCollection({ status: "ready", note });
     await renew(sb, job, { stage: "done", outcome: made.length < asked ? "fewer" : "done", made_count: made.length, asked, charged }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });
