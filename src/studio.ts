@@ -837,6 +837,10 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const cust = await sb.from("studio_customers").select("status,stripe_subscription_id,billing_interval,plan_id").eq("user_id", u).maybeSingle();
       if (cust.error) throw cust.error;
       if (!cust.data || !["active", "trialing"].includes(cust.data.status) || !cust.data.stripe_subscription_id) return res.status(409).json({ error: "subscription_required", detail: "Extra accounts are added to a plan; pick a plan first" });
+      // one account per network: never sell more than the networks offered beyond the plan's own (lowering is always fine)
+      { const { usableExtra } = await import("./studio-social.js"); const { getSocialProvider } = await import("./social-provider.js");
+        const most = usableExtra(SOCIAL_ACCOUNTS[cust.data.plan_id] ?? 1, getSocialProvider({ env })?.offered().length ?? 7);
+        if (extra > most) return res.status(400).json({ error: "invalid_extra", detail: most ? `Up to ${most} extra account${most === 1 ? "" : "s"}: one per network we post to` : "Your plan already covers every network we post to" }); }
       const interval: Interval = cust.data.billing_interval === "year" ? "year" : "month";
       const price = seatPriceId(interval, env);
       if (!price) return res.status(503).json({ error: "billing_unavailable", detail: "Extra accounts are not on sale yet" });

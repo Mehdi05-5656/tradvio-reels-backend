@@ -11,6 +11,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftCaption, type CaptionDraft } from "./studio-captions.js";
 import { getSocialProvider, isSocialPlatform, SocialError, statusOf, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult } from "./social-provider.js";
 import { hasPlanAccess } from "./studio-limits.js";
+import { recordEvent } from "./studio-events.js";
+import { CLEAR_MESSAGE, clearProfile, keepUntil, recordSocialCosts, socialUpkeep, touchSocial, upkeepFacts, upkeepSettings, type ClearReason } from "./studio-social-upkeep.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Outputs are kept 30 days after the job finishes; a post must go out a day before that. */
@@ -50,9 +52,11 @@ export function webhookUrl(env: Record<string, string | undefined>): string | nu
   return base && token ? `${base}/api/studio/social/webhook?token=${encodeURIComponent(token)}` : null;
 }
 
-/** How many social accounts a person may post to: the plan's own plus the extra ones they added. */
+/** How many social accounts a person may post to: the plan's own plus the extra ones they added. One account per
+ *  network (the person's one posting profile holds one of each), so extras stop at the networks offered: `networks` is
+ *  how many are offered today, and max_extra never sells an account that could not be linked. */
 export type Allowance = { plan: string | null; included: number; extra: number; total: number; price_usd_month: number; interval: "month" | "year"; max_extra: number };
-export async function allowanceOf(sb: SupabaseClient, u: string): Promise<Allowance> {
+export async function allowanceOf(sb: SupabaseClient, u: string, networks?: number): Promise<Allowance> {
   let c = await sb.from("studio_customers").select("plan_id,status,billing_interval,social_extra,owner_pass").eq("user_id", u).maybeSingle();
   if (c.error && /social_extra|owner_pass/.test(String(c.error.message ?? ""))) c = await sb.from("studio_customers").select("plan_id,status,billing_interval").eq("user_id", u).maybeSingle() as any;
   if (c.error) throw c.error;
@@ -61,7 +65,11 @@ export async function allowanceOf(sb: SupabaseClient, u: string): Promise<Allowa
   // the owner pass posts to as many accounts as the largest plan
   const included = d.owner_pass && !SOCIAL_ACCOUNTS[d.plan_id] ? SOCIAL_ACCOUNTS.studio : live ? SOCIAL_ACCOUNTS[d.plan_id] ?? 1 : 0, extra = live ? Math.max(0, Number(d.social_extra ?? 0)) : 0;
   const interval = d.billing_interval === "year" ? "year" : "month";
-  return { plan: d.plan_id ?? null, included, extra, total: included + extra, price_usd_month: interval === "year" ? SOCIAL_SEAT_USD.year_per_month : SOCIAL_SEAT_USD.month, interval, max_extra: MAX_SOCIAL_EXTRA };
+  return { plan: d.plan_id ?? null, included, extra, total: included + extra, price_usd_month: interval === "year" ? SOCIAL_SEAT_USD.year_per_month : SOCIAL_SEAT_USD.month, interval, max_extra: usableExtra(included, networks) };
+}
+/** Extra accounts worth buying: up to one per network offered beyond the plan's own (never fewer than none). */
+export function usableExtra(included: number, networks?: number): number {
+  return networks == null ? MAX_SOCIAL_EXTRA : Math.max(0, Math.min(MAX_SOCIAL_EXTRA, networks - included));
 }
 /** Network options the person may set, cleaned: today a YouTube title (required there) and its visibility. */
 export function cleanOptions(platforms: string[], raw: any, caption: string): Record<string, any> {
@@ -96,6 +104,15 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     if (c.error) throw c.error;
     if (!hasPlanAccess(c.data)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
   };
+  // Why the person's accounts were unlinked, shown on the Publish page for 30 days (until they connect again).
+  const clearedNote = async (sb: SupabaseClient, u: string): Promise<{ at: string; reason: ClearReason; message: string } | null> => {
+    try {
+      const r = await sb.from("studio_social_prefs").select("cleared_at,cleared_reason").eq("user_id", u).maybeSingle();
+      const d = r.data as { cleared_at: string | null; cleared_reason: ClearReason | null } | null;
+      if (r.error || !d?.cleared_at || !d.cleared_reason || Date.now() - Date.parse(d.cleared_at) > 30 * 86400_000) return null;
+      return { at: d.cleared_at, reason: d.cleared_reason, message: CLEAR_MESSAGE[d.cleared_reason] ?? CLEAR_MESSAGE.idle };
+    } catch { return null; }
+  };
   const ensureWebhook = async (sb: SupabaseClient, p: SocialProvider, u: string, profileKey: string, registeredHash: string | null | undefined) => {
     const url = webhookUrl(env);
     if (!url || !env.STUDIO_SOCIAL_WEBHOOK_SECRET) return;
@@ -113,15 +130,19 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     if (!p) return res.json({ enabled: false, connected: false, accounts: [], platforms: [] });
     try {
       const sb = sbFn();
-      const [prof, allowance] = await Promise.all([profileOf(sb, u), allowanceOf(sb, u)]);
-      if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered(), allowance });
+      const [prof, allowance] = await Promise.all([profileOf(sb, u), allowanceOf(sb, u, p.offered().length)]);
+      if (!prof) return res.json({ enabled: true, connected: false, accounts: [], platforms: p.offered(), allowance, cleared: await clearedNote(sb, u) });
       let accounts = prof.accounts ?? [], stale = false;
       try {
         accounts = await p.accounts(prof.profile_key);
         await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
       } catch (e: any) { stale = true; log(`[social] accounts read failed for ${u}: ${String(e?.message ?? e).slice(0, 160)}`); }
       if (!stale) void ensureWebhook(sb, p, u, prof.profile_key, prof.webhook_hash); // re-registers after a URL or secret change
-      res.json({ enabled: true, connected: accounts.length > 0, accounts, stale, platforms: p.offered(), allowance });
+      // when the accounts are unlinked for lack of use (null: kept regardless, or nothing linked)
+      const s = upkeepSettings(env);
+      const f = (await upkeepFacts(sb, [u], s.idleDays).catch(() => null))?.get(u);
+      const keep_until = s.mode === "on" && f ? keepUntil({ ...(prof as any), accounts }, f.lastPostAt, { idleDays: s.idleDays, held: f.held }) : null;
+      res.json({ enabled: true, connected: accounts.length > 0, accounts, stale, platforms: p.offered(), allowance, keep_until, idle_days: s.idleDays });
     } catch (e) { fail(res, e); }
   });
 
@@ -146,7 +167,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
         if (cap) {
           const n = await sb.from("studio_social_profiles").select("user_id", { count: "exact", head: true });
           const used = n.count ?? 0;
-          if (used >= cap) { log(`[social] ALERT profile cap reached (${used}/${cap}); linking refused for ${u}`); throw new SocialError("linking_full", "Linking is paused for a moment while we add room. Try again soon.", 503); }
+          if (used >= cap) { log(`[social] ALERT profile cap reached (${used}/${cap}); linking refused for ${u}`); recordEvent({ user_id: u, kind: "feature", name: "social_linking_full", props: { used, cap } }); throw new SocialError("linking_full", "Linking is paused for a moment while we add room. Try again soon.", 503); }
           if (used + 1 >= Math.ceil(cap * 0.8)) log(`[social] ALERT profiles at ${used + 1}/${cap}; raise the posting plan soon`);
         }
         // The title shows on the linking page and must be unique in the provider account.
@@ -168,13 +189,16 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
           if (!prof) throw ins.error;
         } else prof = ins.data as any;
         log(`[social] profile created for ${u}`);
+        const count = await sb.from("studio_social_profiles").select("user_id", { count: "exact", head: true });
+        recordEvent({ user_id: u, kind: "feature", name: "social_profile_created", props: { profiles_now: count.count ?? null } });
       }
+      await touchSocial(sb, u); // pressing Connect counts as use: the linking page gets its full time
       await ensureWebhook(sb, p, u, prof!.profile_key, prof!.webhook_hash);
       const redirect = safeReturn(req.body?.return_to, env) ?? env.STUDIO_SOCIAL_RETURN_URL;
       let origin: string | undefined;
       try { origin = redirect ? new URL(redirect).origin : undefined; } catch { origin = undefined; }
       // at the plan's account limit the linking page only relinks what is there (more accounts are added to the plan first)
-      const allowance = await allowanceOf(sb, u);
+      const allowance = await allowanceOf(sb, u, p.offered().length);
       const linkedNow = (prof!.accounts ?? []).map((a) => a.platform);
       const full = linkedNow.length >= allowance.total;
       if (full && !linkedNow.length) throw new SocialError("account_limit", "Your plan has no social accounts yet; add one to link it", 409);
@@ -195,6 +219,8 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       await p.disconnect(prof.profile_key, platform);
       const accounts = await p.accounts(prof.profile_key).catch(() => (prof.accounts ?? []).filter((a) => a.platform !== platform));
       await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
+      await touchSocial(sb, u);
+      recordEvent({ user_id: u, kind: "feature", name: "social_network_changed", props: { platform, change: "unlinked", by: "person_in_clone8" } });
       res.json({ accounts });
     } catch (e) { fail(res, e); }
   });
@@ -230,6 +256,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const item = await resolveItem(sb, u, b);
       const platforms = (Array.isArray(b.platforms) ? b.platforms : []).map(String).filter(isSocialPlatform);
       const draft = await (deps.caption ?? draftCaption)(sb, u, { ...item, platforms, note: b.note ? String(b.note) : null }, { env, fetch: deps.fetch, log });
+      await touchSocial(sb, u);
       res.json({ draft });
     } catch (e) { fail(res, e); }
   });
@@ -249,6 +276,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const prof = await profileOf(sb, u);
       if (row.provider_post_id && prof) await p.cancel(prof.profile_key, row.provider_post_id);
       const upd = await sb.from("studio_social_posts").update({ status: "canceled", updated_at: new Date().toISOString() }).eq("id", row.id).select("*").single();
+      await touchSocial(sb, u);
       res.json({ post: publicPost((upd.data ?? row) as SocialPostRow, null) });
     } catch (e) { fail(res, e); }
   });
@@ -275,6 +303,8 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
         const accounts = await p.accounts(prof.data.profile_key).catch(() => null);
         if (accounts) await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", prof.data.user_id);
         log(`[social] ${hook.platform} ${hook.change}${hook.bySystem ? " (by the network)" : ""} for ${prof.data.user_id}`);
+        if (!hook.bySystem) await touchSocial(sb, prof.data.user_id); // linking or relinking is use; a network dropping a link is not
+        recordEvent({ user_id: prof.data.user_id, kind: "feature", name: "social_network_changed", props: { platform: hook.platform, change: hook.change, by: hook.bySystem ? "network" : "person" } });
       }
       res.json({ ok: true });
     } catch (e: any) { console.error("[social] webhook", String(e?.message ?? e)); res.status(500).json({ error: "webhook_failed" }); }
@@ -329,7 +359,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const prof = pr.data as { profile_key: string; accounts: SocialAccount[] } | null;
   if (!prof) throw new SocialError("not_connected", "Connect your socials first", 409);
   // more linked than the plan covers (linked several at once on the linking page): posting waits for a fix
-  const allowance = await allowanceOf(sb, u);
+  const allowance = await allowanceOf(sb, u, p.offered().length);
   const linkedCount = (prof.accounts ?? []).length;
   if (linkedCount > allowance.total) throw new SocialError("over_account_limit", `Your plan covers ${allowance.total} social account${allowance.total === 1 ? "" : "s"} and ${linkedCount} are linked. Add ${linkedCount - allowance.total} to your plan or unlink ${linkedCount - allowance.total === 1 ? "one" : "some"} to post.`, 409);
   const items: any[] = Array.isArray(b.items) ? b.items.slice(0, MAX_ITEMS + 1) : [];
@@ -437,6 +467,8 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     }
   }
   log(`[social] ${u} sent ${made.length} post(s) to ${platforms.join(",")}: ${made.map((m) => m.status).join(",")}`);
+  await touchSocial(sb, u);
+  recordEvent({ user_id: u, kind: "feature", name: "social_post_sent", props: { videos: made.length, networks: platforms, scheduled: made.filter((m) => m.status === "scheduled").length, failed: made.filter((m) => m.status === "failed").length, from_chat: !!opts.conversationId } });
   return withPostPosters(sb, u, made);
 }
 
@@ -463,7 +495,7 @@ export async function socialSnapshot(sb: SupabaseClient, u: string, env: Record<
   // "Not now" to linking quiets the unasked offer for two weeks; three of them, for good (asking still works).
   const d = pf.data as { connect_dismissed_at: string | null; connect_dismissals: number } | null;
   const quiet = !linked.length && !!d && (d.connect_dismissals >= 3 || (!!d.connect_dismissed_at && Date.now() - Date.parse(d.connect_dismissed_at) < 14 * 86400_000));
-  const allowance = await allowanceOf(sb, u).catch(() => undefined);
+  const allowance = await allowanceOf(sb, u, getSocialProvider({ env })?.offered().length).catch(() => undefined);
   return { enabled: true, linked, quiet, allowance };
 }
 
@@ -530,12 +562,20 @@ export async function socialTick(sb: SupabaseClient, deps: SocialDeps & { provid
 
 export function startSocialLoop(sbFn: () => SupabaseClient, deps: SocialDeps = {}): void {
   if (!getSocialProvider(deps)) return;
-  const every = 5 * 60_000;
-  let busy = false;
+  const every = 5 * 60_000, HOUR = 3600_000;
+  let busy = false, lastUpkeep = Date.now() - HOUR + 10 * 60_000; // first sweep ~10 minutes after start, then hourly
   setInterval(() => {
     if (busy) return;
     busy = true;
-    socialTick(sbFn(), deps).catch((e) => console.error("[social] tick", String(e?.message ?? e))).finally(() => { busy = false; });
+    const sb = sbFn();
+    (async () => {
+      await socialTick(sb, deps).catch((e) => console.error("[social] tick", String(e?.message ?? e)));
+      if (Date.now() - lastUpkeep < HOUR) return;
+      lastUpkeep = Date.now();
+      // unused profiles go first, then today's bill is shared out over the ones left
+      await socialUpkeep(sb, deps).catch((e) => console.error("[social] upkeep", String(e?.message ?? e)));
+      await recordSocialCosts(sb, deps).catch((e) => console.error("[social] costs", String(e?.message ?? e)));
+    })().finally(() => { busy = false; });
   }, every).unref?.();
 }
 
@@ -544,10 +584,8 @@ export function startSocialLoop(sbFn: () => SupabaseClient, deps: SocialDeps = {
 export async function releaseSocialProfile(sb: SupabaseClient, u: string, deps: SocialDeps = {}): Promise<boolean> {
   const p = getSocialProvider(deps);
   if (!p) return false;
-  const r = await sb.from("studio_social_profiles").select("profile_key").eq("user_id", u).maybeSingle();
+  const r = await sb.from("studio_social_profiles").select("user_id,profile_key,accounts,created_at").eq("user_id", u).maybeSingle();
   if (r.error || !r.data) return false;
-  await p.deleteProfile(r.data.profile_key);
-  const d = await sb.from("studio_social_profiles").delete().eq("user_id", u);
-  if (d.error) throw d.error;
-  return true;
+  // a refusal keeps the row; the hourly upkeep removes it later (no plan), so it never stays billed unnoticed
+  return clearProfile(sb, p, r.data as any, "plan_ended", deps.log ?? ((s: string) => console.log(s)));
 }

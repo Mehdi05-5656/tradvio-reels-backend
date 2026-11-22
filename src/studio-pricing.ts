@@ -138,8 +138,10 @@ export const OVERHEAD = {
   claude_usd_per_mtok: { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 } },
   chat_reply_usd: 0.03, caption_usd: 0.08, overview_usd: 0.25, blueprint_plus_copy_claude_usd: 0.04,
   scrapecreators_usd_per_call: 0.0019, performance_refresh_usd: 0.017, link_import_usd: 0.004,
-  /** Ayrshare: one profile per person who links. Launch $299/month for up to 10; Business $599 for 30, then $8.99 each. */
-  ayrshare_profile_usd_month: { launch_10: 29.9, business_100: 12.28, business_extra: 8.99 },
+  /** Ayrshare bills one profile per person who connects (any number of networks in it), at the month's peak count:
+   *  Launch $299 flat for up to 10; Business $599 for 30, then $8.99 each to 100, $3.49 to 500 (ayrshareBill in
+   *  studio-social-upkeep.ts holds the full table). Average per profile at 10 / 30 / 100: */
+  ayrshare_profile_usd_month: { launch_10: 29.9, business_30: 19.97, business_100: 12.28, business_extra: 8.99 },
 } as const;
 
 /** One-off credit packs: a single Stripe payment, credits added on top of the plan's, never expired by a renewal.
@@ -170,9 +172,10 @@ export function logClaudeCost(log: ((l: string) => void) | undefined, feature: s
 }
 
 /** Social accounts a plan posts to (owner's decision, Oct 30 2026), and the price of each extra one added to a plan.
- *  Our cost is the posting service's profile: $8.99 a month each on its Business tier ($7.99 on annual billing). At
- *  the 50% margin after Stripe's 2.9%: $8.99 x 2 / 0.971 = $18.52, so $19 a month; $7.99 x 2 / 0.971 = $16.46, so $17 a
- *  month on annual plans. Included accounts are Clone8's own cost. */
+ *  The price was set from $8.99 a profile x 2 / 0.971 ($19; $17 on annual). Corrected Nov 21 2026: an account is one
+ *  network inside the person's one posting profile, so an extra account costs Clone8 nothing more; the cost is the
+ *  profile itself, paid once per person who connects (see OVERHEAD and studio-social-upkeep.ts). Extras stop at the
+ *  networks offered (usableExtra in studio-social.ts). */
 export const SOCIAL_ACCOUNTS: Record<string, number> = { starter: 1, creator: 3, studio: 5 }; // Studio 10 → 5 on Nov 21 2026 (owner); more can always be added at SOCIAL_SEAT_USD each
 export const SOCIAL_SEAT_USD = { month: 19, year_per_month: 17 } as const;
 export const MAX_SOCIAL_EXTRA = 50;

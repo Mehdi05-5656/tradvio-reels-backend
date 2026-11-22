@@ -151,7 +151,12 @@ export function ayrshareProvider(deps: SocialDeps = {}): SocialProvider | null {
       return { profileKey: String(r.body.profileKey), refId: r.body.refId ? String(r.body.refId) : null };
     },
 
-    async deleteProfile(profileKey) { await call("DELETE", "/profiles", { profileKey }); },
+    async deleteProfile(profileKey) {
+      // A refusal (400) used to pass as done, so a profile could stay billed with nothing here pointing at it. Already
+      // gone counts as done; anything else is an error the caller keeps its row for and tries again.
+      const r = await call("DELETE", "/profiles", { profileKey });
+      if (r.status === 400 && !/not found|does not exist|invalid profile|no profile/i.test(String(r.body?.message ?? ""))) throw new SocialError("profile_delete_failed", clean(r.body?.message, "Could not remove the posting profile"), 502);
+    },
 
     async connectUrl(profileKey, opts = {}) {
       // `only`: at the plan's account limit the page offers just the networks already linked (to relink them)
