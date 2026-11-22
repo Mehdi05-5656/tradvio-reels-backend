@@ -21,11 +21,18 @@ export type PublishRequest = {
   text: string; platforms: SocialPlatform[]; mediaUrl: string; scheduleAt: Date | null;
   /** the exact linked accounts to post to (provider ids); without it, the first linked account of each network */
   accounts?: string[];
+  /** per account: its own time (accounts of one network spaced apart) and its own caption (a group's sign-off, a
+   *  reworded caption); wins over `accounts` when given */
+  targets?: PostTarget[];
   /** unique per post: a retried request is refused instead of posting twice */
   idempotencyKey?: string;
   /** network options the provider understands: { youtube: { title, visibility }, tiktok: {...}, instagram: {...} } */
   options?: Record<string, any>;
 };
+/** One account a post goes to, with what is its own. */
+export type PostTarget = { accountId: string; platform: string; at?: Date | null; text?: string | null };
+/** A change to a post that has not gone out: a new time, a new caption, per-account times and captions. */
+export type PostUpdate = { scheduleAt?: Date; text?: string; targets?: PostTarget[]; options?: Record<string, any> };
 export type PublishResult = { providerPostId: string | null; status: SocialPostStatus; results: SocialResult[]; error: string | null };
 /** One status change pushed by the provider (a webhook) or read back from it. */
 export type SocialEvent = { providerPostId: string; status: SocialPostStatus; results: SocialResult[]; error: string | null; partial?: boolean };
@@ -75,6 +82,10 @@ export interface SocialProvider {
   publish(profileKey: string, req: PublishRequest): Promise<PublishResult>;
   status(profileKey: string, providerPostId: string): Promise<SocialEvent | null>;
   cancel(profileKey: string, providerPostId: string): Promise<void>;
+  /** Change a scheduled post in place (time, caption, per-account times). */
+  update?(profileKey: string, providerPostId: string, change: PostUpdate): Promise<SocialEvent | null>;
+  /** Send again only the accounts that failed (never posts twice where it went out). */
+  retry?(profileKey: string, providerPostId: string, targets?: Array<{ platform: string; accountId?: string | null }>): Promise<SocialEvent | null>;
   /** Point the provider's post-status webhook for this profile at our endpoint. */
   registerWebhook(profileKey: string, url: string): Promise<void>;
   /** Read a webhook delivery; null when it is not one we act on. Throws SocialError("webhook_unverified") when it fails verification. */

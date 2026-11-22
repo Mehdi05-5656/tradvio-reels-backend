@@ -13,7 +13,7 @@ import { extractAudio, transcribe } from "./studio-eleven.js";
 import { SocialError } from "./social-provider.js";
 
 export const CAPTION_MODEL = "claude-opus-5-5";
-const FRAMES = 5, PER_HOUR = 30;
+const FRAMES = 5, PER_HOUR = 100; // "Write all" on a batch of uploads
 const NAMES: Record<string, string> = { tiktok: "TikTok", instagram: "Instagram Reels", youtube: "YouTube Shorts", facebook: "Facebook", twitter: "X", linkedin: "LinkedIn", threads: "Threads", bluesky: "Bluesky" };
 
 export type CaptionDraft = { caption: string; hashtags: string[]; youtube_title: string | null; heard_speech: boolean };
@@ -84,18 +84,29 @@ export function speechOf(env: Record<string, string | undefined>, fetchFn?: type
 }
 
 /** Draft a caption for one of the person's outputs. Throws SocialError for anything the person should read. */
-export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id: string; output_key: string; platforms: string[]; note?: string | null }, deps: CaptionDeps = {}): Promise<CaptionDraft> {
+export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id?: string; output_key?: string; asset_id?: string; platforms: string[]; note?: string | null }, deps: CaptionDeps = {}): Promise<CaptionDraft> {
   const env = deps.env ?? process.env, f = deps.fetch ?? fetch;
   const key = env.ANTHROPIC_API_KEY;
   if (!key) throw new SocialError("captions_off", "Caption writing is not switched on", 503);
-  const j = await sb.from("studio_jobs").select("id,status,outputs").eq("id", req.job_id).eq("user_id", u).maybeSingle();
-  if (j.error) throw j.error;
-  const out = j.data?.status === "done" ? ((j.data.outputs ?? []) as any[]).find((o) => o.key === req.output_key) : null;
-  if (!out) throw new SocialError("video_not_found", "That video is gone", 404);
-  if (out.kind && out.kind !== "video") throw new SocialError("not_a_video", "Captions are written for videos");
+  // a made video (a job's output) or the person's own upload
+  let bucket = "studio-outputs", objectKey = "";
+  if (req.asset_id) {
+    const a = await sb.from("studio_assets").select("id,kind,status,object_key").eq("id", req.asset_id).eq("user_id", u).maybeSingle();
+    if (a.error) throw a.error;
+    if (!a.data || a.data.status !== "ready") throw new SocialError("video_not_found", "That video is gone", 404);
+    if (a.data.kind !== "video") throw new SocialError("not_a_video", "Captions are written for videos");
+    bucket = "studio-uploads"; objectKey = a.data.object_key;
+  } else {
+    const j = await sb.from("studio_jobs").select("id,status,outputs").eq("id", req.job_id ?? "").eq("user_id", u).maybeSingle();
+    if (j.error) throw j.error;
+    const out = j.data?.status === "done" ? ((j.data.outputs ?? []) as any[]).find((o) => o.key === req.output_key) : null;
+    if (!out) throw new SocialError("video_not_found", "That video is gone", 404);
+    if (out.kind && out.kind !== "video") throw new SocialError("not_a_video", "Captions are written for videos");
+    objectKey = out.key;
+  }
   if (!allowCaption(u)) throw new SocialError("caption_rate_limited", "That is a lot of captions for one hour; write this one by hand or try again soon", 429);
 
-  const s = await sb.storage.from("studio-outputs").createSignedUrl(out.key, 600);
+  const s = await sb.storage.from(bucket).createSignedUrl(objectKey, 600);
   if (s.error || !s.data?.signedUrl) throw new SocialError("video_unavailable", "That video could not be read", 502);
   const dir = await mkdtemp(join(tmpdir(), "c8-caption-"));
   try {

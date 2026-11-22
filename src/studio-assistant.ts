@@ -69,7 +69,7 @@ export type PeopleCard = { id: string; asset_id: string; asset_name: string; rea
 export type PublishItem = { job_id?: string | null; output_key?: string | null; asset_id?: string | null; poster_key?: string | null; url?: string | null };
 export type PublishCard = {
   id: string; items: PublishItem[]; status: "open" | "sending" | "sent" | "ignored"; auto?: boolean; sending_at?: string | null;
-  suggested?: { action?: "now" | "schedule" | null; schedule_at?: string | null; platforms?: string[]; caption?: string | null; note?: string | null; autoreply?: { keyword: string; dm_message: string | null; comment_reply: string | null } | null };
+  suggested?: { action?: "now" | "schedule" | null; schedule_at?: string | null; platforms?: string[]; group_ids?: string[]; caption?: string | null; note?: string | null; autoreply?: { keyword: string; dm_message: string | null; comment_reply: string | null } | null };
   /** networks already acknowledged in this chat, so a new link is announced once */
   linked_seen?: string[]; post_ids?: string[]; outcome?: string | null;
 };
@@ -186,6 +186,7 @@ export const TOOLS = [
         action: { type: "string", enum: ["now", "schedule"], description: "What they asked for, when they said" },
         schedule_at: { type: "string", description: "ISO 8601 with offset, only when they gave an exact day and time" },
         platforms: { type: "array", items: { type: "string", enum: ["tiktok", "instagram", "youtube", "facebook", "linkedin", "threads", "bluesky", "twitter"] }, description: "Networks they named; leave out to let them tick" },
+        group: { type: "string", description: "The name of one of their posting groups when they named it (\"post this to Group A\"); exactly as listed under Posting groups" },
         caption: { type: "string", description: "Only the exact caption text they gave you" },
         note: { type: "string", description: "Their wishes for the caption (tone, a call to action, a product name), for the caption writer" },
         autoreply: { type: "object", additionalProperties: false, description: "Suggest a keyword auto-reply when the video offers something people would ask for (a recipe, a guide, a link, a product, the full stream): people who comment the keyword get a DM on Instagram and Facebook, a public reply elsewhere. The card shows it as a suggestion the person turns on; it never runs on its own. Leave out when nothing fits.", properties: {
@@ -718,7 +719,11 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
           const items = await publishItems(sb, convo, ctx, (Array.isArray(use.input?.videos) ? use.input.videos : []).map(String));
           if (!items.length) throw new AssistantError("plan_invalid", "No finished video matches; use \"latest\", a job id from this chat or a library video asset id");
           const named = (Array.isArray(use.input?.platforms) ? use.input.platforms : []).map(String);
-          publish = { id: randomUUID(), items, status: "open", linked_seen: social.linked, suggested: { action: use.input?.action === "schedule" ? "schedule" : use.input?.action === "now" ? "now" : null, schedule_at: typeof use.input?.schedule_at === "string" && !Number.isNaN(Date.parse(use.input.schedule_at)) ? new Date(use.input.schedule_at).toISOString() : null, platforms: named, caption: use.input?.caption ? String(use.input.caption).slice(0, 2200) : null, note: use.input?.note ? String(use.input.note).slice(0, 300) : null, autoreply: suggestReply(use.input?.autoreply) } };
+          // a posting group named in the chat ("post these to Group A"), matched loosely by name
+          const wantGroup = typeof use.input?.group === "string" ? use.input.group.trim().toLowerCase().replace(/\s+/g, " ") : "";
+          const group = wantGroup ? (social as any).groups?.find((g: any) => g.name.toLowerCase() === wantGroup) ?? (social as any).groups?.find((g: any) => g.name.toLowerCase().includes(wantGroup) || wantGroup.includes(g.name.toLowerCase())) : null;
+          if (wantGroup && !group) throw new AssistantError("plan_invalid", `No posting group is called "${use.input.group}"; their groups are: ${((social as any).groups ?? []).map((g: any) => g.name).join(", ") || "none yet"}`);
+          publish = { id: randomUUID(), items, status: "open", linked_seen: social.linked, suggested: { action: use.input?.action === "schedule" ? "schedule" : use.input?.action === "now" ? "now" : null, schedule_at: typeof use.input?.schedule_at === "string" && !Number.isNaN(Date.parse(use.input.schedule_at)) ? new Date(use.input.schedule_at).toISOString() : null, platforms: named, ...(group ? { group_ids: [group.id] } : {}), caption: use.input?.caption ? String(use.input.caption).slice(0, 2200) : null, note: use.input?.note ? String(use.input.note).slice(0, 300) : null, autoreply: suggestReply(use.input?.autoreply) } };
           const unlinked = named.filter((n: string) => !social.linked.includes(n));
           result = { ok: true, videos: items.length, linked: social.linked, note: social.linked.length ? `The card is shown with ${social.linked.join(", ")} to tick${unlinked.length ? `; ${unlinked.join(", ")} ${unlinked.length === 1 ? "is" : "are"} not linked, the card lets them link it` : ""}. In one short line, say what happens next (pick, caption, Post or Schedule). Do not list the card's contents.` : "Nothing is linked yet: the card asks them to connect their socials first, on a secure page in a new tab. Say that in one line; you will be told when something is linked." };
         } else if (use.name === "preview_voices") {
@@ -1267,7 +1272,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
       });
       // 2. post (outside any lock); 3. record the outcome on a fresh copy
       let posts: any[] = [], failure: any = null;
-      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, accounts: Array.isArray(b.accounts) ? b.accounts : undefined, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options, trial_copies: b.trial_copies, autoreply: b.autoreply }, { conversationId: req.params.id, log, env, via: "chat" }); }
+      try { posts = await createPosts(sb, p, u, { items, platforms: b.platforms, accounts: Array.isArray(b.accounts) ? b.accounts : undefined, group_ids: Array.isArray(b.group_ids) ? b.group_ids : undefined, caption: b.caption, schedule_at: schedule ? b.schedule_at : null, spacing_minutes: b.spacing_minutes, options: b.options, trial_copies: b.trial_copies, autoreply: b.autoreply }, { conversationId: req.params.id, log, env, via: "chat" }); }
       catch (e: any) { failure = e; }
       const ok = posts.filter((x) => x.status !== "failed"), nets = listNames([...new Set(posts.flatMap((x) => x.platforms as string[]))]);
       const unsure = posts.filter((x) => x.error === UNCONFIRMED).length;

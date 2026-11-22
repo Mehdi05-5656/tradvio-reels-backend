@@ -30,7 +30,7 @@ export type KnowledgeInput = {
   /** The older part of this chat, summarized; the raw messages after it follow in the turn. */
   summary?: string | null;
   /** Self-serve posting: on or off, the networks this person linked, and whether they said "not now" to linking. */
-  social?: { enabled: boolean; linked: string[]; quiet: boolean; allowance?: { total: number; included: number; extra: number; price_usd_month: number } };
+  social?: { enabled: boolean; linked: string[]; quiet: boolean; groups?: Array<{ name: string; networks: string[] }>; allowance?: { total: number; included: number; extra: number; price_usd_month: number } };
   /** How this person's own posts perform (from the Performance dashboard), newest analysis first. */
   performance?: string[];
 };
@@ -127,8 +127,12 @@ export function buildSystemPrompt(k: KnowledgeInput): string {
     const al = k.social.allowance;
     if (al) lines.push(`- Social accounts: their plan posts to ${al.total} account${al.total === 1 ? "" : "s"} (${al.included} with the plan${al.extra ? ` and ${al.extra} added` : ""}); ${linked.length} linked. Starter covers 1, Creator 3, Studio 10. More can be added to their current plan at $${al.price_usd_month} a month each (Publish, then Accounts), or a bigger plan covers more and adds credits. ${linked.length > al.total ? "They have more linked than the plan covers, so posting is paused until they add accounts or unlink one: say so plainly if they try to post." : linked.length >= al.total ? "They are at the limit: linking another network needs an extra account first." : ""}`);
     lines.push(`- When to offer posting: whenever they ask to post, publish, upload or schedule something, call offer_post (videos "latest" for this chat's results, a job id from Recent jobs, or a library video id). When a run finishes the interface already offers it under the result, so do not offer again in the same reply. ${k.social.quiet ? "They said \"not now\" to linking recently: do not bring posting up unless they ask." : linked.length ? "If they confirm a result is good and nothing was posted, you may ask once whether to post or schedule it." : "With nothing linked, offer once (not every turn) to post a finished video; the card walks them through linking."} If they say no or ignore it, do not bring it up again in this chat.`);
+    const groups = k.social.groups ?? [];
+    lines.push(groups.length
+      ? `- Posting groups: the person named sets of their accounts to post to by name: ${groups.map((g) => `"${g.name}" (${g.networks.map((x) => names[x] ?? x).join(" + ") || "no linked accounts"})`).join(", ")}. When they say "post this to ${groups[0].name}" (or any group's name, loosely matched), call offer_post with group set to that exact name; the card picks that group's accounts and its defaults (sign-off, spacing, auto-reply). Several groups: pass the one they named; the card lets them add more.`
+      : "- Posting groups: the person can name sets of accounts (\"Group A\" = an Instagram and a TikTok) on Post, then Accounts, and post to them by name. Mention it once when they post the same thing to the same accounts again and again.");
     lines.push("- After linking, the chat gets a message that names the newly linked networks; carry on with what they wanted (post now or schedule), without asking them to repeat it. Captions: pass their exact words as caption, or their wishes (tone, call to action, product) as note for the caption writer. Times: pass schedule_at only for an exact day and time they gave (with their offset when you know it); otherwise let them pick on the card.");
-    lines.push("- Posting limits to mention when relevant: one video per post; TikTok allows about 15 posts a day and 6 a minute; Instagram 50 in 24 hours; YouTube Shorts up to 3 minutes. Results are kept 30 days, so a schedule has to fall within that. Posting needs a plan. Scheduled and past posts, cancel, relink and unlink are on the Publish page.");
+    lines.push("- Posting limits to mention when relevant: one video per post; TikTok allows about 15 posts a day and 6 a minute; Instagram 50 in 24 hours; YouTube Shorts up to 3 minutes. Posts can be scheduled up to 90 days ahead; each account takes up to 15 posts a day. A scheduled post can be moved, its caption changed, and a failed one retried on the Post page. Posting needs a plan. Scheduled and past posts, cancel, relink and unlink are on the Publish page.");
   }
   lines.push("- Keep replies under 120 words unless the person asks for detail.");
   lines.push("");

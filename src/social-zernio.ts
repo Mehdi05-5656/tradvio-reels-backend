@@ -203,12 +203,17 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       const targets: any[] = [], missing: SocialResult[] = [];
       const label = (p: string) => p.charAt(0).toUpperCase() + p.slice(1);
       // the accounts asked for (two TikToks are two targets), or the first account of each network
-      const picks: Array<{ platform: string; a: any; id?: string }> = req.accounts?.length
-        ? req.accounts.map((id) => { const a = accs.find((x) => String(x._id) === id && x.isActive !== false); return { platform: String(a?.platform ?? accs.find((x) => String(x._id) === id)?.platform ?? ""), a, id }; })
+      const own = (id: string) => { const a = accs.find((x) => String(x._id) === id && x.isActive !== false); return { platform: String(a?.platform ?? accs.find((x) => String(x._id) === id)?.platform ?? ""), a, id }; };
+      const picks: Array<{ platform: string; a: any; id?: string; at?: Date | null; text?: string | null }> = req.targets?.length
+        ? req.targets.map((t) => ({ ...own(t.accountId), at: t.at ?? null, text: t.text ?? null }))
+        : req.accounts?.length ? req.accounts.map(own)
         : req.platforms.map((platform) => ({ platform, a: accs.find((x) => x.platform === platform && x.isActive !== false) }));
-      for (const { platform, a, id } of picks) {
+      for (const { platform, a, id, at, text } of picks) {
         if (!a) { missing.push({ platform: platform || "unknown", account_id: id ?? null, status: "failed", url: null, error: platform ? `That ${label(platform)} account is not linked any more. Link it again in Accounts.` : "That account is not linked any more. Link it again in Accounts." }); continue; }
         const t: any = { platform, accountId: String(a._id) };
+        // its own time (accounts of one network spaced apart) and caption (a group's sign-off, a reworded caption)
+        if (scheduled && at && req.scheduleAt && at.getTime() !== req.scheduleAt.getTime()) t.scheduledFor = at.toISOString();
+        if (typeof text === "string" && text.trim() && text !== req.text) t.customContent = text.slice(0, 5000);
         if (platform === "instagram") {
           const ig = req.options?.instagram ?? {};
           const d: Record<string, any> = {};
@@ -247,6 +252,47 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       const results = ((p.platforms ?? []) as any[]).map((x) => resultOf(x, future));
       if (String(p.status) === "cancelled") return { providerPostId, status: "canceled", results, error: null };
       const status = future && String(p.status) === "scheduled" ? "scheduled" : statusOf(results, false);
+      return { providerPostId, status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null };
+    },
+
+    async update(profileKey, providerPostId, change) {
+      const body: Record<string, any> = {};
+      if (change.scheduleAt) body.scheduledFor = change.scheduleAt.toISOString();
+      if (typeof change.text === "string") body.content = change.text;
+      if (change.targets?.length) {
+        // the post's accounts with their own times and captions; options (Instagram, YouTube) kept per network
+        const cur = await call("GET", `/posts/${encodeURIComponent(providerPostId)}`);
+        const was = ((cur.body?.post?.platforms ?? []) as any[]);
+        body.platforms = change.targets.map((t) => {
+          const prev = was.find((x) => idOf(x.accountId) === t.accountId) ?? {};
+          const o: any = { platform: t.platform, accountId: t.accountId };
+          if (prev.platformSpecificData) o.platformSpecificData = prev.platformSpecificData;
+          if (t.platform === "youtube" && change.options?.youtube?.title) o.platformSpecificData = { ...(o.platformSpecificData ?? {}), title: String(change.options.youtube.title).slice(0, 100) };
+          if (t.at && change.scheduleAt && t.at.getTime() !== change.scheduleAt.getTime()) o.scheduledFor = t.at.toISOString();
+          const text = t.text ?? null;
+          if (text && text !== (change.text ?? cur.body?.post?.content)) o.customContent = text.slice(0, 5000);
+          return o;
+        });
+      }
+      const r = await call("PUT", `/posts/${encodeURIComponent(providerPostId)}`, { body });
+      if (r.status === 404) throw new SocialError("post_gone", "That post is no longer on the posting service", 404);
+      if (r.status >= 300) throw new SocialError("update_failed", clean(r.body?.error ?? r.body?.message, "Could not change the post"), r.status === 400 ? 400 : 502);
+      const p = r.body?.post;
+      if (!p) return null;
+      const future = !!p.scheduledFor && Date.parse(p.scheduledFor) > Date.now();
+      const results = ((p.platforms ?? []) as any[]).map((x) => resultOf(x, future));
+      return { providerPostId, status: future ? "scheduled" : statusOf(results, false), results, error: null };
+    },
+
+    async retry(_profileKey, providerPostId, targets) {
+      const body = targets?.length ? { platforms: targets.map((t) => ({ platform: t.platform, ...(t.accountId ? { accountId: t.accountId } : {}) })) } : undefined;
+      const r = await call("POST", `/posts/${encodeURIComponent(providerPostId)}/retry`, { body, timeoutMs: 150_000 });
+      if (r.status === 404) throw new SocialError("post_gone", "That post is no longer on the posting service", 404);
+      if (r.status >= 300) throw new SocialError("retry_failed", clean(r.body?.error ?? r.body?.message, "Could not retry the post"), r.status === 429 ? 429 : 502);
+      const p = r.body?.post;
+      if (!p) return null;
+      const results = ((p.platforms ?? []) as any[]).map((x) => resultOf(x, false));
+      const status = statusOf(results, false);
       return { providerPostId, status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null };
     },
 

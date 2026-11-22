@@ -4,7 +4,8 @@ import express from "express";
 import { createHmac } from "node:crypto";
 import { ayrshareProvider, friendlyError, statusOf, verifySignature } from "../src/social-ayrshare.js";
 import { getSocialProvider } from "../src/social-provider.js";
-import { registerSocial, socialTick, webhookUrl, cleanOptions, applyEvent } from "../src/studio-social.js";
+import { registerSocial, socialTick, webhookUrl, cleanOptions, applyEvent, drainBatch } from "../src/studio-social.js";
+import { registerPostGroups, staggerTimes } from "../src/studio-post-groups.js";
 import { accountAccess } from "../src/account-access.js";
 
 const ANN = "11111111-1111-4111-8111-111111111111", BOB = "22222222-2222-4222-8222-222222222222";
@@ -191,6 +192,7 @@ function fakeSb(tables: Record<string, any[]>) {
         },
         maybeSingle() { maybe = true; return q; }, single() { single = true; return q; },
         insert(v: any) { pending = { op: "insert", v }; return q; },
+        delete() { pending = { op: "delete" }; return q; },
         update(v: any) { pending = { op: "update", v }; return q; },
         then(resolve: any, reject: any) {
           if (pending?.op === "insert") {
@@ -198,6 +200,7 @@ function fakeSb(tables: Record<string, any[]>) {
             const v = { id: `${String(++ids).padStart(8, "0")}-0000-4000-8000-000000000000`, created_at: new Date().toISOString(), updated_at: "2000-01-01T00:00:00Z", results: [], error: null, provider_post_id: null, accounts: [], webhook_registered_at: null, ...pending.v };
             (tables[table] ??= []).push(v); rows = () => [v];
           }
+          if (pending?.op === "delete") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); tables[table] = (tables[table] ?? []).filter((r) => !hit.includes(r)); rows = () => hit; filters.length = 0; }
           if (pending?.op === "update") { const hit = (tables[table] ?? []).filter((r) => filters.every((f) => f(r))); for (const r of hit) Object.assign(r, pending.v); rows = () => hit; filters.length = 0; }
           const out = rows().filter((r) => filters.every((f) => f(r)));
           return Promise.resolve({ data: single || maybe ? (out[0] ?? null) : out, error: single && !out.length ? { message: "no rows" } : null }).then(resolve, reject);
@@ -258,7 +261,8 @@ test("routes: post now and scheduled with spacing; ownership, linking and the 30
 
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["instagram"], caption: "x" })).body.error, "platform_not_linked");
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1, "44444444-4444-4444-8444-444444444444")], platforms: ["tiktok"], caption: "x" })).body.error, "video_not_found", "someone else's job is not found");
-  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() + 40 * 86400_000).toISOString() })).body.error, "too_late");
+  // up to 90 days ahead (owner, Nov 22 2026); made videos are kept for posts that wait on them
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() + 95 * 86400_000).toISOString() })).body.error, "too_late");
 
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() - 60_000).toISOString() })).body.error, "too_soon", "a time that has passed is refused, not posted now");
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item(1)], platforms: ["tiktok"], schedule_at: new Date(Date.now() + 2 * 60_000).toISOString() })).body.error, "too_soon");
@@ -354,9 +358,9 @@ test("captions: frames and speech go to Claude with a JSON schema (no forced too
   await assert.rejects(draftCaption(sb, BOB, { job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4`, platforms: [] }, { env: { ANTHROPIC_API_KEY: "sk" }, fetch: fetchFn, frames: async () => ["A"], speech: async () => null }), (e: any) => e.code === "video_not_found", "someone else's video");
   await assert.rejects(draftCaption(sb, ANN, { job_id: JOB, output_key: "x", platforms: [] }, { env: {}, fetch: fetchFn }), (e: any) => e.code === "captions_off");
   const t0 = 1_000_000;
-  for (let i = 0; i < 30; i++) assert.equal(allowCaption("rate-user", t0 + i), true);
-  assert.equal(allowCaption("rate-user", t0 + 31), false);
-  assert.equal(allowCaption("rate-user", t0 + 3600_001 + 31), true, "the hour rolls over");
+  for (let i = 0; i < 100; i++) assert.equal(allowCaption("rate-user", t0 + i), true);
+  assert.equal(allowCaption("rate-user", t0 + 101), false);
+  assert.equal(allowCaption("rate-user", t0 + 3600_001 + 101), true, "the hour rolls over");
 });
 
 test("routes: a send the service never answers is kept as unconfirmed, never sent again; a TikTok-only delivery merges", async () => {
@@ -494,7 +498,7 @@ test("several accounts of one network: post to two TikToks, a repeat to the same
     const both = await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["tt1", "tt2"] });
     assert.equal(both.status, 201, JSON.stringify(both.body));
     assert.deepEqual(sent.at(-1).accounts, ["tt1", "tt2"]); assert.deepEqual(sent.at(-1).platforms, ["tiktok"]);
-    assert.deepEqual(tables.studio_social_posts[0].options.accounts, [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }]);
+    assert.deepEqual(tables.studio_social_posts[0].options.accounts.map((a: any) => [a.id, a.platform, a.username]), [["tt1", "tiktok", "ann"], ["tt2", "tiktok", "ann.clips"]]);
     const again = await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["tt2"] });
     assert.equal(again.body.error, "already_posted"); assert.match(again.body.detail, /@ann\.clips/);
     assert.equal((await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["yt1"] })).status, 201, "the same video to another account is fine");
@@ -519,5 +523,95 @@ test("several accounts of one network: post to two TikToks, a repeat to the same
     const full = await call("POST", "/api/studio/social/connect", { platform: "tiktok", mode: "add" });
     assert.equal(full.status, 409); assert.equal(full.body.error, "account_limit");
     assert.equal((await call("POST", "/api/studio/social/connect", { platform: "tiktok", account_id: "tt1" })).status, 200);
+  } finally { await new Promise((r) => server.close(r)); }
+});
+
+
+test("posting groups (owner's test): Group A = IG A + TikTok A, Group B = IG B + TikTok B; each video lands only on its own group, same-network accounts are spaced, sign-offs kept; edit, retry, background batches", async () => {
+  const outputs = Array.from({ length: 40 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
+  const accs = [{ id: "igA", platform: "instagram", username: "brand.a" }, { id: "ttA", platform: "tiktok", username: "brand.a" }, { id: "igB", platform: "instagram", username: "brand.b" }, { id: "ttB", platform: "tiktok", username: "brand.b" }];
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "studio", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, provider: "zernio", profile_key: "pk-ann", accounts: accs, webhook_hash: "x" }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [], studio_social_groups: [] };
+  const sb = fakeSb(tables);
+  const published: any[] = [], updated: any[] = [], retried: any[] = [];
+  const provider: any = {
+    name: "zernio", linking: "per_network", offered: () => ["tiktok", "youtube", "instagram"],
+    accounts: async () => accs, registerWebhook: async () => undefined,
+    publish: async (_k: string, req: any) => { published.push(req); return { providerPostId: `pp${published.length}`, status: req.scheduleAt ? "scheduled" : "sending", results: req.targets.map((t: any) => ({ platform: t.platform, account_id: t.accountId, status: req.scheduleAt ? "scheduled" : "pending", url: null, error: null })), error: null }; },
+    update: async (_k: string, id: string, change: any) => { updated.push({ id, change }); return null; },
+    retry: async (_k: string, id: string, targets: any) => { retried.push({ id, targets }); return { providerPostId: id, status: "posted", results: targets.map((t: any) => ({ platform: t.platform, account_id: t.accountId, status: "posted", url: "https://x/1", error: null })), error: null }; },
+    status: async () => null, cancel: async () => undefined,
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req: any, _res, next) => { req.auth = { user_id: ANN, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: ANN }; next(); });
+  registerSocial(app, () => sb, { env: { ...ENV }, provider, log: () => {} });
+  registerPostGroups(app, () => sb, { log: () => {} });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const call = async (method: string, path: string, body?: any) => { const r = await fetch(base + path, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+  const item = (n: number, extra: any = {}) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4`, ...extra });
+  try {
+    // groups: named, coloured, own accounts only, defaults start on (10 min apart, light rewording)
+    const a = await call("POST", "/api/studio/social/groups", { name: "Group A", account_ids: ["igA", "ttA"], defaults: { caption_extra: "Link in bio · Brand A" } });
+    assert.equal(a.status, 201, JSON.stringify(a.body));
+    assert.deepEqual([a.body.group.name, a.body.group.networks, a.body.group.defaults.stagger_minutes, a.body.group.defaults.vary_captions], ["Group A", ["instagram", "tiktok"], 10, true]);
+    const b = await call("POST", "/api/studio/social/groups", { name: "Group B", account_ids: ["igB", "ttB"] });
+    assert.equal(b.status, 201);
+    assert.equal((await call("POST", "/api/studio/social/groups", { name: "group a", account_ids: [] })).body.error, "group_name_taken");
+    assert.equal((await call("POST", "/api/studio/social/groups", { name: "X", account_ids: ["someone-else"] })).body.error, "account_not_linked");
+    const A = a.body.group.id, B = b.body.group.id;
+    // the owner's case: these to Group A, those to Group B, in one send
+    const at = new Date(Date.now() + 3 * 3600_000).toISOString();
+    const r = await call("POST", "/api/studio/social/posts", { caption: "New drop", schedule_at: at, spacing_minutes: 60, items: [item(1, { group_ids: [A] }), item(2, { group_ids: [A] }), item(3, { group_ids: [B] })] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.deepEqual(published.map((p) => p.targets.map((t: any) => t.accountId)), [["igA", "ttA"], ["igA", "ttA"], ["igB", "ttB"]], "each video lands only on its own group's accounts");
+    assert.equal(published[0].targets[0].text, "New drop\n\nLink in bio · Brand A", "Group A's sign-off goes under the caption");
+    assert.equal(published[2].targets[0].text ?? published[2].text, "New drop", "Group B has no sign-off: the post's own caption");
+    assert.equal(published[0].targets[0].at.getTime(), published[0].targets[1].at.getTime(), "Instagram A and TikTok A go out together (different networks)");
+    assert.equal(tables.studio_social_posts[0].group_id, A);
+    // both groups at once: the two TikToks are 10 minutes apart, the two Instagrams too; one account is posted once
+    const both = await call("POST", "/api/studio/social/posts", { caption: "Same clip", schedule_at: at, items: [item(4)], group_ids: [A, B], accounts: ["ttA"] });
+    assert.equal(both.status, 201, JSON.stringify(both.body));
+    const t = published.at(-1).targets;
+    assert.deepEqual(t.map((x: any) => x.accountId), ["igA", "ttA", "igB", "ttB"]);
+    const min = (x: any) => Math.round((x.at.getTime() - Date.parse(at)) / 60_000);
+    assert.deepEqual(t.map(min), [0, 0, 10, 10], "same-network accounts 10 minutes apart; different networks together");
+    assert.deepEqual(staggerTimes(new Date(0), [{ platform: "tiktok" }, { platform: "tiktok" }, { platform: "tiktok" }], 5).map((d) => d.getTime() / 60_000), [0, 5, 10]);
+    // reschedule in place: every account moves by the same amount, spacing kept, the provider's post updated
+    const post = tables.studio_social_posts.at(-1);
+    const later = new Date(Date.parse(at) + 86400_000).toISOString();
+    const ed = await call("PATCH", `/api/studio/social/posts/${post.id}`, { schedule_at: later, caption: "Same clip, new words" });
+    assert.equal(ed.status, 200, JSON.stringify(ed.body));
+    assert.equal(updated.at(-1).id, post.provider_post_id);
+    assert.deepEqual(updated.at(-1).change.targets.map((x: any) => Math.round((x.at.getTime() - Date.parse(later)) / 60_000)), [0, 0, 10, 10]);
+    assert.equal(updated.at(-1).change.targets[0].text, "Same clip, new words\n\nLink in bio · Brand A", "the sign-off is kept on an edited caption");
+    assert.equal(tables.studio_social_posts.at(-1).schedule_at, later);
+    // retry only what failed; never a send we could not confirm
+    Object.assign(post, { status: "partial", results: [{ platform: "instagram", account_id: "igA", status: "posted", url: "https://x", error: null }, { platform: "tiktok", account_id: "ttA", status: "failed", url: null, error: "TikTok needs to be linked again. Relink it in Accounts, then retry." }] });
+    const rt = await call("POST", `/api/studio/social/posts/${post.id}/retry`, {});
+    assert.equal(rt.status, 200, JSON.stringify(rt.body));
+    assert.deepEqual(retried.at(-1).targets, [{ platform: "tiktok", accountId: "ttA" }]);
+    assert.equal((await call("POST", `/api/studio/social/posts/${post.id}/retry`, {})).body.error, "not_retryable", "nothing failed any more");
+    // a big batch is saved as queued and sent in the background, in order
+    const many = Array.from({ length: 8 }, (_, i) => item(5 + i));
+    const big = await call("POST", "/api/studio/social/posts", { caption: "Batch", schedule_at: new Date(Date.now() + 2 * 86400_000).toISOString(), spacing_minutes: 180, items: many, group_ids: [B] });
+    assert.equal(big.status, 201, JSON.stringify(big.body));
+    assert.equal(big.body.queued, true, "16 sends: queued");
+    const batch = tables.studio_social_posts.filter((x) => x.batch_id === big.body.batch_id);
+    for (let i = 0; i < 50 && batch.some((x) => x.status === "queued" || x.status === "sending" && !x.provider_post_id); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(batch.every((x) => x.status === "scheduled"), JSON.stringify(batch.map((x) => x.status)));
+    assert.equal(await drainBatch(sb, provider, ANN, big.body.batch_id), 0, "nothing left to send twice");
+    // the accounts read: groups and today's use per account
+    const st = await call("GET", "/api/studio/social");
+    assert.deepEqual(st.body.groups.map((g: any) => g.name), ["Group A", "Group B"]);
+    assert.equal(st.body.per_account_daily, 15);
+    // per-account allowance: 16 to Group B's TikTok on one day is over 15
+    const tooMany = Array.from({ length: 16 }, (_, i) => item(20 + i));
+    const over = await call("POST", "/api/studio/social/posts", { caption: "x", schedule_at: new Date(Date.now() + 5 * 86400_000).toISOString(), spacing_minutes: 1, items: tooMany, accounts: ["ttB"] });
+    assert.equal(over.body.error, "daily_limit"); assert.match(over.body.detail, /@brand\.b on Tiktok .*limit of 15 a day/);
+    // editing a group never moves posts already scheduled; deleting it keeps them
+    await call("PATCH", `/api/studio/social/groups/${A}`, { remove_account: "ttA" });
+    assert.deepEqual(tables.studio_social_posts[0].options.accounts.map((x: any) => x.id), ["igA", "ttA"]);
+    assert.equal((await call("DELETE", `/api/studio/social/groups/${B}`)).status, 200);
   } finally { await new Promise((r) => server.close(r)); }
 });
