@@ -29,7 +29,7 @@ export const THEIRS = new Set([...THEIR_SIDE, "recast_nsfw", "recast_rejected", 
 export type FailureRow = { id: number; at: string; job_id: string | null; user_id: string | null; tool: string | null; kind: string; code: string;
   detail: string | null; stage: string | null; attempt: number | null; fix_status: string; fix_note: string | null; alerted_at: string | null };
 export type Who = { email: string | null; internal: boolean };
-export type History = { thisPerson: number; everyone: number; fixed: FailureRow | null };
+export type History = { thisPerson: number; everyone: number; fixed: FailureRow | null; /** the person's plan, if any */ plan?: string | null; /** none of their runs has finished yet */ firstRun?: boolean };
 
 /** Which new rows are emailed now. Pure. */
 export function worthEmail(r: FailureRow, who: Who): boolean {
@@ -46,11 +46,14 @@ const label = (r: FailureRow) => (r.kind === "degraded" ? "delivered without a p
 export function failureEmail(rows: { r: FailureRow; who: Who; h: History }[], appUrl = "https://app.clone8.io"): { subject: string; text: string } {
   const regress = rows.filter((x) => x.h.fixed);
   const tools = [...new Set(rows.map((x) => `${x.r.tool ?? "?"} ${x.r.code}`))].slice(0, 3).join(", ");
-  const subject = `${regress.length ? "REGRESSION: " : ""}Clone8: ${rows.length} customer ${rows.length === 1 ? "problem" : "problems"} (${tools})`;
+  // a paying customer whose first run failed is the worst first impression: it leads the subject (owner, Nov 22 2026)
+  const firstPaid = rows.some((x) => x.h.firstRun && x.h.plan);
+  const subject = `${firstPaid ? "FIRST RUN FAILED (paying customer): " : ""}${regress.length ? "REGRESSION: " : ""}Clone8: ${rows.length} customer ${rows.length === 1 ? "problem" : "problems"} (${tools})`;
   const blocks = rows.map(({ r, who, h }) => [
     `${(r.tool ?? "?").toUpperCase()} · ${r.code} · ${label(r)}`,
     `When: ${new Date(r.at).toLocaleString("en-US", { timeZone: "America/Los_Angeles" })} PT · step: ${r.stage ?? "?"} · attempt ${r.attempt ?? "?"}`,
     `Who: ${who.email ?? r.user_id ?? "?"} · job ${r.job_id ?? "?"}`,
+    `Customer: ${h.plan ? `${h.plan} plan` : "no plan"}${h.firstRun ? " · THEIR FIRST RUN: nothing has worked for them yet" : ""}`,
     `Why: ${one(r.detail, 900) || "(no detail was sent)"}`,
     `Before: ${h.thisPerson ? `${h.thisPerson} time(s) for this person` : "first time for this person"}, ${h.everyone} time(s) for anyone in 30 days`,
     h.fixed ? `REGRESSION: "${r.code}" was marked fixed${h.fixed.fix_note ? ` (${one(h.fixed.fix_note, 200)})` : ""} and happened again.` : "",
@@ -106,7 +109,14 @@ export async function failureTick(sb: SupabaseClient, deps: MailDeps & { now?: (
     const past = await sb.from("studio_failures").select("id,user_id,fix_status,fix_note,at").eq("code", r.code).neq("kind", "retry").gte("at", since).lt("id", r.id).order("id", { ascending: false }).limit(500);
     const p = (past.data ?? []) as FailureRow[];
     const fixed = await sb.from("studio_failures").select("*").eq("code", r.code).eq("fix_status", "fixed").lt("id", r.id).order("id", { ascending: false }).limit(1);
-    send.push({ r, who: w, h: { thisPerson: p.filter((x) => x.user_id === r.user_id).length, everyone: p.length, fixed: ((fixed.data ?? [])[0] as FailureRow) ?? null } });
+    // their plan, and whether any run of theirs has ever finished
+    // (looked up so that a failed lookup can never stop the email)
+    const safely = async (f: () => any) => { try { return await f(); } catch { return null; } };
+    const [cust, doneRuns] = r.user_id ? await Promise.all([
+      safely(() => sb.from("studio_customers").select("plan_id").eq("user_id", r.user_id).maybeSingle()),
+      safely(() => sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("user_id", r.user_id).eq("status", "done")),
+    ]) : [null, null];
+    send.push({ r, who: w, h: { thisPerson: p.filter((x) => x.user_id === r.user_id).length, everyone: p.length, fixed: ((fixed.data ?? [])[0] as FailureRow) ?? null, plan: (cust as any)?.data?.plan_id ?? null, firstRun: (doneRuns as any)?.count === 0 } });
   }
   if (send.length) {
     const m = failureEmail(send, env.STUDIO_APP_URL || "https://app.clone8.io");

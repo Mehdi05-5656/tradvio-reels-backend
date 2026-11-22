@@ -33,6 +33,7 @@ import { registerByo } from "./studio-byo.js";
 import { registerByoReport } from "./studio-byo-report.js";
 import { registerClipsHealth, startClipsWatch } from "./clips-watch.js";
 import { registerFailures, startFailureWatch } from "./failure-watch.js";
+import { startSourceCheck } from "./source-check.js";
 import { startRecastLoop } from "./studio-recast.js";
 import { startCharacterLoop } from "./studio-characters.js";
 import { startInstrumentLoop, instrumentLoopSettings } from "./studio-instruments.js";
@@ -159,6 +160,7 @@ async function main() {
   void import("./vendor-alerts.js").then((m) => m.startScrapeCreatorsWatch()).catch(() => undefined); // emails the owner when ScrapeCreators' credits run low or out (src/vendor-alerts.ts)
   startClipsWatch(getSb); // emails the owner when a Clips run fails on our side, falls back, loses margin or sticks; a daily summary at 07:00 PT
   startFailureWatch(getSb); // emails the owner about every customer failure in any tool (with the full reason and repeats); a daily summary at 07:30 PT
+  startSourceCheck(); // every Clips source (Twitch, Kick, YouTube) walked from this server every 6 hours; the owner is emailed when one fails (src/source-check.ts)
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
   startSocialLoop(getSb); // reads back post statuses the social webhook left behind
   startPerformanceLoop(getSb); // daily refresh for people who opened the dashboard this week
