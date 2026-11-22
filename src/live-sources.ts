@@ -297,35 +297,46 @@ export async function kickBroadcastSource(deps: LiveDeps, uuid: string): Promise
 }
 /** The chat replay of a Kick broadcast, walked forward on `start_time` (about 12-25 messages a page), in parallel slices. */
 export const KICK_CHAT_RETRIES = 6;
+/** Kick's chat replay, read by its cursor (Nov 22 2026): `messages?cursor=<microseconds>` answers the 25 messages before
+ *  that moment, newest first, and the cursor of the oldest; paging back from the end of a stretch to its start reads every
+ *  message once, 25 a call, and a quiet stretch costs one call for minutes of chat. (Reading by `start_time` answered at
+ *  most ~5 s of chat a call, empty or not: about ten times the calls, at Kick's ~2 calls a second.) The stream is read in
+ *  up to 3 stretches at once; every call takes its turn in kickWeb's pace. */
 export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIso: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; maxCalls?: number } = {}): Promise<ChatMsg[]> {
   const t0 = Date.parse(startedAtIso);
   if (!Number.isFinite(t0)) throw new LiveSourceError("chat_unreadable", "The broadcast's start time is unknown", 502);
-  // a few readers at once: the pace (kickWeb) sets the speed, more readers only queue
   const slices = Math.max(1, Math.min(3, o.slices ?? Math.ceil(seconds / 1800)));
-  const span = seconds / slices, maxCalls = o.maxCalls ?? 6000;
+  const span = seconds / slices, maxCalls = o.maxCalls ?? 8000;
+  const wait = deps.sleep ?? ((ms: number) => new Promise<void>((ok) => setTimeout(ok, ms)));
   const out: ChatMsg[][] = Array.from({ length: slices }, () => []); const done = new Array(slices).fill(0); let calls = 0;
   await Promise.all(out.map(async (bucket, k) => {
     const from = Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : Math.floor((k + 1) * span);
-    let T = from; const seen = new Set<string>(); let stuck = 0, fails = 0;
-    while (T < to && calls < maxCalls && !o.signal?.aborted) {
-      const iso = new Date(t0 + T * 1000).toISOString().replace(/\.\d{3}Z$/, ".000Z");
+    // the cursor is a moment in microseconds; it walks back from the stretch's end to its start
+    let cursor = (t0 + to * 1000) * 1000; const seen = new Set<string>(); let fails = 0;
+    while (calls < maxCalls && !o.signal?.aborted) {
       let d: any;
       // a refusal that may pass (Kick slowing us, a 5xx, no answer) is tried again at the same point, waiting longer each
-      // time (the pace above also cools down); only after KICK_CHAT_RETRIES in a row does the run stop
-      try { d = (await kickWeb(deps, `api/v2/channels/${encodeURIComponent(chatId)}/messages?start_time=${encodeURIComponent(iso)}`))?.data; fails = 0; }
-      catch (err: any) { if (err?.retry && ++fails <= KICK_CHAT_RETRIES) { await (deps.sleep ?? ((ms: number) => new Promise<void>((ok) => setTimeout(ok, ms))))(Math.min(30_000, 2000 * 2 ** (fails - 1))); continue; } throw err; }
+      // time (the pace in kickWeb also cools down); only after KICK_CHAT_RETRIES in a row does the run stop
+      try { d = (await kickWeb(deps, `api/v2/channels/${encodeURIComponent(chatId)}/messages?cursor=${Math.round(cursor)}`))?.data; fails = 0; }
+      catch (err: any) { if (err?.retry && ++fails <= KICK_CHAT_RETRIES) { await wait(Math.min(30_000, 2000 * 2 ** (fails - 1))); continue; } throw err; }
       calls++;
-      let fresh = 0, last = T;
-      for (const m of d?.messages ?? []) {
+      const msgs: any[] = d?.messages ?? [];
+      let oldest = Infinity;
+      for (const m of msgs) {
+        const at = Date.parse(m?.created_at); if (!Number.isFinite(at)) continue;
+        if (at < oldest) oldest = at;
         if (!m?.id || seen.has(m.id)) continue;
-        seen.add(m.id); fresh++;
-        const t = Math.floor((Date.parse(m.created_at) - t0) / 1000);
-        if (!Number.isFinite(t) || t < from || t >= to) continue;
+        seen.add(m.id);
+        const t = Math.floor((at - t0) / 1000);
+        if (t < from || t >= to) continue;
         bucket.push({ t, u: String(m.sender?.id ?? ""), c: String(m.content ?? "").slice(0, 200), e: (String(m.content ?? "").match(/\[emote:/g) ?? []).length });
-        if (t > last) last = t;
       }
-      if (fresh === 0 || last <= T) { stuck++; T += stuck < 3 ? 1 : 10; } else { stuck = 0; T = last; }
-      done[k] = Math.min(1, (T - from) / Math.max(1, to - from)); o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices);
+      // the next page starts at the oldest message read (Kick's own cursor when it gives one); nothing older, or the
+      // stretch's start reached: this stretch is done
+      const next = Number(d?.cursor) || (Number.isFinite(oldest) ? oldest * 1000 : NaN);
+      if (!msgs.length || !Number.isFinite(next) || next / 1000 <= t0 + from * 1000) { done[k] = 1; o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices); break; }
+      cursor = next >= cursor ? cursor - 1_000_000 : next; // never stand still
+      done[k] = Math.min(1, (t0 + to * 1000 - cursor / 1000) / Math.max(1, (to - from) * 1000)); o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices);
     }
   }));
   return out.flat().sort((a, b) => a.t - b.t);
