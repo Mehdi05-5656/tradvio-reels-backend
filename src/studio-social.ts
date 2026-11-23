@@ -299,7 +299,11 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const b = req.body ?? {};
       const item = UUID_RE.test(String(b.asset_id ?? "")) ? { asset_id: String(b.asset_id) } : await resolveItem(sb, u, b);
       const platforms = (Array.isArray(b.platforms) ? b.platforms : []).map(String).filter(isSocialPlatform);
-      const draft = await (deps.caption ?? draftCaption)(sb, u, { ...item, platforms, note: b.note ? String(b.note) : null, variants: Number(b.variants) || undefined }, { env, fetch: deps.fetch, log });
+      // free here: written from the video's saved note or the creator's line, never by watching it (watching is paid:
+      // POST /api/studio/social/captions/batch, Nov 23 2026); "watch_needed" (402) when the video has no note yet
+      const accounts = (Array.isArray(b.accounts) ? b.accounts : []).map((a: any) => ({ id: String(a?.id ?? "").slice(0, 80), platform: String(a?.platform ?? ""), handle: a?.handle ? String(a.handle).slice(0, 60) : null })).filter((a: any) => a.id && isSocialPlatform(a.platform));
+      const draft = await (deps.caption ?? draftCaption)(sb, u, { ...item, platforms, note: b.note ? String(b.note) : null, variants: Number(b.variants) || undefined, watch: "never",
+        line: b.line ? String(b.line) : null, keep_words: b.keep_words === true, use_video: b.use_video !== false, avoid: Array.isArray(b.avoid) ? b.avoid.map(String) : [], accounts }, { env, fetch: deps.fetch, log });
       await touchSocial(sb, u);
       res.json({ draft });
     } catch (e) { fail(res, e); }

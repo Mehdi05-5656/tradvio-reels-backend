@@ -358,9 +358,10 @@ test("captions: frames and speech go to Claude with a JSON schema (no forced too
   await assert.rejects(draftCaption(sb, BOB, { job_id: JOB, output_key: `${ANN}/${JOB}/1.mp4`, platforms: [] }, { env: { ANTHROPIC_API_KEY: "sk" }, fetch: fetchFn, frames: async () => ["A"], speech: async () => null }), (e: any) => e.code === "video_not_found", "someone else's video");
   await assert.rejects(draftCaption(sb, ANN, { job_id: JOB, output_key: "x", platforms: [] }, { env: {}, fetch: fetchFn }), (e: any) => e.code === "captions_off");
   const t0 = 1_000_000;
-  for (let i = 0; i < 100; i++) assert.equal(allowCaption("rate-user", t0 + i), true);
-  assert.equal(allowCaption("rate-user", t0 + 101), false);
-  assert.equal(allowCaption("rate-user", t0 + 3600_001 + 101), true, "the hour rolls over");
+  // 300 an hour: a batch read once, then re-written from the notes (Nov 23 2026)
+  for (let i = 0; i < 300; i++) assert.equal(allowCaption("rate-user", t0 + i), true);
+  assert.equal(allowCaption("rate-user", t0 + 301), false);
+  assert.equal(allowCaption("rate-user", t0 + 3600_001 + 301), true, "the hour rolls over");
 });
 
 test("routes: a send the service never answers is kept as unconfirmed, never sent again; a TikTok-only delivery merges", async () => {

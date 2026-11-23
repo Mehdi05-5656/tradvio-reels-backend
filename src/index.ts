@@ -52,6 +52,7 @@ import { registerSocial, startSocialLoop } from "./studio-social.js";
 import { registerPostUploads } from "./studio-post-uploads.js";
 import { registerPostGroups } from "./studio-post-groups.js";
 import { registerPostingPlan } from "./studio-posting-plan.js";
+import { registerPostCaptions, startPostCaptionsLoop } from "./studio-post-captions.js";
 import { registerAutoReplies } from "./studio-autoreply.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerOutputAsset } from "./studio-output-asset.js";
@@ -146,6 +147,7 @@ async function main() {
   registerSocial(app, getSb); // Studio self-serve posting to the person's own socials; off until STUDIO_SOCIAL_ENABLED=true. Not Publer.
   registerPostGroups(app, getSb);
   registerPostingPlan(app, getSb);
+  registerPostCaptions(app, getSb); // captions for many videos (watched once, paid) + Smart post
   registerPostUploads(app, getSb); // your own videos to post: library usage, a per-network check of each file // posting groups ("Group A" = IG A + TikTok A), drafts and the post tray
   registerAutoReplies(app, getSb); // keyword comments and DMs answered on the person's own accounts (posting service rules)
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
@@ -159,6 +161,7 @@ async function main() {
   startCharacterLoop(getSb); // Studio characters (Soul portraits); off without HIGGSFIELD_API_KEY
   { const l = instrumentLoopSettings(process.env); startInstrumentLoop(getSb, {}, l.tickMs, l.parallel); } // Studio instruments (every other platform model); off until STUDIO_INSTRUMENTS_ENABLED=true
   startClipsLoop(getSb, { plans: PLANS });
+  startPostCaptionsLoop(getSb); // batches of post captions (their own job lane)
   startCaptionsLoop(getSb); // captions burned into videos; one at a time, never while clips are cutting
   startKageLoop(getSb); // Kage remixes (Claude plans, the platform renders every shot at once); off until STUDIO_KAGE_ENABLED=true
   void import("./studio-youtube.js").then((m) => m.ffmpegReport()).then((r) => console.log(`[clips] ffmpeg: ${r}`)).catch(() => undefined); // Clips from long videos, one run at a time; needs ANTHROPIC_API_KEY plus ScrapeCreators or ElevenLabs
