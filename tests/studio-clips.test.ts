@@ -838,3 +838,27 @@ test("the first cut step brings a source over 30 fps to 30 (the clip is 30 fps e
   assert.equal(await sourceFps(src("/tmp/x/bad.mp4"), probe), null, "an unreadable file keeps today's path");
   assert.deepEqual(probed, ["/tmp/x/st-2.mp4", "/tmp/x/bad.mp4"]);
 });
+
+test("HD clips are priced on their own cost (Nov 22 2026): about twice the bytes and the render of a 720 clip; 720, the video's own shape and HD switched off keep today's price", async () => {
+  const meta = async () => ({ id: "abcdefghijk", url: "", title: "T", channel: "C", description: "", seconds: 1800, thumbnail_url: null, chapters: [], replay: [] });
+  const env = { ANTHROPIC_API_KEY: "k", ELEVENLABS_API_KEY: "e", STUDIO_YT_PROXY: "http://p:1", STUDIO_YT_PROXY_USD_PER_GB: "6.25", STUDIO_CLIPS_LEAN: "on" };
+  const q = (options: any, e: any = env) => quoteClips({ env: e, meta }, PLANS, null, { url: "https://youtu.be/abcdefghijk", count: 10, ...options });
+  const sd = await q({ quality: "720" }), hd = await q({ quality: "1080" });
+  assert.equal(sd.options.price.per_clip, 5, "720: today's price");
+  assert.equal(hd.options.price.per_clip, 10, "HD: a 30 s clip at the busy end, 350 kB/s, at $6.25/GB");
+  assert.equal(hd.options.price.analysis, sd.options.price.analysis, "reading the video costs the same either way");
+  assert.ok(hd.credits > sd.credits);
+  assert.equal((await q({ quality: "1080", format: "original" })).options.price.per_clip, 5, "the video's own shape is cut at 720");
+  assert.equal((await q({ quality: "1080" }, { ...env, STUDIO_CLIPS_HD: "off" })).options.price.per_clip, 5, "HD switched off: 720 runs and prices");
+  assert.equal((await q({ quality: "1080" }, { ...env, STUDIO_CLIPS_LEAN: "off" })).options.price.per_clip, 5, "a whole download already prices its bytes in the reading");
+  // it follows the proxy's real price: a cheaper GB brings HD back toward 720
+  const cheap = await q({ quality: "1080" }, { ...env, STUDIO_YT_PROXY_USD_PER_GB: "3" });
+  assert.ok(cheap.options.price.per_clip < 10 && cheap.options.price.per_clip >= 5, `at $3/GB: ${cheap.options.price.per_clip}`);
+  // a43cb8fc's clips (15, captions, busy 60 fps video, $1.77 of clip costs incl. a restart's re-fetch) no longer run at a loss
+  const a43 = (await q({ quality: "1080", count: 15, captions: { style: { id: "bold" } } })).options.price.per_clip;
+  const floor = 0.0160886;
+  assert.ok(1 - 1.77 / (15 * a43 * floor) > 0.3, `margin on those clips at the cheapest credit: ${(1 - 1.77 / (15 * a43 * floor)).toFixed(2)}`);
+  // the cost behind it: about twice a 720 clip's
+  const ratio = perClipUsd("standard", env, true, true) / perClipUsd("standard", env, true, false);
+  assert.ok(ratio > 1.8 && ratio < 2.4, `HD/720 cost per clip: ${ratio.toFixed(2)}`);
+});

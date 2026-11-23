@@ -81,7 +81,13 @@ export const LEAN = { call_bytes: 1_000_000, ahead: 3,
   // what comes through the proxy in a lean run (Nov 15 2026, three videos through the real proxy): the sound at
   // ~6.3 kB/s of video (kept at 7), and per clip its stretch, the clip plus ~7 s (a second either side and the keyframe
   // before it) at ~120-150 kB/s for 1080 lines at 30 fps (kept at 150, the busy end)
-  sound_bytes_per_second: 7_000, stretch_extra_seconds: 7, stretch_bytes_per_second: 150_000 };
+  sound_bytes_per_second: 7_000, stretch_extra_seconds: 7, stretch_bytes_per_second: 150_000,
+  // HD (1080 lines at the source's own frame rate, every HD run since Nov 21): measured on live runs Nov 22 2026 at 218
+  // kB/s median, 262 average, 363 at the 90th percentile (a busy 60 fps video), against ~125 for 720. Kept at 350, the
+  // busy end, as 150 is for 720: a busy HD video keeps the clip's margin (a43cb8fc's clips ran at a loss on the 720 price)
+  hd_stretch_bytes_per_second: 350_000,
+  // an HD clip takes about twice a 720 clip's server time (1.18-2.08 s per second of clip against 0.68)
+  hd_render_factor: 2 };
 /** Whether YouTube runs fetch the sound and each clip's stretch instead of the whole video (STUDIO_CLIPS_LEAN). */
 export const leanOn = (env: Record<string, string | undefined>) => env.STUDIO_CLIPS_LEAN === "on";
 /** STUDIO_CLIPS_LEAN: "on" for everyone, "off" (or unset) for nobody, or a list of account ids (comma separated) for
@@ -162,15 +168,20 @@ export function analysisUsd(p: { seconds: number; platform: "youtube" | "upload"
   if (p.platform === "youtube") usd += CLIP_COST.lookup_usd + (p.download ? ((p.seconds * bps + (leanOn(p.env) && p.bytesPerSecond == null ? LEAN.call_bytes : 0)) / 1e9) * proxyUsdPerGb(p.env) : 0);
   return usd;
 }
-/** One clip, in dollars: framing at its goal's upper end, rendering and storing. */
-export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env, youtube = false) => frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip
-  // lean YouTube runs: the clip's own stretch through the proxy
-  + (youtube && leanOn(env) ? (((CLIP_LENGTHS[length].target + LEAN.stretch_extra_seconds) * LEAN.stretch_bytes_per_second + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env) : 0);
+/** One clip, in dollars: framing at its goal's upper end, rendering and storing. `hd`: a lean run cut from 1080 lines
+ *  (its stretch is about twice the bytes, its render about twice the time). */
+export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env, youtube = false, hd = false) => {
+  const lean = youtube && leanOn(env), big = lean && hd;
+  return frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip * (big ? LEAN.hd_render_factor : 1)
+    // lean YouTube runs: the clip's own stretch through the proxy
+    + (lean ? (((CLIP_LENGTHS[length].target + LEAN.stretch_extra_seconds) * (big ? LEAN.hd_stretch_bytes_per_second : LEAN.stretch_bytes_per_second) + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env) : 0);
+};
 const credits = (usd: number, floor: number, margin: number) => Math.ceil(usd / ((1 - margin) * floor) - 1e-9);
 /** A run's price: `analysis` once (reading the video), `per_clip` for each clip made; `lite` is reading without the
  *  download (YouTube refused our servers: the moments are chosen from YouTube's captions and the file is asked for). */
 export type ClipsPrice = { analysis: number; per_clip: number; lite: number };
-export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "youtube" | "upload"; length: ClipLength; env: Record<string, string | undefined>; download?: boolean; bytesPerSecond?: number }): ClipsPrice {
+export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "youtube" | "upload"; length: ClipLength; env: Record<string, string | undefined>; download?: boolean; bytesPerSecond?: number;
+  /** clips cut from 1080 lines (HD): each clip priced on its own bytes and render (lean runs) */ hd?: boolean }): ClipsPrice {
   const floor = creditValueFloor(plans), minutes = Math.max(1, Math.ceil(p.seconds / 60));
   const download = p.platform === "youtube" && p.download !== false;
   const transcribe = p.platform === "upload" || !!p.env.ELEVENLABS_API_KEY;
@@ -180,7 +191,7 @@ export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "y
   const rate = p.platform === "youtube" && download ? (lean ? LEAN_RATES.youtube_per_minute : CLIP_RATES.youtube_per_minute) : p.platform === "youtube" ? CLIP_RATES.lite_per_minute : CLIP_RATES.upload_per_minute;
   return {
     analysis: Math.max(minutes * rate, credits(usd, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.analysis_min),
-    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env, lean), floor, lean ? CLIPS_SAFETY_MARGIN.lean_clip : CLIPS_SAFETY_MARGIN.clip)),
+    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env, lean, lean && !!p.hd), floor, lean ? CLIPS_SAFETY_MARGIN.lean_clip : CLIPS_SAFETY_MARGIN.clip)),
     lite: Math.max(minutes * CLIP_RATES.lite_per_minute, credits(lite, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.lite_min),
   };
 }
@@ -1199,7 +1210,10 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
   // whether our servers can read YouTube (a proxy or a signed-in cookie is set); without it the moments are still chosen
   // from YouTube's captions, then the person uploads the file to have them cut. The page says so before they start.
   const youtube_direct = platform !== "youtube" || !!env.STUDIO_YT_PROXY || !!env.STUDIO_YT_COOKIES;
-  const price = clipsPrice(plans, { seconds, platform, length, env, download: youtube_direct });
+  // HD (1080 lines; never for clips in the video's own shape, the run cuts those at 720): each clip costs more to fetch
+  // and render, so it is priced on its own (Nov 22 2026). The page asks again when the quality changes.
+  const hd = platform === "youtube" && cutLines(qualityOf(o.quality), env) === 1080 && format !== "original";
+  const price = clipsPrice(plans, { seconds, platform, length, env, download: youtube_direct, hd });
   // captions burned into every clip: the words are already heard, so a small add-on per clip
   const captions = o.captions && typeof o.captions === "object" ? o.captions : null;
   if (captions) price.per_clip += captionsPerClip(env);
@@ -1336,7 +1350,8 @@ const blockedByYouTube = (e: any) => e instanceof LinkError && (e.code === "link
 function priceOf(o: any, plans: PlanLike[], env: Record<string, string | undefined>, seconds: number): ClipsPrice {
   const p = o?.price;
   if (p && Number.isFinite(Number(p.per_clip))) return { analysis: Number(p.analysis) || 0, per_clip: Number(p.per_clip), lite: Number(p.lite) || 0 };
-  const fresh = clipsPrice(plans, { seconds: seconds || 600, platform: o?.platform === "youtube" ? "youtube" : "upload", length: lengthOf(o?.length), env });
+  const hd = o?.platform === "youtube" && cutLines(qualityOf(o?.quality), env) === 1080 && formatOf(o?.format) !== "original";
+  const fresh = clipsPrice(plans, { seconds: seconds || 600, platform: o?.platform === "youtube" ? "youtube" : "upload", length: lengthOf(o?.length), env, hd });
   return o?.plan_from ? { ...fresh, analysis: 0, lite: 0 } : fresh;
 }
 export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job): Promise<string> {
