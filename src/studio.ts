@@ -1194,7 +1194,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const busy = await sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("asset_id", a.data.id).in("status", ["queued", "running"]);
       if (busy.error) throw busy.error;
       if ((busy.count ?? 0) > 0) return res.status(409).json({ error: "asset_in_use" });
-      const rm = await sb.storage.from("studio-uploads").remove([a.data.object_key]);
+      const kept = await import("./edit-more.js").then((em) => em.keptForEdits(sb, u, [a.data.object_key]));
+      const rm = kept.has(a.data.object_key) ? { error: null } : await sb.storage.from("studio-uploads").remove([a.data.object_key]);
       if (rm.error) throw rm.error;
       const r = await sb.from("studio_assets").update({ status: "deleted", updated_at: new Date().toISOString() }).eq("id", a.data.id);
       if (r.error) throw r.error;

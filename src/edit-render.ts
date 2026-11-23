@@ -25,6 +25,11 @@ export function layoutGraph(doc: EditDoc, info: MediaInfo): { graph: string; w: 
   }
   if (L.type === "content" && pane("content")) { const s = contentLayout(info, pane("content")!); return { graph: s.graph, w: s.w, h: s.h }; }
   const format = doc.canvas.format === "original" || L.type === "original" ? "original" : "vertical";
+  // a Captions video keeps its own size (outputFrame in studio-caption-video.ts), not the cutter's 1280 cap
+  if (format === "original" && doc.canvas.keep) {
+    const fps = info.fps && info.fps > 30.5 ? ",fps=30" : "";
+    return { graph: `[0:v]scale=${doc.canvas.w}:${doc.canvas.h},setsar=1${fps},format=yuv420p[v]`, w: doc.canvas.w, h: doc.canvas.h };
+  }
   const out = format === "vertical" ? { w: doc.canvas.w, h: doc.canvas.h } : undefined;
   const segs: Seg[] = L.type === "fit" && !L.path.length ? [{ start: 0, end: 1e6, mode: "fit", x0: 0.5, x1: 0.5 }] : L.path;
   const graph = buildClipFilter({ w: info.w, h: info.h, format, segs, fps: info.fps, out });
@@ -38,8 +43,8 @@ export function soundFilter(doc: EditDoc, seconds: number, bleeps: Array<[number
   if (bleeps.length && doc.sound.bleep && doc.sound.bleep !== "off") mutes.push(`volume=enable='${during(bleeps)}':volume=0`);
   return [
     ...mutes,
-    `loudnorm=I=${doc.sound.level}:TP=-1.5:LRA=11`,
-    ...(doc.sound.limiter ? ["alimiter=limit=0.891:level=false"] : []),
+    ...(doc.sound.raw ? [] : [`loudnorm=I=${doc.sound.level}:TP=-1.5:LRA=11`]),
+    ...(doc.sound.limiter && !doc.sound.raw ? ["alimiter=limit=0.891:level=false"] : []),
     "afade=t=in:d=0.06",
     `afade=t=out:st=${Math.max(0, seconds - 0.25).toFixed(3)}:d=0.25`,
   ].join(",");

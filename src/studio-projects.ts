@@ -22,22 +22,30 @@ export type Box = { x: number; y: number; w: number; h: number };
 export type EditDoc = {
   v: 1;
   engine: string;
-  kind: "clip";
-  made_by: { tool: "clips" | "live_clips"; auto_edit: string; job_id: string; rank: number };
+  kind: "clip" | "split";
+  /** a Split screen video (edit-more.ts): the gameplay, the framing of both halves, the caption look; the trim, the
+   *  captions' on/off and the sound come from the rest of the file. Only on kind "split". */
+  split?: { loop_id: string; layout: { mode: "split" | "full"; seam: number; swap: boolean; clip: { zoom: number; cx: number; cy: number }; game: { zoom: number; cx: number; cy: number }; captions: boolean };
+    caption_style: string; seed: string };
+  made_by: { tool: "clips" | "live_clips" | "captions" | "splitscreen"; auto_edit: string; job_id: string; rank: number };
   /** the kept recording; times in this file are seconds inside it (or inside the clip itself when none was kept) */
   source: { key: string | null; seconds: number; width: number; height: number; fps: number | null;
     /** where the kept piece sits in the original video or stream, in seconds from its start */ origin_at: number;
-    origin: Record<string, unknown> | null; expires: string | null };
+    origin: Record<string, unknown> | null; expires: string | null;
+    /** where `key` lives: the editor's own kept recordings (studio-outputs, the default), or a library video read in
+     *  place (studio-uploads: the original a Captions or Split screen video was made from; edit-more.ts) */ bucket?: "studio-outputs" | "studio-uploads" };
   setting: { label: Setting | null; by: "ai" | "user"; sure: number | null };
   trim: { in: number; out: number; keep: Array<[number, number]> | null };
-  canvas: { w: number; h: number; fps: number | null; format: "vertical" | "original" };
+  canvas: { w: number; h: number; fps: number | null; format: "vertical" | "original";
+    /** "original" at exactly w x h (a Captions video keeps its own size, up to 1080x1920) instead of the cutter's 1280 cap */ keep?: boolean };
   layout: { type: "stacked" | "content" | "follow" | "fit" | "original"; divider: number | null;
     panes: Array<{ role: "cam" | "content"; from: Box }>;
     /** the moving crop of a followed person: clip-relative seconds, x as a fraction of the width (studio-clips.ts Seg) */ path: Seg[] };
   captions: { on: boolean; style: Record<string, unknown> | null; keywords: boolean; fillers: boolean; censor: boolean; words: string | null; keys: number[]; fixes: unknown[] };
   extras: { title: string | null; punch_in: number | null; pause_trim: boolean; bottom_loop: unknown | null };
   sound: { level: number; limiter: boolean; muted: Array<{ from: number; to: number; why: string; locked: boolean }>;
-    /** swear words in the sound: left as said, silenced, or bleeped (the editor's smart tool; edit-smart.ts) */ bleep?: "off" | "mute" | "tone" };
+    /** swear words in the sound: left as said, silenced, or bleeped (the editor's smart tool; edit-smart.ts) */ bleep?: "off" | "mute" | "tone";
+    /** the sound as it was, without the loudness pass (a Captions video never had one) until the person sets a level */ raw?: boolean };
   meta: { title: string; hook: string | null; hook_line: string | null; score: number | null };
 };
 

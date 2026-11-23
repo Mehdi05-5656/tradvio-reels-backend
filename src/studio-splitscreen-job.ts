@@ -186,6 +186,8 @@ export async function runSplitJob(sb: SupabaseClient, deps: SplitDeps, job: Job,
     await renew({ stage: "done", charged }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
     if (done.error) throw done.error;
+    // the editor's project for this video (edit-more.ts; caught inside, never fails the run)
+    await import("./edit-more.js").then((em) => em.recordSplitProject(sb, { env, log }, { u, jobId: job.id, originalId: job.asset_id!, options: o })).catch(() => undefined);
     recordEvent({ user_id: u, kind: "feature", name: "splitscreen_done", props: { job: job.id, loop: loop.id, kind: loop.kind, seconds: round2(seconds), mode: layout.mode, seam: layout.seam, swap: layout.swap, captions: !!ass, credits: charged } });
     log(`[splitscreen] made ${JSON.stringify({ job: job.id, loop: loop.id, seconds: Math.round(seconds), run_s: Math.round((Date.now() - t0) / 1000), charged })}`);
     return "done";

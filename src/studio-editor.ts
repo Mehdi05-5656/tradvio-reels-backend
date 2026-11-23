@@ -22,8 +22,11 @@ import { renderArgs } from "./edit-render.js";
 import { deadSpaceArgs, deadSpaceBox, pausePlan, swearRanges } from "./edit-smart.js";
 import { trimRemap } from "./studio-clips.js";
 import { editorOn, editorOpen, SETTINGS, type Box, type EditDoc } from "./studio-projects.js";
+import { cleanSplit } from "./edit-split-doc.js";
+import { loopById } from "./studio-splitscreen-library.js";
 
-export type EditorDeps = { env?: Record<string, string | undefined>; log?: (l: string) => void; run?: (args: string[]) => Promise<unknown> };
+export type EditorDeps = { env?: Record<string, string | undefined>; log?: (l: string) => void; run?: (args: string[]) => Promise<unknown>;
+  /** test hooks for a Split screen render (edit-more.ts renderSplit) */ split?: { prepare?: (url: string, target: string) => Promise<void>; poster?: (video: string, target: string) => Promise<void> } };
 export class EditorError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }
 
 /** Renders a project may have per UTC day before it waits for tomorrow (each costs us about a tenth of a cent). */
@@ -60,6 +63,13 @@ export function cleanDoc(ai: EditDoc, next: any): EditDoc {
   const locked = ai.sound.muted.filter((m) => m.locked);
   const own = Array.isArray(next.sound?.muted) ? next.sound.muted.filter((m: any) => !m?.locked).slice(0, 50).map((m: any) => ({ from: num(m?.from, 0, len) ?? 0, to: num(m?.to, 0, len) ?? 0, why: String(m?.why ?? "user").slice(0, 20), locked: false })).filter((m: any) => m.to > m.from) : [];
   const style = next.captions?.style && typeof next.captions.style === "object" ? next.captions.style : ai.captions.style;
+  if (ai.kind === "split") {
+    // a Split screen video: the framing, the gameplay and the caption look are its own; trim, words and sound as any clip
+    const split = cleanSplit(ai, next.split, (id) => !!loopById(id));
+    return { ...ai, trim: { in: r3(tin), out: r3(tout), keep: null },
+      captions: { ...ai.captions, on: split.layout.captions, fixes: Array.isArray(next.captions?.fixes) ? next.captions.fixes.slice(0, 500) : [] },
+      sound: { ...ai.sound, muted: [...locked, ...own] }, split };
+  }
   return {
     ...ai,
     setting: { label, by: label !== ai.setting.label ? "user" : ai.setting.by, sure: label !== ai.setting.label ? 1 : ai.setting.sure },
@@ -68,7 +78,8 @@ export function cleanDoc(ai: EditDoc, next: any): EditDoc {
     captions: { ...ai.captions, on: next.captions?.on === true, style, keywords: next.captions?.keywords !== false, fillers: next.captions?.fillers !== false, censor: next.captions?.censor === true,
       fixes: Array.isArray(next.captions?.fixes) ? next.captions.fixes.slice(0, 500) : [] },
     extras: { title: typeof next.extras?.title === "string" ? next.extras.title.slice(0, 120) : null, punch_in: num(next.extras?.punch_in, 0, 600), pause_trim: next.extras?.pause_trim === true, bottom_loop: next.extras?.bottom_loop ?? null },
-    sound: { level: num(next.sound?.level, -24, -8) ?? ai.sound.level, limiter: ai.sound.limiter, muted: [...locked, ...own], bleep: ["mute", "tone"].includes(next.sound?.bleep) ? next.sound.bleep : "off" },
+    sound: { level: num(next.sound?.level, -24, -8) ?? ai.sound.level, limiter: ai.sound.limiter, muted: [...locked, ...own], bleep: ["mute", "tone"].includes(next.sound?.bleep) ? next.sound.bleep : "off",
+      ...(ai.sound.raw && (num(next.sound?.level, -24, -8) ?? ai.sound.level) === ai.sound.level ? { raw: true } : {}) },
   };
 }
 
@@ -83,7 +94,7 @@ export function shiftWords(words: Array<[string, number, number, string | null]>
 
 /** The clip's words as the AI's cut heard them. The first save keeps a copy beside the project, because the library
  *  clip's own word file is rewritten for the edited clip (so Captions and Publish line up with what is in the library). */
-const projectWordsKey = (u: string, id: string) => `${u}/edit/${id}/words.json`;
+export const projectWordsKey = (u: string, id: string) => `${u}/edit/${id}/words.json`;
 type WordsDoc = { v: 1; words: Array<[string, number, number, string | null]>; keys: number[]; language: string | null; duration: number | null; at: string };
 export async function projectWords(sb: SupabaseClient, u: string, id: string, assetId: string): Promise<WordsDoc | null> {
   const r = await sb.storage.from("studio-outputs").download(projectWordsKey(u, id));
@@ -124,6 +135,11 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
     if (!UUID.test(v)) throw new EditorError("project_not_found", "No project for that clip", 404);
     const r = await sb.from("studio_projects").select(PUBLIC).eq(col, v).eq("user_id", u).maybeSingle();
     if (r.error) throw r.error;
+    if (!r.data && col === "asset_id") {
+      // a Captions (or Split screen) video made before it wrote projects: made now from its run, the first time it opens
+      const { ensureProjectFor } = await import("./edit-more.js");
+      if (await ensureProjectFor(sb, { env, log }, u, v)) return load(sb, u, col, v);
+    }
     if (!r.data) throw new EditorError("project_not_found", "This clip was made before the editor and has no project", 404);
     return r.data as any;
   };
@@ -131,6 +147,20 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
   app.get("/api/studio/projects/by-asset/:assetId", async (req, res) => {
     const u = await gate(req, res); if (!u) return;
     try { const sb = sbFn(); res.json(await view(sb, await load(sb, u, "asset_id", req.params.assetId))); } catch (e) { fail(res, e); }
+  });
+  // a run's video that is not a library row (Split screen): its project by the run
+  app.get("/api/studio/projects/by-job/:jobId", async (req, res) => {
+    const u = await gate(req, res); if (!u) return;
+    try {
+      const sb = sbFn(), jobId = req.params.jobId;
+      if (!UUID.test(jobId)) throw new EditorError("project_not_found", "No project for that video", 404);
+      const find = () => sb.from("studio_projects").select(PUBLIC).eq("job_id", jobId).eq("user_id", u).is("asset_id", null).maybeSingle();
+      let r = await find();
+      if (r.error) throw r.error;
+      if (!r.data && await (await import("./edit-more.js")).ensureSplitProject(sb, { env, log }, u, jobId)) r = await find();
+      if (!r.data) throw new EditorError("project_not_found", "This video can't be opened in the editor", 404);
+      res.json(await view(sb, r.data));
+    } catch (e) { fail(res, e); }
   });
   app.get("/api/studio/projects/:id", async (req, res) => {
     const u = await gate(req, res); if (!u) return;
@@ -199,12 +229,12 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
     try {
       const sb = sbFn();
       const p = await load(sb, u, "id", req.params.id);
-      const r = await sb.from("studio_projects").select("source_key").eq("id", p.id).maybeSingle();
+      const r = await sb.from("studio_projects").select("source_key,doc").eq("id", p.id).maybeSingle();
       const key = (r.data as any)?.source_key;
       if (!key) throw new EditorError("no_source", "The recording for this clip was not kept", 409);
       dir = await mkdtemp(join(tmpdir(), "edit-ds-"));
       const file = join(dir, "s.mp4");
-      const dl = await sb.storage.from("studio-outputs").download(key);
+      const dl = await sb.storage.from(bucketOf((r.data as any)?.doc)).download(key);
       if (dl.error || !dl.data) throw new EditorError("no_source", "The kept recording could not be read", 409);
       await writeFile(file, Buffer.from(await dl.data.arrayBuffer()));
       const info = await probeLocal(file);
@@ -218,6 +248,10 @@ export function registerEditor(app: Express, sbFn: () => SupabaseClient, deps: E
   const sweep = setInterval(() => { void resumeRenders(sbFn(), deps).catch(() => undefined); }, 60_000);
   (sweep as any).unref?.();
 }
+
+const made = (c: any): string | null => (c && typeof c.from === "string" && UUID.test(c.from) ? c.from : null);
+/** Where a project's source file lives (edit-more.ts reads library videos in place). */
+export const bucketOf = (doc: any): "studio-outputs" | "studio-uploads" => (doc?.source?.bucket === "studio-uploads" ? "studio-uploads" : "studio-outputs");
 
 const running = new Set<string>();
 export async function resumeRenders(sb: SupabaseClient, deps: EditorDeps = {}) {
@@ -237,13 +271,21 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
   try {
     return await cutGate(env).run(async () => {
       const t0 = Date.now();
-      const r = await sb.from("studio_projects").select("id,user_id,asset_id,ai_doc,doc,rev,source_key").eq("id", id).maybeSingle();
+      const r = await sb.from("studio_projects").select("id,user_id,asset_id,job_id,ai_doc,doc,rev,source_key").eq("id", id).maybeSingle();
       const p: any = r.data;
-      if (!p?.source_key || !p.asset_id) throw new EditorError("no_source", "No kept recording");
+      const split = p?.doc?.kind === "split";
+      if (!p?.source_key || (!p.asset_id && !split) || (split && !p.job_id)) throw new EditorError("no_source", "No kept recording");
       await sb.from("studio_projects").update({ render_state: "rendering" }).eq("id", id);
       dir = await mkdtemp(join(tmpdir(), "edit-"));
+      if (split) {
+        // a Split screen video: made again with the tool's own render, in place of the run's output (edit-more.ts)
+        const seconds = await (await import("./edit-more.js")).renderSplit(sb, p, dir, { env, log, run: deps.run, ...deps.split });
+        await sb.from("studio_projects").update({ render_state: "done", rendered_rev: p.rev, rendered_at: new Date().toISOString(), render_error: null }).eq("id", id);
+        recordEvent({ user_id: p.user_id, kind: "feature", name: "editor_render", props: { project_id: id, job_id: p.job_id, tool: "splitscreen", rev: p.rev, seconds, ms: Date.now() - t0 } });
+        return true;
+      }
       const src = join(dir, "source.mp4"), out = join(dir, "out.mp4"), still = join(dir, "poster.jpg");
-      const dl = await sb.storage.from("studio-outputs").download(p.source_key);
+      const dl = await sb.storage.from(bucketOf(p.doc)).download(p.source_key);
       if (dl.error || !dl.data) throw new EditorError("no_source", "The kept recording could not be read");
       await writeFile(src, Buffer.from(await dl.data.arrayBuffer()));
       const info = await probeLocal(src);
@@ -291,7 +333,8 @@ export async function renderProject(sb: SupabaseClient, id: string, deps: Editor
       const probe = { ...(a.data.probe ?? {}), duration: r3(fin.seconds || plan.seconds), width: fin.w, height: fin.h, edited: { rev: p.rev, at: new Date().toISOString() },
         ...(pu.error ? {} : { poster_key: posterKey }),
         ...(oldClip ? { clip: { ...oldClip, start: r3(doc.source.origin_at + doc.trim.in), end: r3(doc.source.origin_at + doc.trim.out) } } : {}),
-        ...(doc.captions.on ? { captions: { style: (doc.captions.style as any)?.id ?? null, from: "editor", job_id: null } } : { captions: undefined }) };
+        // a Captions video keeps the original it was made from (the Captions page and the library read `from`)
+        ...(doc.captions.on ? { captions: { style: (doc.captions.style as any)?.id ?? null, from: made(a.data.probe?.captions) ?? "editor", job_id: made(a.data.probe?.captions) ? a.data.probe.captions.job_id ?? null : null } } : { captions: undefined }) };
       const ua = await sb.from("studio_assets").update({ object_key: key, bytes, probe, updated_at: new Date().toISOString() }).eq("id", p.asset_id);
       if (ua.error) { await sb.storage.from("studio-uploads").remove([key]); throw ua.error; }
       if (oldKey && oldKey !== key) await sb.storage.from("studio-uploads").remove([oldKey]).catch(() => undefined);
@@ -327,18 +370,19 @@ export async function makePreview(sb: SupabaseClient, id: string, deps: EditorDe
   const run = deps.run ?? ((args: string[]) => ffmpeg(args, { timeoutMs: 4 * 60_000 }));
   let dir: string | null = null;
   try {
-    const r = await sb.from("studio_projects").select("id,user_id,source_key,preview_state").eq("id", id).maybeSingle();
+    const r = await sb.from("studio_projects").select("id,user_id,source_key,preview_state,doc").eq("id", id).maybeSingle();
     const p: any = r.data;
     if (!p?.source_key || p.preview_state === "ready" || p.preview_state === "making") return false;
     await sb.from("studio_projects").update({ preview_state: "making" }).eq("id", id);
     dir = await mkdtemp(join(tmpdir(), "edit-pv-"));
     const src = join(dir, "s.mp4"), out = join(dir, "p.mp4");
-    const dl = await sb.storage.from("studio-outputs").download(p.source_key);
+    const dl = await sb.storage.from(bucketOf(p.doc)).download(p.source_key);
     if (dl.error || !dl.data) throw new Error("kept recording unreadable");
     await writeFile(src, Buffer.from(await dl.data.arrayBuffer()));
     await cutGate(deps.env ?? process.env).run(() => run(["-v", "error", "-nostdin", "-y", "-threads", "2", "-i", src, "-vf", "scale='min(1280,iw)':-2,fps=30", "-c:v", "libx264", "-preset", "veryfast",
       "-crf", "23", "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-movflags", "+faststart", out]));
-    const key = p.source_key.replace(/source\.mp4$/, "preview.mp4");
+    // beside the project, never beside its source (a Captions project reads a library video in place)
+    const key = `${p.user_id}/edit/${p.id}/preview.mp4`;
     const up = await sb.storage.from("studio-outputs").upload(key, await readFile(out), { contentType: "video/mp4", upsert: true });
     if (up.error) throw up.error;
     await sb.from("studio_projects").update({ preview_key: key, preview_state: "ready" }).eq("id", id);

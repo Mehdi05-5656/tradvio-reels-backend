@@ -254,6 +254,8 @@ export async function runCaptionsJob(sb: SupabaseClient, deps: ClipsDeps, job: J
         if (ins.error) { await sb.storage.from("studio-uploads").remove([key]).catch(() => undefined); throw ins.error; }
         // the captioned copy has the same words: kept, so it can be captioned again without listening again
         const doc = await readWords(sb, u, it.asset_id); if (doc) await saveWords(sb, u, id, doc).catch(() => undefined);
+        // the editor's project for the copy (edit-more.ts; caught inside, never fails the run)
+        await import("./edit-more.js").then((em) => em.recordCaptionProject(sb, { env, log }, { u, copyId: id, originalId: it.asset_id, jobId: job.id, words: Array.isArray(it.words) && it.words.length ? it.words : null, settings, frame: fr })).catch(() => undefined);
         made.push({ asset_id: id, source: it.asset_id, credits: Number(it.credits) || captionCredits(seconds) });
         log(`[captions] made ${JSON.stringify({ job: job.id, seconds: Math.round(seconds), render_s: Math.round((Date.now() - t0) / 1000), words: words.length, style: settings.style.id })}`);
         await renew({ done: made.length, made, message: made.length < items.length ? `Captioning ${made.length + 1} of ${items.length}` : "Finishing" });

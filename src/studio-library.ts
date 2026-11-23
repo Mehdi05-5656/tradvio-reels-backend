@@ -444,7 +444,9 @@ export async function deleteAssets(sb: SupabaseClient, u: string, ids: string[] 
   const skipped = rows.filter((r) => inUse.has(r.id)).map((r) => ({ id: r.id, reason: "in use by a running job" }));
   for (let k = 0; k < go.length; k += 100) {
     const part = go.slice(k, k + 100);
-    const rmv = await sb.storage.from("studio-uploads").remove(part.map((r) => r.object_key));
+    const kept = await import("./edit-more.js").then((em) => em.keptForEdits(sb, u, part.map((r) => r.object_key)));
+    const drop = part.map((r) => r.object_key).filter((k) => !kept.has(k));
+    const rmv = drop.length ? await sb.storage.from("studio-uploads").remove(drop) : { error: null };
     if (rmv.error) throw rmv.error;
     const posters = part.map((r) => r.probe?.poster_key).filter(Boolean);
     if (posters.length) await sb.storage.from("studio-outputs").remove(posters).catch(() => undefined);
