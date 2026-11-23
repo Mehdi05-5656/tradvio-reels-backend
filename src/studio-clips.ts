@@ -81,7 +81,13 @@ export const LEAN = { call_bytes: 1_000_000, ahead: 3,
   // what comes through the proxy in a lean run (Nov 15 2026, three videos through the real proxy): the sound at
   // ~6.3 kB/s of video (kept at 7), and per clip its stretch, the clip plus ~7 s (a second either side and the keyframe
   // before it) at ~120-150 kB/s for 1080 lines at 30 fps (kept at 150, the busy end)
-  sound_bytes_per_second: 7_000, stretch_extra_seconds: 7, stretch_bytes_per_second: 150_000 };
+  sound_bytes_per_second: 7_000, stretch_extra_seconds: 7, stretch_bytes_per_second: 150_000,
+  // HD (1080 lines at the source's own frame rate, every HD run since Nov 21): measured on live runs Nov 22 2026 at 218
+  // kB/s median, 262 average, 363 at the 90th percentile (a busy 60 fps video), against ~125 for 720. Kept at 350, the
+  // busy end, as 150 is for 720: a busy HD video keeps the clip's margin (a43cb8fc's clips ran at a loss on the 720 price)
+  hd_stretch_bytes_per_second: 350_000,
+  // an HD clip takes about twice a 720 clip's server time (1.18-2.08 s per second of clip against 0.68)
+  hd_render_factor: 2 };
 /** Whether YouTube runs fetch the sound and each clip's stretch instead of the whole video (STUDIO_CLIPS_LEAN). */
 export const leanOn = (env: Record<string, string | undefined>) => env.STUDIO_CLIPS_LEAN === "on";
 /** STUDIO_CLIPS_LEAN: "on" for everyone, "off" (or unset) for nobody, or a list of account ids (comma separated) for
@@ -162,15 +168,20 @@ export function analysisUsd(p: { seconds: number; platform: "youtube" | "upload"
   if (p.platform === "youtube") usd += CLIP_COST.lookup_usd + (p.download ? ((p.seconds * bps + (leanOn(p.env) && p.bytesPerSecond == null ? LEAN.call_bytes : 0)) / 1e9) * proxyUsdPerGb(p.env) : 0);
   return usd;
 }
-/** One clip, in dollars: framing at its goal's upper end, rendering and storing. */
-export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env, youtube = false) => frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip
-  // lean YouTube runs: the clip's own stretch through the proxy
-  + (youtube && leanOn(env) ? (((CLIP_LENGTHS[length].target + LEAN.stretch_extra_seconds) * LEAN.stretch_bytes_per_second + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env) : 0);
+/** One clip, in dollars: framing at its goal's upper end, rendering and storing. `hd`: a lean run cut from 1080 lines
+ *  (its stretch is about twice the bytes, its render about twice the time). */
+export const perClipUsd = (length: ClipLength, env: Record<string, string | undefined> = process.env, youtube = false, hd = false) => {
+  const lean = youtube && leanOn(env), big = lean && hd;
+  return frameUsdPerSecond(env) * CLIP_LENGTHS[length].high + CLIP_COST.render_usd_per_clip * (big ? LEAN.hd_render_factor : 1)
+    // lean YouTube runs: the clip's own stretch through the proxy
+    + (lean ? (((CLIP_LENGTHS[length].target + LEAN.stretch_extra_seconds) * (big ? LEAN.hd_stretch_bytes_per_second : LEAN.stretch_bytes_per_second) + LEAN.call_bytes) / 1e9) * proxyUsdPerGb(env) : 0);
+};
 const credits = (usd: number, floor: number, margin: number) => Math.ceil(usd / ((1 - margin) * floor) - 1e-9);
 /** A run's price: `analysis` once (reading the video), `per_clip` for each clip made; `lite` is reading without the
  *  download (YouTube refused our servers: the moments are chosen from YouTube's captions and the file is asked for). */
 export type ClipsPrice = { analysis: number; per_clip: number; lite: number };
-export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "youtube" | "upload"; length: ClipLength; env: Record<string, string | undefined>; download?: boolean; bytesPerSecond?: number }): ClipsPrice {
+export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "youtube" | "upload"; length: ClipLength; env: Record<string, string | undefined>; download?: boolean; bytesPerSecond?: number;
+  /** clips cut from 1080 lines (HD): each clip priced on its own bytes and render (lean runs) */ hd?: boolean }): ClipsPrice {
   const floor = creditValueFloor(plans), minutes = Math.max(1, Math.ceil(p.seconds / 60));
   const download = p.platform === "youtube" && p.download !== false;
   const transcribe = p.platform === "upload" || !!p.env.ELEVENLABS_API_KEY;
@@ -180,7 +191,7 @@ export function clipsPrice(plans: PlanLike[], p: { seconds: number; platform: "y
   const rate = p.platform === "youtube" && download ? (lean ? LEAN_RATES.youtube_per_minute : CLIP_RATES.youtube_per_minute) : p.platform === "youtube" ? CLIP_RATES.lite_per_minute : CLIP_RATES.upload_per_minute;
   return {
     analysis: Math.max(minutes * rate, credits(usd, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.analysis_min),
-    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env, lean), floor, lean ? CLIPS_SAFETY_MARGIN.lean_clip : CLIPS_SAFETY_MARGIN.clip)),
+    per_clip: Math.max(CLIP_RATES.per_clip[p.length], credits(perClipUsd(p.length, p.env, lean, lean && !!p.hd), floor, lean ? CLIPS_SAFETY_MARGIN.lean_clip : CLIPS_SAFETY_MARGIN.clip)),
     lite: Math.max(minutes * CLIP_RATES.lite_per_minute, credits(lite, floor, CLIPS_SAFETY_MARGIN.analysis), CLIP_RATES.lite_min),
   };
 }
@@ -201,7 +212,8 @@ export const clipsCharge = (price: ClipsPrice, made: number, o: { analysis?: boo
 /** Seconds per stage, as rates: fetching and listening scale with the video's length; choosing has a fixed part plus a
  *  part per second of video; cutting has a fixed part per clip plus a part per second of clip (framing, rendering). */
 export type ClipTiming = { fetch_per_s: number; listen_per_s: number; choose_base: number; choose_per_s: number; cut_base: number; cut_per_s: number; runs: number;
-  /** lean runs (STUDIO_CLIPS_LEAN): reading is the sound alone, and cutting includes each clip's stretch */ lean_fetch_per_s: number; lean_cut_per_s: number };
+  /** lean runs (STUDIO_CLIPS_LEAN): reading is the sound alone, and cutting includes each clip's stretch */ lean_fetch_per_s: number; lean_cut_per_s: number;
+  /** lean HD runs (1080 lines at the source's own frame rate, often 60 fps): about three times a 720 run's cut */ lean_hd_cut_per_s: number };
 /** Before runs are measured, the two TED runs (844 s video, Oct 31-Nov 1 2026): the download took 60 s and 177 s
  *  through the proxy (its speed varies; kept between), hearing and choosing about 70 s, and each clip, cut one at a
  *  time, 45-118 s: 527 s for 270 s of clips, about 1.9 s per second of clip. */
@@ -209,7 +221,11 @@ export const DEFAULT_TIMING: ClipTiming = { fetch_per_s: 0.15, listen_per_s: 0.0
   // the first clean lean run on Render (afd95664, Nov 16 2026: a 43-min video, 5 clips): the sound in 32 s (0.0125 s per
   // second of video, kept at 0.015) and each clip 1.0-1.5 s per second of clip with its stretch fetched ahead (median
   // 1.22, kept at 1.3). Whole-video timing had been applied to it: the page said 14 min 45 s for a 7 min 9 s run.
-  lean_fetch_per_s: 0.015, lean_cut_per_s: 1.3 };
+  lean_fetch_per_s: 0.015, lean_cut_per_s: 1.3,
+  // HD, measured on Render Nov 8-22 2026 (s per second of clip, stretch included): 720 lines 0.68 (228 clips), 1080
+  // at 30 fps 1.18 (210), 1080 at the source's rate ("sharp", every HD run since Nov 21) 2.08 (25). One rate for all
+  // put a 53-min HD run (a43cb8fc) at 12.9 min; it took 28.5.
+  lean_hd_cut_per_s: 2.0 };
 const median = (xs: number[]) => { const v = xs.filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : NaN; };
 /** The timing model from recorded runs (each run's own rates, the median of each); the default fills what is missing. */
 export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
@@ -219,10 +235,12 @@ export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
   // lean runs fetch the sound, not the video, and cut from stretches: their own rates. A lean run that fell back to the
   // whole video mixes both, so it counts for neither's fetching and cutting (its hearing and choosing still count).
   const isLean = (x: any) => !!x.lean && !x.lean.fallback, mixed = (x: any) => !!x.lean && !!x.lean.fallback;
-  const t = all.filter((x) => !isLean(x) && !mixed(x)), lt = all.filter(isLean);
+  const isHd = (x: any) => Number(x.lean?.height) === 1080 && !!x.lean?.sharp;
+  const t = all.filter((x) => !isLean(x) && !mixed(x)), lt = all.filter((x) => isLean(x) && !isHd(x)), lhd = all.filter((x) => isLean(x) && isHd(x));
   const perClipOf = (rs: any[], base: number) => rs.flatMap((x) => (Array.isArray(x.cuts) ? x.cuts : [])).filter((c: any) => Array.isArray(c) && c[0] > 5 && c[1] > 0).map((c: number[]) => Math.max(0.3, (c[1] - base) / c[0]));
   const fetch = pick(t.filter((x) => x.fetch_s > 0).map((x) => x.fetch_s / x.video_s), DEFAULT_TIMING.fetch_per_s);
-  const leanFetch = pick(lt.filter((x) => x.fetch_s > 0).map((x) => x.fetch_s / x.video_s), DEFAULT_TIMING.lean_fetch_per_s);
+  const leanFetch = pick([...lt, ...lhd].filter((x) => x.fetch_s > 0).map((x) => x.fetch_s / x.video_s), DEFAULT_TIMING.lean_fetch_per_s);
+  const leanHdCut = pick(perClipOf(lhd, DEFAULT_TIMING.cut_base), DEFAULT_TIMING.lean_hd_cut_per_s);
   const leanCut = pick(perClipOf(lt, DEFAULT_TIMING.cut_base), DEFAULT_TIMING.lean_cut_per_s);
   const listen = pick(all.filter((x) => x.listen_s > 0).map((x) => x.listen_s / x.video_s), DEFAULT_TIMING.listen_per_s);
   // choosing: the fixed part stays at the default; the rest scales with the video
@@ -232,7 +250,7 @@ export function timingFrom(runs: Array<Record<string, any>>): ClipTiming {
   const whole = t.filter((x) => !Array.isArray(x.cuts) && x.cut_s > 0 && x.clip_s > 0 && x.clips > 0).map((x) => Math.max(0.3, (x.cut_s - x.clips * DEFAULT_TIMING.cut_base) / x.clip_s));
   const cut = pick([...perClip, ...whole], DEFAULT_TIMING.cut_per_s);
   return { fetch_per_s: fetch, listen_per_s: listen, choose_base: DEFAULT_TIMING.choose_base, choose_per_s: choose, cut_base: DEFAULT_TIMING.cut_base, cut_per_s: cut, runs: all.length,
-    lean_fetch_per_s: leanFetch, lean_cut_per_s: leanCut };
+    lean_fetch_per_s: leanFetch, lean_cut_per_s: leanCut, lean_hd_cut_per_s: leanHdCut };
 }
 let timingCache: { at: number; timing: ClipTiming } | null = null;
 /** The current model: the last 30 finished runs, read at most every 10 minutes. */
@@ -245,9 +263,13 @@ export async function clipsTiming(sb: SupabaseClient): Promise<ClipTiming> {
 }
 export const resetClipsTiming = () => { timingCache = null; };
 type EtaJob = { options: any; progress?: any; status?: string };
+/** Seconds per second of clip for this run: whole-video, lean, or lean HD (1080 lines, cut in a vertical shape). */
+export function cutRateOf(o: any, timing: ClipTiming): number {
+  if (!(o?.platform === "youtube" && !o?.plan_from && o?.lean === true)) return timing.cut_per_s;
+  return qualityOf(o?.quality) === "1080" && formatOf(o?.format) !== "original" ? timing.lean_hd_cut_per_s ?? timing.lean_cut_per_s : timing.lean_cut_per_s;
+}
 /** The time one clip takes to cut (a lean run's includes fetching its stretch). */
-const clipSecondsEach = (o: any, timing: ClipTiming, length: ClipLength) =>
-  timing.cut_base + (o?.platform === "youtube" && !o?.plan_from && o?.lean === true ? timing.lean_cut_per_s : timing.cut_per_s) * CLIP_LENGTHS[length].target;
+const clipSecondsEach = (o: any, timing: ClipTiming, length: ClipLength) => timing.cut_base + cutRateOf(o, timing) * CLIP_LENGTHS[length].target;
 /** Seconds a run still needs, from where it is (a queued run needs all of it). Each stage's own clock (`stage_at`) takes
  *  off what has already passed; a cut in progress uses the clips already made when there are some. */
 export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now()): number {
@@ -275,7 +297,7 @@ export function remainingSeconds(job: EtaJob, timing: ClipTiming, now = Date.now
     if (Number.isFinite(sLeft) && Number.isFinite(sAll) && sAll > 0) {
       // the chosen clips' own lengths are known: seconds of clip still to cut, at this run's measured pace once it has one
       const cutSoFar = sAll - sLeft;
-      const pace = cutSoFar > 0 && since > 0 ? since / cutSoFar : (lean ? timing.lean_cut_per_s : timing.cut_per_s) + timing.cut_base / Math.max(5, sAll / Math.max(1, total));
+      const pace = cutSoFar > 0 && since > 0 ? since / cutSoFar : cutRateOf(o, timing) + timing.cut_base / Math.max(5, sAll / Math.max(1, total));
       left += sLeft * pace;
       const sinceClip = p.clip_at ? (now - Date.parse(p.clip_at)) / 1000 : since;
       left -= Math.min(Math.max(0, sinceClip), (sAll / Math.max(1, total)) * pace * 0.9);
@@ -1054,12 +1076,26 @@ export function outputSize(w: number, h: number, format: ClipFormat, tall = fals
   if (w >= h) { const ow = Math.min(1280, w); return { w: even(ow), h: even((h * ow) / Math.max(1, w)) }; }
   const oh = Math.min(1280, h); return { w: even((w * oh) / Math.max(1, h)), h: even(oh) };
 }
+/** The first step's frame-rate cap: 30 when the source runs faster (the same rule buildClipFilter applies at the end). */
+export const mezzFps = (fps: number | null | undefined) => (fps && fps > 30.5 ? ",fps=30" : "");
+/** The picture's frame rate: as given, else read from the local file (a stretch, a whole download; milliseconds). A
+ *  source read over the network (an upload's signed address) is not probed and keeps today's path: step 3 caps it. A
+ *  file that cannot be read answers null, which also keeps today's path. */
+export async function sourceFps(src: SourceInput, probe: (f: string) => Promise<{ fps: number | null }> = probeLocal): Promise<number | null> {
+  if (src.fps) return src.fps;
+  if (!src.video || /^https?:/i.test(src.video)) return null;
+  return probe(src.video).then((x) => x.fps, () => null);
+}
 export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
   const { sb, u, dir } = ctx;
   const mezz = join(dir, `m${m.rank}.mp4`), out = join(dir, `c${m.rank}.mp4`), still = join(dir, `p${m.rank}.jpg`);
   const seconds = m.end - m.start;
-  // 1. the stretch, cut exactly (decoded from just before it), kept near-lossless at up to 1080 lines
-  await ffmpeg(["-v", "error", "-nostdin", "-y", ...inputArgs(ctx.src, m.start, seconds), "-vf", "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'",
+  // 1. the stretch, cut exactly (decoded from just before it), kept near-lossless at up to 1080 lines; a source over 30
+  // fps is brought to 30 here instead of in step 3 (the clip is 30 fps either way): half the frames to write, frame and
+  // render. Measured Nov 22 2026 on 1080p60 stretches: this step 9.1 s -> 5.2 s, the clip identical against the best
+  // source (SSIM 0.9722 both ways).
+  const srcFps = await sourceFps(ctx.src);
+  await ffmpeg(["-v", "error", "-nostdin", "-y", ...inputArgs(ctx.src, m.start, seconds), "-vf", `scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'${mezzFps(srcFps)}`,
     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-threads", "2", "-c:a", "aac", "-b:a", "192k", "-ac", "2", mezz], { timeoutMs: 8 * 60_000, proxy: ctx.src.proxy });
   const info = await probeLocal(mezz);
   const dur = info.seconds || seconds;
@@ -1174,7 +1210,10 @@ export async function quoteClips(deps: ClipsDeps, plans: PlanLike[], asset: { id
   // whether our servers can read YouTube (a proxy or a signed-in cookie is set); without it the moments are still chosen
   // from YouTube's captions, then the person uploads the file to have them cut. The page says so before they start.
   const youtube_direct = platform !== "youtube" || !!env.STUDIO_YT_PROXY || !!env.STUDIO_YT_COOKIES;
-  const price = clipsPrice(plans, { seconds, platform, length, env, download: youtube_direct });
+  // HD (1080 lines; never for clips in the video's own shape, the run cuts those at 720): each clip costs more to fetch
+  // and render, so it is priced on its own (Nov 22 2026). The page asks again when the quality changes.
+  const hd = platform === "youtube" && cutLines(qualityOf(o.quality), env) === 1080 && format !== "original";
+  const price = clipsPrice(plans, { seconds, platform, length, env, download: youtube_direct, hd });
   // captions burned into every clip: the words are already heard, so a small add-on per clip
   const captions = o.captions && typeof o.captions === "object" ? o.captions : null;
   if (captions) price.per_clip += captionsPerClip(env);
@@ -1311,7 +1350,8 @@ const blockedByYouTube = (e: any) => e instanceof LinkError && (e.code === "link
 function priceOf(o: any, plans: PlanLike[], env: Record<string, string | undefined>, seconds: number): ClipsPrice {
   const p = o?.price;
   if (p && Number.isFinite(Number(p.per_clip))) return { analysis: Number(p.analysis) || 0, per_clip: Number(p.per_clip), lite: Number(p.lite) || 0 };
-  const fresh = clipsPrice(plans, { seconds: seconds || 600, platform: o?.platform === "youtube" ? "youtube" : "upload", length: lengthOf(o?.length), env });
+  const hd = o?.platform === "youtube" && cutLines(qualityOf(o?.quality), env) === 1080 && formatOf(o?.format) !== "original";
+  const fresh = clipsPrice(plans, { seconds: seconds || 600, platform: o?.platform === "youtube" ? "youtube" : "upload", length: lengthOf(o?.length), env, hd });
   return o?.plan_from ? { ...fresh, analysis: 0, lite: 0 } : fresh;
 }
 export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job): Promise<string> {
