@@ -157,6 +157,25 @@ async function saveThumb(sb: SupabaseClient, f: typeof fetch, u: string, platfor
   } catch { return null; } // the post shows without its picture
 }
 
+/** Fixed ages a post's numbers are kept at, with the window each one is taken in (a refresh happens at least daily). */
+export const AGES: Array<{ age: "24h" | "3d" | "10d"; from: number; to: number }> = [{ age: "24h", from: 20, to: 48 }, { age: "3d", from: 72, to: 120 }, { age: "10d", from: 240, to: 336 }];
+/** Keep each post's numbers once at 24 h, 3 days and 10 days old, so posts are compared at the same age. */
+export async function snapshotAges(sb: SupabaseClient, u: string, platform: string, posts: PerfPost[], now: Date): Promise<number> {
+  const rows: any[] = [];
+  for (const p of posts) {
+    if (!p.published_at) continue;
+    const hours = (now.getTime() - Date.parse(p.published_at)) / 3600_000;
+    const a = AGES.find((x) => hours >= x.from && hours < x.to);
+    if (!a) continue;
+    rows.push({ user_id: u, platform, platform_post_id: p.platform_post_id, age: a.age, taken_at: now.toISOString(), age_hours: Math.round(hours * 10) / 10, views: p.views, likes: p.likes, comments: p.comments, shares: p.shares, saves: p.saves, extra: p.extra ?? {} });
+  }
+  if (!rows.length) return 0;
+  // the first reading inside each window is kept (ignoreDuplicates): the closest to the age itself
+  const w = await sb.from("studio_perf_post_snapshots").upsert(rows, { onConflict: "user_id,platform,platform_post_id,age", ignoreDuplicates: true });
+  if (w.error) throw w.error;
+  return rows.length;
+}
+
 export async function refreshPerformance(sb: SupabaseClient, u: string, deps: PerfDeps = {}): Promise<{ platforms: string[]; posts: number; errors: string[] }> {
   const log = deps.log ?? ((s: string) => console.log(s)), f = deps.fetch ?? fetch;
   const now = new Date(deps.now?.() ?? Date.now());
@@ -170,23 +189,26 @@ export async function refreshPerformance(sb: SupabaseClient, u: string, deps: Pe
   for (const row of (sp.data ?? []) as any[]) for (const r of row.results ?? []) { const pid = postIdFromUrl(r.platform, r.url); if (pid) made.set(`${r.platform}:${pid}`, { id: row.id, job_id: row.job_id }); }
   // the posting provider's private analytics first (reach, watch time, retention); public numbers when it has none
   const provider = prof.data?.profile_key ? getSocialProvider({ env: deps.env, fetch: deps.fetch, log }) : null;
-  const stats = provider?.accountStats ? await provider.accountStats(prof.data!.profile_key, accounts.map((a) => a.platform)).catch(() => []) : [];
+  const stats = provider?.accountStats ? await provider.accountStats(prof.data!.profile_key, [...new Set(accounts.map((a) => a.platform))]).catch(() => []) : [];
+  // every linked account (two TikToks are read one by one, each with its own rows)
   for (const a of accounts) {
     const handle = handleFor(a) ?? a.platform;
     const platform = a.platform as PerfPlatform;
+    const account_key = a.id ?? handle;
+    const statOf = () => stats.find((x) => (a.id && x.account_id ? x.account_id === a.id : x.platform === platform));
     try {
       let read: { profile: PerfProfile; posts: PerfPost[] } | null = null;
       if (provider?.recentPosts) {
         try {
-          const pp = await provider.recentPosts(prof.data!.profile_key, platform, 60);
-          const st = stats.find((x) => x.platform === platform);
+          const pp = await provider.recentPosts(prof.data!.profile_key, platform, 60, a.id);
+          const st = statOf();
           if (pp.length) read = { profile: { followers: st?.followers ?? null, avatar_url: a.image_url ?? null }, posts: pp.map((x) => fromProvider(platform, x)).filter(Boolean) as PerfPost[] };
         } catch (e: any) { log(`[performance] ${u} ${platform} provider: ${String(e?.message ?? e).slice(0, 120)}`); }
       }
       if (!read) {
         if (!handleFor(a)) throw new Error("no handle to read");
         read = await readAccount(deps, platform, handleFor(a)!);
-        const st = stats.find((x) => x.platform === platform);
+        const st = statOf();
         if (st?.followers != null) read.profile.followers = st.followers;
       }
       const { profile, posts } = read;
@@ -206,18 +228,19 @@ export async function refreshPerformance(sb: SupabaseClient, u: string, deps: Pe
       for (const p of uniq) {
         const thumb_key = thumbs.get(p.platform_post_id) ?? null;
         const m = made.get(`${platform}:${p.platform_post_id}`);
-        rows.push({ user_id: u, platform, platform_post_id: p.platform_post_id, url: p.url, caption: p.caption?.slice(0, 2200) ?? null, published_at: p.published_at, duration_s: p.duration_s, thumb_key,
+        rows.push({ user_id: u, platform, account_key, platform_post_id: p.platform_post_id, url: p.url, caption: p.caption?.slice(0, 2200) ?? null, published_at: p.published_at, duration_s: p.duration_s, thumb_key,
           views: p.views, likes: p.likes, comments: p.comments, shares: p.shares, saves: p.saves, extra: p.extra ?? {}, refreshed_at: now.toISOString(), ...(m ? { social_post_id: m.id, job_id: m.job_id } : {}) });
       }
       if (rows.length) { const w = await sb.from("studio_perf_posts").upsert(rows, { onConflict: "user_id,platform,platform_post_id" }); if (w.error) throw w.error; }
-      await sb.from("studio_perf_accounts").upsert({ user_id: u, platform, handle, followers: profile.followers, refreshed_at: now.toISOString(), error: null }, { onConflict: "user_id,platform" });
+      await sb.from("studio_perf_accounts").upsert({ user_id: u, platform, account_key, handle, followers: profile.followers, refreshed_at: now.toISOString(), error: null }, { onConflict: "user_id,platform,account_key" });
       const views_total = posts.reduce((s, p) => s + (p.views ?? 0), 0);
-      await sb.from("studio_perf_snapshots").upsert({ user_id: u, platform, day: now.toISOString().slice(0, 10), followers: profile.followers, views_total, posts: posts.length }, { onConflict: "user_id,platform,day" });
+      await sb.from("studio_perf_snapshots").upsert({ user_id: u, platform, account_key, day: now.toISOString().slice(0, 10), followers: profile.followers, views_total, posts: posts.length }, { onConflict: "user_id,platform,account_key,day" });
+      await snapshotAges(sb, u, platform, uniq, now).catch((e) => log(`[performance] ${u} age snapshots: ${String(e?.message ?? e).slice(0, 100)}`));
       out.platforms.push(platform); out.posts += rows.length;
     } catch (e: any) {
       const msg = String(e?.message ?? e).slice(0, 160);
       out.errors.push(`${platform}: ${msg}`);
-      await sb.from("studio_perf_accounts").upsert({ user_id: u, platform, handle, refreshed_at: now.toISOString(), error: msg }, { onConflict: "user_id,platform" });
+      await sb.from("studio_perf_accounts").upsert({ user_id: u, platform, account_key, handle, refreshed_at: now.toISOString(), error: msg }, { onConflict: "user_id,platform,account_key" });
       log(`[performance] ${u} ${platform} ${msg}`);
     }
   }
@@ -228,7 +251,7 @@ export async function refreshPerformance(sb: SupabaseClient, u: string, deps: Pe
 // Analyze: the evidence
 // ---------------------------------------------------------------------------------------------------
 export type PostRow = {
-  id: string; platform: string; platform_post_id: string; url: string; caption: string | null; published_at: string | null; duration_s: number | null;
+  id: string; platform: string; account_key?: string | null; platform_post_id: string; url: string; caption: string | null; published_at: string | null; duration_s: number | null;
   views: number | null; likes: number | null; comments: number | null; shares: number | null; saves: number | null; social_post_id?: string | null; job_id?: string | null; extra?: any;
 };
 export type PostStats = PostRow & { er: number | null; share_rate: number | null; save_rate: number | null; comment_rate: number | null; multiple: number | null; clone8: boolean;
@@ -258,16 +281,18 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 /** Local hour and weekday of a time, at a UTC offset in minutes (the person's time zone). */
 function local(iso: string, offsetMin: number) { const d = new Date(Date.parse(iso) + offsetMin * 60_000); return { hour: d.getUTCHours(), day: d.getUTCDay(), date: d.toISOString().slice(0, 10) }; }
 
-export function analyze(rows: PostRow[], snapshots: Array<{ platform: string; day: string; followers: number | null }>, opts: { range_days: number; now: number; offset_min: number; platform?: string | null }): Analysis {
+export function analyze(rows: PostRow[], snapshots: Array<{ platform: string; account_key?: string | null; day: string; followers: number | null }>, opts: { range_days: number; now: number; offset_min: number; platform?: string | null; account?: string | null }): Analysis {
   const { range_days, now, offset_min } = opts;
   const from = now - range_days * 86400_000, prevFrom = from - range_days * 86400_000;
-  const scoped = rows.filter((r) => !opts.platform || r.platform === opts.platform);
+  const scoped = rows.filter((r) => (!opts.platform || r.platform === opts.platform) && (!opts.account || r.account_key === opts.account));
   // each post against the person's own median on its platform (the last 90 days of posts, so one viral month does not skew it)
+  // ... and on its own account: two TikToks of very different sizes each have their own normal
+  const acct = (r: { platform: string; account_key?: string | null }) => `${r.platform}|${r.account_key ?? ""}`;
   const base = new Map<string, number | null>();
-  for (const p of new Set(scoped.map((r) => r.platform))) base.set(p, median(scoped.filter((r) => r.platform === p && r.views != null && r.published_at && Date.parse(r.published_at) > now - 90 * 86400_000).map((r) => r.views!)));
+  for (const k of new Set(scoped.map(acct))) base.set(k, median(scoped.filter((r) => acct(r) === k && r.views != null && r.published_at && Date.parse(r.published_at) > now - 90 * 86400_000).map((r) => r.views!)));
   const stats: PostStats[] = scoped.map((r) => {
     const eng = (r.likes ?? 0) + (r.comments ?? 0) + (r.shares ?? 0) + (r.saves ?? 0);
-    const b = base.get(r.platform);
+    const b = base.get(acct(r));
     const x = r.extra ?? {};
     const watch = x.avg_view_pct != null ? Number(x.avg_view_pct) / 100 : x.avg_watch_s != null && r.duration_s ? Math.min(1.5, Number(x.avg_watch_s) / Number(r.duration_s)) : null;
     const fwr = x.full_watch_rate == null ? null : Number(x.full_watch_rate) > 1.5 ? Number(x.full_watch_rate) / 100 : Number(x.full_watch_rate);
@@ -285,10 +310,16 @@ export function analyze(rows: PostRow[], snapshots: Array<{ platform: string; da
   };
   // followers now and change over the range, from the daily snapshots
   const followers = [...new Set(snapshots.map((s) => s.platform))].filter((p) => !opts.platform || p === opts.platform).map((p) => {
-    const xs = snapshots.filter((s) => s.platform === p && s.followers != null).sort((a, b) => a.day.localeCompare(b.day));
-    // the change over the window: from the last snapshot before it starts (or its first day), to the latest
-    const last = xs.at(-1) ?? null, first = [...xs].reverse().find((s) => Date.parse(s.day) <= from) ?? xs.find((s) => Date.parse(s.day) >= from) ?? null;
-    return { platform: p, now: last?.followers ?? null, delta: last && first && first !== last ? (last.followers ?? 0) - (first.followers ?? 0) : null };
+    // per account, then added up (two TikToks: both audiences)
+    let nowSum: number | null = null, deltaSum: number | null = null;
+    for (const k of new Set(snapshots.filter((s) => s.platform === p && (!opts.account || s.account_key === opts.account)).map((s) => s.account_key ?? ""))) {
+      const xs = snapshots.filter((s) => s.platform === p && (s.account_key ?? "") === k && s.followers != null).sort((a, b) => a.day.localeCompare(b.day));
+      // the change over the window: from the last snapshot before it starts (or its first day), to the latest
+      const last = xs.at(-1) ?? null, first = [...xs].reverse().find((s) => Date.parse(s.day) <= from) ?? xs.find((s) => Date.parse(s.day) >= from) ?? null;
+      if (last?.followers != null) nowSum = (nowSum ?? 0) + last.followers;
+      if (last && first && first !== last) deltaSum = (deltaSum ?? 0) + ((last.followers ?? 0) - (first.followers ?? 0));
+    }
+    return { platform: p, now: nowSum, delta: deltaSum };
   });
   const series: Array<{ day: string; views: number; posts: number }> = [];
   for (let t = from; t <= now; t += 86400_000) series.push({ day: local(new Date(t).toISOString(), offset_min).date, views: 0, posts: 0 });

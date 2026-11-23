@@ -56,16 +56,20 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
     const p = String(req.query.platform ?? req.body?.platform ?? "");
     const platform = ["tiktok", "instagram", "youtube"].includes(p) ? p : null;
     const tz = Math.max(-840, Math.min(840, Math.round(Number(req.query.tz ?? req.body?.tz ?? 0)) || 0));
-    return { range, platform, tz };
+    // one account of a network (two TikToks): its provider id or handle
+    const a = String(req.query.account ?? req.body?.account ?? "").slice(0, 120);
+    const account = /^[\w.@:-]{1,120}$/.test(a) ? a : null;
+    return { range, platform, tz, account };
   };
-  const payload = async (sb: SupabaseClient, u: string, range: number, platform: string | null, tz: number, refreshing: boolean) => {
-    const L = await loadPerformance(sb, u, range, platform, tz);
-    const ins = await latestInsight(sb, u, platform ?? "all", range);
+  const scopeOf = (platform: string | null, account: string | null) => (account ? `account:${account}`.slice(0, 64) : platform ?? "all");
+  const payload = async (sb: SupabaseClient, u: string, range: number, platform: string | null, tz: number, refreshing: boolean, account: string | null = null) => {
+    const L = await loadPerformance(sb, u, range, platform, tz, Date.now(), account);
+    const ins = await latestInsight(sb, u, scopeOf(platform, account), range);
     const hash = insightHash(L.analysis, platform);
     const posts = L.analysis.posts.map((p) => ({ ...p, thumb_url: L.thumbs.get(p.id) ?? null }));
     return {
       enabled: true, refreshing,
-      accounts: L.accounts.map((a) => ({ platform: a.platform, handle: a.handle, followers: a.followers, refreshed_at: a.refreshed_at, error: a.error })),
+      accounts: L.accounts.map((a) => ({ platform: a.platform, account_key: a.account_key ?? null, handle: a.handle, followers: a.followers, refreshed_at: a.refreshed_at, error: a.error })),
       analysis: { ...L.analysis, posts },
       insight: ins ? { ...ins.body, created_at: ins.created_at, stale: ins.input_hash !== hash } : null,
       suggestions: suggestionsFrom(L.analysis, ins?.body ?? null),
@@ -76,7 +80,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
     res.setHeader("Cache-Control", "private, no-store");
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const sb = sbFn(), { range, platform, tz } = params(req);
+      const sb = sbFn(), { range, platform, tz, account } = params(req);
       const prof = await sb.from("studio_social_profiles").select("accounts").eq("user_id", u).maybeSingle();
       const linked = ((prof.data?.accounts ?? []) as any[]).filter((a) => ["tiktok", "instagram", "youtube"].includes(a.platform));
       if (!prof.data || !linked.length) return res.json({ enabled: true, connected: false, accounts: [], analysis: null, insight: null, suggestions: [] });
@@ -91,34 +95,34 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
         // first open: wait a little so a quick read fills the page; a slow one carries on and the page polls
         if (never) await Promise.race([job.catch(() => undefined), new Promise((r) => setTimeout(r, FIRST_WAIT_MS))]);
       }
-      res.json({ connected: true, ...(await payload(sb, u, range, platform, tz, running.has(u))) });
+      res.json({ connected: true, ...(await payload(sb, u, range, platform, tz, running.has(u), account)) });
     } catch (e) { fail(res, e); }
   });
 
   app.post("/api/studio/performance/refresh", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const sb = sbFn(), { range, platform, tz } = params(req);
+      const sb = sbFn(), { range, platform, tz, account } = params(req);
       await needPlan(sb, u);
       const last = manual.get(u) ?? 0;
       if (Date.now() - last < MANUAL_GAP_MS) return res.status(429).json({ error: "refresh_too_soon", detail: "Fresh numbers arrive every few minutes at most", retry_in_s: Math.ceil((MANUAL_GAP_MS - (Date.now() - last)) / 1000) });
       manual.set(u, Date.now());
       const r = await refreshOnce(sb, u, { ...deps, env });
-      res.json({ connected: true, sync: r, ...(await payload(sb, u, range, platform, tz, false)) });
+      res.json({ connected: true, sync: r, ...(await payload(sb, u, range, platform, tz, false, account)) });
     } catch (e) { fail(res, e); }
   });
 
   app.post("/api/studio/performance/insights", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
-      const sb = sbFn(), { range, platform, tz } = params(req);
+      const sb = sbFn(), { range, platform, tz, account } = params(req);
       await needPlan(sb, u);
       if (writing.has(u)) return res.status(409).json({ error: "insights_busy", detail: "An overview is already being written" });
       const recent = (attempts.get(u) ?? []).filter((t) => Date.now() - t < 86400_000);
       if (recent.length >= ATTEMPTS_PER_DAY) return res.status(429).json({ error: "insights_limit", detail: "A few overviews a day; the numbers do not move faster than that" });
       const day = await sb.from("studio_perf_insights").select("id").eq("user_id", u).gte("created_at", new Date(Date.now() - 86400_000).toISOString());
       if ((day.data ?? []).length >= INSIGHTS_PER_DAY) return res.status(429).json({ error: "insights_limit", detail: "A few overviews a day; the numbers do not move faster than that" });
-      const L = await loadPerformance(sb, u, range, platform, tz);
+      const L = await loadPerformance(sb, u, range, platform, tz, Date.now(), account);
       if (L.analysis.posts.filter((p) => p.published_at && Date.parse(p.published_at) > Date.now() - range * 86400_000).length < 3) return res.status(409).json({ error: "not_enough_posts", detail: "An overview needs at least 3 posts in this window" });
       const tops = L.analysis.top.slice(0, 2).map((id) => L.analysis.posts.find((p) => p.id === id)!).filter((p) => p?.platform === "tiktok");
       const transcripts = await (deps.transcripts ?? scTranscripts(env, deps.fetch))(tops.map((p) => p.url)).catch(() => new Map<string, string>());
@@ -129,7 +133,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       let body;
       try { body = await (deps.insight ?? writeInsight)(sb, u, L.analysis, { platform, thumbs: L.thumbs, transcripts: t2 }, { ...deps, env }); }
       finally { writing.delete(u); }
-      const ins = await sb.from("studio_perf_insights").insert({ user_id: u, scope: platform ?? "all", range_days: range, input_hash: insightHash(L.analysis, platform), body, model: env.STUDIO_INSIGHT_MODEL || "claude-opus-5-5" }).select("created_at").single();
+      const ins = await sb.from("studio_perf_insights").insert({ user_id: u, scope: scopeOf(platform, account), range_days: range, input_hash: insightHash(L.analysis, platform), body, model: env.STUDIO_INSIGHT_MODEL || "claude-opus-5-5" }).select("created_at").single();
       if (ins.error) throw ins.error;
       log(`[performance] overview for ${u} (${platform ?? "all"}, ${range} d)`);
       res.json({ insight: { ...body, created_at: ins.data.created_at, stale: false }, suggestions: suggestionsFrom(L.analysis, body) });

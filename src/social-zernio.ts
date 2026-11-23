@@ -357,11 +357,9 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
 
     async accountStats(profileKey, platforms): Promise<ProviderAccountStats[]> {
       const accs = await rawAccounts(profileKey);
-      return platforms.map((platform) => {
-        const a = accs.find((x) => x.platform === platform);
-        const extra = a?.metadata?.profileData?.extraData ?? {};
-        return { platform, followers: nn(a?.followersCount), extra: { views_total: nn(extra.totalViews), videos: nn(extra.videoCount), likes_total: nn(extra.likesCount) } };
-      });
+      // every account of those networks (two TikToks are two entries), each with its id
+      const one = (platform: string, a: any): ProviderAccountStats => { const extra = a?.metadata?.profileData?.extraData ?? {}; return { platform, account_id: a ? String(a._id) : null, followers: nn(a?.followersCount), extra: { views_total: nn(extra.totalViews), videos: nn(extra.videoCount), likes_total: nn(extra.likesCount) } }; };
+      return platforms.flatMap((platform) => { const mine = accs.filter((x) => x.platform === platform); return mine.length ? mine.map((a) => one(platform, a)) : [one(platform, null)]; });
     },
   };
 }

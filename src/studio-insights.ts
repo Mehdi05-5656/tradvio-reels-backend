@@ -154,16 +154,16 @@ export function chatBrief(a: Analysis | null, insight: Insight | null): string[]
 export type PerfLoad = { analysis: Analysis; rows: PostRow[]; accounts: any[]; snapshots: any[]; thumbs: Map<string, string> };
 
 /** Everything the dashboard shows for one person, one range and one network (or all). */
-export async function loadPerformance(sb: SupabaseClient, u: string, range: number, platform: string | null, offsetMin: number, now = Date.now()): Promise<PerfLoad> {
+export async function loadPerformance(sb: SupabaseClient, u: string, range: number, platform: string | null, offsetMin: number, now = Date.now(), account: string | null = null): Promise<PerfLoad> {
   const since = new Date(now - Math.max(range * 2, 90) * 86400_000).toISOString();
   const [posts, accounts, snaps] = await Promise.all([
     sb.from("studio_perf_posts").select("*").eq("user_id", u).gte("published_at", since).order("published_at", { ascending: false }).limit(400),
     sb.from("studio_perf_accounts").select("*").eq("user_id", u),
-    sb.from("studio_perf_snapshots").select("platform,day,followers,views_total").eq("user_id", u).gte("day", new Date(now - (range + 2) * 86400_000).toISOString().slice(0, 10)),
+    sb.from("studio_perf_snapshots").select("platform,account_key,day,followers,views_total").eq("user_id", u).gte("day", new Date(now - (range + 2) * 86400_000).toISOString().slice(0, 10)),
   ]);
   if (posts.error) throw posts.error;
   const rows = (posts.data ?? []) as any[];
-  const analysis = analyze(rows, (snaps.data ?? []) as any[], { range_days: range, now, offset_min: offsetMin, platform });
+  const analysis = analyze(rows, (snaps.data ?? []) as any[], { range_days: range, now, offset_min: offsetMin, platform, account });
   const keys = rows.map((r) => r.thumb_key).filter(Boolean);
   const signed = keys.length ? await sb.storage.from("studio-outputs").createSignedUrls([...new Set(keys)] as string[], 3600) : { data: [] as any[] };
   const byKey = new Map(((signed.data ?? []) as any[]).filter((x) => !x.error).map((x) => [x.path, x.signedUrl]));

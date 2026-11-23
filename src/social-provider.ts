@@ -59,7 +59,7 @@ export type ProviderPost = {
    *  engaged_views, avg_view_pct, subscribers_gained, follows */
   extra: Record<string, any>;
 };
-export type ProviderAccountStats = { platform: string; followers: number | null; extra: Record<string, any> };
+export type ProviderAccountStats = { platform: string; account_id?: string | null; followers: number | null; extra: Record<string, any> };
 
 export class SocialError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }
 

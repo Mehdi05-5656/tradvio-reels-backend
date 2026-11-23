@@ -238,3 +238,37 @@ test("a finished video goes into the library once: copied on the first ask, the 
     assert.equal(outputAssetLabel({ tool: "swap", options: {} }).length > 0, true);
   } finally { await new Promise((r) => server.close(r)); }
 });
+
+test("every account: two TikToks are each judged against their own median, and their followers add up", async () => {
+  const { analyze } = await import("../src/studio-performance.js");
+  const now = Date.parse("2026-11-22T12:00:00Z");
+  const day = (d: number) => new Date(now - d * 86400_000).toISOString();
+  const post = (id: string, account_key: string, views: number, d: number) => ({ id, platform: "tiktok", account_key, platform_post_id: id, url: "", caption: null, published_at: day(d), duration_s: 20, views, likes: 0, comments: 0, shares: 0, saves: 0 });
+  // a big account (median 100k) and a small one (median 1k): 20k is weak for the big one, a hit for the small one
+  const rows = [post("b1", "big", 100_000, 2), post("b2", "big", 100_000, 3), post("b3", "big", 20_000, 4), post("s1", "small", 1_000, 2), post("s2", "small", 1_000, 3), post("s3", "small", 20_000, 4)];
+  const snaps = [{ platform: "tiktok", account_key: "big", day: "2026-11-22", followers: 50_000 }, { platform: "tiktok", account_key: "small", day: "2026-11-22", followers: 800 }];
+  const a = analyze(rows as any, snaps, { range_days: 28, now, offset_min: 0 });
+  const m = (id: string) => a.posts.find((p) => p.id === id)!.multiple!;
+  assert.equal(Math.round(m("b3") * 100) / 100, 0.2);
+  assert.equal(m("s3"), 20);
+  assert.equal(a.followers[0].now, 50_800);
+  const one = analyze(rows as any, snaps, { range_days: 28, now, offset_min: 0, account: "small" });
+  assert.deepEqual(one.posts.map((p) => p.id).sort(), ["s1", "s2", "s3"]);
+  assert.equal(one.followers[0].now, 800);
+});
+
+test("age snapshots: a post's numbers are kept once at 24 h, 3 d and 10 d", async () => {
+  const { snapshotAges } = await import("../src/studio-performance.js");
+  const now = new Date("2026-11-22T12:00:00Z");
+  const at = (h: number) => new Date(now.getTime() - h * 3600_000).toISOString();
+  const wrote: any[] = [];
+  const sb: any = { from: () => ({ upsert: async (rows: any[], o: any) => { wrote.push({ rows, o }); return { error: null }; } }) };
+  const n = await snapshotAges(sb, "u1", "tiktok", [
+    { platform: "tiktok", platform_post_id: "a", url: "", caption: null, published_at: at(30), duration_s: 10, thumb_url: null, views: 500, likes: 1, comments: 0, shares: 0, saves: 0 },
+    { platform: "tiktok", platform_post_id: "b", url: "", caption: null, published_at: at(80), duration_s: 10, thumb_url: null, views: 900, likes: 1, comments: 0, shares: 0, saves: 0 },
+    { platform: "tiktok", platform_post_id: "c", url: "", caption: null, published_at: at(6), duration_s: 10, thumb_url: null, views: 50, likes: 0, comments: 0, shares: 0, saves: 0 },
+  ] as any, now);
+  assert.equal(n, 2);
+  assert.deepEqual(wrote[0].rows.map((r: any) => [r.platform_post_id, r.age]), [["a", "24h"], ["b", "3d"]]);
+  assert.equal(wrote[0].o.ignoreDuplicates, true, "the first reading in the window is kept");
+});
