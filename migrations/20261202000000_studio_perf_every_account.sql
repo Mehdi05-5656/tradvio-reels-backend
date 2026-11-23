@@ -33,4 +33,29 @@ CREATE TABLE IF NOT EXISTS public.studio_perf_post_snapshots (
 );
 ALTER TABLE public.studio_perf_post_snapshots ENABLE ROW LEVEL SECURITY;
 
+-- Rows read before this change belong to the one linked account of their network: give them its key (the provider's
+-- account id, as refreshPerformance writes it), so they are not shown twice beside the rows the new code writes.
+-- Networks with no linked account, or more than one, are left as they are.
+WITH one AS (
+  SELECT p.user_id, acc->>'platform' AS platform, min(acc->>'id') AS id
+  FROM public.studio_social_profiles p, jsonb_array_elements(p.accounts) acc
+  WHERE acc->>'id' IS NOT NULL
+  GROUP BY 1, 2 HAVING count(*) = 1
+)
+UPDATE public.studio_perf_accounts a SET account_key = one.id FROM one WHERE a.user_id = one.user_id AND a.platform = one.platform AND a.account_key = '';
+WITH one AS (
+  SELECT p.user_id, acc->>'platform' AS platform, min(acc->>'id') AS id
+  FROM public.studio_social_profiles p, jsonb_array_elements(p.accounts) acc
+  WHERE acc->>'id' IS NOT NULL
+  GROUP BY 1, 2 HAVING count(*) = 1
+)
+UPDATE public.studio_perf_snapshots s SET account_key = one.id FROM one WHERE s.user_id = one.user_id AND s.platform = one.platform AND s.account_key = '';
+WITH one AS (
+  SELECT p.user_id, acc->>'platform' AS platform, min(acc->>'id') AS id
+  FROM public.studio_social_profiles p, jsonb_array_elements(p.accounts) acc
+  WHERE acc->>'id' IS NOT NULL
+  GROUP BY 1, 2 HAVING count(*) = 1
+)
+UPDATE public.studio_perf_posts x SET account_key = one.id FROM one WHERE x.user_id = one.user_id AND x.platform = one.platform AND x.account_key IS NULL;
+
 COMMIT;
