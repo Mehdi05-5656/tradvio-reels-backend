@@ -9,6 +9,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { refreshPerformance, REFRESH_EVERY_MS, type PerfDeps } from "./studio-performance.js";
 import { profileSuggestions } from "./studio-onboarding.js";
 import { insightHash, latestInsight, loadPerformance, performanceForChat, suggestionsFrom, writeInsight } from "./studio-insights.js";
+import { fillPostFeatures, whatsWorking } from "./studio-post-features.js";
 import { importLink, promoteOutput } from "./studio-assistant.js";
 import { withPosterUrls } from "./studio.js";
 import { hasPlanAccess } from "./studio-limits.js";
@@ -25,16 +26,26 @@ const ATTEMPTS_PER_DAY = 10;
 /** How long the first open waits for the first read before answering "still reading". */
 const FIRST_WAIT_MS = 8_000;
 
-/** One refresh at a time per person; a second caller waits for the same one. */
-function refreshOnce(sb: SupabaseClient, u: string, deps: PerfDeps) {
+const reading = new Set<string>();
+/** One refresh at a time per person; a second caller waits for the same one. After it, what is in the new posts is
+ *  read in the background (a capped number of covers per pass), without holding up the numbers. */
+function refreshOnce(sb: SupabaseClient, u: string, deps: PerfDeps & { features?: typeof fillPostFeatures }) {
   const cur = running.get(u);
   if (cur) return cur;
   const p = refreshPerformance(sb, u, deps).finally(() => running.delete(u));
   running.set(u, p);
+  p.then(() => {
+    if (reading.has(u)) return;
+    reading.add(u);
+    (deps.features ?? fillPostFeatures)(sb, u, deps)
+      .then((r) => { if (r.read) (deps.log ?? console.log)(`[features] ${u} read ${r.read} posts (${r.covers} covers)`); })
+      .catch((e) => (deps.log ?? console.log)(`[features] ${u}: ${String(e?.message ?? e).slice(0, 160)}`))
+      .finally(() => reading.delete(u));
+  }, () => undefined);
   return p;
 }
 
-export function registerPerformance(app: Express, sbFn: () => SupabaseClient, deps: PerfDeps & { insight?: typeof writeInsight; transcripts?: (urls: string[]) => Promise<Map<string, string>> } = {}): void {
+export function registerPerformance(app: Express, sbFn: () => SupabaseClient, deps: PerfDeps & { insight?: typeof writeInsight; transcripts?: (urls: string[]) => Promise<Map<string, string>>; features?: typeof fillPostFeatures } = {}): void {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
@@ -71,6 +82,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       enabled: true, refreshing,
       accounts: L.accounts.map((a) => ({ platform: a.platform, account_key: a.account_key ?? null, handle: a.handle, followers: a.followers, refreshed_at: a.refreshed_at, error: a.error })),
       analysis: { ...L.analysis, posts },
+      working: whatsWorking(L.analysis, { offset_min: tz }),
       insight: ins ? { ...ins.body, created_at: ins.created_at, stale: ins.input_hash !== hash } : null,
       suggestions: suggestionsFrom(L.analysis, ins?.body ?? null),
     };
@@ -83,7 +95,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       const sb = sbFn(), { range, platform, tz, account } = params(req);
       const prof = await sb.from("studio_social_profiles").select("accounts").eq("user_id", u).maybeSingle();
       const linked = ((prof.data?.accounts ?? []) as any[]).filter((a) => ["tiktok", "instagram", "youtube"].includes(a.platform));
-      if (!prof.data || !linked.length) return res.json({ enabled: true, connected: false, accounts: [], analysis: null, insight: null, suggestions: [] });
+      if (!prof.data || !linked.length) return res.json({ enabled: true, connected: false, accounts: [], analysis: null, working: null, insight: null, suggestions: [] });
       await sb.from("studio_social_profiles").update({ perf_viewed_at: new Date().toISOString(), timezone: String(tz) }).eq("user_id", u);
       const acc = await sb.from("studio_perf_accounts").select("refreshed_at").eq("user_id", u);
       const oldest = Math.min(...((acc.data ?? []) as any[]).map((a) => Date.parse(a.refreshed_at)), Number.POSITIVE_INFINITY);
@@ -131,7 +143,7 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       attempts.set(u, [...recent, Date.now()]);
       writing.add(u);
       let body;
-      try { body = await (deps.insight ?? writeInsight)(sb, u, L.analysis, { platform, thumbs: L.thumbs, transcripts: t2 }, { ...deps, env }); }
+      try { body = await (deps.insight ?? writeInsight)(sb, u, L.analysis, { platform, thumbs: L.thumbs, transcripts: t2, offset_min: tz }, { ...deps, env }); }
       finally { writing.delete(u); }
       const ins = await sb.from("studio_perf_insights").insert({ user_id: u, scope: scopeOf(platform, account), range_days: range, input_hash: insightHash(L.analysis, platform), body, model: env.STUDIO_INSIGHT_MODEL || "claude-opus-5-5" }).select("created_at").single();
       if (ins.error) throw ins.error;

@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLAYBOOK } from "./data/social-playbook.js";
 import { analyze, type Analysis, type PerfDeps, type PostRow, type PostStats } from "./studio-performance.js";
+import { cardLine, whatsWorking } from "./studio-post-features.js";
 
 export const INSIGHT_MODEL = "claude-opus-5-5";
 export const MOVE_TOOLS = ["blueprint", "swap", "recast", "restyle", "trend", "publish", "chat", "replies"] as const;
@@ -66,7 +67,7 @@ export function insightHash(a: Analysis, platform: string | null): string {
   return createHash("sha256").update(JSON.stringify({ platform, facts: a.facts, top: a.top, low: a.low, v: 2 })).digest("hex").slice(0, 32);
 }
 
-export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, opts: { platform: string | null; thumbs: Map<string, string>; transcripts?: Map<string, string> }, deps: PerfDeps = {}): Promise<Insight> {
+export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, opts: { platform: string | null; thumbs: Map<string, string>; transcripts?: Map<string, string>; offset_min?: number }, deps: PerfDeps = {}): Promise<Insight> {
   const env = deps.env ?? process.env, f = deps.fetch ?? fetch;
   const key = env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("insights_unconfigured");
@@ -79,6 +80,7 @@ export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, o
   const said = [...(opts.transcripts?.entries() ?? [])].map(([id, t]) => `What is said in post ${id}: """${t.slice(0, 1200)}"""`).join("\n");
   const text = [
     `THEIR NUMBERS (${opts.platform ?? "all linked accounts"}, last ${a.range_days} days)`, ...a.facts.map((x) => `- ${x}`), "",
+    ...(() => { const w = whatsWorking(a, { offset_min: opts.offset_min ?? 0 }).cards; return w.length ? ["WHAT THEIR POSTS SHARE (measured: each post against its own account's usual views; confidence from a permutation test)", ...w.map((c) => `- ${cardLine(c)}`), ""] : []; })(),
     "TOP POSTS (by their own usual views)", ...top.map((p) => `- ${line(p)}`), "",
     low.length ? "WEAKEST POSTS" : "", ...low.map((p) => `- ${line(p)}`), "",
     said, "",
@@ -138,10 +140,11 @@ export function suggestionsFrom(a: Analysis | null, insight: Insight | null): Su
 }
 
 /** A few lines for the assistant's system prompt: how this person's posts do, what works, the move list. */
-export function chatBrief(a: Analysis | null, insight: Insight | null): string[] {
+export function chatBrief(a: Analysis | null, insight: Insight | null, offset_min = 0): string[] {
   if (!a || !a.posts.length) return [];
   const byId = new Map(a.posts.map((p) => [p.id, p]));
   const lines = [...a.facts.slice(0, 6)];
+  for (const c of whatsWorking(a, { offset_min }).cards.slice(0, 3)) lines.push(`Measured on their posts: ${cardLine(c)}`);
   const top = a.top.slice(0, 3).map((id) => byId.get(id)!).filter(Boolean);
   if (top.length) lines.push(`Their best recent posts: ${top.map((p) => `${p.platform} "${short(p.caption, 50)}" ${p.multiple ? `${p.multiple.toFixed(1)}× usual` : ""} (${p.url})`).join("; ")}.`);
   if (insight) { lines.push(`Overview: ${insight.headline}`); for (const w of insight.working.slice(0, 2)) lines.push(`Works: ${w.title}: ${w.evidence}`); for (const m of insight.moves.slice(0, 3)) lines.push(`Suggested move (${m.tool}): ${m.title}: ${m.detail}`); }
@@ -192,7 +195,7 @@ async function performanceForChatUncached(sb: SupabaseClient, u: string): Promis
     const { analysis } = await loadPerformance(sb, u, 28, null, offset);
     if (!analysis.posts.length) return { brief: [], suggestions: [] };
     const ins = await latestInsight(sb, u, "all", 28);
-    return { brief: chatBrief(analysis, ins?.body ?? null), suggestions: suggestionsFrom(analysis, ins?.body ?? null) };
+    return { brief: chatBrief(analysis, ins?.body ?? null, offset), suggestions: suggestionsFrom(analysis, ins?.body ?? null) };
   } catch { return { brief: [], suggestions: [] }; }
 }
 

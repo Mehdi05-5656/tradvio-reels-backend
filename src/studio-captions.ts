@@ -62,7 +62,8 @@ When the creator's best captions are given, match their voice (length, tone, cas
  *  say about each hashtag: the voice and the evidence a caption is written with. Empty for a new account. */
 export async function captionContext(sb: SupabaseClient, u: string, platforms: string[]): Promise<{ voice: string[]; tags: Array<{ tag: string; multiple: number | null; posts: number }>; questionsHelp: boolean | null }> {
   const r = await sb.from("studio_perf_posts").select("platform,account_key,caption,views,comments,published_at").eq("user_id", u).gte("published_at", new Date(Date.now() - 120 * 86400_000).toISOString()).limit(400);
-  const rows = ((r.data ?? []) as any[]).filter((x) => x.views != null && (!platforms.length || platforms.includes(x.platform)));
+  // YouTube's numbers stay raw (its API terms), so its posts never feed a multiple
+  const rows = ((r.data ?? []) as any[]).filter((x) => x.views != null && x.platform !== "youtube" && (!platforms.length || platforms.includes(x.platform)));
   if (rows.length < 6) return { voice: [], tags: [], questionsHelp: null };
   const med = new Map<string, number>();
   for (const k of new Set(rows.map((x) => `${x.platform}|${x.account_key ?? ""}`))) {

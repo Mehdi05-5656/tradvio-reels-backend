@@ -253,6 +253,8 @@ export async function refreshPerformance(sb: SupabaseClient, u: string, deps: Pe
 export type PostRow = {
   id: string; platform: string; account_key?: string | null; platform_post_id: string; url: string; caption: string | null; published_at: string | null; duration_s: number | null;
   views: number | null; likes: number | null; comments: number | null; shares: number | null; saves: number | null; social_post_id?: string | null; job_id?: string | null; extra?: any;
+  /** what is in the post (studio-post-features.ts), when it has been read */
+  features?: any;
 };
 export type PostStats = PostRow & { er: number | null; share_rate: number | null; save_rate: number | null; comment_rate: number | null; multiple: number | null; clone8: boolean;
   /** share of viewers still watching at 3 s, share of the length watched on average, shares per account reached (where reported) */
@@ -289,7 +291,9 @@ export function analyze(rows: PostRow[], snapshots: Array<{ platform: string; ac
   // ... and on its own account: two TikToks of very different sizes each have their own normal
   const acct = (r: { platform: string; account_key?: string | null }) => `${r.platform}|${r.account_key ?? ""}`;
   const base = new Map<string, number | null>();
-  for (const k of new Set(scoped.map(acct))) base.set(k, median(scoped.filter((r) => acct(r) === k && r.views != null && r.published_at && Date.parse(r.published_at) > now - 90 * 86400_000).map((r) => r.views!)));
+  // YouTube stays raw: its API terms forbid new or derived metrics from its data until an audit is passed, so its posts
+  // get no multiple and stay out of every comparison built on one (their views, likes and comments still show)
+  for (const k of new Set(scoped.filter((r) => r.platform !== "youtube").map(acct))) base.set(k, median(scoped.filter((r) => acct(r) === k && r.views != null && r.published_at && Date.parse(r.published_at) > now - 90 * 86400_000).map((r) => r.views!)));
   const stats: PostStats[] = scoped.map((r) => {
     const eng = (r.likes ?? 0) + (r.comments ?? 0) + (r.shares ?? 0) + (r.saves ?? 0);
     const b = base.get(acct(r));
@@ -366,8 +370,6 @@ export function analyze(rows: PostRow[], snapshots: Array<{ platform: string; ac
   if (p90 != null && inRange.length >= 5) { const out = inRange.filter((r) => (r.views ?? 0) > p90).length; facts.push(`Beat their own top-10% mark (${fmt(p90)} views) on ${out} of ${inRange.length} posts in the window.`); }
   const rewatch = median(inRange.filter((r) => r.reach && r.views).map((r) => r.views! / r.reach!));
   if (rewatch != null && inRange.filter((r) => r.reach).length >= 3) facts.push(`Views per account reached: ${rewatch.toFixed(2)} (above 1 means people replay).`);
-  const engaged = median(inRange.filter((r) => r.extra?.engaged_views != null && r.views).map((r) => Number(r.extra!.engaged_views) / r.views!));
-  if (engaged != null) facts.push(`YouTube engaged views are ${(engaged * 100).toFixed(0)}% of views (the rest swiped away quickly).`);
   const perWeek = kpis.posts / (range_days / 7); facts.push(`Posting pace: ${perWeek.toFixed(1)} posts a week${kpis.posts_prev ? ` (previous window ${(kpis.posts_prev / (range_days / 7)).toFixed(1)})` : ""}.`);
 
   return { range_days, posts: stats, kpis, followers, series, top: ranked.slice(0, 8).map((r) => r.id), breakouts: breakouts.map((r) => r.id), low: ranked.slice(-3).reverse().filter((r) => (r.multiple ?? 1) < 0.7).map((r) => r.id), by_time, by_weekday, by_length, clone8, facts };
