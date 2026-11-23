@@ -11,6 +11,7 @@ import { command } from "./video-render.js";
 import { probeSeconds } from "./studio-recast.js";
 import { extractAudio, transcribe } from "./studio-eleven.js";
 import { SocialError } from "./social-provider.js";
+import { testWinners } from "./studio-caption-tests.js";
 
 export const CAPTION_MODEL = "claude-opus-5-5";
 const FRAMES = 5, PER_HOUR = 100; // "Write all" on a batch of uploads
@@ -25,15 +26,19 @@ export type CaptionDraft = {
   keywords?: Array<{ word: string; from: "said" | "shown" }>;
   reasons?: string[]; voice_from?: number;
   tags?: Array<{ tag: string; multiple: number | null; posts: number }>;
+  /** other captions for an Instagram caption test (each opens with a different hook), when asked */
+  alternatives?: string[];
 };
 export type CaptionDeps = {
   env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (s: string) => void;
   /** test seams: frames (base64 JPEGs) and the speech of a local video file */
   frames?: (video: string) => Promise<string[]>; speech?: (video: string) => Promise<string | null>;
+  /** test seam: the person's caption-test winners */
+  winners?: (sb: SupabaseClient, u: string) => Promise<Array<{ caption: string; beat: string; lead: number | null }>>;
 };
 
 const SCHEMA = {
-  type: "object", additionalProperties: false, required: ["caption", "hashtags", "youtube_title", "keywords", "versions", "reasons"],
+  type: "object", additionalProperties: false, required: ["caption", "hashtags", "youtube_title", "keywords", "versions", "reasons", "alternatives"],
   properties: {
     caption: { type: "string", description: "The main post text, without the hashtags (the TikTok one when TikTok is a target)" },
     hashtags: { type: "array", items: { type: "string" }, description: "3 to 5 specific hashtags, each starting with #" },
@@ -41,6 +46,7 @@ const SCHEMA = {
     keywords: { type: "array", items: { type: "object", additionalProperties: false, required: ["word", "from"], properties: { word: { type: "string" }, from: { type: "string", enum: ["said", "shown"] } } }, description: "1 to 3 words or short phrases someone would search to find this video, taken from what is said or shown in it" },
     versions: { type: "array", items: { type: "object", additionalProperties: false, required: ["platform", "caption", "hashtags"], properties: { platform: { type: "string" }, caption: { type: "string" }, hashtags: { type: "array", items: { type: "string" } } } }, description: "One version per target network (only those listed), each fitted to it" },
     reasons: { type: "array", items: { type: "string" }, description: "2 to 4 very short reasons for the choices, each under 60 characters, plain words" },
+    alternatives: { type: "array", items: { type: "string" }, description: "Only when a caption test is asked for: the other Instagram captions, each opening with a clearly different hook; otherwise empty" },
   },
 };
 
@@ -133,7 +139,7 @@ export function speechOf(env: Record<string, string | undefined>, fetchFn?: type
 }
 
 /** Draft a caption for one of the person's outputs. Throws SocialError for anything the person should read. */
-export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id?: string; output_key?: string; asset_id?: string; platforms: string[]; note?: string | null }, deps: CaptionDeps = {}): Promise<CaptionDraft> {
+export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id?: string; output_key?: string; asset_id?: string; platforms: string[]; note?: string | null; variants?: number }, deps: CaptionDeps = {}): Promise<CaptionDraft> {
   const env = deps.env ?? process.env, f = deps.fetch ?? fetch;
   const key = env.ANTHROPIC_API_KEY;
   if (!key) throw new SocialError("captions_off", "Caption writing is not switched on", 503);
@@ -170,12 +176,16 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id?
     if (!frames.length) throw new SocialError("video_unreadable", "No frames could be read from that video", 422);
     const targets = req.platforms.map((p) => NAMES[p] ?? p).join(", ") || "TikTok, Instagram Reels";
     const ctx = await captionContext(sb, u, req.platforms).catch(() => ({ voice: [] as string[], tags: [] as Array<{ tag: string; multiple: number | null; posts: number }>, questionsHelp: null as boolean | null }));
+    const won = await (deps.winners ?? testWinners)(sb, u);
+    const variants = Math.min(Math.max(Math.floor(Number(req.variants) || 0), 0), 3);
     const text = [
       `Posting to: ${targets}. Target network ids for versions: ${(req.platforms.length ? req.platforms : ["tiktok", "instagram"]).join(", ")}.`,
       speech ? `What is said in the video:\n"""${speech}"""` : "Nobody speaks in this video (or the sound is music only).",
       ctx.voice.length ? `The creator's best-performing captions (their voice; do not copy):\n${ctx.voice.map((v) => `- ${v.replace(/\n+/g, " / ")}`).join("\n")}` : "",
       ctx.tags.length ? `Hashtags on the creator's own posts, with the median views multiple of posts that used them (1.0 = their normal): ${ctx.tags.map((t) => `${t.tag} ${t.multiple}x (${t.posts} posts)`).join(", ")}. Prefer their strong ones when they fit this video; never use a weak one just because it is theirs.` : "",
       ctx.questionsHelp === true ? "Questions in their captions earn them more comments: one short question is fine." : ctx.questionsHelp === false ? "Questions in their captions do not earn them more comments: no question." : "",
+      won.length ? `Captions that won the creator's own caption tests (same video posted as Instagram Trial Reels with different captions; the strongest evidence of what their audience responds to):\n${won.map((w) => `- "${w.caption.replace(/\n+/g, " / ")}" beat "${w.beat.replace(/\n+/g, " / ")}"${w.lead ? ` (${w.lead}x the views)` : ""}`).join("\n")}` : "",
+      variants >= 2 ? `This is for a caption test: the Instagram caption plus ${variants - 1} alternative${variants > 2 ? "s" : ""} in "alternatives", each opening with a clearly different hook (a different first line and angle), same rules and keywords. The test shows which one people watch.` : "",
       req.note ? `The creator's note: ${String(req.note).slice(0, 300)}` : "",
     ].filter(Boolean).join("\n\n");
     const r = await f("https://api.anthropic.com/v1/messages", {
@@ -201,6 +211,7 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: { job_id?
     const reasons = (Array.isArray(parsed.reasons) ? parsed.reasons : []).map((r: any) => String(r).trim().slice(0, 80)).filter(Boolean).slice(0, 4);
     const tagsUsed = new Set([...cleanTags(parsed.hashtags, req.platforms[0] ?? "tiktok"), ...versions.flatMap((v: any) => v.hashtags)].map((t) => t.toLowerCase()));
     return { caption: String(parsed.caption ?? "").trim().slice(0, 2000), hashtags: cleanTags(parsed.hashtags, req.platforms.includes("instagram") && req.platforms.length === 1 ? "instagram" : req.platforms[0] ?? "tiktok"), youtube_title: title, heard_speech: !!speech,
-      versions, keywords, reasons, voice_from: ctx.voice.length, tags: ctx.tags.filter((t) => tagsUsed.has(t.tag)) };
+      versions, keywords, reasons, voice_from: ctx.voice.length, tags: ctx.tags.filter((t) => tagsUsed.has(t.tag)),
+      ...(variants >= 2 ? { alternatives: (Array.isArray(parsed.alternatives) ? parsed.alternatives : []).map((x: any) => String(x ?? "").trim().slice(0, 2000)).filter(Boolean).slice(0, variants - 1) } : {}) };
   } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }

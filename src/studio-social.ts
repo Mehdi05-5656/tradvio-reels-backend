@@ -79,6 +79,8 @@ export function usableExtra(included: number, networks?: number): number {
  *  Trial Reel ("auto": Instagram shares a good one with followers, "manual": the person does it in the app) and a
  *  first comment posted under the post (the place for "Comment GUIDE" that an auto-reply answers). */
 export const MAX_TRIAL_COPIES = 5;
+/** Captions in one Trial Reel caption test (each its own Trial Reel of the same video). */
+export const MAX_TEST_CAPTIONS = 3;
 export function cleanOptions(platforms: string[], raw: any, caption: string): Record<string, any> {
   const out: Record<string, any> = {};
   if (platforms.includes("instagram")) {
@@ -294,7 +296,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const b = req.body ?? {};
       const item = UUID_RE.test(String(b.asset_id ?? "")) ? { asset_id: String(b.asset_id) } : await resolveItem(sb, u, b);
       const platforms = (Array.isArray(b.platforms) ? b.platforms : []).map(String).filter(isSocialPlatform);
-      const draft = await (deps.caption ?? draftCaption)(sb, u, { ...item, platforms, note: b.note ? String(b.note) : null }, { env, fetch: deps.fetch, log });
+      const draft = await (deps.caption ?? draftCaption)(sb, u, { ...item, platforms, note: b.note ? String(b.note) : null, variants: Number(b.variants) || undefined }, { env, fetch: deps.fetch, log });
       await touchSocial(sb, u);
       res.json({ draft });
     } catch (e) { fail(res, e); }
@@ -579,8 +581,12 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
 
   // Trial Reels go to non-followers first, so the same video may go out more than once (up to 5 copies, Instagram only)
   const askedTrial = b.options?.instagram?.trial === "auto" || b.options?.instagram?.trial === "manual" ? b.options.instagram.trial : null;
-  type Item = { it: any; targets: Target[]; trial: "auto" | "manual" | null };
+  type Item = { it: any; targets: Target[]; trial: "auto" | "manual" | null; test?: { id: string; variant: number; of: number; caption: string } };
   const expanded: Item[] = [];
+  // A caption test: 2 or 3 captions, one Trial Reel each (non-followers first), to see which one people watch
+  const testCaps = Array.isArray(b.caption_test?.captions) ? (b.caption_test.captions as unknown[]).map((c) => String(c ?? "").trim().slice(0, 2200)).filter(Boolean) : null;
+  if (testCaps && (testCaps.length < 2 || testCaps.length > MAX_TEST_CAPTIONS)) throw new SocialError("caption_test_size", `A caption test takes 2 to ${MAX_TEST_CAPTIONS} captions`);
+  if (testCaps && new Set(testCaps.map((c) => c.toLowerCase())).size !== testCaps.length) throw new SocialError("caption_test_same", "Each caption in a test has to be different");
   for (const it of items) {
     const { targets, legacy } = targetsFor(own(it));
     if (!targets.length) throw new SocialError("no_platforms", "Pick at least one account");
@@ -592,6 +598,12 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
       // older pages sent the option with other networks too: it was ignored there, and still is
       else if (!legacy) throw new SocialError("trial_instagram_only", "Trial Reels post to Instagram only. Pick only Instagram accounts, or turn Trial Reels off.");
     } else if (b.options?.instagram?.trial === undefined && groupTrial && allIg) trial = groupTrial;
+    if (testCaps) {
+      if (!trial) throw new SocialError("caption_test_trial_only", "Caption tests post as Instagram Trial Reels. Pick only Instagram accounts and turn Trial Reels on.");
+      const id = randomUUID();
+      testCaps.forEach((c, k) => expanded.push({ it, targets, trial, test: { id, variant: k, of: testCaps.length, caption: c } }));
+      continue;
+    }
     const copies = trial ? Math.min(Math.max(Math.floor(Number(b.trial_copies) || 1), 1), MAX_TRIAL_COPIES) : 1;
     for (let k = 0; k < copies; k++) expanded.push({ it, targets, trial });
   }
@@ -602,7 +614,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const tokenOf = (a: { id?: string | null; platform: string }) => (a.id ? `acct:${a.id}` : `net:${a.platform}`);
   const caption = String(b.caption ?? "").slice(0, 5000);
   // each video may bring its own caption and YouTube title (a batch of clips, each about something else)
-  const captionOf = (e: Item) => (typeof e.it?.caption === "string" ? String(e.it.caption).slice(0, 5000) : caption);
+  const captionOf = (e: Item) => (e.test ? e.test.caption : typeof e.it?.caption === "string" ? String(e.it.caption).slice(0, 5000) : caption);
   const optionsOf = (e: Item) => {
     const nets = [...new Set(e.targets.map((t) => t.platform))];
     const groupYt = groupsIn(e.targets).map((g) => g.defaults?.youtube_visibility).find(Boolean);
@@ -672,7 +684,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     if (jittered.some((d) => d && d.getTime() > latest)) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead`);
     const base = captionOf(e);
     // one caption per network when the composer sends them (TikTok short, Instagram fuller)
-    const perNet = (e.it?.captions_by_network && typeof e.it.captions_by_network === "object" ? e.it.captions_by_network : b.captions_by_network && typeof b.captions_by_network === "object" ? b.captions_by_network : {}) as Record<string, unknown>;
+    const perNet = (e.test ? {} : e.it?.captions_by_network && typeof e.it.captions_by_network === "object" ? e.it.captions_by_network : b.captions_by_network && typeof b.captions_by_network === "object" ? b.captions_by_network : {}) as Record<string, unknown>;
     const baseFor = (platform: string) => (typeof perNet[platform] === "string" && String(perNet[platform]).trim() ? String(perNet[platform]).slice(0, 5000) : base);
     const vary = b.vary_captions != null ? b.vary_captions === true : groups.some((g) => g.defaults?.vary_captions === true);
     const targets: Target[] = e.targets.map((t, k) => {
@@ -684,7 +696,9 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const groupId = groups.length === 1 ? groups[0].id : null;
     const meta = e.it?.caption_meta ?? b.caption_meta;
     const captionMeta = meta && typeof meta === "object" && ["ai", "edited", "own"].includes(meta.source) ? { source: meta.source, keywords: Array.isArray(meta.keywords) ? meta.keywords.map(String).slice(0, 3) : undefined, per_network: Object.keys(perNet).length > 0 || undefined } : undefined;
-    return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}) }, targets, vary: vary && sameNet, groupId, groups };
+    const test = e.test ? { caption_test: { id: e.test.id, variant: e.test.variant, of: e.test.of } } : {};
+    // the captions of a test are the point of it: never reworded per account
+    return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}), ...test }, targets, vary: vary && sameNet && !e.test, groupId, groups };
   });
   // Daily allowance, counted on the day a post goes out (UTC): per account (TikTok's own limit is about 15 a day,
   // shared by every app posting to it) and, as a safety net, per person.

@@ -10,6 +10,7 @@ import { refreshPerformance, REFRESH_EVERY_MS, type PerfDeps } from "./studio-pe
 import { profileSuggestions } from "./studio-onboarding.js";
 import { insightHash, latestInsight, loadPerformance, performanceForChat, suggestionsFrom, writeInsight } from "./studio-insights.js";
 import { fillPostFeatures, whatsWorking } from "./studio-post-features.js";
+import { captionTests } from "./studio-caption-tests.js";
 import { importLink, promoteOutput } from "./studio-assistant.js";
 import { withPosterUrls } from "./studio.js";
 import { hasPlanAccess } from "./studio-limits.js";
@@ -186,6 +187,20 @@ export function registerPerformance(app: Express, sbFn: () => SupabaseClient, de
       if (["link_blocked", "link_unsupported", "link_failed", "link_too_long"].includes(code)) return res.status(422).json({ error: code, detail: String(e?.message ?? "") });
       fail(res, e);
     }
+  });
+
+  // Instagram caption tests: each test's captions, their numbers at the same age, and the call (studio-caption-tests.ts)
+  app.get("/api/studio/performance/caption-tests", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const sb = sbFn();
+      const tests = await captionTests(sb, u);
+      const keys = [...new Set(tests.flatMap((t) => t.variants.map((v) => v.thumb_key)).filter(Boolean))] as string[];
+      const signed = keys.length ? await sb.storage.from("studio-outputs").createSignedUrls(keys, 3600) : { data: [] as any[] };
+      const url = new Map(((signed.data ?? []) as any[]).filter((x) => !x.error).map((x) => [x.path, x.signedUrl]));
+      res.json({ tests: tests.map((t) => ({ ...t, variants: t.variants.map(({ thumb_key, ...v }) => ({ ...v, thumb_url: thumb_key ? url.get(thumb_key) ?? null : null })) })) });
+    } catch (e) { fail(res, e); }
   });
 
   app.get("/api/studio/assistant/suggestions", async (req, res) => {

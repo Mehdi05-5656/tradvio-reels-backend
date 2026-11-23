@@ -470,6 +470,18 @@ test("trial reels: Instagram-only trials may repeat a video up to 5 times; anyth
   assert.equal(again.status, 201); assert.equal(again.body.posts.length, 5, "copies are capped at 5");
   const mixed = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram", "tiktok"], options: { instagram: { trial: "auto" } }, trial_copies: 3 });
   assert.equal(mixed.body.error, "already_posted", "a trial with another network is a normal post: repeats refused");
+  // a caption test: one Trial Reel per caption, tagged with one test id, never reworded
+  const ct = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } }, caption: "ignored", caption_test: { captions: ["first hook", "second hook", "third hook"] }, vary_captions: true });
+  assert.equal(ct.status, 201); assert.equal(ct.body.posts.length, 3);
+  const made = tables.studio_social_posts.filter((r) => r.options?.caption_test);
+  assert.deepEqual(made.map((r) => r.caption).sort(), ["first hook", "second hook", "third hook"]);
+  assert.equal(new Set(made.map((r) => r.options.caption_test.id)).size, 1);
+  assert.deepEqual(made.map((r) => r.options.caption_test.variant).sort(), [0, 1, 2]);
+  assert.ok(made.every((r) => r.options.instagram?.trial === "auto"));
+  const noTrial = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], caption_test: { captions: ["a", "b"] } });
+  assert.equal(noTrial.body.error, "caption_test_trial_only");
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } }, caption_test: { captions: ["same", "Same"] } })).body.error, "caption_test_same");
+  assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } }, caption_test: { captions: ["a", "b", "c", "d"] } })).body.error, "caption_test_size");
   await s.close();
 });
 
