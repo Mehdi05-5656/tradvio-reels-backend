@@ -623,3 +623,20 @@ test("media check: the posting service's size limits per network, read as 'too l
   assert.equal(r.ok, true); assert.equal(r.format, "mp4");
   assert.equal(readMediaCheck("a2", { valid: false, code: "MEDIA_UNDECODABLE" }).error, "MEDIA_UNDECODABLE");
 });
+
+test("captions v2: the voice comes from the person's best posts (against their own median), each hashtag carries its record, generic tags are dropped", async () => {
+  const { captionContext, cleanTags } = await import("../src/studio-captions.js");
+  const now = Date.now(), d = (n: number) => new Date(now - n * 86400_000).toISOString();
+  const rows = [
+    ...Array.from({ length: 6 }, (_, i) => ({ platform: "tiktok", account_key: "a", caption: `normal day ${i} #kitkat #snacks?`, views: 1000, comments: 5, published_at: d(i + 1) })),
+    { platform: "tiktok", account_key: "a", caption: "japan has 300 kitkat flavours #kitkat #japan", views: 9000, comments: 10, published_at: d(8) },
+    { platform: "tiktok", account_key: "a", caption: "the wasabi one #kitkat #japan", views: 6000, comments: 8, published_at: d(9) },
+    { platform: "tiktok", account_key: "a", caption: "matcha ranking #japan #snacks", views: 5000, comments: 4, published_at: d(10) },
+  ];
+  const sb: any = { from: () => ({ select: () => ({ eq: () => ({ gte: () => ({ limit: async () => ({ data: rows, error: null }) }) }) }) }) };
+  const ctx = await captionContext(sb, "u1", ["tiktok"]);
+  assert.ok(ctx.voice[0].startsWith("japan has 300"), "the best post first");
+  const japan = ctx.tags.find((t) => t.tag === "#japan")!, snacks = ctx.tags.find((t) => t.tag === "#snacks")!;
+  assert.ok(japan.multiple! > snacks.multiple!, "#japan sits on their best posts");
+  assert.deepEqual(cleanTags(["fyp", "#Viral", "kitkat japan", "#kitkat", "#kitkat", "a", "b", "c", "d"], "instagram"), ["#kitkatjapan", "#kitkat", "#a", "#b", "#c"], "no generic tags, no spaces, no repeats, 5 at most");
+});

@@ -671,14 +671,20 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const jittered = times.map((d) => (d && natural && d.getTime() - now > 15 * 60_000 ? new Date(d.getTime() + Math.round((Math.random() * 8 - 4) * 60_000)) : d));
     if (jittered.some((d) => d && d.getTime() > latest)) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead`);
     const base = captionOf(e);
+    // one caption per network when the composer sends them (TikTok short, Instagram fuller)
+    const perNet = (e.it?.captions_by_network && typeof e.it.captions_by_network === "object" ? e.it.captions_by_network : b.captions_by_network && typeof b.captions_by_network === "object" ? b.captions_by_network : {}) as Record<string, unknown>;
+    const baseFor = (platform: string) => (typeof perNet[platform] === "string" && String(perNet[platform]).trim() ? String(perNet[platform]).slice(0, 5000) : base);
     const vary = b.vary_captions != null ? b.vary_captions === true : groups.some((g) => g.defaults?.vary_captions === true);
     const targets: Target[] = e.targets.map((t, k) => {
       const extra = t.group ? groupById.get(t.group)?.defaults?.caption_extra : undefined;
-      const text = extra && !base.includes(extra) ? `${base.trim()}${base.trim() ? "\n\n" : ""}${extra}`.slice(0, 5000) : base;
+      const own = baseFor(t.platform);
+      const text = extra && !own.includes(extra) ? `${own.trim()}${own.trim() ? "\n\n" : ""}${extra}`.slice(0, 5000) : own;
       return { ...t, at: jittered[k], caption: text };
     });
     const groupId = groups.length === 1 ? groups[0].id : null;
-    return { x, at, caption: base, options: optionsOf(e), targets, vary: vary && sameNet, groupId, groups };
+    const meta = e.it?.caption_meta ?? b.caption_meta;
+    const captionMeta = meta && typeof meta === "object" && ["ai", "edited", "own"].includes(meta.source) ? { source: meta.source, keywords: Array.isArray(meta.keywords) ? meta.keywords.map(String).slice(0, 3) : undefined, per_network: Object.keys(perNet).length > 0 || undefined } : undefined;
+    return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}) }, targets, vary: vary && sameNet, groupId, groups };
   });
   // Daily allowance, counted on the day a post goes out (UTC): per account (TikTok's own limit is about 15 a day,
   // shared by every app posting to it) and, as a safety net, per person.
