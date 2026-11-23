@@ -4,8 +4,8 @@ import express from "express";
 import { cleanPlan, registerPostingPlan } from "../src/studio-posting-plan.js";
 
 test("posting plan: bounded and cleaned; nothing usable is null", () => {
-  const p = cleanPlan({ per_day: 3, countries: ["us", "gb", "xxx"], timezone: "America/New_York", times: ["19:00", "09:00", "9:00", "13:00", "19:00"], days: [1, 2, 9] })!;
-  assert.deepEqual(p.times, ["09:00", "13:00", "19:00"]); assert.deepEqual(p.countries, ["US", "GB"]); assert.deepEqual(p.days, [1, 2]); assert.equal(p.per_day, 3);
+  const p = cleanPlan({ per_day: 3, countries: ["us", "gb", "xxx", "us-e"], timezone: "America/New_York", times: ["19:00", "09:00", "9:00", "13:00", "19:00"], days: [1, 2, 9] })!;
+  assert.deepEqual(p.times, ["09:00", "13:00", "19:00"]); assert.deepEqual(p.countries, ["US", "GB", "US-E"]); assert.deepEqual(p.days, [1, 2]); assert.equal(p.per_day, 3);
   assert.equal(cleanPlan({ timezone: "Mars/Base", times: ["09:00"] }), null);
   assert.equal(cleanPlan({ timezone: "Europe/London", times: [] }), null);
   assert.deepEqual(cleanPlan({ timezone: "Europe/London", times: ["08:30"] })!.days, [0, 1, 2, 3, 4, 5, 6]);

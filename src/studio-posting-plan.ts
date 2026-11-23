@@ -6,6 +6,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadPerformance } from "./studio-insights.js";
 
+/** `countries` are audience zone ids from the page ("GB", "US-E" for US Eastern, "HOME" is not stored). */
 export type PostingPlan = { per_day: number; countries: string[]; timezone: string; times: string[]; days: number[]; updated_at?: string };
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -18,7 +19,7 @@ export function cleanPlan(raw: any): PostingPlan | null {
   const times = Array.isArray(raw.times) ? [...new Set(raw.times.map(String).filter((t: string) => TIME_RE.test(t)))].sort().slice(0, 12) as string[] : [];
   if (!timezone || !times.length) return null;
   const days = Array.isArray(raw.days) ? [...new Set(raw.days.map(Number).filter((d: number) => Number.isInteger(d) && d >= 0 && d <= 6))].sort() as number[] : [0, 1, 2, 3, 4, 5, 6];
-  const countries = Array.isArray(raw.countries) ? [...new Set(raw.countries.map((c: any) => String(c).toUpperCase()).filter((c: string) => /^[A-Z]{2}$/.test(c)))].slice(0, 6) as string[] : [];
+  const countries = Array.isArray(raw.countries) ? [...new Set(raw.countries.map((c: any) => String(c).toUpperCase()).filter((c: string) => /^[A-Z]{2}(-[A-Z]{1,2})?$/.test(c)))].slice(0, 6) as string[] : [];
   const per_day = Math.min(Math.max(Math.round(Number(raw.per_day) || times.length), 1), 12);
   return { per_day, countries, timezone, times, days: days.length ? days : [0, 1, 2, 3, 4, 5, 6] };
 }
