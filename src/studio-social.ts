@@ -286,7 +286,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const posts = await createPosts(sbFn(), need(), u, req.body ?? {}, { log, env, fetch: deps.fetch, via: typeof req.body?.via === "string" ? req.body.via.slice(0, 20) : "publish" });
-      res.status(201).json({ posts, autoreply: posts.autoreply ?? null, queued: posts.queued, batch_id: posts.batch_id, skipped: posts.skipped, spaced: posts.spaced ?? 0 });
+      res.status(201).json({ posts, autoreply: posts.autoreply ?? null, queued: posts.queued, batch_id: posts.batch_id, skipped: posts.skipped, spaced: posts.spaced ?? 0, unsent_items: posts.unsent_items ?? [] });
     } catch (e) { fail(res, e); }
   });
 
@@ -602,7 +602,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
       if (allIg) trial = askedTrial;
       // older pages sent the option with other networks too: it was ignored there, and still is
       else if (!legacy) throw new SocialError("trial_instagram_only", "Trial Reels post to Instagram only. Pick only Instagram accounts, or turn Trial Reels off.");
-    } else if (b.options?.instagram?.trial === undefined && groupTrial && allIg && !blocked) trial = groupTrial; // a group's default quietly skips an account that can't yet
+    } else if (b.options?.instagram?.trial === undefined && b.trial_off !== true && groupTrial && allIg && !blocked) trial = groupTrial; // a group's default quietly skips an account that can't yet
     if (testCaps) {
       if (!trial) throw new SocialError("caption_test_trial_only", "Caption tests post as Instagram Trial Reels. Pick only Instagram accounts and turn Trial Reels on.");
       const id = randomUUID();
@@ -688,7 +688,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     // a time for each account (the composer's Best times: every account in the next open slot of its own plan), by
     // provider id; accounts without one go with the post's time
     const acctTimes = e.it?.account_times && typeof e.it.account_times === "object" ? (e.it.account_times as Record<string, unknown>) : null;
-    if (acctTimes && !e.trial) {
+    if (acctTimes) {
       const own = e.targets.map((t) => (t.id && typeof acctTimes[t.id] === "string" ? readTime(acctTimes[t.id]) : null));
       const given = own.filter((d): d is Date => !!d);
       if (given.length) {
@@ -721,30 +721,46 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     // the captions of a test are the point of it: never reworded per account
     return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}), ...test }, targets, vary: vary && sameNet && !e.test, groupId, groups, trial: !!e.trial };
   });
-  // One account never gets two posts of this batch at once: a later post to an account is moved to at least the gap
-  // after the one before it (the whole post moves, so its accounts keep going out together). Trial Reels are left as
-  // asked: their copies go to non-followers and a caption test wants them side by side.
+  // One account never gets two posts within the gap (30 min): every send of this batch, per account and in time order,
+  // checked against the one before it on that account and against what that account already has scheduled or on its
+  // way. Only the clashing account's send moves (each account keeps its own plan times); a post whose accounts all go
+  // "now" moves together. Trial Reels are left as asked: copies and caption tests go side by side to non-followers.
   const gapMs = minGapMinutes(opts.env ?? process.env) * 60_000;
-  let spaced = 0;
-  if (gapMs > 0 && plan.length > 1) {
-    const last = new Map<string, number>();
+  const movedRows = new Set<(typeof plan)[number]>();
+  if (gapMs > 0) {
     const when = (r: (typeof plan)[number], t: Target) => (t.at ?? r.at)?.getTime() ?? now;
-    const order = plan.map((_, i) => i).sort((a, c) => ((plan[a].at?.getTime() ?? now) - (plan[c].at?.getTime() ?? now)) || a - c);
-    for (const i of order) {
-      const r = plan[i];
-      if (r.trial) continue;
-      let need = 0;
-      for (const t of r.targets) { const prev = last.get(tokenOf(t)); if (prev != null) need = Math.max(need, prev + gapMs - when(r, t)); }
-      if (need > 0) {
-        const move = (d: Date | null | undefined) => new Date((d?.getTime() ?? now) + need);
-        r.at = move(r.at);
-        r.targets = r.targets.map((t) => ({ ...t, at: t.at ? move(t.at) : r.at }));
-        if (r.at.getTime() > latest || r.at.getTime() > r.x.keptUntil) throw new SocialError("too_late", `Spaced ${Math.round(gapMs / 60_000)} min apart per account, these run past ${MAX_AHEAD_DAYS} days ahead; post fewer at once`);
-        spaced++;
+    const busy = new Map<string, number[]>();
+    const sinceIso = new Date(now - 3600_000).toISOString();
+    const ex = await sb.from("studio_social_posts").select("platforms,options,status,schedule_at,created_at").eq("user_id", u).in("status", ["queued", "sending", "scheduled"])
+      .or(`schedule_at.gte.${sinceIso},and(schedule_at.is.null,created_at.gte.${sinceIso})`).limit(3000);
+    if (ex.error) throw ex.error;
+    for (const row of (ex.data ?? []) as any[]) {
+      const stored = Array.isArray(row.options?.accounts) ? (row.options.accounts as any[]) : [];
+      for (const t of sendsOf(row)) {
+        const s0 = stored.find((a) => (t.id ? a.id === t.id : a.platform === t.platform));
+        const ms = Date.parse(s0?.at ?? row.schedule_at ?? row.created_at);
+        if (Number.isFinite(ms)) busy.set(tokenOf(t), [...(busy.get(tokenOf(t)) ?? []), ms]);
       }
-      for (const t of r.targets) last.set(tokenOf(t), Math.max(last.get(tokenOf(t)) ?? -Infinity, when(r, t)));
+    }
+    const sends = new Map<string, Array<{ r: (typeof plan)[number]; k: number; t: number }>>();
+    for (const r of plan) { if (r.trial) continue; r.targets.forEach((t, k) => { const tok = tokenOf(t); sends.set(tok, [...(sends.get(tok) ?? []), { r, k, t: when(r, t) }]); }); }
+    for (const [tok, list] of sends) {
+      const taken = [...(busy.get(tok) ?? [])];
+      for (const e of list.sort((a, c) => a.t - c.t)) {
+        let t = e.t;
+        for (let guard = 0; guard < 1000; guard++) { const clash = taken.filter((x) => Math.abs(x - t) < gapMs); if (!clash.length) break; t = Math.max(...clash) + gapMs; }
+        if (t !== e.t) { e.r.targets[e.k] = { ...e.r.targets[e.k], at: new Date(t) }; movedRows.add(e.r); }
+        taken.push(t);
+      }
+    }
+    for (const r of movedRows) {
+      // a post that was going out now and has an account moved: the rest of it goes out in two minutes, together
+      if (!r.at) { r.at = new Date(now + 2 * 60_000); r.targets = r.targets.map((t) => (t.at ? t : { ...t, at: r.at })); }
+      r.at = new Date(Math.min(...r.targets.map((t) => (t.at ?? r.at!).getTime())));
+      if (r.targets.some((t) => t.at && (t.at.getTime() > latest || t.at.getTime() > r.x.keptUntil))) throw new SocialError("too_late", `Spaced ${Math.round(gapMs / 60_000)} min apart per account, these run past ${MAX_AHEAD_DAYS} days ahead; post fewer at once`);
     }
   }
+  const spaced = movedRows.size;
   // Daily allowance, counted on the day a post goes out (UTC): per account (TikTok's own limit is about 15 a day,
   // shared by every app posting to it) and, as a safety net, per person.
   const DAY = 86400_000, dayOf = (ms: number) => Math.floor(ms / DAY);
@@ -782,7 +798,9 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const batchId = randomUUID();
   const via = typeof opts.via === "string" ? opts.via : opts.conversationId ? "chat" : "publish";
   const made: SocialPostRow[] = [];
-  for (const r of plan) {
+  const unsent: number[] = [];
+  for (const [pi, r] of plan.entries()) {
+    if (unsent.length) { unsent.push(items.indexOf(expanded[pi].it)); continue; }
     const accounts: StoredTarget[] = r.targets.map((t) => ({ id: t.id ?? null, platform: t.platform, username: t.username ?? null, at: t.at ? t.at.toISOString() : null, caption: t.caption && t.caption !== r.caption ? t.caption : null, group: t.group ?? null, ...(t.own ? { own: true } : r.vary ? { vary: true } : {}) }));
     const row = { user_id: u, provider: p.name, job_id: r.x.job_id, output_key: r.x.output_key, asset_id: r.x.asset_id, conversation_id: opts.conversationId ?? null, caption: r.caption, platforms: [...new Set(r.targets.map((t) => t.platform))], options: { ...r.options, accounts, ...(spec && background ? { autoreply_spec: spec, via } : {}) }, schedule_at: r.at?.toISOString() ?? null, status: background ? "queued" : "sending", batch_id: batchId, group_id: r.groupId };
     let ins = await sb.from("studio_social_posts").insert(row).select("*").single();
@@ -796,7 +814,8 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
       // the ones already sent stay sent; stop here and report what went (never fail the whole call after a send)
       log(`[social] ${u} insert failed after ${made.length} post(s): ${String(ins.error.message ?? ins.error).slice(0, 160)}`);
       if (!made.length) throw ins.error;
-      break;
+      unsent.push(items.indexOf(expanded[pi].it)); // this one and every one after it: handed back, so the page keeps them
+      continue;
     }
     if (background) { made.push(ins.data as SocialPostRow); continue; }
     made.push(await sendRow(sb, p, prof.profile_key, ins.data as SocialPostRow, { env, log, fetch: opts.fetch, resolved: r.x }));
@@ -809,7 +828,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   recordEvent({ user_id: u, kind: "feature", name: "social_post_sent", props: { videos: made.length, networks: nets, accounts: new Set(plan.flatMap((r) => r.targets.map((t) => tokenOf(t)))).size, sends, groups: [...new Set(plan.flatMap((r) => r.groups.map((g) => g.id)))].length, staggered: plan.some((r) => r.targets.some((t) => t.at && r.at && t.at.getTime() !== r.at.getTime())), vary: plan.some((r) => r.vary), background, scheduled: made.filter((m) => m.status === "scheduled").length, failed: made.filter((m) => m.status === "failed").length, from_chat: !!opts.conversationId, via } });
   if (background) void drainBatch(sb, p, u, batchId, { env, log, fetch: opts.fetch });
   const sent = await withPostPosters(sb, u, made);
-  return Object.assign(sent, { autoreply, queued: background, batch_id: batchId, skipped, spaced });
+  return Object.assign(sent, { autoreply, queued: background, batch_id: batchId, skipped, spaced, unsent_items: [...new Set(unsent)].filter((x) => x >= 0) });
 }
 
 /** Send one saved row: its file signed for the provider, captions reworded where asked, one target per account. A
@@ -837,7 +856,11 @@ async function sendRow(sb: SupabaseClient, p: SocialProvider, profileKey: string
       await sb.from("studio_social_posts").update({ options: { ...row.options, accounts: stored } }).eq("id", row.id);
       row = { ...row, options: { ...row.options, accounts: stored } };
     }
-    const at = row.schedule_at ? new Date(row.schedule_at) : null;
+    // a time that has passed (or is under a minute away) by the time this row is sent, e.g. late in a long batch, goes
+    // two minutes from now rather than to the network as a time in the past
+    const soon = (d: Date | null) => (d && d.getTime() < Date.now() + 60_000 ? new Date(Date.now() + 2 * 60_000) : d);
+    for (const t of stored) if (t.at) t.at = soon(new Date(t.at))!.toISOString();
+    const at = soon(row.schedule_at ? new Date(row.schedule_at) : null);
     const lastAt = Math.max(at?.getTime() ?? now, ...stored.map((t) => (t.at ? Date.parse(t.at) : 0)));
     // The provider checks the link with a HEAD request and fetches it at publish time; it asks for 7 days at least.
     const ttl = Math.ceil(Math.min(Math.max(7 * 86400_000, lastAt - now + 2 * 86400_000), (MAX_AHEAD_DAYS + 2) * 86400_000) / 1000);
@@ -1013,14 +1036,14 @@ export async function socialTick(sb: SupabaseClient, deps: SocialDeps & { provid
   if (lost.error) log(`[social] closing unanswered sends failed: ${lost.error.message}`);
   else if ((lost.data ?? []).length) log(`[social] ${(lost.data ?? []).length} send(s) closed as unconfirmed`);
   const due = new Date(Date.now() - 10 * 60_000).toISOString();
-  const r = await sb.from("studio_social_posts").select("id,user_id,provider_post_id,status,schedule_at,created_at,updated_at")
+  const r = await sb.from("studio_social_posts").select("id,user_id,provider_post_id,status,schedule_at,created_at,updated_at,options")
     .eq("provider", p.name).in("status", ["scheduled", "sending"]).not("provider_post_id", "is", null).or(`schedule_at.is.null,schedule_at.lt.${due}`).lt("updated_at", due).order("updated_at", { ascending: true }).limit(50);
   if (r.error) throw r.error;
   let moved = 0;
   const keys = new Map<string, string | null>();
   for (const row of (r.data ?? []) as any[]) {
     // a week past its time with no answer: stop asking and say so
-    const since = Date.parse(row.schedule_at ?? row.created_at);
+    const since = Math.max(Date.parse(row.schedule_at ?? row.created_at), ...((row.options?.accounts ?? []) as any[]).map((a) => (a?.at ? Date.parse(a.at) : 0)).filter(Number.isFinite));
     if (Date.now() - since > 7 * 86400_000) { await sb.from("studio_social_posts").update({ status: "failed", error: UNCONFIRMED, updated_at: new Date().toISOString() }).eq("id", row.id).neq("status", "canceled"); continue; }
     if (!keys.has(row.user_id)) { const k = await sb.from("studio_social_profiles").select("profile_key").eq("user_id", row.user_id).maybeSingle(); keys.set(row.user_id, k.data?.profile_key ?? null); }
     const key = keys.get(row.user_id);

@@ -250,10 +250,13 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       if (r.status === 404 || (r.status < 300 && !r.body?.post)) return { providerPostId, status: "canceled", results: [], error: null };
       if (r.status >= 300) return null;
       const p = r.body.post;
-      const future = !!p.scheduledFor && Date.parse(p.scheduledFor) > Date.now();
-      const results = ((p.platforms ?? []) as any[]).map((x) => resultOf(x, future));
+      // each account can have its own time: one still ahead keeps the post scheduled (editable, counted as taken)
+      const at = (x: any) => Date.parse(x?.scheduledFor ?? p.scheduledFor ?? "");
+      const ahead = (x: any) => Number.isFinite(at(x)) && at(x) > Date.now();
+      const results = ((p.platforms ?? []) as any[]).map((x) => resultOf(x, ahead(x)));
       if (String(p.status) === "cancelled") return { providerPostId, status: "canceled", results, error: null };
-      const status = future && String(p.status) === "scheduled" ? "scheduled" : statusOf(results, false);
+      const anyAhead = ((p.platforms ?? []) as any[]).some(ahead) || (Number.isFinite(at(null)) && at(null) > Date.now());
+      const status = statusOf(results, anyAhead);
       return { providerPostId, status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null };
     },
 

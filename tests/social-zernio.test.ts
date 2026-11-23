@@ -122,6 +122,13 @@ test("zernio: status read-back, a deleted post reads as canceled, cancel tolerat
   await gone.p.cancel(PROFILE, "post-1");
   const late = z({ "DELETE /posts/:id": () => ({ status: 400, body: { error: "Cannot delete already published posts" } }) });
   await assert.rejects(late.p.cancel(PROFILE, "post-1"), (e: any) => e.code === "cancel_failed");
+  // one account posted, another still ahead at its own time: the post stays scheduled (editable, counted as taken)
+  const later = new Date(Date.now() + 5 * 3600_000).toISOString();
+  const mixed = z({ "GET /posts/:id": () => ({ status: 200, body: { post: { _id: "post-1", status: "partial", scheduledFor: new Date(Date.now() - 3600_000).toISOString(), platforms: [
+    { platform: "tiktok", accountId: "a1", status: "published", platformPostUrl: "https://www.tiktok.com/@x/video/1" },
+    { platform: "tiktok", accountId: "a2", status: "pending", scheduledFor: later }] } } }) });
+  const ev2 = (await mixed.p.status(PROFILE, "post-1"))!;
+  assert.equal(ev2.status, "scheduled"); assert.deepEqual(ev2.results.map((r) => r.status), ["posted", "scheduled"]);
 });
 
 test("zernio: one webhook endpoint for the workspace, registered once with our secret", async () => {

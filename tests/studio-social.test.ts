@@ -592,6 +592,38 @@ test("a time for each account: each account goes out at its own slot; the post's
   } finally { server.close(); }
 });
 
+test("spacing counts what is already scheduled, and moves only the account that clashes", async () => {
+  const outputs = Array.from({ length: 3 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
+  const accs = [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }, { id: "yt1", platform: "youtube", username: "ann" }];
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "studio", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, provider: "zernio", profile_key: "pk-ann", accounts: accs, webhook_hash: "x" }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
+  const sb = fakeSb(tables);
+  const sent: any[] = [];
+  const provider: any = {
+    name: "zernio", linking: "per_network", offered: () => ["tiktok", "youtube", "instagram"],
+    accounts: async () => accs, registerWebhook: async () => undefined,
+    connectUrl: async (_k: string, o: any) => { sent.push({ connect: o }); return { url: "https://link", expiresInMinutes: 30 }; },
+    disconnect: async (_k: string, platform: string, id?: string) => { sent.push({ unlink: [platform, id] }); },
+    publish: async (_k: string, req: any) => { sent.push(req); return { providerPostId: `pp${sent.length}`, status: "sending", results: req.accounts.map((id: string) => ({ platform: accs.find((a) => a.id === id)!.platform, account_id: id, status: "pending", url: null, error: null })), error: null }; },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req: any, _res, next) => { req.auth = { user_id: ANN, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: ANN }; next(); });
+  registerSocial(app, () => sb, { env: { ...ENV, STUDIO_SOCIAL_DAILY_POSTS: "40" }, provider, log: () => {} });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const call = async (method: string, path: string, body?: any) => { const r = await fetch(base + path, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+  const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
+  try {
+    const t0 = Date.now(), at = new Date(t0 + 4 * 3600_000).toISOString();
+    assert.equal((await call("POST", "/api/studio/social/posts", { items: [item(1)], accounts: ["tt1"], schedule_at: at })).status, 201);
+    // a later batch puts tt1 and tt2 at the same minute: tt1 already has a post there, so only tt1 moves 30 min
+    const r = await call("POST", "/api/studio/social/posts", { items: [{ ...item(2), account_times: { tt1: at, tt2: at } }], accounts: ["tt1", "tt2"] });
+    assert.equal(r.status, 201, JSON.stringify(r.body)); assert.equal(r.body.spaced, 1);
+    const by = Object.fromEntries(tables.studio_social_posts.at(-1).options.accounts.map((x: any) => [x.id, Math.round((Date.parse(x.at) - Date.parse(at)) / 60_000)]));
+    assert.deepEqual(by, { tt1: 30, tt2: 0 });
+  } finally { server.close(); }
+});
+
 test("several accounts of one network: post to two TikToks, a repeat to the same account is refused, the other account is fine, sends count per account", async () => {
   const outputs = Array.from({ length: 3 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
   const accs = [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }, { id: "yt1", platform: "youtube", username: "ann" }];
@@ -689,11 +721,12 @@ test("posting groups (owner's test): Group A = IG A + TikTok A, Group B = IG B +
     assert.equal(published[0].targets[0].at.getTime(), published[0].targets[1].at.getTime(), "Instagram A and TikTok A go out together (different networks)");
     assert.equal(tables.studio_social_posts[0].group_id, A);
     // both groups at once: the two TikToks are 10 minutes apart, the two Instagrams too; one account is posted once
-    const both = await call("POST", "/api/studio/social/posts", { caption: "Same clip", schedule_at: at, items: [item(4)], group_ids: [A, B], accounts: ["ttA"] });
+    const at2 = new Date(Date.now() + 9 * 3600_000).toISOString(); // clear of the posts above (they hold `at` on these accounts)
+    const both = await call("POST", "/api/studio/social/posts", { caption: "Same clip", schedule_at: at2, items: [item(4)], group_ids: [A, B], accounts: ["ttA"] });
     assert.equal(both.status, 201, JSON.stringify(both.body));
     const t = published.at(-1).targets;
     assert.deepEqual(t.map((x: any) => x.accountId), ["igA", "ttA", "igB", "ttB"]);
-    const min = (x: any) => Math.round((x.at.getTime() - Date.parse(at)) / 60_000);
+    const min = (x: any) => Math.round((x.at.getTime() - Date.parse(at2)) / 60_000);
     assert.deepEqual(t.map(min), [0, 0, 10, 10], "same-network accounts 10 minutes apart; different networks together");
     assert.deepEqual(staggerTimes(new Date(0), [{ platform: "tiktok" }, { platform: "tiktok" }, { platform: "tiktok" }], 5).map((d) => d.getTime() / 60_000), [0, 5, 10]);
     // reschedule in place: every account moves by the same amount, spacing kept, the provider's post updated
