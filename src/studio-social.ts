@@ -28,6 +28,9 @@ const MAX_AHEAD_DAYS = 90;
 const dailyCap = (env: Record<string, string | undefined>) => Math.max(1, Number(env.STUDIO_SOCIAL_DAILY_POSTS) || 400);
 /** Per account per day: TikTok's own limit is about 15 a day, shared by every app posting to the account. */
 const dailyPerAccount = (env: Record<string, string | undefined>) => Math.max(1, Number(env.STUDIO_SOCIAL_DAILY_PER_ACCOUNT) || 15);
+/** The least time between two posts of one batch on one account (back-to-back posts split the audience and read as
+ *  spam). Later ones are moved, never refused. 0 turns it off. */
+export const minGapMinutes = (env: Record<string, string | undefined>) => { const v = Number(env.STUDIO_SOCIAL_MIN_GAP_MINUTES); return Number.isFinite(v) && env.STUDIO_SOCIAL_MIN_GAP_MINUTES !== undefined && env.STUDIO_SOCIAL_MIN_GAP_MINUTES !== "" ? Math.max(0, Math.min(v, 24 * 60)) : 30; };
 /** What a post says when the service never answered: it may have gone out, so it is never sent again on its own. */
 export const UNCONFIRMED = "We could not confirm this went out. Check the network before posting it again.";
 /** Where the linking page may send the person back to: the Clone8 app only. */
@@ -283,7 +286,7 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const posts = await createPosts(sbFn(), need(), u, req.body ?? {}, { log, env, fetch: deps.fetch, via: typeof req.body?.via === "string" ? req.body.via.slice(0, 20) : "publish" });
-      res.status(201).json({ posts, autoreply: posts.autoreply ?? null, queued: posts.queued, batch_id: posts.batch_id, skipped: posts.skipped });
+      res.status(201).json({ posts, autoreply: posts.autoreply ?? null, queued: posts.queued, batch_id: posts.batch_id, skipped: posts.skipped, spaced: posts.spaced ?? 0 });
     } catch (e) { fail(res, e); }
   });
 
@@ -671,7 +674,8 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const natural = b.natural_timing === true;
   const plan = resolved.map((x, i) => {
     const e = expanded[i];
-    let at = e.it?.schedule_at ? readTime(e.it.schedule_at) : first ? new Date(first.getTime() + i * spacing * 60_000) : spacing ? new Date(now + MIN_LEAD_MS + i * spacing * 60_000) : null;
+    // spaced with no start: the first goes now, the rest every `spacing` after it
+    let at = e.it?.schedule_at ? readTime(e.it.schedule_at) : first ? new Date(first.getTime() + i * spacing * 60_000) : spacing && i > 0 ? new Date(now + Math.max(MIN_LEAD_MS, i * spacing * 60_000)) : null;
     if (at && (at.getTime() > x.keptUntil || at.getTime() > latest)) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead`);
     // accounts of one network spaced apart (a group's default, or asked for); other networks keep the same time
     const groups = groupsIn(e.targets);
@@ -701,8 +705,32 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const captionMeta = meta && typeof meta === "object" && ["ai", "edited", "own"].includes(meta.source) ? { source: meta.source, keywords: Array.isArray(meta.keywords) ? meta.keywords.map(String).slice(0, 3) : undefined, per_network: Object.keys(perNet).length > 0 || undefined, per_account: Object.keys(perAcct).length > 0 || undefined } : undefined;
     const test = e.test ? { caption_test: { id: e.test.id, variant: e.test.variant, of: e.test.of } } : {};
     // the captions of a test are the point of it: never reworded per account
-    return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}), ...test }, targets, vary: vary && sameNet && !e.test, groupId, groups };
+    return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}), ...test }, targets, vary: vary && sameNet && !e.test, groupId, groups, trial: !!e.trial };
   });
+  // One account never gets two posts of this batch at once: a later post to an account is moved to at least the gap
+  // after the one before it (the whole post moves, so its accounts keep going out together). Trial Reels are left as
+  // asked: their copies go to non-followers and a caption test wants them side by side.
+  const gapMs = minGapMinutes(opts.env ?? process.env) * 60_000;
+  let spaced = 0;
+  if (gapMs > 0 && plan.length > 1) {
+    const last = new Map<string, number>();
+    const when = (r: (typeof plan)[number], t: Target) => (t.at ?? r.at)?.getTime() ?? now;
+    const order = plan.map((_, i) => i).sort((a, c) => ((plan[a].at?.getTime() ?? now) - (plan[c].at?.getTime() ?? now)) || a - c);
+    for (const i of order) {
+      const r = plan[i];
+      if (r.trial) continue;
+      let need = 0;
+      for (const t of r.targets) { const prev = last.get(tokenOf(t)); if (prev != null) need = Math.max(need, prev + gapMs - when(r, t)); }
+      if (need > 0) {
+        const move = (d: Date | null | undefined) => new Date((d?.getTime() ?? now) + need);
+        r.at = move(r.at);
+        r.targets = r.targets.map((t) => ({ ...t, at: t.at ? move(t.at) : r.at }));
+        if (r.at.getTime() > latest || r.at.getTime() > r.x.keptUntil) throw new SocialError("too_late", `Spaced ${Math.round(gapMs / 60_000)} min apart per account, these run past ${MAX_AHEAD_DAYS} days ahead; post fewer at once`);
+        spaced++;
+      }
+      for (const t of r.targets) last.set(tokenOf(t), Math.max(last.get(tokenOf(t)) ?? -Infinity, when(r, t)));
+    }
+  }
   // Daily allowance, counted on the day a post goes out (UTC): per account (TikTok's own limit is about 15 a day,
   // shared by every app posting to it) and, as a safety net, per person.
   const DAY = 86400_000, dayOf = (ms: number) => Math.floor(ms / DAY);
@@ -767,7 +795,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   recordEvent({ user_id: u, kind: "feature", name: "social_post_sent", props: { videos: made.length, networks: nets, accounts: new Set(plan.flatMap((r) => r.targets.map((t) => tokenOf(t)))).size, sends, groups: [...new Set(plan.flatMap((r) => r.groups.map((g) => g.id)))].length, staggered: plan.some((r) => r.targets.some((t) => t.at && r.at && t.at.getTime() !== r.at.getTime())), vary: plan.some((r) => r.vary), background, scheduled: made.filter((m) => m.status === "scheduled").length, failed: made.filter((m) => m.status === "failed").length, from_chat: !!opts.conversationId, via } });
   if (background) void drainBatch(sb, p, u, batchId, { env, log, fetch: opts.fetch });
   const sent = await withPostPosters(sb, u, made);
-  return Object.assign(sent, { autoreply, queued: background, batch_id: batchId, skipped });
+  return Object.assign(sent, { autoreply, queued: background, batch_id: batchId, skipped, spaced });
 }
 
 /** Send one saved row: its file signed for the provider, captions reworded where asked, one target per account. A
