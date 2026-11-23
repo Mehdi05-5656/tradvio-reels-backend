@@ -175,6 +175,14 @@ test("a batch run: a few at a time, later ones told how earlier ones open, only 
   assert.equal(calls, 2);
   assert.equal(sb2.rpcs.find((r: any) => r.name === "studio_complete").args.p_credits_charged, 8, "the hold caps the charge (3 watched x 4 = 12 > 8 held)");
 
+  // the writer did not answer once: tried again, and only one read is counted
+  const sb4 = fakeSb({});
+  let tries = 0;
+  const flaky: any = async () => { if (++tries === 1) { const { SocialError } = await import("../src/social-provider.js"); throw new SocialError("captions_unavailable", "no answer", 503); } return { caption: "ok", hashtags: [], youtube_title: null, heard_speech: false, watched: true }; };
+  await runPostCaptions(sb4, { ...job, options: { ...job.options, videos: [{ asset_id: A1 }] } } as any, { caption: flaky, log: () => {}, retryMs: 1 });
+  assert.equal(tries, 2);
+  assert.equal(sb4.rpcs.find((r: any) => r.name === "studio_complete").args.p_credits_charged, 4);
+
   // the lease lost: stops quietly, never completes or fails the job
   const sb3 = fakeSb({}, { studio_renew: () => ({ data: false, error: null }) });
   assert.equal(await runPostCaptions(sb3, job as any, { caption: w2, log: () => {} }), "lease_lost");
@@ -241,7 +249,7 @@ test("Smart post: brief from the notes only (unwatched refused), answers become 
   const s = await serve(sb, { brief: async (b: any) => {
     seen.push(b);
     return b.answer
-      ? { caption: { mode: "line_video", line: 'Comment "clone8"', keep_words: false, style: "casual" }, schedule: { per_day: 3, days: [1, 2, 3, 4, 5, 9], start: "tomorrow", times: ["9:00", "25:00", "18:30"], now: false }, autoreply: { on: true, keyword: '"clone8"!', link: "javascript:alert(1)" }, trial: null, unclear: [] }
+      ? { caption: { mode: "line_video", line: 'Comment "clone8"', keep_words: false, style: "casual" }, networks: { mode: "custom", how: "TikTok short, no hashtags" }, schedule: { per_day: 3, days: [1, 2, 3, 4, 5, 9], start: "tomorrow", times: ["9:00", "25:00", "18:30"], now: false }, autoreply: { on: true, keyword: '"clone8"!', link: "javascript:alert(1)" }, trial: null, unclear: [] }
       : { summary: "Cat clips", kinds: [{ label: "cats", count: 2 }], samples: [{ style: "Hook", caption: "the cat chose violence" }], lines: ['Comment "clone8" for the link'] };
   } });
   try {
@@ -255,6 +263,7 @@ test("Smart post: brief from the notes only (unwatched refused), answers become 
     assert.deepEqual(an.body.schedule, { per_day: 3, days: [1, 2, 3, 4, 5], start: "tomorrow", times: ["09:00", "18:30"], now: false });
     assert.deepEqual(an.body.autoreply, { on: true, keyword: "clone8", link: null }, "keyword cleaned; a non-web link dropped");
     assert.equal(an.body.caption.mode, "line_video");
+    assert.deepEqual(an.body.networks, { mode: "custom", how: "TikTok short, no hashtags" });
     assert.equal((await s.call("POST", "/api/studio/social/smart/answer", { text: "  " })).body.error, "nothing_said");
   } finally { s.close(); }
 });

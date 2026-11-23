@@ -32,7 +32,7 @@ const plansOf = async (): Promise<PlanLike[]> => (await import("./studio.js")).P
 
 type Job = { id: string; user_id: string; tool: string; lease_token: string; options: any; credits_reserved: number; progress: any; attempts: number };
 export type BatchResult = { ok: true; draft: CaptionDraft } | { ok: false; code: string; error: string };
-export type PostCaptionsDeps = CaptionDeps & { caption?: typeof draftCaption; plans?: PlanLike[]; brief?: (body: any) => Promise<any> };
+export type PostCaptionsDeps = CaptionDeps & { caption?: typeof draftCaption; plans?: PlanLike[]; brief?: (body: any) => Promise<any>; retryMs?: number };
 
 const UUID = /^[0-9a-f-]{36}$/i;
 /** A video as sent by the page: an upload or a job output (anything else is dropped). */
@@ -75,7 +75,13 @@ export async function runPostCaptions(sb: SupabaseClient, job: Job, deps: PostCa
       const avoid = Object.values(results).filter((r): r is { ok: true; draft: CaptionDraft } => r.ok).map((r) => r.draft.caption).slice(-8);
       await Promise.all(wave.map(async (v) => {
         try {
-          const d = await write(sb, job.user_id, { ...v, platforms: o.platforms ?? [], line: o.line, keep_words: !!o.keep_words, use_video: o.use_video !== false, note: o.note, accounts: o.accounts ?? [], avoid, watch: o.rewatch ? "always" : "auto" }, { ...deps, log });
+          const ask = { ...v, platforms: o.platforms ?? [], line: o.line, keep_words: !!o.keep_words, use_video: o.use_video !== false, note: o.note, accounts: o.accounts ?? [], avoid, watch: (o.rewatch ? "always" : "auto") as "always" | "auto" };
+          // the writer not answering (a long video read past its time limit, an overloaded model) is tried once more
+          const d = await write(sb, job.user_id, ask, { ...deps, log }).catch(async (e: any) => {
+            if (!(e instanceof SocialError) || !["captions_unavailable"].includes(e.code)) throw e;
+            await new Promise((r) => setTimeout(r, deps.retryMs ?? 3000));
+            return write(sb, job.user_id, ask, { ...deps, log });
+          });
           if (d.watched) watched++;
           results[videoKey(v)] = { ok: true, draft: d };
         } catch (e: any) {
@@ -141,8 +147,11 @@ const BRIEF_SCHEMA = {
   },
 };
 const ANSWER_SCHEMA = {
-  type: "object", additionalProperties: false, required: ["caption", "schedule", "autoreply", "trial", "unclear"],
+  type: "object", additionalProperties: false, required: ["caption", "networks", "schedule", "autoreply", "trial", "unclear"],
   properties: {
+    networks: { type: "object", additionalProperties: false, required: ["mode", "how"], properties: {
+      mode: { type: "string", enum: ["fit", "same", "custom", "unchanged"], description: "fit: each network its own version written for it; same: the same caption everywhere; custom: they said how each network should differ; unchanged: not said" },
+      how: { anyOf: [{ type: "string" }, { type: "null" }], description: "For custom: how each network's caption should differ, in their words (e.g. 'TikTok short, no hashtags; Instagram longer with the link line')" } } },
     caption: { type: "object", additionalProperties: false, required: ["mode", "line", "keep_words", "style"], properties: {
       mode: { type: "string", enum: ["video", "line", "line_video", "own", "unchanged"], description: "video: write each from its video; line: variants of their line only; line_video: their line worked into captions about each video; own: they write; unchanged: they did not say" },
       line: { anyOf: [{ type: "string" }, { type: "null" }] }, keep_words: { type: "boolean" },
@@ -282,13 +291,15 @@ export function registerPostCaptions(app: Express, sbFn: () => SupabaseClient, d
         `The creator is posting ${Number(ctx.videos) || "some"} videos. Today is ${String(ctx.today ?? new Date().toISOString().slice(0, 10)).slice(0, 10)} (${String(ctx.timezone ?? "").slice(0, 40)}).`,
         ctx.current ? `What is set now: ${JSON.stringify(ctx.current).slice(0, 1500)}` : "",
         `What they said: """${said}"""`,
-        "Turn it into settings. Leave anything they did not mention as null / 'unchanged'. Never invent a link or keyword they did not give; if they give a comment word without a link, keyword is that word and link null.",
+        ctx.networks ? `Networks posted to: ${String(ctx.networks).slice(0, 80)}.` : "",
+        "Turn it into settings. Leave anything they did not mention as null / 'unchanged'. networks: only when they say whether captions should differ between networks (TikTok, Instagram, YouTube...) or be the same. Never invent a link or keyword they did not give; if they give a comment word without a link, keyword is that word and link null.",
       ].filter(Boolean).join("\n\n");
       const out = deps.brief ? await deps.brief({ text, answer: true }) : await askClaude(env, f, ANSWER_SCHEMA, "You turn what a creator says about how to post a batch of videos into settings. Be literal; do not add what they did not ask for.", text, log, u, "smart_answer");
       const c = out.caption ?? {}, s = out.schedule ?? {}, a = out.autoreply ?? {};
       const times = Array.isArray(s.times) ? s.times.map(String).filter((t: string) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(t)).map((t: string) => t.padStart(5, "0")).slice(0, 8) : null;
       res.json({
         caption: { mode: ["video", "line", "line_video", "own", "unchanged"].includes(c.mode) ? c.mode : "unchanged", line: c.line ? String(c.line).slice(0, 300) : null, keep_words: c.keep_words === true, style: c.style ? String(c.style).slice(0, 200) : null },
+        networks: { mode: ["fit", "same", "custom"].includes(out.networks?.mode) ? out.networks.mode : "unchanged", how: out.networks?.mode === "custom" && out.networks?.how ? String(out.networks.how).slice(0, 300) : null },
         schedule: { per_day: Number.isInteger(s.per_day) && s.per_day > 0 && s.per_day <= 8 ? s.per_day : null, days: Array.isArray(s.days) ? [...new Set(s.days.map(Number).filter((d: number) => Number.isInteger(d) && d >= 0 && d <= 6))] : null, start: typeof s.start === "string" && /^(today|tomorrow|\d{4}-\d{2}-\d{2})$/.test(s.start) ? s.start : null, times: times && times.length ? times : null, now: s.now === true },
         autoreply: { on: typeof a.on === "boolean" ? a.on : null, keyword: a.keyword ? String(a.keyword).replace(/[^\p{L}\p{N}_-]/gu, "").slice(0, 30) || null : null, link: a.link && /^https?:\/\/\S+$/i.test(String(a.link)) ? String(a.link).slice(0, 500) : null },
         trial: typeof out.trial === "boolean" ? out.trial : null,
