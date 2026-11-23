@@ -190,6 +190,7 @@ export function castChoice(o: any): { character: string | null; character_asset_
 /** A job named the way a person thinks of it: "Swap · 44 s", "Blueprint · 3 copies", "Seedance 2.5 · 31 s". */
 export function jobLabel(j: { tool: string; options?: any }): string {
   const o = j.options ?? {};
+  if (j.tool === "post_captions") return `Captions written · ${(o.videos ?? []).length} video${(o.videos ?? []).length === 1 ? "" : "s"}`;
   const names: Record<string, string> = { blueprint: "Blueprint", blueprint_plus: "Blueprint+", recast: "Recast", swap: "Swap", restyle: "Style", trend: "Trend", character: "Character", instrument: "Instrument" };
   if (j.tool === "blueprint" || j.tool === "blueprint_plus") return `${names[j.tool]} · ${o.copies ?? "?"} ${o.copies === 1 ? "copy" : "copies"}`;
   if (j.tool === "instrument") { const ep = String(o.endpoint ?? ""); const fam = ep.startsWith("audio/") ? ep.slice(6).replace(/-/g, " ") : ep.split("/").slice(0, 2).pop()?.replace(/-/g, " ") ?? "model"; return `${fam.charAt(0).toUpperCase()}${fam.slice(1)}${o.units && o.output === "video" ? ` · ${Math.round(o.units)} s` : ""}`; }

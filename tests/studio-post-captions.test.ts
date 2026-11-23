@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { draftCaption, keepLine, lineKeyword, videoKey } from "../src/studio-captions.js";
+import { asksFor, draftCaption, keepLine, lineKeyword, videoKey } from "../src/studio-captions.js";
 import { batchOptions, registerPostCaptions, runPostCaptions, watchCredits, POST_CAPTIONS_TOOL } from "../src/studio-post-captions.js";
 import { PLANS } from "../src/studio.js";
 
@@ -79,6 +79,17 @@ test("the comment keyword is read from the creator's line; every version keeps t
   assert.equal(keepLine('want it? drop "clone8" below', line, false, "clone8"), 'want it? drop "clone8" below', "fresh words keep the keyword: fine");
   assert.equal(keepLine("want the link? ask below", line, false, "clone8"), `want the link? ask below\n\n${line}`, "keyword lost: the line is added");
   assert.equal(keepLine("x", null, true, null), "x");
+  // the comment word must still be asked for: "link in bio" does not ask anyone to comment LINK
+  assert.equal(asksFor("link in bio", "LINK"), false);
+  assert.equal(asksFor("Comment LINK below", "LINK"), true);
+  assert.equal(asksFor('drop "clone8" below', "clone8"), true);
+  assert.equal(asksFor("made with clone8", "clone8"), false);
+  assert.equal(asksFor("comment clone8x", "clone8"), false, "part of a longer word");
+  assert.equal(keepLine("want it? link in bio", 'Comment "LINK"', false, "LINK"), 'want it? link in bio\n\nComment "LINK"');
+  // a long caption gives way to the line, never the other way round
+  const long = "a".repeat(2190);
+  const kept = keepLine(long, line, true, "clone8", 2200);
+  assert.ok(kept.length <= 2200 && kept.endsWith(line));
 });
 
 test("a video is watched once: the first draft watches (Opus, frames) and saves a note; later drafts write from the note (Sonnet, no frames)", async () => {
@@ -183,6 +194,16 @@ test("a batch run: a few at a time, later ones told how earlier ones open, only 
   assert.equal(tries, 2);
   assert.equal(sb4.rpcs.find((r: any) => r.name === "studio_complete").args.p_credits_charged, 4);
 
+  // broken mid-run: what was read is charged (its notes are kept), the rest refunded
+  const sb5 = fakeSb({}, { studio_renew: (() => { let k = 0; return () => ({ data: ++k < 2, error: null }); })() });
+  const one: any = async () => ({ caption: "ok", hashtags: [], youtube_title: null, heard_speech: false, watched: true });
+  const s5 = await runPostCaptions(sb5, { ...job, options: { ...job.options, videos: [{ asset_id: A1 }, { asset_id: A2 }, { asset_id: A3 }] } } as any, { caption: one, log: () => {} }, 1);
+  assert.equal(s5, "lease_lost", "a lost lease leaves the job to the next server, which reads the saved progress");
+  const sb6 = fakeSb({}, { studio_complete: (() => { let k = 0; return () => (++k < 2 ? { data: null, error: { message: "db blip" } } : { data: {}, error: null }); })() });
+  const s6 = await runPostCaptions(sb6, { ...job, options: { ...job.options, videos: [{ asset_id: A1 }, { asset_id: A2 }] } } as any, { caption: one, log: () => {} }, 1);
+  assert.match(s6, /^stopped after 2 read, charged 8/);
+  assert.ok(!sb6.rpcs.some((r: any) => r.name === "studio_fail"));
+
   // the lease lost: stops quietly, never completes or fails the job
   const sb3 = fakeSb({}, { studio_renew: () => ({ data: false, error: null }) });
   assert.equal(await runPostCaptions(sb3, job as any, { caption: w2, log: () => {} }), "lease_lost");
@@ -227,14 +248,20 @@ test("routes: quote, batch (credits held only for unwatched videos, job hidden a
     assert.equal(j.options.line, "follow for more");
     assert.ok(j.hidden_at && j.notified_at && j.push_notified_at, "out of the library, no email, no push");
 
+    const busy = await s.call("POST", "/api/studio/social/captions/batch", { videos: [{ asset_id: A1 }], platforms: ["tiktok"], line: "follow", use_video: false });
+    assert.equal(busy.body.error, "captions_busy", "one batch at a time: two could read (and charge for) the same video");
+    j.status = "done";
     const lineOnly = await s.call("POST", "/api/studio/social/captions/batch", { videos: [{ asset_id: A1 }], platforms: ["tiktok"], line: "follow", use_video: false });
     assert.equal(lineOnly.body.credits, 0, "from the line alone: free");
+    jobs[1].status = "done";
 
+    j.status = "queued";
     j.progress = { done: 1, results: { [`a:${A1}`]: { ok: true, draft: { caption: "hi" } } } }; j.status = "running";
     const st = await s.call("GET", `/api/studio/social/captions/batch/${j.id}`);
     assert.deepEqual([st.body.status, st.body.done, st.body.of, st.body.results[`a:${A1}`].draft.caption], ["running", 1, 3, "hi"]);
     assert.equal((await s.call("GET", `/api/studio/social/captions/batch/${j.id}`, undefined, BOB)).status, 404, "someone else's batch");
 
+    j.status = "done";
     balance = 3;
     const poor = await s.call("POST", "/api/studio/social/captions/batch", { videos: [{ asset_id: A1 }], platforms: ["tiktok"] });
     assert.equal(poor.status, 402);

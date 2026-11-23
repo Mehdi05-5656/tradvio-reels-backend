@@ -216,12 +216,30 @@ export function lineKeyword(line: string | null | undefined): string | null {
 }
 /** Every version keeps the creator's line: word for word, or at least its keyword; when the writer dropped it, the line
  *  is added on its own line at the end (never a post without the call to action the person asked for). */
-export function keepLine(caption: string, line: string | null | undefined, keep: boolean, keyword: string | null): string {
+export function keepLine(caption: string, line: string | null | undefined, keep: boolean, keyword: string | null, max = 2200): string {
   const l = String(line ?? "").trim();
-  if (!l) return caption;
-  if (keep) return caption.includes(l) ? caption : `${caption.trim()}\n\n${l}`.trim();
-  if (keyword && !caption.toLowerCase().includes(keyword.toLowerCase())) return `${caption.trim()}\n\n${l}`.trim();
-  return caption;
+  const c = caption.slice(0, max);
+  if (!l) return c;
+  // the line is added in full: the caption gives way, never the call to action
+  const add = () => `${caption.trim().slice(0, Math.max(0, max - l.length - 2)).trim()}\n\n${l}`.trim();
+  if (keep) return caption.includes(l) && caption.length <= max ? caption : add();
+  // the comment word as a whole word ("LINK" is not kept by "link in bio" ... unless it is the word itself)
+  if (keyword && !asksFor(caption, keyword)) return add();
+  return c;
+}
+/** The caption still asks viewers for the word: it is quoted, or written in its own capitals, or comes right after
+ *  comment / type / DM / reply / say / drop / write. ("link in bio" does not ask anyone to comment LINK.) */
+export function asksFor(text: string, word: string): boolean {
+  if (!hasWord(text, word)) return false;
+  const esc = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`["“'‘]${esc}["”'’]`, "iu").test(text)) return true;
+  if (/\p{Lu}/u.test(word) && new RegExp(`(^|[^\\p{L}\\p{N}_])${esc}($|[^\\p{L}\\p{N}_])`, "u").test(text)) return true;
+  return new RegExp(`\\b(comment|type|dm|reply|say|drop|write)\\b[^.\\n]{0,24}?(^|[^\\p{L}\\p{N}_])${esc}($|[^\\p{L}\\p{N}_])`, "iu").test(text);
+}
+/** `word` stands on its own in `text` (any case): not part of a longer word. */
+export function hasWord(text: string, word: string): boolean {
+  const esc = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}_])${esc}($|[^\\p{L}\\p{N}_])`, "iu").test(text);
 }
 
 const SEEN = {
@@ -342,7 +360,7 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: DraftRequ
       const sn = parsed.seen, list = (x: any, n: number) => (Array.isArray(x) ? x : []).map((v: any) => String(v ?? "").trim().slice(0, 200)).filter(Boolean).slice(0, n);
       await saveNote(sb, u, key, { summary: String(sn.summary ?? "").slice(0, 800), moments: list(sn.moments, 8), on_screen_text: list(sn.on_screen_text, 8), speech, tone: String(sn.tone ?? "").slice(0, 80), people: String(sn.people ?? "").slice(0, 160), searched: list(sn.searched, 6) }, model, log);
     }
-    const fit = (c: string) => keepLine(c, line, !!req.keep_words, keyword).slice(0, 2200);
+    const fit = (c: string) => keepLine(c, line, !!req.keep_words, keyword, 2200);
     const title = platforms.includes("youtube") && parsed.youtube_title ? Array.from(String(parsed.youtube_title)).slice(0, 100).join("") : null;
     const versions = (Array.isArray(parsed.versions) ? parsed.versions : []).filter((v: any) => v && platforms.includes(String(v.platform))).map((v: any) => ({ platform: String(v.platform), caption: fit(String(v.caption ?? "").trim().slice(0, 2000)), hashtags: cleanTags(v.hashtags, String(v.platform)) })).filter((v: any, i: number, a: any[]) => v.caption && a.findIndex((x) => x.platform === v.platform) === i);
     const byAcct = accounts.length ? (Array.isArray(parsed.by_account) ? parsed.by_account : []).map((x: any) => { const a = accounts.find((y) => y.id === String(x?.id)); return a ? { id: a.id, platform: a.platform, caption: fit(String(x.caption ?? "").trim().slice(0, 2000)), hashtags: cleanTags(x.hashtags, a.platform) } : null; }).filter((x: any, i: number, all: any[]) => x && x.caption && all.findIndex((y) => y?.id === x.id) === i) : undefined;

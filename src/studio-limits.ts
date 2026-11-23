@@ -81,7 +81,8 @@ export async function checkJobRate(sb: any, user: string, now = new Date()): Pro
     const since = new Date(now.getTime() - 3600_000).toISOString();
     const [cust, jobs] = await Promise.all([
       sb.from("studio_customers").select("plan_id,status,owner_pass").eq("user_id", user).maybeSingle(),
-      sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("user_id", user).gte("created_at", since),
+      // (caption batches for posting are a step of posting, not a run: they never use up the hour's jobs)
+      sb.from("studio_jobs").select("id", { count: "exact", head: true }).eq("user_id", user).neq("tool", "post_captions").gte("created_at", since),
     ]);
     if (cust.error || jobs.error) return null;
     // No plan: say nothing here. studio_create_job refuses with subscription_required, which the app and the site turn

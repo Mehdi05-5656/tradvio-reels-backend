@@ -7,7 +7,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Plan } from "./studio.js";
 
-export const OWN_POOL = new Set(["clips", "import", "captions"]);
+export const OWN_POOL = new Set(["clips", "import", "captions", "post_captions"]);
 export const poolOf = (tool: string): string => (OWN_POOL.has(tool) ? tool : "tools");
 
 const LABEL: Record<string, string> = {

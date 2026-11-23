@@ -78,12 +78,14 @@ export async function runPostCaptions(sb: SupabaseClient, job: Job, deps: PostCa
           const ask = { ...v, platforms: o.platforms ?? [], line: o.line, keep_words: !!o.keep_words, use_video: o.use_video !== false, note: o.note, accounts: o.accounts ?? [], avoid, watch: (o.rewatch ? "always" : "auto") as "always" | "auto" };
           // the writer not answering (a long video read past its time limit, an overloaded model) is tried once more
           const d = await write(sb, job.user_id, ask, { ...deps, log }).catch(async (e: any) => {
-            if (!(e instanceof SocialError) || !["captions_unavailable"].includes(e.code)) throw e;
+            if (!(e instanceof SocialError) || e.code !== "captions_unavailable" || e.status !== 503) throw e; // (an unreadable answer is not read twice)
             await new Promise((r) => setTimeout(r, deps.retryMs ?? 3000));
             return write(sb, job.user_id, ask, { ...deps, log });
           });
           if (d.watched) watched++;
           results[videoKey(v)] = { ok: true, draft: d };
+          // saved as each lands: a run taken over after a restart neither reads nor charges a video twice
+          await save();
         } catch (e: any) {
           results[videoKey(v)] = { ok: false, code: e instanceof SocialError ? e.code : "caption_failed", error: e instanceof SocialError ? e.message : "This one could not be written; try it again" };
           if (!(e instanceof SocialError)) log(`[post-captions] ${job.id} ${videoKey(v)}: ${String(e?.message ?? e).slice(0, 200)}`);
@@ -99,8 +101,14 @@ export async function runPostCaptions(sb: SupabaseClient, job: Job, deps: PostCa
   } catch (e: any) {
     if (e instanceof SocialError && e.code === "lease_lost") return "lease_lost";
     log(`[post-captions] ${job.id} failed: ${String(e?.message ?? e).slice(0, 200)}`);
-    // (studio_fail refunds the whole hold; a retry would only re-run what is not written yet)
-    await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: "caption_failed", p_retry: (job.attempts ?? 1) < 3, p_detail: String(e?.message ?? e).slice(0, 300) }).catch(() => undefined);
+    // videos read before it broke are kept (their notes make every later caption free): those are charged, the rest
+    // refunded; with nothing read, the whole hold comes back
+    const per = Number(o.per_watch) || 0;
+    if (watched > 0) {
+      const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: Math.min(job.credits_reserved, watched * per) });
+      if (!done.error) return `stopped after ${watched} read, charged ${Math.min(job.credits_reserved, watched * per)}`;
+    }
+    await studioFail(sb, { p_job: job.id, p_token: job.lease_token, p_reason: "caption_failed", p_retry: false, p_detail: String(e?.message ?? e).slice(0, 300) }).catch(() => undefined);
     return "failed";
   }
 }
@@ -217,6 +225,9 @@ export function registerPostCaptions(app: Express, sbFn: () => SupabaseClient, d
       const sb = sbFn();
       const o = batchOptions(req.body ?? {});
       await resolveAll(sb, u, o.videos);
+      // one batch at a time: two at once could both read (and charge for) the same video
+      const busy = await sb.from("studio_jobs").select("id").eq("user_id", u).eq("tool", POST_CAPTIONS_TOOL).in("status", ["queued", "running"]);
+      if ((busy.data ?? []).length) throw new SocialError("captions_busy", "Captions are already being written; wait for those to finish", 409);
       const noted = await notedKeys(sb, u, o.videos.map(videoKey));
       const each = await per();
       const toWatch = !o.use_video ? 0 : o.rewatch ? o.videos.length : o.videos.filter((v) => !noted.has(videoKey(v))).length;
@@ -232,7 +243,8 @@ export function registerPostCaptions(app: Express, sbFn: () => SupabaseClient, d
       const job = r.data as { id: string };
       // a step of posting, not something made: out of the library, no "ready" email or push
       const now = new Date().toISOString();
-      await sb.from("studio_jobs").update({ hidden_at: now, notified_at: now, push_notified_at: now }).eq("id", job.id).eq("user_id", u);
+      const hid = await sb.from("studio_jobs").update({ hidden_at: now, notified_at: now, push_notified_at: now }).eq("id", job.id).eq("user_id", u);
+      if (hid.error) log(`[post-captions] ${job.id} not hidden: ${String(hid.error.message ?? hid.error).slice(0, 160)}`);
       res.status(201).json({ job_id: job.id, credits, to_watch: toWatch, credits_each: each, videos: o.videos.length });
     } catch (e) { fail(res, e); }
   });
