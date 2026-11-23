@@ -244,7 +244,7 @@ export function whatsWorking(a: Analysis, opts: { offset_min?: number } = {}): W
 
   // the caption (counted for every post with features); length matters on TikTok, so it is judged there
   const tt = withF.filter((p) => p.platform === "tiktok");
-  split("caption_length", (w) => `${w} do better on TikTok`, "Short captions (under 100 characters)", "Longer captions", (p) => feats(p)!.caption.chars < 100, tt, () => write("Write my next captions short"));
+  split("caption_length", (w) => (w === "Under 100 characters" ? "Short captions do better on TikTok" : "Longer captions do better on TikTok"), "Under 100 characters", "Longer captions", (p) => feats(p)!.caption.chars < 100, tt, () => write("Write my next captions short"));
   split("caption_question", (w) => `${w} do better`, "Captions with a question", "Captions without a question", (p) => feats(p)!.caption.question, withF, () => write("Write my next captions this way"));
 
   // hashtags: each tag on 3 posts or more, against the posts without it
@@ -255,7 +255,7 @@ export function whatsWorking(a: Analysis, opts: { offset_min?: number } = {}): W
   if (tagStats.length >= 2) {
     const best = tagStats.filter((t) => t.multiple >= 1.1).slice(0, 5);
     const pool = withF.filter((p) => tagsOf(p).length);
-    if (best.length) split("hashtags", () => "Your best hashtags carry more views", `Posts with ${best.slice(0, 3).map((t) => t.tag).join(", ")}`, "Your other tagged posts", (p) => tagsOf(p).some((t) => best.some((b) => b.tag === t)), pool, () => ({ tool: "copy", label: "Copy my best tags", post_id: null, prompt: null, text: best.map((t) => t.tag).join(" ") }), true);
+    if (best.length) split("hashtags", () => "Your best hashtags carry more views", "With these tags", "Other tagged posts", (p) => tagsOf(p).some((t) => best.some((b) => b.tag === t)), pool, () => ({ tool: "copy", label: "Copy my best tags", post_id: null, prompt: null, text: best.map((t) => t.tag).join(" ") }), true);
     const card = cards.find((c) => c.kind === "hashtags");
     if (card) card.tags = tagStats.slice(0, 8);
   }
