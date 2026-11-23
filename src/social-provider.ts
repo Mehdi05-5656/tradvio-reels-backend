@@ -13,7 +13,19 @@ export const isSocialPlatform = (p: unknown): p is SocialPlatform => typeof p ==
 /** A network the person linked, as the provider reports it. */
 /** `id` is the provider's account id: several accounts of one network can be linked (two TikToks), so posts, unlinks
  *  and relinks name the account, not only the network. */
-export type SocialAccount = { id?: string; platform: string; username: string | null; display_name: string | null; image_url: string | null; profile_url: string | null; refresh_required?: boolean };
+export type SocialAccount = { id?: string; platform: string; username: string | null; display_name: string | null; image_url: string | null; profile_url: string | null; refresh_required?: boolean;
+  /** as the network reports them (Instagram: followers and BUSINESS / MEDIA_CREATOR), for rules like Trial Reels */
+  followers?: number | null; account_type?: string | null };
+
+/** Instagram's rule for Trial Reels (help.instagram.com/1013292530224018, Nov 2026): a public professional account with
+ *  at least 200 followers that can be recommended. Posting through an app needs a professional account anyway, so here
+ *  it comes down to followers; an unknown count is let through (the network has the last word). */
+export const TRIAL_MIN_FOLLOWERS = 200;
+export function trialBlock(a: SocialAccount): string | null {
+  if (a.platform !== "instagram") return "Trial Reels are an Instagram feature";
+  if (a.followers != null && a.followers < TRIAL_MIN_FOLLOWERS) return `Trial Reels unlock at ${TRIAL_MIN_FOLLOWERS} followers (Instagram's rule); ${a.username ? `@${a.username}` : "this account"} has ${a.followers}`;
+  return null;
+}
 /** The outcome on one network. */
 export type SocialResult = { platform: string; account_id?: string | null; status: "scheduled" | "posted" | "failed" | "pending"; url: string | null; error: string | null };
 export type SocialPostStatus = "sending" | "scheduled" | "posted" | "partial" | "failed" | "canceled";

@@ -482,6 +482,10 @@ test("trial reels: Instagram-only trials may repeat a video up to 5 times; anyth
   assert.equal(noTrial.body.error, "caption_test_trial_only");
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } }, caption_test: { captions: ["same", "Same"] } })).body.error, "caption_test_same");
   assert.equal((await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } }, caption_test: { captions: ["a", "b", "c", "d"] } })).body.error, "caption_test_size");
+  // Instagram's rule: 200 followers for Trial Reels; a known smaller account is told why
+  tables.studio_social_profiles[0].accounts = tables.studio_social_profiles[0].accounts.map((x: any) => (x.platform === "instagram" ? { ...x, username: "ann", followers: 38 } : x));
+  const small = await s.call("POST", "/api/studio/social/posts", { items: [item], platforms: ["instagram"], options: { instagram: { trial: "auto" } } });
+  assert.equal(small.body.error, "trial_not_eligible"); assert.match(small.body.detail, /200 followers.*@ann has 38/);
   await s.close();
 });
 

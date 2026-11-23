@@ -9,7 +9,7 @@ import { SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, MAX_SOCIAL_EXTRA } from "./studio-pri
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftCaption, type CaptionDraft } from "./studio-captions.js";
-import { getSocialProvider, providerNamed, isSocialPlatform, SocialError, statusOf, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type PostTarget } from "./social-provider.js";
+import { getSocialProvider, providerNamed, isSocialPlatform, SocialError, statusOf, trialBlock, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type PostTarget } from "./social-provider.js";
 import { groupsOf, publicGroup, staggerTimes, varyCaptions } from "./studio-post-groups.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
@@ -596,11 +596,13 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const allIg = targets.every((t) => t.platform === "instagram");
     const groupTrial = groupsIn(targets).map((g) => g.defaults?.instagram_trial).find((x) => x === "auto" || x === "manual") ?? null;
     let trial: "auto" | "manual" | null = null;
+    const blocked = targets.map(trialBlock).find(Boolean) ?? null;
     if (askedTrial) {
+      if (allIg && blocked) throw new SocialError("trial_not_eligible", `${blocked}. Post it as a normal reel, or try again once the account has grown.`);
       if (allIg) trial = askedTrial;
       // older pages sent the option with other networks too: it was ignored there, and still is
       else if (!legacy) throw new SocialError("trial_instagram_only", "Trial Reels post to Instagram only. Pick only Instagram accounts, or turn Trial Reels off.");
-    } else if (b.options?.instagram?.trial === undefined && groupTrial && allIg) trial = groupTrial;
+    } else if (b.options?.instagram?.trial === undefined && groupTrial && allIg && !blocked) trial = groupTrial; // a group's default quietly skips an account that can't yet
     if (testCaps) {
       if (!trial) throw new SocialError("caption_test_trial_only", "Caption tests post as Instagram Trial Reels. Pick only Instagram accounts and turn Trial Reels on.");
       const id = randomUUID();

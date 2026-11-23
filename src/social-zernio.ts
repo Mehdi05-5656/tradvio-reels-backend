@@ -185,6 +185,8 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       return (await rawAccounts(profileKey)).filter((a) => offered().includes(a.platform)).map((a) => ({
         id: String(a._id), platform: String(a.platform), username: a.username ? String(a.username) : null, display_name: a.displayName ? String(a.displayName) : null,
         image_url: safeUrl(a.profilePicture), profile_url: safeUrl(a.profileUrl), refresh_required: a.needsReconnection === true || a.isActive === false,
+        followers: nn(a.followersCount ?? a.metadata?.profileData?.followersCount),
+        account_type: typeof a.metadata?.profileData?.extraData?.accountType === "string" ? String(a.metadata.profileData.extraData.accountType).slice(0, 40) : null,
       }));
     },
 
