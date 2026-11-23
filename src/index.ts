@@ -50,6 +50,7 @@ import { registerAutomations } from "./studio-automations.js";
 import { registerSocial, startSocialLoop } from "./studio-social.js";
 import { registerPostUploads } from "./studio-post-uploads.js";
 import { registerPostGroups } from "./studio-post-groups.js";
+import { registerPostingPlan } from "./studio-posting-plan.js";
 import { registerAutoReplies } from "./studio-autoreply.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerOutputAsset } from "./studio-output-asset.js";
@@ -143,6 +144,7 @@ async function main() {
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
   registerSocial(app, getSb); // Studio self-serve posting to the person's own socials; off until STUDIO_SOCIAL_ENABLED=true. Not Publer.
   registerPostGroups(app, getSb);
+  registerPostingPlan(app, getSb);
   registerPostUploads(app, getSb); // your own videos to post: library usage, a per-network check of each file // posting groups ("Group A" = IG A + TikTok A), drafts and the post tray
   registerAutoReplies(app, getSb); // keyword comments and DMs answered on the person's own accounts (posting service rules)
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
