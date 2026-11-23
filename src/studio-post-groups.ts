@@ -29,6 +29,8 @@ export type GroupDefaults = {
   times?: string[];                // posting times for the queue ("09:00", "18:30"), in `timezone`
   days?: number[];                 // weekdays they apply to, 0 = Sunday
   timezone?: string;
+  per_day?: number;                // the posting plan these times came from: posts a day per account
+  countries?: string[];            // and where the audience is (zone ids from the page)
 };
 export type GroupRow = { id: string; user_id: string; name: string; color: string; icon: string | null; account_ids: string[]; defaults: GroupDefaults; position: number; created_at: string; updated_at: string };
 
@@ -59,6 +61,8 @@ export function cleanDefaults(raw: any): GroupDefaults {
   if (Array.isArray(raw.times)) out.times = [...new Set(raw.times.map(String).filter((t: string) => TIME_RE.test(t)))].sort().slice(0, 12) as string[];
   if (Array.isArray(raw.days)) out.days = [...new Set(raw.days.map(Number).filter((d: number) => Number.isInteger(d) && d >= 0 && d <= 6))].sort() as number[];
   if (typeof raw.timezone === "string" && raw.timezone.length <= 64 && validZone(raw.timezone)) out.timezone = raw.timezone;
+  if (raw.per_day != null) out.per_day = Math.min(Math.max(Math.round(Number(raw.per_day) || 1), 1), 12);
+  if (Array.isArray(raw.countries)) out.countries = [...new Set(raw.countries.map((c: any) => String(c).toUpperCase()).filter((c: string) => /^[A-Z]{2}(-[A-Z]{1,2})?$/.test(c)))].slice(0, 6) as string[];
   return out;
 }
 

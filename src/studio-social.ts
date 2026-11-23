@@ -682,7 +682,19 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const stagger = b.stagger_minutes != null ? Math.min(Math.max(Math.round(Number(b.stagger_minutes) || 0), 0), 240) : Math.max(0, ...groups.map((g) => Number(g.defaults?.stagger_minutes ?? 0)));
     const sameNet = e.targets.some((t, k) => e.targets.findIndex((o) => o.platform === t.platform) !== k);
     if (stagger > 0 && sameNet && !at) at = new Date(now + 2 * 60_000); // "now", then the rest of the network after it
-    const times = at ? (stagger > 0 && sameNet ? staggerTimes(at, e.targets, stagger) : e.targets.map(() => at!)) : e.targets.map(() => null);
+    let times: Array<Date | null> = at ? (stagger > 0 && sameNet ? staggerTimes(at, e.targets, stagger) : e.targets.map(() => at!)) : e.targets.map(() => null);
+    // a time for each account (the composer's Best times: every account in the next open slot of its own plan), by
+    // provider id; accounts without one go with the post's time
+    const acctTimes = e.it?.account_times && typeof e.it.account_times === "object" ? (e.it.account_times as Record<string, unknown>) : null;
+    if (acctTimes && !e.trial) {
+      const own = e.targets.map((t) => (t.id && typeof acctTimes[t.id] === "string" ? readTime(acctTimes[t.id]) : null));
+      const given = own.filter((d): d is Date => !!d);
+      if (given.length) {
+        if (!at) at = new Date(Math.min(...given.map((d) => d.getTime())));
+        times = own.map((d, k) => d ?? times[k] ?? at);
+        if (times.some((d) => d && (d.getTime() > x.keptUntil || d.getTime() > latest))) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead`);
+      }
+    }
     // natural timing: a few minutes either side, so a schedule does not look automated (only well ahead of time)
     const jittered = times.map((d) => (d && natural && d.getTime() - now > 15 * 60_000 ? new Date(d.getTime() + Math.round((Math.random() * 8 - 4) * 60_000)) : d));
     if (jittered.some((d) => d && d.getTime() > latest)) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead`);

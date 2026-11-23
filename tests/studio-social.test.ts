@@ -554,6 +554,40 @@ test("never two at once on one account: later posts move to the gap after the on
   } finally { server.close(); }
 });
 
+test("a time for each account: each account goes out at its own slot; the post's time is the earliest", async () => {
+  const outputs = Array.from({ length: 3 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
+  const accs = [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }, { id: "yt1", platform: "youtube", username: "ann" }];
+  const tables: Record<string, any[]> = { studio_customers: [{ user_id: ANN, status: "active", plan_id: "studio", billing_interval: "month", social_extra: 0 }], studio_social_profiles: [{ user_id: ANN, provider: "zernio", profile_key: "pk-ann", accounts: accs, webhook_hash: "x" }], studio_jobs: [doneJob({ outputs })], studio_social_posts: [] };
+  const sb = fakeSb(tables);
+  const sent: any[] = [];
+  const provider: any = {
+    name: "zernio", linking: "per_network", offered: () => ["tiktok", "youtube", "instagram"],
+    accounts: async () => accs, registerWebhook: async () => undefined,
+    connectUrl: async (_k: string, o: any) => { sent.push({ connect: o }); return { url: "https://link", expiresInMinutes: 30 }; },
+    disconnect: async (_k: string, platform: string, id?: string) => { sent.push({ unlink: [platform, id] }); },
+    publish: async (_k: string, req: any) => { sent.push(req); return { providerPostId: `pp${sent.length}`, status: "sending", results: req.accounts.map((id: string) => ({ platform: accs.find((a) => a.id === id)!.platform, account_id: id, status: "pending", url: null, error: null })), error: null }; },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req: any, _res, next) => { req.auth = { user_id: ANN, email: "ann@synthetic.invalid" }; req.profile = { role: "user", user_id: ANN }; next(); });
+  registerSocial(app, () => sb, { env: { ...ENV, STUDIO_SOCIAL_DAILY_POSTS: "40" }, provider, log: () => {} });
+  const server = app.listen(0); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const call = async (method: string, path: string, body?: any) => { const r = await fetch(base + path, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+  const item = (n: number) => ({ job_id: JOB, output_key: `${ANN}/${JOB}/${n}.mp4` });
+  try {
+    const t0 = Date.now(), a = new Date(t0 + 2 * 3600_000).toISOString(), b = new Date(t0 + 5 * 3600_000).toISOString();
+    const r = await call("POST", "/api/studio/social/posts", { items: [{ ...item(1), account_times: { tt1: a, tt2: b } }], accounts: ["tt1", "tt2"] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    const row = tables.studio_social_posts.at(-1);
+    assert.equal(row.schedule_at, a);
+    const by = Object.fromEntries(row.options.accounts.map((x: any) => [x.id, x.at]));
+    assert.equal(by.tt1, a); assert.equal(by.tt2, b);
+    const late = await call("POST", "/api/studio/social/posts", { items: [{ ...item(2), account_times: { tt1: new Date(t0 + 120 * 86400_000).toISOString() } }], accounts: ["tt1"] });
+    assert.equal(late.body.error, "too_late");
+  } finally { server.close(); }
+});
+
 test("several accounts of one network: post to two TikToks, a repeat to the same account is refused, the other account is fine, sends count per account", async () => {
   const outputs = Array.from({ length: 3 }, (_, i) => ({ key: `${ANN}/${JOB}/${i + 1}.mp4`, kind: "video" }));
   const accs = [{ id: "tt1", platform: "tiktok", username: "ann" }, { id: "tt2", platform: "tiktok", username: "ann.clips" }, { id: "yt1", platform: "youtube", username: "ann" }];
