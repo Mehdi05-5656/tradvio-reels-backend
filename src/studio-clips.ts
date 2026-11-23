@@ -77,6 +77,8 @@ export const DOWNLOAD_TRIES = [3_000, 10_000];
 async function hasPicture(file: string, deps: ClipsDeps): Promise<boolean | null> {
   try { return (deps.lines ? await deps.lines(file) : (await probeLocal(file)).h) > 0; } catch { return null; }
 }
+/** Waits before each retry of a stretch (each on a fresh proxy session). STUDIO_CLIPS_STRETCH_RETRY_MS="3000,8000,20000,45000". */
+export const stretchRetryMs = (env: Record<string, string | undefined>) => { const v = String(env.STUDIO_CLIPS_STRETCH_RETRY_MS ?? "").split(",").map(Number).filter((x) => Number.isFinite(x) && x >= 0); return v.length ? v.slice(0, 6) : [3000, 8000, 20000, 45000]; };
 export const LEAN = { call_bytes: 1_000_000, ahead: 3,
   // what comes through the proxy in a lean run (Nov 15 2026, three videos through the real proxy): the sound at
   // ~6.3 kB/s of video (kept at 7), and per clip its stretch, the clip plus ~7 s (a second either side and the keyframe
@@ -1620,17 +1622,22 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
           const began = Date.now();
           // (YouTube refuses a request now and then and lets the same one through seconds later: through the real proxy
           // on Nov 15 2026, 4 of ~30 calls were refused once and every retry went through; two more tries, 3 s and 8 s apart)
-          const once = (fresh = false) => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeLocal(f).then((i) => i.start).catch(() => null) })))(
+          const once = (fresh = false) => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeLocal(f).catch(() => null) })))(
             o.url, Math.max(0, m.start - 1), m.end + 1, join(dir!, `lean-${m.rank}`), { maxHeight: stretchHeight, sharp, signal: job.signal, fresh });
           try {
-            // (each retry on a fresh proxy session, Nov 15 2026: the first live run's session went bad and every retry on it failed)
+            // (each retry on a fresh proxy session, Nov 15 2026: the first live run's session went bad and every retry on it
+            //  failed; Nov 23 2026 run ff37f63e: the proxy was refusing for a few minutes, four stretches got through on a
+            //  fresh session and one ran out of its three tries in 11 s, sending the run to a 194 MB whole download.
+            //  Now two more tries, 20 s and 45 s later, before a stretch counts as failed)
             const again = (ms: number) => async (e: any) => { if (e?.code === "link_stopped" || job.signal?.aborted) throw e; await new Promise((ok) => setTimeout(ok, ms)); return once(true); };
-            const r = await once().catch(again(3000)).catch(again(8000));
+            let tries = once();
+            for (const ms of stretchRetryMs(env)) tries = tries.catch(again(ms));
+            const r = await tries;
             leanSpent(await stat(r.file).then((x) => x.size).catch(() => 0), "stretch"); leanStat.stretch_s += (Date.now() - began) / 1000;
             return r;
           } catch (e: any) {
             if (e?.code === "link_stopped" || job.signal?.aborted) throw e;
-            log(`[clips] lean stretch ${m.rank} of ${job.id} failed; the rest come from the whole video: ${String(e?.message ?? e).slice(0, 200)}`);
+            log(`[clips] lean stretch ${m.rank} of ${job.id} failed every try: ${String(e?.message ?? e).slice(0, 200)}`);
             return null;
           }
         })();
@@ -1640,13 +1647,23 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       return pr;
     };
     let whole: Promise<unknown> | null = null;
+    // A stretch that fails all its tries costs only its own clip (skipped, its credits back); the whole video (a 30-min video
+    // is ~200 MB through the proxy, ~25 stretches' worth) only when a second stretch fails too (the proxy is really down),
+    // or when the run has a single clip (nothing else would come out). Stretches already fetched are always used.
+    let stretchFails = 0;
+    // clips set aside for a failed stretch: cut from the whole video if the run falls back to it, else skipped at the end
+    const setAside: Moment[] = [];
     const sourceFor = async (m: Moment): Promise<SourceInput> => {
-      if (!leanOff) {
+      const fetched = stretches.get(m.rank);
+      if (!leanOff || fetched) {
         const began = Date.now();
         const st = await stretchOf(m);
         leanStat.wait_s += (Date.now() - began) / 1000;
         if (st) return { video: st.file, audio: soundFile, proxy: null, width: 0, height: 0, fps: null, offset: st.t0 };
+        stretchFails++;
+        if (!leanOff && stretchFails < 2 && p.moments.length > 1) throw new ClipsError("clip_stretch_failed", "this clip's part of the video could not be fetched", 502, true);
         leanOff = true; leanStat.fallback = true;
+        queue.push(...setAside.splice(0)); // the clips set aside come from the whole video too
       }
       if (!ytFile) { whole ??= fetchYouTube(p.seconds); await whole; }
       return { video: ytFile!, audio: null, proxy: null, width: 0, height: 0, fps: null };
@@ -1679,6 +1696,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         } catch (e: any) {
           if (e instanceof ClipsError && (e.code === "storage_full" || e.code === "too_many_files")) { full = e; break; }
           if (e instanceof ClipsError && e.code === "lease_lost") throw e;
+          if (e instanceof ClipsError && e.code === "clip_stretch_failed") { setAside.push(m); log(`[clips] clip ${m.rank} of ${job.id} set aside: its stretch could not be fetched`); continue; }
           skipped.push(m.rank);
           sLeft = Math.max(0, sLeft - Math.round(m.end - m.start));
           log(`[clips] clip ${m.rank} of ${job.id} skipped: ${String(e?.message ?? e).slice(0, 200)}`);
@@ -1686,6 +1704,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       }
     };
     await worker();
+    // a single failed stretch: its clip is not made (the whole video for one clip would cost more than the run earns)
+    for (const m of setAside.splice(0)) { skipped.push(m.rank); sLeft = Math.max(0, sLeft - Math.round(m.end - m.start)); log(`[clips] clip ${m.rank} of ${job.id} skipped: its stretch failed every try`); }
     if (!made.length) throw new ClipsError(full ? (full as ClipsError).code : "clips_cut_failed", full ? (full as ClipsError).message : "None of the clips could be cut.", full ? 409 : 502, !full);
     // D. Settle on what was made: reading once (at the video's real size), and each clip made. What was reserved for
     //    clips not made, or for a bigger video than this one, goes back.

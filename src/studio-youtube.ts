@@ -320,7 +320,20 @@ export const stretchTimeoutMs = (seconds: number) => Math.max(STRETCH_TIMEOUT_MS
  *  own timestamps kept (-copyts): the file starts at that keyframe's time, which `t0` reports, so a cut seeks exactly.
  *  yt-dlp fetches it itself (only its download-stage addresses are accepted: the ones it prints without downloading
  *  were refused with 403, even locally, Nov 15 2026). */
-export async function youtubeStretch(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; sharp?: boolean; signal?: AbortSignal; fresh?: boolean; probe: (file: string) => Promise<number | null> }): Promise<{ file: string; t0: number }> {
+/** What a fetched stretch must be before a clip is cut from it: it starts at (or just before) the asked start, it has a
+ *  picture, and it runs to the asked end. Nov 23 2026 (run ff37f63e): a stretch came back with no picture track (5.7 MB),
+ *  passed the start check, and the clip failed at the cut (crop 2x2) and was lost; now it is refused and fetched again.
+ *  Returns why it is not usable, or null. */
+export function stretchProblem(info: { start: number | null; w: number; h: number; seconds: number } | null, start: number, end: number): string | null {
+  if (!info) return "the stretch could not be read";
+  const t0 = info.start;
+  if (t0 == null || !(t0 <= start + 0.05) || t0 < start - 30) return `the stretch does not start where it should (${t0} for ${start.toFixed(2)})`;
+  if (!(info.w > 0 && info.h > 0)) return "the stretch has no picture";
+  // the file runs from t0 for `seconds`; it must reach the clip's end (the stretch asks a second past it, so 0.5 s slack)
+  if (!(t0 + info.seconds >= end - 1.5)) return `the stretch stops short (${(t0 + info.seconds).toFixed(2)} for ${end.toFixed(2)})`;
+  return null;
+}
+export async function youtubeStretch(url: string, start: number, end: number, target: string, o: { fetch?: typeof fetch; env?: Record<string, string | undefined>; maxHeight?: number; sharp?: boolean; signal?: AbortSignal; fresh?: boolean; probe: (file: string) => Promise<{ start: number | null; w: number; h: number; seconds: number } | null> }): Promise<{ file: string; t0: number }> {
   const h = o.maxHeight ?? 1080, sharp = !!o.sharp;
   // ffmpeg fetches the stretch and only uses an http:// proxy: an https:// one goes through the local relay
   // (studio-proxy-relay.ts), or YouTube sees our server's own address and refuses it (403 on Render, Nov 15 2026).
@@ -338,12 +351,13 @@ export async function youtubeStretch(url: string, start: number, end: number, ta
   for (const ext of exts) {
     const file = `${target}.${ext}`;
     try { await access(file); } catch { continue; }
-    const t0 = await o.probe(file);
-    // (Nov 15 2026 on Render: two stretches came back starting at 2.72 s instead of ~521 and ~1081; the format is now
-    //  in the message so the next one can be traced)
-    if (t0 == null || !(t0 <= start + 0.05) || t0 < start - 30) throw new LinkError("link_fetch_failed", `the stretch does not start where it should (${t0} for ${start.toFixed(2)}; format ${format})`);
+    const info = await o.probe(file).catch(() => null);
+    // (Nov 15 2026 on Render: two stretches came back starting at 2.72 s instead of ~521 and ~1081; Nov 23 2026 one came
+    //  back with no picture: each is refused here and fetched again; the format is in the message so it can be traced)
+    const bad = stretchProblem(info, Math.max(0, start), end);
+    if (bad) { await rm(file, { force: true }).catch(() => undefined); throw new LinkError("link_fetch_failed", `${bad}; format ${format}`); }
     if (chosen.fresh) pinYoutubeProxy(env, chosen.proxy);
-    return { file, t0 };
+    return { file, t0: info!.start! };
   }
   throw new LinkError("link_fetch_failed", "The stretch of the video could not be fetched");
 }

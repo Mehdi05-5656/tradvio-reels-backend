@@ -9,13 +9,13 @@ import {
   timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, cutRateOf, mezzFps, sourceFps, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
-import { parseStreams, LinkError, downloadFormat, downloadSort } from "../src/studio-youtube.js";
+import { parseStreams, LinkError, downloadFormat, downloadSort, stretchProblem } from "../src/studio-youtube.js";
 import { quote, PLANS } from "../src/studio.js";
 import { jobsNotice } from "../src/studio-notices.js";
 
 const U = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 // (the kept-videos folder is off here: each test fetches for itself; the reuse has its own tests below)
-const ENV = { ANTHROPIC_API_KEY: "k", SCRAPECREATORS_API_KEY: "k", ELEVENLABS_API_KEY: "k", STUDIO_CLIPS_CACHE_GB: "0" };
+const ENV = { ANTHROPIC_API_KEY: "k", SCRAPECREATORS_API_KEY: "k", ELEVENLABS_API_KEY: "k", STUDIO_CLIPS_CACHE_GB: "0", STUDIO_CLIPS_STRETCH_RETRY_MS: "1,1,1,1" };
 
 test("caption segments become short lines; timed words become sentences that know where thoughts start and end", () => {
   const segs = [
@@ -470,7 +470,7 @@ test("lean (STUDIO_CLIPS_LEAN): the sound alone is heard, each clip is cut from 
   assert.deepEqual(args.slice(4, 8), ["-ss", "600.000", "-i", "a.webm"]);
 });
 
-test("lean: a stretch YouTube refuses twice switches the rest of the run to the whole video, fetched once; no clip is lost", async () => {
+test("lean: when two stretches fail every try, the run falls back to the whole video once and the clip set aside comes back; no clip is lost", async () => {
   const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
   const { writeFile } = await import("node:fs/promises");
   let whole = 0, tries = 0; const from: string[] = [], fresh: boolean[] = [];
@@ -482,9 +482,9 @@ test("lean: a stretch YouTube refuses twice switches the rest of the run to the 
     cut: async (ctx: any, m: any) => { from.push(ctx.src.video); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
   assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
   assert.equal(whole, 1, "the whole video once");
-  assert.ok(tries >= 2, "each stretch is tried twice before giving up");
+  assert.ok(tries >= 5, "each stretch is tried five times before giving up");
   const firsts = fresh.filter((f) => !f).length;
-  assert.equal(fresh.filter(Boolean).length, 2 * firsts, "every retry asks the proxy for a fresh session; first tries use the usual one");
+  assert.equal(fresh.filter(Boolean).length, 4 * firsts, "every retry asks the proxy for a fresh session; first tries use the usual one");
   assert.equal(from.length, 2); assert.ok(from.every((f) => f.endsWith("youtube.mp4")));
 });
 
@@ -861,4 +861,30 @@ test("HD clips are priced on their own cost (Nov 22 2026): about twice the bytes
   // the cost behind it: about twice a 720 clip's
   const ratio = perClipUsd("standard", env, true, true) / perClipUsd("standard", env, true, false);
   assert.ok(ratio > 1.8 && ratio < 2.4, `HD/720 cost per clip: ${ratio.toFixed(2)}`);
+});
+
+test("lean: one stretch that fails every try costs only its clip (credits back); the whole video is never fetched; the others use their own stretches", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  let whole = 0, triesBad = 0; const from: string[] = [];
+  const logs: string[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: (l: string) => logs.push(l), meta: META,
+    download: async (_u: string, target: string) => { whole++; await writeFile(target, "mp4"); },
+    sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
+    stretch: async (_u: string, a: number, _b: number, t: string) => { if (t.endsWith("lean-2")) { triesBad++; throw new LinkError("link_fetch_failed", "504"); } await writeFile(`${t}.webm`, "vp9"); return { file: `${t}.webm`, t0: a - 0.5 }; },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose,
+    cut: async (ctx: any, m: any) => { from.push(ctx.src.video); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800 }) as any), "done");
+  assert.equal(whole, 0, "no whole download for one bad stretch");
+  assert.equal(triesBad, 5, "the bad stretch was tried five times");
+  assert.equal(from.length, 1, logs.filter((l) => /clips\]/.test(l)).join("\n")); assert.ok(from.every((f) => /lean-1\.webm$/.test(f)), "the other clip from its own stretch");
+  assert.ok(logs.some((l) => /clip 2 of job1 skipped: its stretch failed every try/.test(l)));
+});
+
+test("a stretch is usable only if it starts in place, has a picture and reaches the clip's end", () => {
+  assert.equal(stretchProblem({ start: 99.6, w: 1280, h: 720, seconds: 32 }, 100, 131), null);
+  assert.match(stretchProblem({ start: 99.6, w: 0, h: 0, seconds: 32 }, 100, 131)!, /no picture/, "the Nov 23 file: sound-only");
+  assert.match(stretchProblem({ start: 99.6, w: 1280, h: 720, seconds: 12 }, 100, 131)!, /stops short/);
+  assert.match(stretchProblem({ start: 2.72, w: 1280, h: 720, seconds: 32 }, 520, 551)!, /does not start/, "the Nov 15 seek failure");
+  assert.match(stretchProblem(null, 100, 131)!, /could not be read/);
 });
