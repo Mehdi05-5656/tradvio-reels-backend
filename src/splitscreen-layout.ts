@@ -79,6 +79,9 @@ export type Subject = { x: number; y: number; h?: number; kind?: "face" | "subje
  *  fills about a third of the half's height, never past 2.2x (beyond that a phone clip turns to mush at 720 wide).
  *  A screen recording or a clip with nobody in it keeps the whole width (zoom 1, centred). */
 export function autoClipBox(src: Size, slot: Size, s: Subject | null): Box {
+  // a wide clip shows whole (Nov 23 2026, owner: cropping a 16:9 clip to fill the half looked zoomed in); its half is
+  // shaped like it (autoSeam), so zoom 1 is the whole picture
+  if (isWide(src)) return { ...CENTRE };
   if (!s || s.kind === "screen" || s.kind === "none") return { ...CENTRE };
   const base = cropRect(src, slot, CENTRE);
   let zoom = 1;
@@ -92,9 +95,15 @@ export function autoClipBox(src: Size, slot: Size, s: Subject | null): Box {
   return { zoom: Math.round(zoom * 100) / 100, cx: clamp(s.x, 0, 1), cy: clamp(cy, 0, 1) };
 }
 
-/** The seam the auto-sizer picks: half and half, unless the clip is a close talking head in a vertical video (its
+/** A landscape clip: at least a fifth wider than tall (a square or a vertical clip is framed as before). */
+export const isWide = (src: Size) => src.w > 0 && src.h > 0 && src.w >= src.h * 1.2;
+
+/** The seam the auto-sizer picks: a wide clip's own shape (above); otherwise half and half, unless the clip is a close talking head in a vertical video (its
  *  detail is in the middle, so it can give 5 % to the gameplay) or a wide screen recording (it needs the room). */
 export function autoSeam(src: Size, s: Subject | null): number {
+  // a wide clip (16:9, 4:3) gets a half its own shape, so it shows whole, nothing cropped or zoomed; the gameplay takes
+  // the rest of the frame. 16:9 is 405 of the 1280 (the seam's floor of 30 % keeps very wide video from vanishing)
+  if (isWide(src)) return Math.round(clamp((SPLIT_OUT.w * src.h) / src.w / SPLIT_OUT.h, SPLIT_LIMITS.seam_min, SPLIT_LIMITS.seam_max) * 1000) / 1000;
   if (s?.kind === "screen") return 0.6;
   if (s?.kind === "face" && src.h > src.w && (s.h ?? 0) >= 0.28) return 0.45;
   return 0.5;

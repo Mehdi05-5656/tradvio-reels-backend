@@ -69,7 +69,9 @@ test("autoClipBox: a face sits centred across and a little above the middle; a s
 test("autoSeam: half and half unless the clip asks for more or less", () => {
   assert.equal(autoSeam({ w: 1080, h: 1920 }, null), 0.5);
   assert.equal(autoSeam({ w: 1080, h: 1920 }, { kind: "face", x: 0.5, y: 0.4, h: 0.32 }), 0.45);
-  assert.equal(autoSeam({ w: 1920, h: 1080 }, { kind: "screen", x: 0.5, y: 0.5 }), 0.6);
+  // a wide screen recording shows whole, like any wide clip (Nov 23 2026); a vertical one still gets the room
+  assert.equal(autoSeam({ w: 1920, h: 1080 }, { kind: "screen", x: 0.5, y: 0.5 }), 0.316);
+  assert.equal(autoSeam({ w: 1080, h: 1920 }, { kind: "screen", x: 0.5, y: 0.5 }), 0.6);
 });
 
 test("gameWindow: a long loop starts somewhere inside its middle, the same for the same job; a short one repeats", () => {
@@ -186,4 +188,20 @@ test("autoClipBox: the top of a tall subject or a head is never cut (the first l
   const c = cropRect(src, { w: 720, h: 640 }, f);
   const at = (0.35 * 1280 - c.y) / c.h;
   assert.ok(at > 0.38 && at < 0.5, `face at ${at.toFixed(2)}`);
+});
+
+test("a wide clip shows whole: its half takes its own shape, no crop and no face zoom (Nov 23 2026)", async () => {
+  const { autoSeam, autoClipBox, halves, cropRect, isWide, CENTRE } = await import("../src/splitscreen-layout.js");
+  const wide = { w: 1920, h: 1080 };
+  assert.ok(isWide(wide)); assert.ok(!isWide({ w: 1080, h: 1920 })); assert.ok(!isWide({ w: 1080, h: 1080 }));
+  const face = { x: 0.6, y: 0.4, h: 0.12, kind: "face" as const };
+  const seam = autoSeam(wide, face);
+  assert.equal(seam, 0.316, "16:9 takes 405 of 1280");
+  const slot = halves({ mode: "split", seam, swap: false }).clip!;
+  assert.deepEqual(autoClipBox(wide, slot, face), CENTRE, "a small face is not zoomed in a wide clip");
+  const crop = cropRect(wide, slot, CENTRE);
+  assert.ok(crop.w >= 1918 && crop.h >= 1076, `nearly the whole picture shows (${crop.w}x${crop.h})`);
+  assert.equal(autoSeam({ w: 1440, h: 1080 }, null), 0.422, "4:3 is a taller half");
+  assert.equal(autoSeam({ w: 2560, h: 1080 }, null), 0.3, "very wide stops at the seam's floor");
+  assert.equal(autoSeam({ w: 1080, h: 1920 }, face), 0.5, "a vertical clip is framed as before");
 });
