@@ -507,9 +507,9 @@ async function resolveItems(sb: SupabaseClient, u: string, items: any[]): Promis
  *  the background, in order, so a 200-post batch is never one long, fragile request. */
 const SYNC_SENDS = 12;
 /** A send to one account: who, when, and its own caption when it differs. */
-type Target = SocialAccount & { at?: Date | null; caption?: string | null; group?: string | null };
+type Target = SocialAccount & { at?: Date | null; caption?: string | null; group?: string | null; /** written for this account by the person: never reworded */ own?: boolean };
 /** The accounts a stored row goes to, with their own time and caption (options.accounts). */
-type StoredTarget = { id: string | null; platform: string; username: string | null; at?: string | null; caption?: string | null; group?: string | null; vary?: boolean };
+type StoredTarget = { id: string | null; platform: string; username: string | null; at?: string | null; caption?: string | null; group?: string | null; vary?: boolean; own?: boolean };
 
 /** Post or schedule videos for a person; every path that posts (the Post page, the Clips sheet, the chat's card,
  *  Blueprint sets) comes through here. A send names, per video or for all of them: accounts, posting groups, or
@@ -687,15 +687,18 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
     const perNet = (e.test ? {} : e.it?.captions_by_network && typeof e.it.captions_by_network === "object" ? e.it.captions_by_network : b.captions_by_network && typeof b.captions_by_network === "object" ? b.captions_by_network : {}) as Record<string, unknown>;
     const baseFor = (platform: string) => (typeof perNet[platform] === "string" && String(perNet[platform]).trim() ? String(perNet[platform]).slice(0, 5000) : base);
     const vary = b.vary_captions != null ? b.vary_captions === true : groups.some((g) => g.defaults?.vary_captions === true);
+    // a caption written for one account (the composer's "Each account"), by its provider id
+    const perAcct = (e.test ? {} : e.it?.captions_by_account && typeof e.it.captions_by_account === "object" ? e.it.captions_by_account : b.captions_by_account && typeof b.captions_by_account === "object" ? b.captions_by_account : {}) as Record<string, unknown>;
     const targets: Target[] = e.targets.map((t, k) => {
       const extra = t.group ? groupById.get(t.group)?.defaults?.caption_extra : undefined;
-      const own = baseFor(t.platform);
+      const mine = t.id && typeof perAcct[t.id] === "string" && String(perAcct[t.id]).trim() ? String(perAcct[t.id]).slice(0, 5000) : null;
+      const own = mine ?? baseFor(t.platform);
       const text = extra && !own.includes(extra) ? `${own.trim()}${own.trim() ? "\n\n" : ""}${extra}`.slice(0, 5000) : own;
-      return { ...t, at: jittered[k], caption: text };
+      return { ...t, at: jittered[k], caption: text, ...(mine ? { own: true } : {}) };
     });
     const groupId = groups.length === 1 ? groups[0].id : null;
     const meta = e.it?.caption_meta ?? b.caption_meta;
-    const captionMeta = meta && typeof meta === "object" && ["ai", "edited", "own"].includes(meta.source) ? { source: meta.source, keywords: Array.isArray(meta.keywords) ? meta.keywords.map(String).slice(0, 3) : undefined, per_network: Object.keys(perNet).length > 0 || undefined } : undefined;
+    const captionMeta = meta && typeof meta === "object" && ["ai", "edited", "own"].includes(meta.source) ? { source: meta.source, keywords: Array.isArray(meta.keywords) ? meta.keywords.map(String).slice(0, 3) : undefined, per_network: Object.keys(perNet).length > 0 || undefined, per_account: Object.keys(perAcct).length > 0 || undefined } : undefined;
     const test = e.test ? { caption_test: { id: e.test.id, variant: e.test.variant, of: e.test.of } } : {};
     // the captions of a test are the point of it: never reworded per account
     return { x, at, caption: base, options: { ...optionsOf(e), ...(captionMeta ? { caption_meta: captionMeta } : {}), ...test }, targets, vary: vary && sameNet && !e.test, groupId, groups };
@@ -738,7 +741,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const via = typeof opts.via === "string" ? opts.via : opts.conversationId ? "chat" : "publish";
   const made: SocialPostRow[] = [];
   for (const r of plan) {
-    const accounts: StoredTarget[] = r.targets.map((t) => ({ id: t.id ?? null, platform: t.platform, username: t.username ?? null, at: t.at ? t.at.toISOString() : null, caption: t.caption && t.caption !== r.caption ? t.caption : null, group: t.group ?? null, ...(r.vary ? { vary: true } : {}) }));
+    const accounts: StoredTarget[] = r.targets.map((t) => ({ id: t.id ?? null, platform: t.platform, username: t.username ?? null, at: t.at ? t.at.toISOString() : null, caption: t.caption && t.caption !== r.caption ? t.caption : null, group: t.group ?? null, ...(t.own ? { own: true } : r.vary ? { vary: true } : {}) }));
     const row = { user_id: u, provider: p.name, job_id: r.x.job_id, output_key: r.x.output_key, asset_id: r.x.asset_id, conversation_id: opts.conversationId ?? null, caption: r.caption, platforms: [...new Set(r.targets.map((t) => t.platform))], options: { ...r.options, accounts, ...(spec && background ? { autoreply_spec: spec, via } : {}) }, schedule_at: r.at?.toISOString() ?? null, status: background ? "queued" : "sending", batch_id: batchId, group_id: r.groupId };
     let ins = await sb.from("studio_social_posts").insert(row).select("*").single();
     // before the groups migration: the same row without the new columns
@@ -777,7 +780,8 @@ async function sendRow(sb: SupabaseClient, p: SocialProvider, profileKey: string
     // light rewording for accounts of the same network (the first keeps the caption), done once and kept on the row
     if (stored.some((t) => t.vary)) {
       const byNet = new Map<string, number[]>();
-      stored.forEach((t, k) => byNet.set(t.platform, [...(byNet.get(t.platform) ?? []), k]));
+      // only the accounts left to the shared caption; one written for its account stays as written
+      stored.forEach((t, k) => { if (!t.own) byNet.set(t.platform, [...(byNet.get(t.platform) ?? []), k]); });
       for (const ks of byNet.values()) {
         if (ks.length < 2) continue;
         const versions = await varyCaptions(row.caption, ks.length, { env: ctx.env, fetch: ctx.fetch, log: ctx.log, user: row.user_id });
