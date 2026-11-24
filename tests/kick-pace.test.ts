@@ -41,3 +41,14 @@ test("Kick calls are spaced out: one starts at a time, a gap apart, wider after 
   assert.equal(m, KICK_PACE.tries);
   resetKickPace();
 });
+
+test("an EMPTY page from Kick while the read is still inside the stream is waited out, not taken as the chat's start (Nov 23 2026)", async () => {
+  resetKickPace();
+  let calls = 0; const waits: number[] = [];
+  // newest first: a page at 50 s, then two empty answers, then the page at 20 s, then the real start (empty below 0)
+  const pages = [[msg("c", 50)], [], [], [msg("b", 20)], []];
+  const deps: any = { sleep: async (ms: number) => { waits.push(ms); }, kickCurl: async () => ok({ data: { messages: pages[Math.min(calls++, pages.length - 1)] } }) };
+  const chat = await kickChatReplay(deps, "123", start, 60, { slices: 1 });
+  assert.deepEqual(chat.map((m) => m.t), [20, 50], "the older page after the empty answers is read");
+  assert.ok(waits.length >= 2);
+});

@@ -399,7 +399,7 @@ export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIs
   await Promise.all(out.map(async (bucket, k) => {
     const from = Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : Math.floor((k + 1) * span);
     // the cursor is a moment in microseconds; it walks back from the stretch's end to its start
-    let cursor = (t0 + to * 1000) * 1000; const seen = new Set<string>(); let fails = 0;
+    let cursor = (t0 + to * 1000) * 1000; const seen = new Set<string>(); let fails = 0; let empties = 0;
     while (calls < maxCalls && !o.signal?.aborted) {
       let d: any;
       // a refusal that may pass (Kick slowing us, a 5xx, no answer) is tried again at the same point, waiting longer each
@@ -420,6 +420,10 @@ export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIs
       }
       // the next page starts at the oldest message read (Kick's own cursor when it gives one); nothing older, or the
       // stretch's start reached: this stretch is done
+      // Kick answers the messages BEFORE the cursor, so an empty page while the cursor is still inside the stream is a
+      // hiccup, not the start of the chat (Twitch, Nov 23 2026, slowed readers with empty pages): wait, ask again
+      if (!msgs.length && cursor / 1000 > t0 + from * 1000 && ++empties <= KICK_CHAT_RETRIES) { await wait(Math.min(30_000, 2000 * 2 ** (empties - 1))); continue; }
+      if (msgs.length) empties = 0;
       const next = Number(d?.cursor) || (Number.isFinite(oldest) ? oldest * 1000 : NaN);
       if (!msgs.length || !Number.isFinite(next) || next / 1000 <= t0 + from * 1000) { done[k] = 1; o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices); break; }
       cursor = next >= cursor ? cursor - 1_000_000 : next; // never stand still
