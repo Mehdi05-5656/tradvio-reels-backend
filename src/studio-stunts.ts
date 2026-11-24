@@ -26,11 +26,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { claudeJson, ClipsError, ffmpeg, type ClipsDeps } from "./studio-clips.js";
 import { docWords, wordsFor } from "./studio-caption-video.js";
 import { cutGate, roomForAnother } from "./studio-capacity.js";
-import { recordCost } from "./studio-costs.js";
+import { recordCost, withCostRun } from "./studio-costs.js";
 import { recordEvent } from "./studio-events.js";
 import { hf, outputUrls } from "./studio-instruments.js";
 import { creditValueFloor, creditsForCost, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
-import { extractFrame, makePoster, probeDimensions, probeSeconds, probeStream, RecastError } from "./studio-recast.js";
+import { billedUsdOf, extractFrame, makePoster, probeDimensions, probeSeconds, probeStream, RecastError } from "./studio-recast.js";
 import type { LibraryHelpers } from "./studio-library.js";
 import { claimJob } from "./studio-leases.js";
 
@@ -276,8 +276,6 @@ async function defaultGenerate(deps: StuntDeps, ctx: { job: string; user: string
     const r = await hf(deps, `/${stuntEndpoint(env)}`, { method: "POST", body: JSON.stringify(body), idempotency: ctx.key });
     if (![200, 201, 202].includes(r.status) || !r.body?.request_id) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
     requestId = String(r.body.request_id);
-    // billed from here whatever comes back: the cost is written when the request is taken, at the quoted rate
-    recordCost({ job_id: ctx.job, user_id: ctx.user, tool: "stunts", provider: "higgsfield", product: stuntEndpoint(env), source: "stunts_gag", units: { seconds: STUNT_LIMITS.gag_seconds }, usd: stuntGenerationUsd(env), basis: "list", ref: requestId });
     await ctx.onSubmit?.(requestId);
   }
   const started = Date.now();
@@ -288,6 +286,11 @@ async function defaultGenerate(deps: StuntDeps, ctx: { job: string; user: string
     catch (e: any) { if (e instanceof RecastError && e.retry) { await sleep(POLL_MS); continue; } throw e; }
     const status = String(st.body?.status ?? "unknown").toLowerCase();
     if (status === "completed") {
+      // booked when the render completes (audit Nov 24 2026: it was booked at request time, but Higgsfield does not bill
+      // failed or moderated renders), at the billed figure when the status has one, else the quoted rate
+      const billed = billedUsdOf(st.body);
+      recordCost({ job_id: ctx.job, user_id: ctx.user, tool: "stunts", provider: "higgsfield", product: stuntEndpoint(env), source: "stunts_gag", units: { seconds: STUNT_LIMITS.gag_seconds },
+        usd: billed ?? stuntGenerationUsd(env), basis: billed != null ? "metered" : "list", ref: `higgsfield:${requestId}` });
       const url = outputUrls(st.body).videos[0];
       if (!url) throw new RecastError("recast_bad_output", "completed without a video");
       const dl = await (deps.fetch ?? fetch)(url, { signal: AbortSignal.timeout(300_000) });
@@ -540,7 +543,7 @@ export function startStuntsLoop(sbFn: () => SupabaseClient, deps: StuntDeps = {}
       if (!job || !job.id) return;
       active.add(job.id);
       const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); }, 4 * 60_000);
-      runStuntsJob(sb, { ...deps, log }, job).then((s) => log(`[stunts] ${s} ${job.id}`)).catch((e) => log(`[stunts] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); active.delete(job.id); });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "stunts") }, () => runStuntsJob(sb, { ...deps, log }, job)).then((s) => log(`[stunts] ${s} ${job.id}`)).catch((e) => log(`[stunts] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); active.delete(job.id); });
     } catch (e: any) { log(`[stunts] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { claiming = false; }
   };

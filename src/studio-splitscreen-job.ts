@@ -12,6 +12,7 @@
 // person adjusts it); the job renders exactly the layout it is given.
 //
 // Off until STUDIO_SPLITSCREEN_ENABLED=true; until STUDIO_SPLITSCREEN_OPEN=true only the owner's account can use it.
+import { withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -224,7 +225,7 @@ export function startSplitLoop(sbFn: () => SupabaseClient, deps: SplitDeps = {},
       if (!job || !job.id) return;
       active.add(job.id);
       const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); }, 4 * 60_000);
-      runSplitJob(sb, { ...deps, log }, job).then((s) => log(`[splitscreen] ${s} ${job.id}`)).catch((e) => log(`[splitscreen] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); active.delete(job.id); });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "splitscreen") }, () => runSplitJob(sb, { ...deps, log }, job)).then((s) => log(`[splitscreen] ${s} ${job.id}`)).catch((e) => log(`[splitscreen] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); active.delete(job.id); });
     } catch (e: any) { log(`[splitscreen] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { claiming = false; }
   };

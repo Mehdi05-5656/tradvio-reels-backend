@@ -37,7 +37,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { claudeJson, ClipsError, ffmpeg, type ClipsDeps } from "./studio-clips.js";
 import { docWords, wordsFor } from "./studio-caption-video.js";
 import { cutGate, roomForAnother } from "./studio-capacity.js";
-import { recordCost } from "./studio-costs.js";
+import { recordCost, withCostRun } from "./studio-costs.js";
 import { recordEvent } from "./studio-events.js";
 import { hf, outputUrls } from "./studio-instruments.js";
 import { creditValueFloor, creditsForCost, marginForSecond, SEEDANCE_EDIT_RATES, type PlanLike } from "./studio-pricing.js";
@@ -870,7 +870,7 @@ export function startReshootLoop(sbFn: () => SupabaseClient, deps: ReshootDeps =
       if (!job || !job.id) return;
       active.add(job.id);
       const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); }, 4 * 60_000);
-      runReshootJob(sb, { ...deps, log }, job).then((s) => log(`[reshoot] ${s} ${job.id}`)).catch((e) => log(`[reshoot] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); active.delete(job.id); });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "reshoot") }, () => runReshootJob(sb, { ...deps, log }, job)).then((s) => log(`[reshoot] ${s} ${job.id}`)).catch((e) => log(`[reshoot] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); active.delete(job.id); });
     } catch (e: any) { log(`[reshoot] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { claiming = false; }
   };

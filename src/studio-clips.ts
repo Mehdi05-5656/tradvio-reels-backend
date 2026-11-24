@@ -29,6 +29,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { creditValueFloor, logClaudeCost, OVERHEAD, type PlanLike } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import { transcribeWords, type AudioEvent, type TimedWord } from "./studio-eleven.js";
+import { recordScribe } from "./studio-stt.js";
 import { youtubeAudio, youtubeDownload, youtubeId, youtubeInfo, youtubeSound, youtubeStretch, LinkError } from "./studio-youtube.js";
 import { noteScrapeCreators } from "./vendor-alerts.js";
 import { checkUpload } from "./studio-limits.js";
@@ -1495,6 +1496,8 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         if (rms.length) excess = loudnessExcess(rms);
         if (!deps.words && !env.ELEVENLABS_API_KEY) return false;
         const heard = await (deps.words ?? (async (audio) => { const r = await transcribeWords({ env, fetch: deps.fetch }, { audio, events: true }); return { words: r.words, events: r.events, language: r.language }; }))(await readFile(mp3));
+        // the cost ledger (audit Nov 24 2026: YouTube Clips' speech-to-text wrote no row): the seconds of sound sent
+        if (!deps.words) recordScribe({ userId: job.user_id ?? null, seconds: rms.length || seconds, use: "clips", job: job.id });
         words = Array.isArray(heard) ? heard : heard.words;
         events = Array.isArray(heard) ? [] : heard.events ?? [];
         heardLanguage = Array.isArray(heard) ? null : heard.language ?? null;

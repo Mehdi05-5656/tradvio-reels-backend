@@ -10,6 +10,7 @@
 //             estimate up; a model with neither cannot be quoted and says so.
 //   run       one runner claims `instrument` jobs, signs the inputs, submits, polls, stores the video or images, and
 //             charges what was reserved. Failures refund through studio_fail like every other tool.
+import { recordCost, withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -19,7 +20,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import catalogJson from "./data/higgsfield-catalog.json";
 import elevenJson from "./data/eleven-catalog.json";
 import { elevenEnabled, runElevenJob } from "./studio-eleven.js";
-import { HF_BASE, higgsfieldAuth, RecastError, makePoster, probeSeconds } from "./studio-recast.js";
+import { HF_BASE, billedUsdOf, higgsfieldAuth, RecastError, makePoster, probeSeconds } from "./studio-recast.js";
 import { toJpeg } from "./studio-characters.js";
 import { creditValueFloor, creditsForCost, higgsfieldDiscount, marginForSecond, seedanceDiscount, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
 import { claimJob } from "./studio-leases.js";
@@ -390,7 +391,16 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
       try { st = await hf(deps, `/requests/${encodeURIComponent(requestId)}/status`, { method: "GET" }); }
       catch (e: any) { if (e instanceof RecastError && e.retry) { await renew(sb, job, { note: "Waiting for the renderer" }); await sleep(POLL_MS); continue; } throw e; }
       const status = String(st.body?.status ?? "unknown").toLowerCase();
-      if (status === "completed") { result = st.body; break; }
+      if (status === "completed") {
+        result = st.body;
+        // the cost ledger (audit Nov 24 2026: instruments wrote no row): what Higgsfield billed when the status says,
+        // else its estimate at quote time, else our rate table. Failed and moderated renders are not billed.
+        const o = job.options ?? {}, billed = billedUsdOf(st.body), est = Number(o.cost_usd), table = Number(o.usd);
+        const usd = billed ?? (Number.isFinite(est) && est > 0 ? est : Number.isFinite(table) ? table : 0);
+        if (usd > 0) recordCost({ job_id: job.id, user_id: job.user_id ?? null, tool: "instrument", provider: "higgsfield", product: String(o.endpoint ?? inst.id), source: "instrument_render", units: { requests: 1, units: Number(o.units) || 1 },
+          usd, basis: billed != null ? "metered" : Number.isFinite(est) && est > 0 ? "list" : "estimated", ref: `higgsfield:${requestId}`, note: billed != null ? null : Number.isFinite(est) && est > 0 ? "Higgsfield's estimate at quote time" : "our rate table" });
+        break;
+      }
       if (status === "failed" || status === "nsfw" || status === "canceled" || status === "cancelled") {
         log(`[instrument] ${status} ${JSON.stringify({ job: job.id, request: requestId, detail: JSON.stringify(st.body).slice(0, 300) })}`);
         throw new RecastError(status === "nsfw" ? "recast_nsfw" : status === "failed" ? "recast_failed" : "recast_canceled");
@@ -473,7 +483,7 @@ export function startInstrumentLoop(sbFn: () => SupabaseClient, deps: Instrument
       const job = r.data as Job | null;
       if (!job || !job.id) return;
       running++;
-      runInstrumentJob(sb, { ...deps, log }, job).then((s) => log(`[instrument] ${s} ${job.id}`)).catch((e) => log(`[instrument] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "instrument") }, () => runInstrumentJob(sb, { ...deps, log }, job)).then((s) => log(`[instrument] ${s} ${job.id}`)).catch((e) => log(`[instrument] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
     } catch (e: any) { log(`[instrument] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);

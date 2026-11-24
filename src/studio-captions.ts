@@ -2,8 +2,9 @@
 // by Claude, which answers in a fixed JSON shape: the caption, a few hashtags and, when YouTube is in the mix, a title.
 // Used by the Publish page and the chat's publish card; the person can always write their own instead.
 // Raw HTTP to the Messages API like the assistant (studio-assistant.ts), so tests can swap fetch.
+import { recordScribe } from "./studio-stt.js";
 import { logClaudeCost } from "./studio-pricing.js";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -163,6 +164,8 @@ export function speechOf(env: Record<string, string | undefined>, fetchFn?: type
       const wav = join(dir, "a.wav");
       await extractAudio(video, wav);
       const t = await transcribe({ env, fetch: fetchFn }, { audio: await readFile(wav), diarize: false });
+      // the cost ledger (audit Nov 24 2026): extractAudio writes 44.1 kHz mono 16-bit wav, 88,200 bytes a second
+      recordScribe({ userId: null, seconds: Math.round((await stat(wav)).size / 88_200), use: "caption_writer" });
       const text = String(t.text ?? "").trim();
       return text ? text.slice(0, 4000) : null;
     } catch { return null; } // a silent clip, or no audio track: the frames still carry it

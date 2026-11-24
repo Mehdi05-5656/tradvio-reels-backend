@@ -1,6 +1,8 @@
 // Hourly public post metrics from ScrapeCreators. Publer only refreshes insights once a day,
 // so these rows give the dashboard near-live views, likes and comments (plus TikTok shares and
 // saves). Read-only toward social platforms; never touches publishing state or Publer's budget.
+import { OVERHEAD } from "./studio-pricing.js";
+import { recordEvent } from "./studio-events.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Cadence, overridable from the environment so credits can be tuned without a deploy:
@@ -146,6 +148,7 @@ const sameMetrics = (a: any, b: LivePost) =>
 
 async function scGet(path: string, key: string, f: typeof fetch) {
   const r = await f(`${BASE}${path}`, { headers: { "x-api-key": key }, signal: AbortSignal.timeout(45_000) });
+  recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: path.split("?")[0], status: r.status, use: "live_metrics" } }); // the cost ledger (audit Nov 24 2026)
   if (r.status === 402) throw new CreditsExhausted("scrapecreators_credits_exhausted");
   if (!r.ok) throw new Error(`scrapecreators_http_${r.status}`);
   const body: any = await r.json();

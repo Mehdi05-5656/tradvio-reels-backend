@@ -3,6 +3,7 @@
 // original sound back (the full model returns silent video), stores the result in studio-outputs and
 // charges the exact seconds. Runs inside the web service as a timer loop, like the intake loop: Higgsfield
 // does the heavy work, we only wait. Nothing here is reachable from HTTP.
+import { recordCost, withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -403,6 +404,10 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
       delete pending[requestId];
       const billed = raw !== undefined ? billedUsdOf(raw) : null;
       const usd = billed ?? held.usd;
+      // the cost ledger too (audit Nov 24 2026: Recast's spend lived only on the job): what Higgsfield billed when the
+      // status says, else its own estimate at send, else our rate table
+      if (usd > 0) recordCost({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "recast"), provider: "higgsfield", product: `${String(job.options?.tool ?? (job as any).tool ?? "recast")} ${String(job.options?.model ?? "")}`.trim(), source: "recast_render",
+        usd, basis: billed != null ? "metered" : held.priced === "estimate" ? "list" : "estimated", ref: `higgsfield:${requestId}`, note: billed != null ? null : held.priced === "estimate" ? "Higgsfield's own estimate at send" : "our rate table" });
       return { pending_spend: pending, spend_usd: Math.round(((Number(job.progress?.spend_usd) || 0) + usd) * 10000) / 10000, spend_priced: billed != null ? "billed" : held.priced };
     };
     // The high-capacity route, offered with its price when the standard renderer is busy or refuses the clip. Never taken
@@ -829,7 +834,7 @@ export function startRecastLoop(sbFn: () => SupabaseClient, deps: RecastDeps = {
       }
       if (!job) return;
       running++;
-      runRecastJob(sb, { ...deps, log }, job).then((s) => log(`[recast] ${s} ${job.id}`)).catch((e) => log(`[recast] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "recast") }, () => runRecastJob(sb, { ...deps, log }, job)).then((s) => log(`[recast] ${s} ${job.id}`)).catch((e) => log(`[recast] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
     } catch (e: any) { log(`[recast] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);

@@ -135,7 +135,7 @@ const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
  *  Oct 30 2026; per-use figures are estimates from the prompts' sizes, to be replaced by the logged usage. The plans
  *  carry these: they are why a credit's value is taken at the cheapest plan after fees. */
 export const OVERHEAD = {
-  claude_usd_per_mtok: { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 } },
+  claude_usd_per_mtok: { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.1 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 } },
   chat_reply_usd: 0.03, caption_usd: 0.08, overview_usd: 0.25, blueprint_plus_copy_claude_usd: 0.04,
   scrapecreators_usd_per_call: 0.0019, performance_refresh_usd: 0.017, link_import_usd: 0.004,
   /** Ayrshare bills one profile per person who connects (any number of networks in it), at the month's peak count:
@@ -163,9 +163,14 @@ export function packsClearFloor(plans: PlanLike[]): boolean {
  *  these itself, so they are watched, not charged. `user` is the person the call was made for, when there is one. */
 export function logClaudeCost(log: ((l: string) => void) | undefined, feature: string, model: string, usage: any, user?: string | null) {
   if (!usage) return;
-  const rates: Record<string, { input: number; output: number; cache_read: number }> = { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 }, "claude-haiku-5-5": { input: 0.1, output: 0.5, cache_read: 0.01 } };
-  const r = rates[model] ?? rates["claude-opus-5-5"];
+  // Anthropic's list prices (checked Nov 24 2026): Sonnet 5.5 cache reads are $0.10, not $0.20 (counted double before);
+  // the models a server-side fallback can answer with are priced as themselves, not as Opus 5.5
+  const rates: Record<string, { input: number; output: number; cache_read: number }> = { "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.1 }, "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 }, "claude-haiku-5-5": { input: 0.1, output: 0.5, cache_read: 0.01 },
+    "claude-sonnet-5": { input: 2, output: 10, cache_read: 0.2 }, "claude-opus-5": { input: 5, output: 25, cache_read: 0.5 }, "claude-opus-4-8": { input: 5, output: 25, cache_read: 0.5 }, "claude-opus-4-7": { input: 5, output: 25, cache_read: 0.5 }, "claude-haiku-4-5": { input: 1, output: 5, cache_read: 0.1 } };
+  const base = rates[model] ?? rates[String(model).replace(/-\d{8}$/, "")] ?? rates["claude-opus-5-5"];
   const inp = Number(usage.input_tokens ?? 0), outp = Number(usage.output_tokens ?? 0), read = Number(usage.cache_read_input_tokens ?? 0), write = Number(usage.cache_creation_input_tokens ?? 0);
+  // Haiku 5.5 bills a prompt over 100K tokens at $0.50 in / $2.50 out (five times its base rate)
+  const r = String(model).startsWith("claude-haiku-5-5") && inp + read + write > 100_000 ? { input: base.input * 5, output: base.output * 5, cache_read: base.cache_read * 5 } : base;
   const usd = (inp * r.input + write * r.input * 1.25 + read * r.cache_read + outp * r.output) / 1e6;
   log?.(`[cost] claude ${JSON.stringify({ feature, model, input: inp, cache_write: write, cache_read: read, output: outp, usd: Math.round(usd * 10000) / 10000 })}`);
   recordEvent({ user_id: user ?? null, kind: "claude", name: feature, usd, props: { model, input: inp, cache_write: write, cache_read: read, output: outp } });

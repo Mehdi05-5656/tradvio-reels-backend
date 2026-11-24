@@ -4,6 +4,7 @@
 // the hero's photo, and the shots are cut together on the reference's own rhythm with its sound. One job on the
 // queue (tool "kage"), the plan and every shot's state on the job, nothing new in the database beyond the tool name.
 // Not a shot-for-shot copy: new scenes, same cuts, same energy. Switched on by STUDIO_KAGE_ENABLED=true.
+import { recordCost, withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -12,7 +13,7 @@ import { join } from "node:path";
 import type { Express } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { command } from "./video-render.js";
-import { RecastError, sceneCuts, motionScores, trimClip, concatVideos, muxAudio, probeSeconds, probeDimensions, makePoster } from "./studio-recast.js";
+import { RecastError, billedUsdOf, sceneCuts, motionScores, trimClip, concatVideos, muxAudio, probeSeconds, probeDimensions, makePoster } from "./studio-recast.js";
 import { hf, outputUrls, listPrice, instrumentDiscount, type InstrumentDeps } from "./studio-instruments.js";
 import { claudeJson, type ClipsDeps } from "./studio-clips.js";
 import { PREMIUM_MARGIN, creditsForCost, studioCosts, type PlanLike } from "./studio-pricing.js";
@@ -275,14 +276,22 @@ export async function runKageJob(sb: SupabaseClient, deps: KageDeps, job: Job): 
     const started = Date.parse(job.progress?.started_at ?? "") || now();
     if (!job.progress?.started_at) await renew(sb, job, { started_at: new Date(started).toISOString(), total: plan.shots.length, done: 0 });
     const overdue = () => { if (now() - started > KAGE_LIMITS.max_wait_min * 60_000) throw new RecastError("recast_timeout"); };
-    const waitFor = async (requestId: string, what: string): Promise<any> => {
+    // the cost ledger (audit Nov 24 2026: Kage's plates and shots wrote no row): booked when a render completes (failed
+    // and moderated renders are not billed), at Higgsfield's billed figure when the status has one, else the list price
+    const book = (requestId: string, body: any, model: string, units: number, what: string) => {
+      const billed = billedUsdOf(body), lp = listPrice(model);
+      const usd = billed ?? (lp ? lp.usd * units : 0);
+      if (usd > 0) recordCost({ job_id: job.id, user_id: job.user_id ?? null, tool: "kage", provider: "higgsfield", product: model, source: `kage_${what.split(" ")[0]}`, units: { [lp?.per === "image" ? "images" : "seconds"]: units },
+        usd, basis: billed != null ? "metered" : "list", ref: `higgsfield:${requestId}` });
+    };
+    const waitFor = async (requestId: string, what: string, price?: { model: string; units: number }): Promise<any> => {
       for (;;) {
         overdue();
         let st: { status: number; body: any };
         try { st = await hf(deps, `/requests/${encodeURIComponent(requestId)}/status`, { method: "GET" }); }
         catch (e: any) { if (e instanceof RecastError && e.retry) { await sleep(POLL_MS); continue; } throw e; }
         const status = String(st.body?.status ?? "unknown").toLowerCase();
-        if (status === "completed") return st.body;
+        if (status === "completed") { if (price) book(requestId, st.body, price.model, price.units, what); return st.body; }
         if (status === "failed" || status === "nsfw" || status === "canceled" || status === "cancelled") {
           log(`[kage] ${status} ${JSON.stringify({ job: job.id, what, request: requestId, detail: JSON.stringify(st.body).slice(0, 300) })}`);
           throw new RecastError(status === "nsfw" ? "recast_nsfw" : status === "failed" ? "recast_failed" : "recast_canceled");
@@ -316,7 +325,7 @@ export async function runKageJob(sb: SupabaseClient, deps: KageDeps, job: Job): 
         await renew(sb, job, { plates });
         log(`[kage] submitted ${JSON.stringify({ job: job.id, plate: loc.id, request: requestId })}`);
       }
-      const raw = await waitFor(plates[loc.id].request_id!, `plate ${loc.id}`);
+      const raw = await waitFor(plates[loc.id].request_id!, `plate ${loc.id}`, { model: PLATE_MODEL, units: 1 });
       const url = outputUrls(raw).images[0] ?? outputUrls(raw).videos[0];
       if (!url) throw new RecastError("recast_bad_output", "a plate completed without a url");
       const file = join(dir, `plate-${loc.id}.jpg`);
@@ -346,7 +355,7 @@ export async function runKageJob(sb: SupabaseClient, deps: KageDeps, job: Job): 
       log(`[kage] submitted ${JSON.stringify({ job: job.id, shot: i + 1, of: shots.length, reroll: shots[i].rerolls, request: requestId, seconds: body.duration })}`);
     };
     const land = async (i: number): Promise<"done" | "again"> => {
-      const raw = await waitFor(shots[i].request_id!, `shot ${i + 1}`);
+      const raw = await waitFor(shots[i].request_id!, `shot ${i + 1}`, { model: SHOT_MODEL, units: genSeconds(analysis.shots[i].end - analysis.shots[i].start) });
       const url = outputUrls(raw).videos[0];
       if (!url) throw new RecastError("recast_bad_output", "a shot completed without a url");
       const file = join(dir!, `shot-${i + 1}-${shots[i].rerolls}.mp4`);
@@ -450,7 +459,7 @@ export function startKageLoop(sbFn: () => SupabaseClient, deps: KageDeps = {}, i
       if (!job || !job.id) return;
       running++;
       const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); /* (sent only when then-ed: a bare void never went out until Nov 7 2026) */ }, 4 * 60_000);
-      runKageJob(sb, { ...deps, log }, job).then((s) => log(`[kage] ${s} ${job.id}`)).catch((e) => log(`[kage] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); running--; });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "kage") }, () => runKageJob(sb, { ...deps, log }, job)).then((s) => log(`[kage] ${s} ${job.id}`)).catch((e) => log(`[kage] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { clearInterval(keep); running--; });
     } catch (e: any) { log(`[kage] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);

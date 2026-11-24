@@ -7,6 +7,8 @@
 //   2. A job renders each video: the person's words (edited or as heard) -> ASS -> ffmpeg -> a new library video.
 //   3. Price: 1 credit per 5 seconds of video, at least 5 a video (owner's call, Nov 1 2026). In Clips, captions add 3
 //      credits a clip (the words are already heard there). Charged per video made; the rest goes back.
+import { recordScribe } from "./studio-stt.js";
+import { withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -132,6 +134,7 @@ export async function wordsFor(sb: SupabaseClient, deps: ClipsDeps, u: string, a
     const mp3 = join(dir, "sound.mp3");
     await defaultExtractAudio(src, mp3);
     const heard = await transcribeWords({ env, fetch: deps.fetch }, { audio: await readFile(mp3) });
+    recordScribe({ userId: u, seconds, use: "captions" }); // the cost ledger (audit Nov 24 2026); the run (withCostRun) adds the job
     const words = heard.words.map((w) => [w.text, round2(w.start), round2(w.end), w.speaker] as [string, number, number, string | null]);
     const keys = words.length ? await markKeywords(deps, heard.words, u) : [];
     const doc = { words, keys, language: heard.language, duration: seconds || null };
@@ -312,7 +315,7 @@ export function startCaptionsLoop(sbFn: () => SupabaseClient, deps: ClipsDeps = 
         if (!job || !job.id) return;
         active.add(job.id); busy.captions = true;
         const keep = setInterval(() => { sb.rpc("studio_renew", { p_job: job.id, p_token: job.lease_token, p_progress: job.progress ?? {} }).then(() => undefined, () => undefined); /* (sent only when then-ed: a bare void never went out until Nov 7 2026) */ }, 4 * 60_000);
-        runCaptionsJob(sb, { ...deps, log }, job).then((s) => log(`[captions] ${s} ${job.id}`)).catch((e) => log(`[captions] crashed ${job.id} ${e?.message ?? e}`))
+        withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "captions") }, () => runCaptionsJob(sb, { ...deps, log }, job)).then((s) => log(`[captions] ${s} ${job.id}`)).catch((e) => log(`[captions] crashed ${job.id} ${e?.message ?? e}`))
           .finally(() => { clearInterval(keep); active.delete(job.id); busy.captions = active.size > 0; });
       }
     } catch (e: any) { log(`[captions] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }

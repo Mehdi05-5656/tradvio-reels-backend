@@ -2,6 +2,7 @@
 // description (human or animal), stores it as an image asset in their library, and charges one character unit. The asset
 // is then a reference for Recast, Swap and Trend like an uploaded photo. Runs as a timer loop in the web service.
 // Soul standard accepts resolution 720p or 1080p (the first live run was refused with "2K", Oct 29, 2026).
+import { recordCost, withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -10,8 +11,8 @@ import { join } from "node:path";
 import { command } from "./video-render.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLANS } from "./studio.js";
-import { studioCosts } from "./studio-pricing.js";
-import { higgsfieldAuth, RecastError, HF_BASE } from "./studio-recast.js";
+import { CHARACTER_IMAGE_COST_USD, studioCosts } from "./studio-pricing.js";
+import { billedUsdOf, higgsfieldAuth, RecastError, HF_BASE } from "./studio-recast.js";
 import { PHOTO_ENDPOINT } from "./studio-influencer.js";
 import { claimJob } from "./studio-leases.js";
 
@@ -116,7 +117,15 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
       let st: { status: string; imageUrl: string | null; imageUrls: string[]; raw: any };
       try { st = await pollCharacter(deps, requestId); }
       catch (e: any) { if (e instanceof RecastError && e.retry) { await renew(sb, job, { note: "Waiting for the renderer" }); await sleep(POLL_MS); continue; } throw e; }
-      if (st.status === "completed") { result = st; break; }
+      if (st.status === "completed") {
+        result = st;
+        // the cost ledger (audit Nov 24 2026: characters wrote no row): Higgsfield's billed figure when the status has
+        // one, else the list price per image ($0.094, studio-pricing.ts); failed and moderated renders are not billed
+        const billed = billedUsdOf(st.raw), images = Math.max(1, Math.min(st.imageUrls.length || 1, Number(job.options?.count) === 4 ? 4 : 1));
+        recordCost({ job_id: job.id, user_id: job.user_id ?? null, tool: "character", provider: "higgsfield", product: job.options?.photo_asset_id ? PHOTO_ENDPOINT : SOUL_ENDPOINT, source: "character_render", units: { images },
+          usd: billed ?? images * CHARACTER_IMAGE_COST_USD, basis: billed != null ? "metered" : "list", ref: `higgsfield:${requestId}` });
+        break;
+      }
       if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? "recast_failed" : "recast_canceled");
       await renew(sb, job, { note: "Drawing your character" });
       await sleep(POLL_MS);
@@ -181,7 +190,7 @@ export function startCharacterLoop(sbFn: () => SupabaseClient, deps: CharacterDe
       const job = r.data as Job | null;
       if (!job || !job.id) return;
       running++;
-      runCharacterJob(sb, { ...deps, log }, job).then((s) => log(`[character] ${s} ${job.id}`)).catch((e) => log(`[character] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "character") }, () => runCharacterJob(sb, { ...deps, log }, job)).then((s) => log(`[character] ${s} ${job.id}`)).catch((e) => log(`[character] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running--; });
     } catch (e: any) { log(`[character] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);

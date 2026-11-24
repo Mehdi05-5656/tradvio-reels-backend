@@ -24,6 +24,8 @@ export type AdminData = {
   users: Array<{ id: string; email: string | null; created_at: string; email_confirmed_at: string | null; last_sign_in_at: string | null }>;
   customers: any[]; jobs: any[]; ledger: any[]; stripe: any[]; conversations: any[]; automations: any[];
   posts: any[]; profiles: any[]; insights: any[]; perfAccounts: any[]; assets: any[]; events: any[]; memory: any[];
+  /** per person: the Claude and vendor events whose ledger rows also landed on a job (counted once, through the job) */
+  eventCostsInJobs?: Map<string, number>;
 };
 export type AdminOptions = { days: number | null; includeInternal: boolean; now?: Date };
 
@@ -416,7 +418,9 @@ export function computeAdmin(d: AdminData, opt: AdminOptions, env: Env = process
   const latest = (...xs: Array<string | null | undefined>) => xs.reduce((m: string | null, x) => (x && Number.isFinite(Date.parse(x)) && (!m || Date.parse(x) > Date.parse(m)) ? x : m), null);
   const people = d.users.filter((u) => keep(u.id)).map((u) => {
     const js = jobsBy.get(u.id) ?? [], c = cust.get(u.id);
-    const costU = js.reduce((n, j) => n + jobCost(j, env).usd, 0) + events.filter((e) => e.user_id === u.id && (e.kind === "claude" || e.kind === "vendor")).reduce((n, e) => n + num(e.usd), 0);
+    // (audit Nov 24 2026: a Claude or vendor call made inside a run is in that job's metered cost AND in the events; the
+    // part already counted through a job is taken off the events so it is counted once)
+    const costU = js.reduce((n, j) => n + jobCost(j, env).usd, 0) + Math.max(0, events.filter((e) => e.user_id === u.id && (e.kind === "claude" || e.kind === "vendor")).reduce((n, e) => n + num(e.usd), 0) - (d.eventCostsInJobs?.get(u.id) ?? 0));
     const paid = paidBy.get(u.id) ?? 0;
     const last = js.reduce((m: string | null, j) => (!m || j.created_at > m ? j.created_at : m), null);
     return {
@@ -630,11 +634,15 @@ export async function loadAdminData(sb: SupabaseClient): Promise<AdminData> {
     all(() => sb.from("studio_assistant_memory").select("user_id,created_at")),
   ]);
   // each job's measured cost (rows that name a tool; the backend's own Claude and vendor rows are counted through events)
-  const metered = new Map<string, number>();
-  for (const r of await all(() => sb.from("studio_costs").select("job_id,usd").not("tool", "is", null).not("job_id", "is", null).order("id"), 1000, 500_000).catch(() => [] as any[]))
+  const metered = new Map<string, number>(), eventCostsInJobs = new Map<string, number>();
+  for (const r of await all(() => sb.from("studio_costs").select("job_id,user_id,usd,writer,provider,basis,note").not("tool", "is", null).not("job_id", "is", null).order("id"), 1000, 500_000).catch(() => [] as any[])) {
     metered.set(String(r.job_id), (metered.get(String(r.job_id)) ?? 0) + num(r.usd));
+    // rows copied from the backend's own events (studio-costs.ts costFromEvent): their dollars are in the events too
+    const fromEvent = r.writer === "backend" && ((r.provider === "anthropic" && r.basis === "metered") || r.note === "priced at an assumed rate per call or per gigabyte");
+    if (fromEvent && r.user_id) eventCostsInJobs.set(String(r.user_id), (eventCostsInJobs.get(String(r.user_id)) ?? 0) + num(r.usd));
+  }
   for (const j of jobs) if (metered.has(String(j.id))) j._metered = metered.get(String(j.id));
-  return { users, customers, jobs, ledger, stripe, conversations, automations, posts, profiles, insights, perfAccounts, assets, events, memory };
+  return { users, customers, jobs, ledger, stripe, conversations, automations, posts, profiles, insights, perfAccounts, assets, events, memory, eventCostsInJobs };
 }
 
 /** GET /api/studio/admin/metrics?days=30&internal=0: the owner's account only; 404 for anyone else (the panel stays unannounced).

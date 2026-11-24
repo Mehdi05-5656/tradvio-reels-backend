@@ -13,7 +13,15 @@ export type SttProvider = "scribe" | "groq";
 export type Heard = { words: TimedWord[]; events: AudioEvent[]; language: string | null };
 export type SttDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch };
 /** Dollars an hour of sound, each door (Nov 19 2026 list prices; Scribe is what the cost events have always used). */
-export const STT_RATES: Record<SttProvider, number> = { scribe: 0.2, groq: 0.04 };
+// (Scribe was $0.20 here and $0.22 in the Clips price and the admin panel: one rate now, the one prices are built on;
+// check it against the ElevenLabs bill, audit Nov 24 2026)
+export const STT_RATES: Record<SttProvider, number> = { scribe: 0.22, groq: 0.04 };
+/** Record Scribe heard outside hearAudio (YouTube Clips, Captions, the caption writer): by the seconds of sound sent. */
+export function recordScribe(p: { userId: string | null; seconds: number; use: string; job?: string | null }) {
+  const seconds = Number(p.seconds);
+  if (!(seconds > 0)) return;
+  recordEvent({ user_id: p.userId ?? null, kind: "vendor", name: "elevenlabs_scribe", usd: (seconds / 3600) * STT_RATES.scribe, props: { use: p.use, seconds, ...(p.job ? { job: p.job } : {}) } });
+}
 export const GROQ_MODEL = "whisper-large-v3-turbo";
 
 /** The door for the hours read whole: Groq whenever its key is there (the owner's choice, Nov 19 2026: the hybrid on,

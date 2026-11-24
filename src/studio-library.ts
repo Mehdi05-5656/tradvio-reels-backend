@@ -3,6 +3,7 @@
 // uploads. Imports bring many short videos in at once: files and zips go straight from the browser to storage (the zip
 // is opened in the browser, never uploaded whole); links (pasted, or read from a spreadsheet or a public Google Sheet)
 // are fetched here by a background job, priced per link and refunded per link that fails.
+import { withCostRun } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
@@ -556,7 +557,7 @@ export function startImportLoop(sbFn: () => SupabaseClient, deps: ImportDeps = {
       const job = r.data as Job | null;
       if (!job || !job.id) return;
       running = true;
-      runImportJob(sb, { ...deps, log }, job).then((s) => log(`[import] ${s} ${job.id}`)).catch((e) => log(`[import] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running = false; });
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "import") }, () => runImportJob(sb, { ...deps, log }, job)).then((s) => log(`[import] ${s} ${job.id}`)).catch((e) => log(`[import] crashed ${job.id} ${e?.message ?? e}`)).finally(() => { running = false; });
     } catch (e: any) { log(`[import] claim failed ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   const t = setInterval(tick, intervalMs);

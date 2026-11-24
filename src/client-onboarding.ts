@@ -10,6 +10,8 @@
 // Accounts: client_account_setup records which Publer account belongs to which client and the method chosen for
 // it. Only blueprint_repost runs today; the other two are recorded as not available. Setting up an account runs the
 // same ownership → plan → arm path the console already uses, with the client's batch size as the posting threshold.
+import { OVERHEAD } from "./studio-pricing.js";
+import { recordEvent } from "./studio-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -122,6 +124,7 @@ async function fetchBuffer(f: typeof fetch, url: string, max = MAX_SOURCE_BYTES,
 }
 async function scGet(f: typeof fetch, key: string, path: string) {
   const r = await f(`${SC}${path}`, { headers: { "x-api-key": key }, signal: AbortSignal.timeout(45_000) });
+  recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: path.split("?")[0], status: r.status, use: "client_onboarding" } }); // the cost ledger (audit Nov 24 2026)
   if (r.status === 402) throw new Error("scrapecreators_credits_exhausted");
   if (!r.ok) throw new Error(`scrapecreators_http_${r.status}`);
   const body: any = await r.json();

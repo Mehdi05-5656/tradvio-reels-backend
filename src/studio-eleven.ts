@@ -3,6 +3,7 @@
 // and transcripts. Each is one row in src/data/eleven-catalog.json and runs through the same `instrument` job as the
 // video models; this module is the client and the runner. Sound comes back as MP3, transcripts as .txt and .srt,
 // and anything applied to a clip is muxed back onto the untouched picture with ffmpeg.
+import { recordCost } from "./studio-costs.js";
 import { studioFail } from "./studio-fail.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -260,6 +261,11 @@ export async function runElevenJob(sb: SupabaseClient, deps: ElevenDeps, job: Jo
       default: throw new RecastError("instrument_unknown");
     }
     const charged = Math.min(job.credits_reserved, Math.max(1, Number(job.credits_reserved)));
+    // the cost ledger (audit Nov 24 2026: audio instruments wrote no row): the job's own priced cost from the audio
+    // table (characters, minutes, hours or one sound, at the plan's rate), recorded once the work is done
+    { const o = job.options ?? {}, usd = Number(o.cost_usd ?? o.usd);
+      if (Number.isFinite(usd) && usd > 0) recordCost({ job_id: job.id, user_id: job.user_id ?? null, tool: "instrument", provider: "elevenlabs", product: inst.id, source: "audio_instrument", units: { units: Number(o.units) || 1 },
+        usd, basis: "estimated", note: "priced from the audio table at quote time" }); }
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;

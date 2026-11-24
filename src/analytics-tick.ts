@@ -1,4 +1,6 @@
 // One-shot analytics tick, invoked by Render Cron every 15 minutes.
+import { flushCosts, initCosts } from "./studio-costs.js";
+import { flushEvents, initEvents } from "./studio-events.js";
 import { createClient } from "@supabase/supabase-js";
 import { analyticsTick } from "./publer-schedule.js";
 import { configurePublerRate } from "./publer-rate.js";
@@ -17,6 +19,8 @@ async function main() {
       realtime: { params: { eventsPerSecond: 0 } },
     },
   );
+  // the cost ledger and event record (audit Nov 24 2026: this cron's paid calls were never written); flushed at the end
+  initEvents(() => sb); initCosts(() => sb);
   // Live public metrics (ScrapeCreators) run first and independently: they never use Publer's
   // request budget, so they also run during posting windows. A failure here never blocks Publer.
   try {
@@ -54,6 +58,7 @@ async function main() {
   } catch (e: any) {
     console.error("[cron:alerts] failed:", e?.message || e);
   }
+  await flushEvents(); await flushCosts();
 }
 
 main().catch((e) => {

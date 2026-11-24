@@ -12,5 +12,5 @@ test("the cheap door: Groq's words with times, no speakers; chosen only when ask
   await assert.rejects(() => transcribeGroq({ env: {}, fetch: fetchFake }, { audio: Buffer.from("x") }), /GROQ_API_KEY/);
   const h = await hearAudio({ env: { STUDIO_LIVE_STT: "groq", GROQ_API_KEY: "k" }, fetch: fetchFake }, { audio: Buffer.from("mp3"), seconds: 3600, use: "live_clips_hour", userId: "u" });
   assert.equal(h.words.length, 2);
-  assert.equal(STT_RATES.groq, 0.04); assert.equal(STT_RATES.scribe, 0.2);
+  assert.equal(STT_RATES.groq, 0.04); assert.equal(STT_RATES.scribe, 0.22, "one Scribe rate, the one Clips is priced on (Nov 24 2026)");
 });

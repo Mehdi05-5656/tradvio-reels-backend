@@ -14,6 +14,8 @@
 // Requires env:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SCRAPECREATORS_API_KEY
 
+import { OVERHEAD } from "./studio-pricing.js";
+import { cleanCost } from "./studio-costs.js";
 import { createClient } from "@supabase/supabase-js";
 
 type LeaderRow = {
@@ -57,9 +59,11 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
 
+let scCalls = 0; // the cost ledger (audit Nov 24 2026): one row at the end of the run
 async function scGet(path: string): Promise<any> {
   const url = `https://api.scrapecreators.com${path}`;
   const r = await fetch(url, { headers: { "x-api-key": SC_KEY } });
+  scCalls++;
   if (!r.ok) throw new Error(`ScrapeCreators ${r.status}: ${await r.text()}`);
   return r.json();
 }
@@ -363,9 +367,17 @@ async function main() {
   }
 
   console.log("\ndone");
+  await bookScrapeCalls();
+}
+async function bookScrapeCalls() {
+  if (!scCalls) return;
+  const row = cleanCost({ provider: "scrapecreators", product: "leader refresh", source: "leader_refresh", units: { calls: scCalls }, usd: scCalls * OVERHEAD.scrapecreators_usd_per_call, basis: "estimated", writer: "leader-refresh", note: "priced at an assumed rate per call" });
+  const r = await sb.from("studio_costs").insert(row);
+  if (r.error) console.error("[costs] not recorded:", r.error.message);
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
+  await bookScrapeCalls().catch(() => undefined); // calls made before the failure were still billed
   console.error("FATAL", e);
   process.exit(1);
 });

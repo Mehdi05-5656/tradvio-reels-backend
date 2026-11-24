@@ -13,6 +13,7 @@
 // Smart post: once the videos are watched, /smart/brief reads the notes (Sonnet, text only, free) and gives what they
 // are, three sample captions and two call-to-action lines; /smart/answer turns what the person typed into settings
 // the Post page fills in. Nothing posts from here: the person sees every setting and confirms on the Post page.
+import { withCostRun } from "./studio-costs.js";
 import { randomUUID } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -132,7 +133,7 @@ export function startPostCaptionsLoop(sbFn: () => SupabaseClient, deps: PostCapt
       const job = r.data as Job | null;
       if (!job?.id) return;
       active.add(job.id);
-      runPostCaptions(sb, job, { ...deps, log }).then((s) => log(`[post-captions] ${s} ${job.id}`)).catch((e) => log(`[post-captions] crashed ${job.id} ${e?.message ?? e}`)).finally(() => active.delete(job.id));
+      withCostRun({ job_id: job.id, user_id: (job as any).user_id ?? null, tool: String((job as any).tool ?? "post_captions") }, () => runPostCaptions(sb, job, { ...deps, log })).then((s) => log(`[post-captions] ${s} ${job.id}`)).catch((e) => log(`[post-captions] crashed ${job.id} ${e?.message ?? e}`)).finally(() => active.delete(job.id));
     } catch (e: any) {
       if (!/does not exist|violates check constraint/i.test(String(e?.message ?? e))) log(`[post-captions] claim failed ${String(e?.message ?? e).slice(0, 200)}`);
     } finally { claiming = false; }

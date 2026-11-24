@@ -11,6 +11,8 @@
 //      1,000. Each month has a statement; on the 1st it closes for review (under the minimum it carries over), the owner
 //      approves or withholds it in the admin panel, pays it and marks it paid.
 // Anything that looks bought (followers jumping, views without engagement) is flagged for the owner, never paid on its own.
+import { OVERHEAD } from "./studio-pricing.js";
+import { recordEvent } from "./studio-events.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSocialProvider, type ProviderPost, type SocialDeps, type SocialProvider } from "./social-provider.js";
@@ -71,6 +73,7 @@ async function publicProfile(deps: Deps, platform: CreatorPlatform, handle: stri
   const path = platform === "tiktok" ? `/v1/tiktok/profile?handle=${h}` : `/v1/instagram/profile?handle=${h}`;
   try {
     const r = await (deps.fetch ?? fetch)(`https://api.scrapecreators.com${path}`, { headers: { "x-api-key": key, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
+    recordEvent({ kind: "vendor", name: "scrapecreators", usd: OVERHEAD.scrapecreators_usd_per_call, props: { path: path.split("?")[0], status: r.status, use: "creator_program" } }); // the cost ledger (audit Nov 24 2026)
     if (!r.ok) return null;
     const b: any = await r.json();
     if (platform === "tiktok") return { bio: b?.user?.signature ?? null, followers: Number(b?.stats?.followerCount ?? b?.statsV2?.followerCount) || null };
