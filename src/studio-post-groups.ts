@@ -23,7 +23,7 @@ export type GroupDefaults = {
   caption_extra?: string;          // a sign-off, hashtags or a call to action added under the caption
   stagger_minutes?: number;        // accounts of the same network go out this far apart (0 = together)
   vary_captions?: boolean;         // accounts of the same network get a lightly reworded caption each
-  autoreply?: { keywords: string[]; dm_message?: string; comment_reply?: string; button?: { title: string; url: string } | null } | null;
+  autoreply?: { keywords: string[]; dm_message?: string; comment_reply?: string; button?: { title: string; url: string } | null; dm?: boolean } | null;
   instagram_trial?: "auto" | "manual" | null;
   youtube_visibility?: "public" | "unlisted" | "private";
   times?: string[];                // posting times for the queue ("09:00", "18:30"), in `timezone`
@@ -53,6 +53,7 @@ export function cleanDefaults(raw: any): GroupDefaults {
       keywords,
       ...(typeof raw.autoreply.dm_message === "string" && raw.autoreply.dm_message.trim() ? { dm_message: raw.autoreply.dm_message.trim().slice(0, 1000) } : {}),
       ...(typeof raw.autoreply.comment_reply === "string" && raw.autoreply.comment_reply.trim() ? { comment_reply: raw.autoreply.comment_reply.trim().slice(0, 500) } : {}),
+      ...(raw.autoreply.dm === false ? { dm: false } : {}), // reply only on Instagram and Facebook (studio-reply-only.ts)
       button: raw.autoreply.button && /^https:\/\/.+\..+/.test(String(raw.autoreply.button.url ?? "")) && String(raw.autoreply.button.title ?? "").trim() ? { title: String(raw.autoreply.button.title).trim().slice(0, 20), url: String(raw.autoreply.button.url).trim().slice(0, 500) } : null,
     };
   } else if (raw.autoreply === null) out.autoreply = null;

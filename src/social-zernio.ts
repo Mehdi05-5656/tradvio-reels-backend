@@ -312,7 +312,9 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       if (webhookReady === url) return;
       const secret = env.STUDIO_SOCIAL_WEBHOOK_SECRET;
       if (!secret) throw new SocialError("webhook_failed", "No signing secret", 502);
-      const events = ["post.published", "post.failed", "post.partial", "post.cancelled", "post.platform.published", "post.platform.failed", "post.tiktok.url.resolved", "account.connected", "account.disconnected"];
+      const events = ["post.published", "post.failed", "post.partial", "post.cancelled", "post.platform.published", "post.platform.failed", "post.tiktok.url.resolved", "account.connected", "account.disconnected"].concat(
+        // reply-only auto-replies on Instagram and Facebook run at Clone8 (studio-reply-only.ts): only then are comments asked for
+        env.STUDIO_AUTOREPLY_REPLY_ONLY === "true" ? ["comment.received"] : []);
       const list = await call("GET", "/webhooks/settings");
       const same = (Array.isArray(list.body?.webhooks) ? list.body.webhooks : []).find((w: any) => w?.url === url);
       const r = same ? await call("PUT", "/webhooks/settings", { body: { _id: same._id, url, secret, events, isActive: true } }) : await call("POST", "/webhooks/settings", { body: { name: "Clone8", url, secret, events } });
@@ -338,6 +340,7 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
         const status = statusOf(results, false);
         return { kind: "post", event: { providerPostId: String(p.id), status, results, error: status === "failed" ? (results.find((x) => x.error)?.error ?? "The post did not go out") : null, partial: true } };
       }
+      if (ev === "comment.received" && b.comment?.id) return { kind: "comment", payload: b };
       if ((ev === "account.connected" || ev === "account.disconnected") && b.account?.profileId) {
         return { kind: "account", refId: String(b.account.profileId), platform: String(b.account.platform ?? ""), accountId: idOf(b.account), change: ev === "account.connected" ? "link" : "unlink", bySystem: ev === "account.disconnected" && b.account?.disconnectionType !== "intentional" && b.disconnectionType !== "intentional" };
       }

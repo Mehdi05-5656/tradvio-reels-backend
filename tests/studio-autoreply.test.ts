@@ -75,7 +75,7 @@ function sbFor(plan: string) {
   return {
     from(t: string) {
       const f: Array<(r: any) => boolean> = []; let one = false, upd: any = null;
-      const q: any = { select() { return q; }, eq(k: string, v: any) { f.push((r) => r[k] === v); return q; }, maybeSingle() { one = true; return q; }, update(v: any) { upd = v; return q; },
+      const q: any = { select() { return q; }, eq(k: string, v: any) { f.push((r) => r[k] === v); return q; }, in(k: string, v: any[]) { f.push((r) => v.includes(r[k])); return q; }, order() { return q; }, limit() { return q; }, maybeSingle() { one = true; return q; }, update(v: any) { upd = v; return q; },
         then(res: any, rej: any) { const rows = (tables[t] ?? []).filter((r) => f.every((g) => g(r))); if (upd) rows.forEach((r) => Object.assign(r, upd)); return Promise.resolve({ data: one ? rows[0] ?? null : rows, error: null }).then(res, rej); } };
       return q;
     },

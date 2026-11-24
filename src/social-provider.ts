@@ -61,7 +61,7 @@ export function statusOf(results: SocialResult[], scheduled: boolean): SocialPos
 
 
 /** A webhook delivery we act on: a post settled, or a network was linked, unlinked or needs relinking. */
-export type SocialWebhook = { kind: "post"; event: SocialEvent } | { kind: "account"; refId: string; platform: string; accountId?: string | null; change: "link" | "unlink" | "refresh"; bySystem: boolean };
+export type SocialWebhook = { kind: "post"; event: SocialEvent } | { kind: "account"; refId: string; platform: string; accountId?: string | null; change: "link" | "unlink" | "refresh"; bySystem: boolean } | { kind: "comment"; payload: any };
 
 /** A post on a linked account, with what the provider reports about it (private analytics where the network shares them). */
 export type ProviderPost = {

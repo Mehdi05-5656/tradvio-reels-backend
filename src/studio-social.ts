@@ -15,6 +15,7 @@ import { groupsOf, publicGroup, staggerTimes, varyCaptions } from "./studio-post
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import { attachAutoReplies, type AutoReplySpec } from "./studio-autoreply.js";
+import { handleComment, parseCommentEvent } from "./studio-reply-only.js";
 import { CLEAR_MESSAGE, clearProfile, keepUntil, recordSocialCosts, socialUpkeep, touchSocial, upkeepFacts, upkeepSettings, type ClearReason } from "./studio-social-upkeep.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -45,7 +46,8 @@ export function safeReturn(v: any, env: Record<string, string | undefined>): str
 }
 const sameText = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); };
 /** A fingerprint of where and how webhooks are registered, so a changed URL or secret registers again. */
-export const webhookHash = (url: string, env: Record<string, string | undefined>) => createHash("sha256").update(`${url}\n${env.STUDIO_SOCIAL_WEBHOOK_SECRET ?? ""}`).digest("hex").slice(0, 32);
+// the comment events (reply-only auto-replies) are part of the hash only when on, so switching them on re-registers once
+export const webhookHash = (url: string, env: Record<string, string | undefined>) => createHash("sha256").update(`${url}\n${env.STUDIO_SOCIAL_WEBHOOK_SECRET ?? ""}${env.STUDIO_AUTOREPLY_REPLY_ONLY === "true" ? "\ncomments" : ""}`).digest("hex").slice(0, 32);
 
 export type SocialPostRow = {
   id: string; user_id: string; provider: string; provider_post_id: string | null; job_id: string | null; output_key: string | null; asset_id?: string | null; conversation_id?: string | null;
@@ -480,6 +482,13 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     try {
       const sb = sbFn();
       if (hook.kind === "post") return res.json({ ok: true, updated: await applyEvent(sb, hook.event) });
+      if (hook.kind === "comment") {
+        // answered after the acknowledgement (the reply can take seconds); a comment is answered at most once either way
+        const ev = parseCommentEvent(hook.payload);
+        res.json({ ok: true });
+        if (ev) void handleComment(sb, ev, { env, fetch: deps.fetch, log });
+        return;
+      }
       // A network linked, unlinked (by the person or by the network) or due for relinking: refresh the cached list.
       const prof = await sb.from("studio_social_profiles").select("user_id,profile_key").eq("ref_id", hook.refId).maybeSingle();
       if (prof.data) {
@@ -820,7 +829,7 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   }
   // an auto-reply asked for with the post, or the group's own
   const spec: AutoReplySpec | null = b.autoreply && typeof b.autoreply === "object"
-    ? { keywords: Array.isArray(b.autoreply.keywords) ? b.autoreply.keywords.map(String) : [], dm_message: typeof b.autoreply.dm_message === "string" ? b.autoreply.dm_message : undefined, button: b.autoreply.button ?? null, comment_reply: typeof b.autoreply.comment_reply === "string" ? b.autoreply.comment_reply : undefined }
+    ? { keywords: Array.isArray(b.autoreply.keywords) ? b.autoreply.keywords.map(String) : [], dm_message: typeof b.autoreply.dm_message === "string" ? b.autoreply.dm_message : undefined, button: b.autoreply.button ?? null, comment_reply: typeof b.autoreply.comment_reply === "string" ? b.autoreply.comment_reply : undefined, ...(b.autoreply.dm === false ? { dm: false } : {}) }
     : b.autoreply === null ? null : ((plan.flatMap((r) => r.groups).map((g) => g.defaults?.autoreply).find(Boolean) as AutoReplySpec | undefined) ?? null);
   const sends = plan.reduce((n, r) => n + r.targets.length, 0);
   const background = sends > SYNC_SENDS || b.background === true;
