@@ -4,6 +4,7 @@
 //
 // Status flow of a post row: queued (a big batch, sent in the background) → sending → scheduled → posted | partial | failed, or canceled. The provider's webhook moves
 // it; a loop reads back any post the webhook left behind, so a missed delivery never strands a row.
+import { projectFor } from "./studio-post-projects.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, MAX_SOCIAL_EXTRA } from "./studio-pricing.js";
 import type { Express, Request, Response } from "express";
@@ -528,6 +529,8 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
   if (c.error) throw c.error;
   if (!hasPlanAccess(c.data)) throw new SocialError("subscription_required", "Posting to your socials comes with a plan", 409);
+  // sent from a project on the Post page: its posts carry it (its own Up next / Posted); only the person's own
+  const projectId = b.project_id ? await projectFor(sb, u, b.project_id).catch(() => null) : null;
   const pr = await sb.from("studio_social_profiles").select("provider,profile_key,accounts").eq("user_id", u).maybeSingle();
   if (pr.error) throw pr.error;
   const prof = pr.data as { provider?: string; profile_key: string; accounts: SocialAccount[] } | null;
@@ -806,12 +809,13 @@ export async function createPosts(sb: SupabaseClient, p: SocialProvider, u: stri
   for (const [pi, r] of plan.entries()) {
     if (unsent.length) { unsent.push(items.indexOf(expanded[pi].it)); continue; }
     const accounts: StoredTarget[] = r.targets.map((t) => ({ id: t.id ?? null, platform: t.platform, username: t.username ?? null, at: t.at ? t.at.toISOString() : null, caption: t.caption && t.caption !== r.caption ? t.caption : null, group: t.group ?? null, ...(t.own ? { own: true } : r.vary ? { vary: true } : {}) }));
-    const row = { user_id: u, provider: p.name, job_id: r.x.job_id, output_key: r.x.output_key, asset_id: r.x.asset_id, conversation_id: opts.conversationId ?? null, caption: r.caption, platforms: [...new Set(r.targets.map((t) => t.platform))], options: { ...r.options, accounts, ...(spec && background ? { autoreply_spec: spec, via } : {}) }, schedule_at: r.at?.toISOString() ?? null, status: background ? "queued" : "sending", batch_id: batchId, group_id: r.groupId };
+    const row = { ...(projectId ? { project_id: projectId } : {}), user_id: u, provider: p.name, job_id: r.x.job_id, output_key: r.x.output_key, asset_id: r.x.asset_id, conversation_id: opts.conversationId ?? null, caption: r.caption, platforms: [...new Set(r.targets.map((t) => t.platform))], options: { ...r.options, accounts, ...(spec && background ? { autoreply_spec: spec, via } : {}) }, schedule_at: r.at?.toISOString() ?? null, status: background ? "queued" : "sending", batch_id: batchId, group_id: r.groupId };
     let ins = await sb.from("studio_social_posts").insert(row).select("*").single();
     // before the groups migration: the same row without the new columns
+    if (ins.error && /project_id/i.test(String(ins.error.message ?? ""))) { const { project_id: _p, ...noProject } = row as any; ins = await sb.from("studio_social_posts").insert(noProject).select("*").single(); }
     if (ins.error && /batch_id|group_id|queued|status_check/i.test(String(ins.error.message ?? ""))) {
       if (background) throw new SocialError("batch_unavailable", `Up to ${SYNC_SENDS} posts at a time for now; send the rest after these`, 409);
-      const { batch_id: _b, group_id: _g, ...older } = row as any;
+      const { batch_id: _b, group_id: _g, project_id: _p, ...older } = row as any;
       ins = await sb.from("studio_social_posts").insert(older).select("*").single();
     }
     if (ins.error) {
@@ -1020,7 +1024,7 @@ export async function applyEvent(sb: SupabaseClient, ev: SocialEvent): Promise<n
 }
 
 export function publicPost(x: SocialPostRow, posterUrl: string | null) {
-  return { id: x.id, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id ?? null, conversation_id: x.conversation_id ?? null, caption: x.caption, platforms: x.platforms, options: x.options, schedule_at: x.schedule_at, status: x.status, results: x.results ?? [], error: x.error, created_at: x.created_at, updated_at: x.updated_at, poster_url: posterUrl };
+  return { project_id: (x as any).project_id ?? null, id: x.id, job_id: x.job_id, output_key: x.output_key, asset_id: x.asset_id ?? null, conversation_id: x.conversation_id ?? null, caption: x.caption, platforms: x.platforms, options: x.options, schedule_at: x.schedule_at, status: x.status, results: x.results ?? [], error: x.error, created_at: x.created_at, updated_at: x.updated_at, poster_url: posterUrl };
 }
 
 /** Reads back posts the webhook has not settled: scheduled ones past their time, sends that never got an answer. A
