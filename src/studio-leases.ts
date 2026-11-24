@@ -17,15 +17,19 @@ let stopping = false;
 
 /** True once the server has been told to stop: no loop takes a new job. */
 export const isStopping = () => stopping;
+/** True once a newer server of this service is up (watchSuccessor): no loop takes a new job; jobs held carry on until
+ *  the stop signal hands them back (stopGracefully, unchanged). */
+let superseded = false;
+export const isSuperseded = () => superseded;
 export function beginStopping() { stopping = true; }
 /** For tests. */
-export function resetLeases() { stopping = false; held.clear(); }
+export function resetLeases() { stopping = false; superseded = false; held.clear(); }
 export const heldJobs = () => [...held.values()];
 
 /** studio_claim for one tool, unless the server is stopping; the job is remembered until the server stops. The answer
  *  has the shape of the rpc's ({ data, error }), so every loop reads it as before. */
 export async function claimJob(sb: SupabaseClient | any, tool: string, worker: string): Promise<{ data: any; error: any }> {
-  if (stopping) return { data: null, error: null };
+  if (stopping || superseded) return { data: null, error: null };
   const r = await sb.rpc("studio_claim", { p_tool: tool, p_worker: worker });
   if (!r.error && r.data?.id && r.data?.lease_token) {
     // (a job finished or failed long ago needs no handing back: kept a day at most, the release is a no-op anyway)
@@ -77,4 +81,49 @@ export async function stopGracefully(o: { signal: string; sb: () => SupabaseClie
   await within(Promise.allSettled((o.flush ?? []).map((f) => f())), 5_000);
   log(`[shutdown] done in ${Date.now() - began} ms`);
   (o.exit ?? ((c: number) => process.exit(c)))(0);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The hand-over between an old server and a new one (Nov 23 2026)
+// ---------------------------------------------------------------------------------------------------
+// Render keeps the old server running about 60 s after the new one is live and only then sends the stop signal. In
+// that minute the old server kept taking NEW jobs with the old code: during the Twitch chat fix's deploy a test run of
+// the very stream the fix was for went to the old server and failed the old way, and two more runs it took were cut
+// off by its stop. Now the new server, once it has been up for SERVER_MARK.announce_ms, writes its boot id to storage;
+// every server reads that file every SERVER_MARK.every_ms, and one that sees a newer server stops taking jobs at once.
+// Only on Render (RENDER_INSTANCE_ID), so local runs and tests never stop each other.
+export const SERVER_MARK = { key: "ops/current-server.txt", announce_ms: 20_000, every_ms: 5_000 };
+export type ServerMark = { boot: string; at: number; commit: string | null; instance: string | null };
+
+/** Whether `mark` (the file's contents) says a newer server than this one (`boot`, started at `at`) is up. */
+export function newerServer(mark: ServerMark | null, boot: string, at: number): boolean {
+  return !!mark && mark.boot !== boot && Number(mark.at) > at;
+}
+
+export function watchSuccessor(sbFn: () => SupabaseClient | any, o: { env?: Record<string, string | undefined>; log?: (l: string) => void; boot?: string; at?: number } = {}): (() => void) | null {
+  const env = o.env ?? process.env, log = o.log ?? ((l: string) => console.log(l));
+  if (!env.RENDER_INSTANCE_ID || env.STUDIO_SUCCESSOR_WATCH === "off") return null;
+  const boot = o.boot ?? `${env.RENDER_INSTANCE_ID}:${Date.now().toString(36)}`, at = o.at ?? Date.now();
+  const bucket = () => sbFn().storage.from("studio-outputs");
+  const announce = setTimeout(() => {
+    if (stopping || superseded) return;
+    const mark: ServerMark = { boot, at, commit: env.RENDER_GIT_COMMIT ?? null, instance: env.RENDER_INSTANCE_ID ?? null };
+    void Promise.resolve().then(() => bucket().upload(SERVER_MARK.key, Buffer.from(JSON.stringify(mark)), { contentType: "text/plain", upsert: true }))
+      .then((r: any) => { if (r?.error) log(`[handover] could not announce this server: ${String(r.error.message ?? r.error).slice(0, 120)}`); else log(`[handover] this server (${mark.instance}, ${String(mark.commit ?? "").slice(0, 7)}) is the newest; older ones stop taking jobs`); })
+      .catch(() => undefined);
+  }, SERVER_MARK.announce_ms);
+  const watch = setInterval(async () => {
+    if (stopping || superseded) return;
+    try {
+      const d = await bucket().download(SERVER_MARK.key);
+      if (d?.error || !d?.data) return;
+      const mark = JSON.parse(await d.data.text()) as ServerMark;
+      if (newerServer(mark, boot, at)) {
+        superseded = true;
+        log(`[handover] a newer server (${mark.instance}, ${String(mark.commit ?? "").slice(0, 7)}) is up: this one takes no more jobs; holding ${held.size} until the stop signal hands them back`);
+      }
+    } catch { /* storage unreachable for a moment: look again next time */ }
+  }, SERVER_MARK.every_ms);
+  (announce as any).unref?.(); (watch as any).unref?.();
+  return () => { clearTimeout(announce); clearInterval(watch); };
 }

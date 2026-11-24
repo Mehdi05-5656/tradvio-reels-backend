@@ -110,3 +110,38 @@ test("stopGracefully: requests that never end do not hold the jobs past the wait
   assert.ok(sb.calls.some((c) => c[0] === "studio_release"));
   resetLeases();
 });
+
+// ---------------------------------------------------------------------------------------------------
+// Hand-over: a newer server up means the old one takes no more jobs (Nov 23 2026)
+// ---------------------------------------------------------------------------------------------------
+import { newerServer, watchSuccessor, isSuperseded, SERVER_MARK } from "../src/studio-leases.js";
+
+test("newerServer: only a different server that started later", () => {
+  assert.equal(newerServer(null, "a", 100), false);
+  assert.equal(newerServer({ boot: "a", at: 200, commit: null, instance: null }, "a", 100), false, "itself");
+  assert.equal(newerServer({ boot: "b", at: 50, commit: null, instance: null }, "a", 100), false, "an older one");
+  assert.equal(newerServer({ boot: "b", at: 200, commit: null, instance: null }, "a", 100), true);
+});
+
+test("an old server that sees a newer one stops taking jobs; the jobs it holds are left for the stop signal", async () => {
+  resetLeases();
+  let file: string | null = null; let claims = 0;
+  const sb: any = {
+    rpc: async () => { claims++; return { data: { id: `j${claims}`, lease_token: "t" }, error: null }; },
+    storage: { from: () => ({ upload: async (_k: string, b: Buffer) => { file = String(b); return { error: null }; }, download: async () => (file ? { data: new Blob([file]), error: null } : { data: null, error: { message: "none" } }) }) },
+  };
+  const logs: string[] = [];
+  const stop = watchSuccessor(() => sb, { env: { RENDER_INSTANCE_ID: "old" }, log: (l) => logs.push(l), boot: "old", at: 1000 })!;
+  assert.ok((await claimJob(sb, "clips", "w")).data, "takes jobs while it is the newest");
+  file = JSON.stringify({ boot: "new", at: 2000, commit: "abc1234", instance: "new" });
+  await new Promise((ok) => setTimeout(ok, SERVER_MARK.every_ms + 300));
+  assert.equal(isSuperseded(), true);
+  assert.equal((await claimJob(sb, "clips", "w")).data, null, "no new job once a newer server is up");
+  assert.equal(heldJobs().length, 1, "the job it held is still its own until the stop signal");
+  assert.ok(logs.some((l) => /newer server/.test(l)));
+  stop(); resetLeases();
+});
+
+test("off the platform (no RENDER_INSTANCE_ID) the watch does nothing", () => {
+  assert.equal(watchSuccessor(() => ({}), { env: {} }), null);
+});

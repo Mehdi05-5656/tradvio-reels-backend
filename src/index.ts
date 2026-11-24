@@ -71,7 +71,7 @@ import { registerAffiliates } from "./studio-affiliates.js";
 import { registerEditor } from "./studio-editor.js";
 import { flushCosts, initCosts, registerStudioCosts } from "./studio-costs.js";
 import { registerContentPerf, startContentPerfLoop } from "./studio-content-perf-routes.js";
-import { stopGracefully } from "./studio-leases.js";
+import { stopGracefully, watchSuccessor } from "./studio-leases.js";
 import { flushPosthog } from "./posthog.js";
 import { registerStoryExam } from "./studio-story-exam.js";
 import compression from "compression";
@@ -209,6 +209,8 @@ async function main() {
   // keeps working until the SIGKILL, so the SIGTERM is not reaching this process. Who started us is logged at boot and
   // every signal is logged the moment it lands (written straight to stdout), so a deploy shows where it goes.
   console.log(`[boot] ${processLineage()}`);
+  // a newer server announces itself; this one then stops taking jobs instead of running them on old code for a minute
+  watchSuccessor(getSb);
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => {
     try { writeSync(1, `[signal] ${signal} received by pid ${process.pid}\n`); } catch { /* stdout gone: carry on */ }
     void stopGracefully({ signal, sb: getSb, server: http, flush: [flushEvents, flushCosts, flushPosthog], waitMs: 10_000 });
