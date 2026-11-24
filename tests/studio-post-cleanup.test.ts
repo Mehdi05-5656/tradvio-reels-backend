@@ -61,3 +61,20 @@ test("delete after posting: an upload whose posts all went out goes; one still w
   assert.deepEqual(sb.removed, [`${ANN}/a1.mp4`]);
   assert.equal(await sweepPosted(sb, () => {}, now, ENV), 0, "nothing twice");
 });
+
+test("storage: every file with what it is used for; the delete never removes a file a post still waits on", async () => {
+  const { storageFiles } = await import("../src/studio-post-cleanup.js");
+  const at = new Date().toISOString();
+  const asset = (id: string, bytes: number, col: string | null = null) => ({ id, user_id: ANN, kind: "video", name: `${id}.mp4`, bytes, status: "ready", object_key: `${ANN}/${id}.mp4`, probe: { duration: 40 }, created_at: at, collection_id: col });
+  const tables: Record<string, any[]> = {
+    studio_assets: [asset("posted", 10), asset("waits", 20), asset("board", 30), asset("clip", 40, "cs"), asset("loose", 50)],
+    studio_social_posts: [{ user_id: ANN, asset_id: "posted", status: "posted", updated_at: at }, { user_id: ANN, asset_id: "waits", status: "scheduled", updated_at: at }],
+    studio_collections: [{ id: "cs", user_id: ANN, kind: "clips", name: "Clips", source: {} }],
+    studio_post_drafts: [{ user_id: ANN, kind: "tray", payload: { rows: [{ pick: { asset_id: "board" } }] } }], studio_post_projects: [], studio_jobs: [], studio_projects: [],
+  };
+  const sb = fakeSb(tables);
+  sb.storage.from = () => ({ remove: async () => ({ error: null }), createSignedUrls: async () => ({ data: [] }) });
+  const files = await storageFiles(sb, ANN);
+  const f = (id: string) => files.find((x: any) => x.id === id);
+  assert.deepEqual([f("posted").posted, f("waits").waiting, f("board").on_board, f("clip").clip_set, f("loose").posted], [true, true, true, true, false]);
+});

@@ -11,7 +11,7 @@ import { deleteAssets } from "./studio-library.js";
 
 const KEEP_FOR = ["scheduled", "queued", "sending", "failed", "partial"];
 /** Uploads a board or draft still holds (the tray, saved drafts, every project's board): never deleted. */
-async function heldOnBoards(sb: SupabaseClient, u: string): Promise<Set<string>> {
+export async function heldOnBoards(sb: SupabaseClient, u: string): Promise<Set<string>> {
   const out = new Set<string>();
   const add = (payload: any) => { for (const r of Array.isArray(payload?.rows) ? payload.rows : []) { const id = r?.pick?.asset_id; if (typeof id === "string") out.add(id); } };
   const [d, p] = await Promise.all([
@@ -76,10 +76,77 @@ export async function sweepPosted(sb: SupabaseClient, log: (s: string) => void =
   return gone;
 }
 
+/** Every file in the person's library with what it is used for, so they can free space by hand (owner, Nov 23 2026):
+ *  posted (every post of it went out), waiting (a post still to go out or failed: deleting it would break that post),
+ *  on a board (the tray, a draft or a project board holds it), in a Clips set. */
+export async function storageFiles(sb: SupabaseClient, u: string, posters: (sb: SupabaseClient, rows: any[]) => Promise<any[]> = async (_s, rows) => rows.map((r) => ({ ...r, poster_url: null }))) {
+  const a = await sb.from("studio_assets").select("id,kind,name,bytes,probe,created_at,collection_id").eq("user_id", u).neq("status", "deleted").order("bytes", { ascending: false }).limit(5000);
+  if (a.error) throw a.error;
+  const rows = (a.data ?? []) as any[];
+  const ids = rows.map((x) => x.id);
+  const posts: any[] = [];
+  for (let k = 0; k < ids.length; k += 500) {
+    const r = await sb.from("studio_social_posts").select("asset_id,status,updated_at").eq("user_id", u).in("asset_id", ids.slice(k, k + 500)).limit(5000);
+    if (r.error) throw r.error;
+    posts.push(...((r.data ?? []) as any[]));
+  }
+  const cols = [...new Set(rows.map((x) => x.collection_id).filter(Boolean))];
+  const kinds = new Map<string, { kind: string; name: string; project: boolean }>();
+  if (cols.length) { const c = await sb.from("studio_collections").select("id,kind,name,source").eq("user_id", u).in("id", cols); for (const x of (c.data ?? []) as any[]) kinds.set(x.id, { kind: x.kind, name: x.name, project: !!x.source?.project }); }
+  const held = await heldOnBoards(sb, u).catch(() => null);
+  const withPosters = await posters(sb, rows);
+  return withPosters.map((x: any) => {
+    const mine = posts.filter((p) => p.asset_id === x.id);
+    const waiting = mine.some((p) => KEEP_FOR.includes(p.status));
+    const posted = mine.some((p) => p.status === "posted");
+    const col = x.collection_id ? kinds.get(x.collection_id) : undefined;
+    return { id: x.id, kind: x.kind, name: x.name, bytes: Number(x.bytes) || 0, created_at: x.created_at, poster_url: x.poster_url ?? null,
+      seconds: Number(x.probe?.duration) > 0 ? Math.round(Number(x.probe.duration)) : null,
+      posted, waiting, on_board: held ? held.has(x.id) : true, clip_set: col?.kind === "clips", folder: col ? col.name : null, project: !!col?.project,
+      last_posted: posted ? mine.filter((p) => p.status === "posted").map((p) => p.updated_at).sort().at(-1) ?? null : null };
+  });
+}
+
+/** Each file's poster, signed for 15 minutes. */
+async function signPosters(sb: SupabaseClient, rows: any[]) {
+  const keys = rows.map((a) => a.probe?.poster_key).filter(Boolean);
+  if (!keys.length) return rows.map((a) => ({ ...a, poster_url: null }));
+  const urls = new Map<string, string>();
+  for (let k = 0; k < keys.length; k += 500) { const r = await sb.storage.from("studio-outputs").createSignedUrls(keys.slice(k, k + 500), 900); for (const x of (r.data ?? []) as any[]) if (x.path) urls.set(x.path, x.signedUrl); }
+  return rows.map((a) => ({ ...a, poster_url: a.probe?.poster_key ? urls.get(a.probe.poster_key) ?? null : null }));
+}
+
 /** The setting, read and changed from the Post page. */
 export function registerPostCleanup(app: Express, sbFn: () => SupabaseClient) {
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? (req.auth as any).user_id : null);
   const fail = (res: Response, e: any) => { console.error("[cleanup]", String(e?.message ?? e)); res.status(500).json({ error: "failed", detail: "Something went wrong on our side; try again in a moment" }); };
+  app.get("/api/studio/storage/files", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try { res.json({ files: await storageFiles(sbFn(), u, signPosters) }); } catch (e) { fail(res, e); }
+  });
+  // Delete files to free space. A file a post still waits on (scheduled, queued, sending, failed) is never deleted
+  // here: that post would fail. Everything else goes (the Library's own delete: running jobs and editor files kept).
+  app.post("/api/studio/storage/delete", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    try {
+      const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(String).filter((x: string) => /^[0-9a-f-]{36}$/i.test(x)))].slice(0, 2000) as string[];
+      if (!ids.length) return res.json({ deleted: [], skipped: [], freed: 0 });
+      const sb = sbFn();
+      const waiting = new Set<string>();
+      for (let k = 0; k < ids.length; k += 500) {
+        const r = await sb.from("studio_social_posts").select("asset_id").eq("user_id", u).in("asset_id", ids.slice(k, k + 500)).in("status", KEEP_FOR);
+        if (r.error) throw r.error;
+        for (const x of (r.data ?? []) as any[]) waiting.add(x.asset_id);
+      }
+      const go = ids.filter((id) => !waiting.has(id));
+      const sizes = new Map<string, number>();
+      for (let k = 0; k < go.length; k += 500) { const r = await sb.from("studio_assets").select("id,bytes").eq("user_id", u).in("id", go.slice(k, k + 500)); for (const x of (r.data ?? []) as any[]) sizes.set(x.id, Number(x.bytes) || 0); }
+      const deleted: string[] = [], skipped: Array<{ id: string; reason: string }> = [...[...waiting].map((id) => ({ id, reason: "a post still waits on it" }))];
+      for (let k = 0; k < go.length; k += 500) { const r = await deleteAssets(sb, u, go.slice(k, k + 500), null); deleted.push(...r.deleted); skipped.push(...r.skipped); }
+      res.json({ deleted, skipped, freed: deleted.reduce((n, id) => n + (sizes.get(id) ?? 0), 0) });
+    } catch (e) { fail(res, e); }
+  });
   app.get("/api/studio/social/prefs", async (req, res) => {
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try { res.json({ delete_after_post: await deleteAfterPost(sbFn(), u) }); } catch (e) { fail(res, e); }
