@@ -170,7 +170,7 @@ export async function noticesTick(sb: SupabaseClient, deps: NoticeDeps = {}): Pr
       if (to) {
         try {
           const subject = `Your plan renews on ${longDate(periodEnd)}`, kind = "renewal";
-          const body = renderEmail({ preheader: `${n(c.credits_per_period)} new credits arrive on ${longDate(periodEnd)}.`, heading: subject, paragraphs: [`Your ${plan?.name ?? ""} plan renews on ${longDate(periodEnd)} with ${n(c.credits_per_period)} new credits.`, `You have ${n(balance)} credits left. Plan credits that are unused expire when the new ones arrive; top-up and bundle credits carry over.`, "You can change or cancel the plan from your account page."], button: { label: "Open your account", url: account }, footer: ["You are getting this because your Clone8 Studio plan renews soon."], unsubscribeUrl: unsub });
+          const body = renderEmail({ preheader: `${n(c.credits_per_period)} new credits arrive on ${longDate(periodEnd)}.`, heading: subject, paragraphs: [`Your ${plan?.name ?? ""} plan renews on ${longDate(periodEnd)} with ${n(c.credits_per_period)} new credits.`, `You have ${n(balance)} credits left.`, "You can change or cancel the plan from your account page."], button: { label: "Open your account", url: account }, footer: ["You are getting this because your Clone8 Studio plan renews soon."], unsubscribeUrl: unsub });
           await sendMail({ to, subject, ...body, unsubscribeUrl: unsub, kind, userId: c.user_id }, deps);
           out.renewals++;
         } catch (e: any) { log(`[notices] renewal mail failed for ${c.user_id}: ${String(e?.message ?? e).slice(0, 120)}`); continue; }

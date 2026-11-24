@@ -49,11 +49,17 @@ export function toHtml(text: string): string {
 export type EmailBody = {
   /** The first line most inboxes show after the subject. */
   preheader: string;
+  /** A short label over the heading, in the accent colour ("Clips"). */
+  eyebrow?: string;
   heading: string;
   paragraphs: string[];
+  /** Numbered steps, each a short bold line and an optional plain one, under an optional title. */
+  steps?: { title?: string; items: Array<{ title: string; text?: string }> };
   /** Short rows shown as a quiet list ("Swap · 12 s", "Ready"). */
   rows?: Array<{ label: string; value: string }>;
   button?: { label: string; url: string };
+  /** One small grey line right under the button ("Cancel any time."). */
+  note?: string;
   /** Paragraphs under the button (the invitation to reply, say). */
   after?: string[];
   /** Who signs it, on its own line ("Sam, Clone8"). */
@@ -68,50 +74,65 @@ export type EmailBody = {
 //  - Outlook.com and the Outlook apps rewrite colours themselves and tag the result ([data-ogsc]/[data-ogsb]), so the
 //    same dark colours are repeated under those tags;
 //  - Gmail ignores both and inverts light colours by itself, so the light colours are chosen to survive that: no
-//    images, no picture of a logo, no coloured text on a coloured ground except the one button, whose teal and white
-//    Gmail leaves alone.
-// Every colour is an inline style (light) plus a class (dark), never a background image.
-const DARK = { bg: "#0b0d12", card: "#14171f", line: "#262b38", head: "#f4f6f8", text: "#c5ccd6", mute: "#8b94a1", link: "#3ddccb", btn: "#22cdbb", btnText: "#03211d" };
-const darkRules = (pre: string) => `${pre} .e-bg{background:${DARK.bg} !important}${pre} .e-card{background:${DARK.card} !important;border-color:${DARK.line} !important}${pre} .e-head{color:${DARK.head} !important}${pre} .e-text{color:${DARK.text} !important}${pre} .e-mute{color:${DARK.mute} !important}${pre} .e-line{border-color:${DARK.line} !important}${pre} .e-link{color:${DARK.link} !important}${pre} .e-btn{background:${DARK.btn} !important}${pre} .e-btn a{color:${DARK.btnText} !important}`;
-const EMAIL_CSS = `:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${darkRules("")}}${darkRules("[data-ogsc]")}${darkRules("[data-ogsb]")}@media (max-width:480px){.e-pad{padding:22px 20px 20px !important}.e-btn a{display:block !important;text-align:center !important}.e-btnwrap{width:100% !important}}`;
+//    images, no picture of a logo, no gradients, no coloured text on a coloured ground except the button and the
+//    step numbers, whose teal Gmail leaves readable.
+// Every colour is an inline style (light) plus a class (dark), never a background image. (Nov 23 2026 redesign: an
+// accent edge on the card, a label over the heading, numbered steps, a note under the button; still no images and
+// one button, which is what keeps these in the inbox and out of Promotions.)
+const LIGHT = { bg: "#f3f4f6", card: "#ffffff", line: "#e6e8ec", head: "#0b1220", text: "#3b4654", mute: "#6b7685", accent: "#0e8a7b", tint: "#e6f5f2", btnText: "#ffffff" };
+const DARK = { bg: "#0b0d12", card: "#14171f", line: "#262b38", head: "#f4f6f8", text: "#c5ccd6", mute: "#8b94a1", link: "#3ddccb", btn: "#22cdbb", btnText: "#03211d", tint: "#10302c" };
+const darkRules = (pre: string) => `${pre} .e-bg{background:${DARK.bg} !important}${pre} .e-card{background:${DARK.card} !important;border-color:${DARK.line} !important}${pre} .e-edge{background:${DARK.btn} !important}${pre} .e-head{color:${DARK.head} !important}${pre} .e-text{color:${DARK.text} !important}${pre} .e-mute{color:${DARK.mute} !important}${pre} .e-line{border-color:${DARK.line} !important}${pre} .e-link{color:${DARK.link} !important}${pre} .e-btn{background:${DARK.btn} !important}${pre} .e-btn a{color:${DARK.btnText} !important}${pre} .e-num{background:${DARK.tint} !important;color:${DARK.link} !important}`;
+const EMAIL_CSS = `:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${darkRules("")}}${darkRules("[data-ogsc]")}${darkRules("[data-ogsb]")}@media (max-width:480px){.e-pad{padding:26px 22px 24px !important}.e-btn a{display:block !important;text-align:center !important}.e-btnwrap{width:100% !important}.e-h1{font-size:22px !important}}`;
 
 /** One email in two forms with the same words: plain text, and an HTML card that follows the reader's light or dark
  *  setting (no images, one button). */
 export function renderEmail(b: EmailBody): { text: string; html: string } {
   const text = [
+    ...(b.eyebrow ? [b.eyebrow.toUpperCase()] : []),
     b.heading,
     ...b.paragraphs,
+    ...(b.steps?.items.length ? [[...(b.steps.title ? [b.steps.title] : []), ...b.steps.items.map((s, i) => `${i + 1}. ${s.title}${s.text ? ` ${s.text}` : ""}`)].join("\n")] : []),
     ...(b.rows?.length ? [b.rows.map((r) => `${r.label}: ${r.value}`).join("\n")] : []),
     ...(b.button ? [`${b.button.label}: ${b.button.url}`] : []),
+    ...(b.note ? [b.note] : []),
     ...(b.after ?? []),
     ...(b.signoff ? [b.signoff] : []),
     ...(b.footer ?? []),
     ...(b.unsubscribeUrl ? [`Stop these emails: ${b.unsubscribeUrl}`] : []),
   ].join("\n\n");
   const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif";
+  const L = LIGHT;
   const link = (s: string, color: string, cls: string) => esc(s).replace(/(https:\/\/[^\s<]+)/g, `<a href="$1" class="${cls}" style="color:${color}">$1</a>`);
-  const para = (p: string) => `<p class="e-text" style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#33404a">${link(p, "#0f8f7f", "e-link")}</p>`;
+  const para = (p: string) => `<p class="e-text" style="margin:0 0 14px;font-size:15px;line-height:1.6;color:${L.text}">${link(p, L.accent, "e-link")}</p>`;
+  const eyebrow = b.eyebrow ? `<p class="e-link" style="margin:0 0 8px;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:${L.accent}">${esc(b.eyebrow)}</p>` : "";
+  const steps = b.steps?.items.length
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="e-line" style="margin:6px 0 22px;border-collapse:collapse;border-top:1px solid ${L.line}">${b.steps.title ? `<tr><td colspan="2" class="e-head" style="padding:16px 0 4px;font-size:14px;font-weight:700;color:${L.head}">${esc(b.steps.title)}</td></tr>` : ""}${b.steps.items.map((s, i) => `<tr><td width="40" valign="top" style="padding:12px 0 0"><div class="e-num" style="width:28px;height:28px;line-height:28px;border-radius:14px;text-align:center;font-size:13px;font-weight:700;background:${L.tint};color:${L.accent}">${i + 1}</div></td><td valign="top" style="padding:12px 0 0"><p class="e-head" style="margin:0;font-size:15px;line-height:1.45;font-weight:600;color:${L.head}">${esc(s.title)}</p>${s.text ? `<p class="e-mute" style="margin:2px 0 0;font-size:14px;line-height:1.5;color:${L.mute}">${esc(s.text)}</p>` : ""}</td></tr>`).join("")}</table>`
+    : "";
   const rows = b.rows?.length
-    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:4px 0 20px;border-collapse:collapse">${b.rows.map((r) => `<tr><td class="e-head e-line" style="padding:9px 0;border-top:1px solid #e6eaed;font-size:14px;color:#0f1720">${esc(r.label)}</td><td align="right" class="e-mute e-line" style="padding:9px 0 9px 12px;border-top:1px solid #e6eaed;font-size:14px;color:#5b6670">${esc(r.value)}</td></tr>`).join("")}</table>`
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:4px 0 22px;border-collapse:collapse">${b.rows.map((r) => `<tr><td class="e-head e-line" style="padding:11px 0;border-top:1px solid ${L.line};font-size:14px;color:${L.head}">${esc(r.label)}</td><td align="right" class="e-head e-line" style="padding:11px 0 11px 12px;border-top:1px solid ${L.line};font-size:14px;font-weight:600;color:${L.head}">${esc(r.value)}</td></tr>`).join("")}</table>`
     : "";
   const button = b.button
-    ? `<table role="presentation" class="e-btnwrap" cellpadding="0" cellspacing="0" style="margin:8px 0 6px"><tr><td class="e-btn" style="border-radius:12px;background:#0f8f7f"><a href="${esc(b.button.url)}" style="display:inline-block;padding:13px 24px;font-family:${font};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:12px">${esc(b.button.label)}</a></td></tr></table>`
+    ? `<table role="presentation" class="e-btnwrap" cellpadding="0" cellspacing="0" style="margin:6px 0 0"><tr><td class="e-btn" style="border-radius:12px;background:${L.accent}"><a href="${esc(b.button.url)}" style="display:inline-block;padding:14px 26px;font-family:${font};font-size:15px;font-weight:700;color:${L.btnText};text-decoration:none;border-radius:12px">${esc(b.button.label)}&nbsp;&rarr;</a></td></tr></table>`
     : "";
-  const after = (b.after ?? []).map((p, i) => (i === 0 ? `<div style="height:14px;line-height:14px;font-size:14px">&nbsp;</div>` : "") + para(p)).join("");
-  const signoff = b.signoff ? `<p class="e-head" style="margin:${b.after?.length ? "2px" : "16px"} 0 0;font-size:15px;line-height:1.6;font-weight:600;color:#0f1720">${esc(b.signoff)}</p>` : "";
-  const foot = [...(b.footer ?? []).map((f) => link(f, "#6b7680", "e-mute")), ...(b.unsubscribeUrl ? [`<a href="${esc(b.unsubscribeUrl)}" class="e-mute" style="color:#6b7680;text-decoration:underline">Stop these emails</a>`] : [])];
+  const note = b.note ? `<p class="e-mute" style="margin:10px 0 0;font-size:13px;line-height:1.5;color:${L.mute}">${esc(b.note)}</p>` : "";
+  const after = (b.after ?? []).map((p, i) => (i === 0 ? `<div style="height:18px;line-height:18px;font-size:18px">&nbsp;</div>` : "") + para(p)).join("");
+  const signoff = b.signoff ? `<p class="e-head" style="margin:${b.after?.length ? "2px" : "20px"} 0 0;font-size:15px;line-height:1.6;font-weight:600;color:${L.head}">${esc(b.signoff)}</p>` : "";
+  const foot = [...(b.footer ?? []).map((f) => link(f, L.mute, "e-mute")), ...(b.unsubscribeUrl ? [`<a href="${esc(b.unsubscribeUrl)}" class="e-mute" style="color:${L.mute};text-decoration:underline">Stop these emails</a>`] : [])];
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${esc(b.heading)}</title><style>${EMAIL_CSS}</style></head>
-<body class="e-bg" style="margin:0;padding:0;background:#f5f7f8">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0">${esc(b.preheader)}</div>
-<table role="presentation" class="e-bg" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7f8"><tr><td align="center" style="padding:28px 12px">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px">
-<tr><td class="e-head" style="padding:0 4px 14px;font-family:${font};font-size:19px;font-weight:700;letter-spacing:-0.5px;color:#0f1720">clone<span class="e-link" style="color:#0f8f7f">8</span></td></tr>
-<tr><td class="e-card e-pad" style="background:#ffffff;border:1px solid #e6eaed;border-radius:16px;padding:28px 28px 24px;font-family:${font};color:#0f1720">
-<h1 class="e-head" style="margin:0 0 14px;font-size:21px;line-height:1.3;font-weight:700;letter-spacing:-0.2px;color:#0f1720">${esc(b.heading)}</h1>
+<body class="e-bg" style="margin:0;padding:0;background:${L.bg}">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0">${esc(b.preheader)}&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;</div>
+<table role="presentation" class="e-bg" width="100%" cellpadding="0" cellspacing="0" style="background:${L.bg}"><tr><td align="center" style="padding:32px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:540px">
+<tr><td class="e-head" style="padding:0 6px 16px;font-family:${font};font-size:20px;font-weight:800;letter-spacing:-0.6px;color:${L.head}">clone<span class="e-link" style="color:${L.accent}">8</span></td></tr>
+<tr><td class="e-card" style="background:${L.card};border:1px solid ${L.line};border-radius:18px;font-family:${font};color:${L.head};overflow:hidden">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td class="e-edge" height="4" style="height:4px;line-height:4px;font-size:4px;background:${L.accent};border-radius:18px 18px 0 0">&nbsp;</td></tr>
+<tr><td class="e-pad" style="padding:30px 32px 28px">
+${eyebrow}<h1 class="e-head e-h1" style="margin:0 0 14px;font-size:24px;line-height:1.25;font-weight:800;letter-spacing:-0.4px;color:${L.head}">${esc(b.heading)}</h1>
 ${b.paragraphs.map(para).join("")}
-${rows}${button}${after}${signoff}
+${steps}${rows}${button}${note}${after}${signoff}
+</td></tr></table>
 </td></tr>
-${foot.length ? `<tr><td class="e-mute" style="padding:16px 6px 0;font-family:${font};font-size:12px;line-height:1.6;color:#6b7680">${foot.join("<br>")}</td></tr>` : ""}
+${foot.length ? `<tr><td class="e-mute" style="padding:18px 8px 0;font-family:${font};font-size:12px;line-height:1.6;color:${L.mute}">${foot.join("<br>")}</td></tr>` : ""}
 </table></td></tr></table></body></html>`;
   return { text, html };
 }

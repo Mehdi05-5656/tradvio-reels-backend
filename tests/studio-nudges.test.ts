@@ -49,21 +49,33 @@ test("the words: the person's own goal, one button to the plans, a way out, both
   assert.equal(goalOf({ goals: ["other"] }), null);
   const a = nudgeEmail("plan_30m", { userId: U(1), onboarding: { goal: "stories" } }, ENV);
   assert.equal(a.subject, "Your first Story is one step away");
-  assert.match(a.text, /You told us you want to make faceless shorts from an idea\. In Stories/);
-  assert.match(a.text, /Pick a plan: https:\/\/app\.clone8\.io\/#studio\/pricing\?e=plan_30m\n/);
-  assert.match(a.text, /reply to this email/);
+  assert.match(a.text, /^STORIES\n\nYour first Story is one step away\n\nType one idea and get a narrated 3D short/);
+  assert.match(a.text, /1\. Type one idea\n2\. Clone8 writes, voices and animates it/);
+  assert.match(a.text, /Pick a plan and start: https:\/\/app\.clone8\.io\/#studio\/pricing\?e=plan_30m\n/);
+  assert.match(a.text, /Reply to this email/);
   assert.match(a.text, /Stop these emails: https:\/\//);
   assert.ok(a.unsubscribeUrl);
   const g = nudgeEmail("plan_30m", { userId: U(1), onboarding: {} }, ENV);
   assert.equal(g.subject, "Your first video is one step away");
-  assert.ok(!/You told us/.test(g.text));
   const b = nudgeEmail("plan_day1", { userId: U(1), onboarding: { goal: "stories" } }, { ...ENV, STUDIO_MAIL_SIGNER: "Sam, Clone8", STUDIO_MAIL_ADDRESS: "Clone8, 1 Example St, Town" });
   assert.equal(b.subject, "What a plan gets you in Stories");
-  assert.match(b.text, /Starter · \$29 a month: 1,000 credits/);
+  assert.match(b.text, /Starter · \$29 a month: about \d+ Stories/);
   assert.match(b.text, /A 45-second Story costs [\d,]+ credits\./);
   assert.match(b.text, /Sam, Clone8/);
   assert.match(b.text, /1 Example St/);
-  for (const m of [a, g, b]) {
+  // clippers (role clipper, or first goal clips or earn): how clippers get paid, and clips per plan the next day
+  const c = nudgeEmail("plan_30m", { userId: U(1), onboarding: { role: "clipper", goal: "captions" } }, ENV);
+  assert.equal(c.subject, "Your first clips are one step away", "plural, and grammatical");
+  assert.match(c.text, /How clippers get paid\n1\. Find a clipping agency .*\n2\. Clip their creators with Clone8 .*\n3\. Get paid for the views you bring/);
+  assert.match(c.text, /Pick a plan and start clipping: https:/);
+  const e = nudgeEmail("plan_30m", { userId: U(1), onboarding: { role: "creator", goal: "earn" } }, ENV);
+  assert.equal(e.subject, c.subject, "the earn goal is a clipper too");
+  const d = nudgeEmail("plan_day1", { userId: U(1), onboarding: { goal: "clips" } }, { ...ENV, STUDIO_CLIPS_LEAN: "on", STUDIO_YT_PROXY: "https://p", ELEVENLABS_API_KEY: "e" });
+  assert.equal(d.subject, "How many clips a plan makes");
+  assert.match(d.text, /Cutting a 1-hour stream into 10 clips costs about [\d,]+ credits/);
+  assert.match(d.text, /Starter · \$29 a month: about \d+ clips/);
+  for (const m of [a, g, b, c, e, d]) {
+    assert.ok(!/expire|roll over|rolls over|yearly|annual|make money|cash/i.test(m.text), "nothing about expiry or yearly; no money words");
     assert.ok(!/free|discount|% off|act now|limited time|guarantee|click here|!/i.test(`${m.subject}\n${m.text}`), "no words spam filters score");
     assert.ok(!/<img|background-image|http:\/\//i.test(m.html), "no images, no plain-http links");
     assert.match(m.html, /name="color-scheme" content="light dark"/);
