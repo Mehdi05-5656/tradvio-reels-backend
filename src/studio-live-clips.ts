@@ -474,7 +474,27 @@ async function fromSegments(url: string, start: number, seconds: number, src: st
     return true;
   } finally { await rm(src, { force: true }).catch(() => undefined); }
 }
-export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"]; /** the door that heard it: a window reuses the words only when it was Scribe (exact words for the verdict and the cut) */ door: "scribe" | "groq" };
+export type HourRead = { hour: number; start: number; seconds: number; words: Heard["words"]; events: Heard["events"]; /** the door that heard it: a window reuses the words only when it was Scribe (exact words for the verdict and the cut) */ door: "scribe" | "groq"; /** the language heard (ISO 639-3, as the hearing gives it) */ language?: string | null };
+
+/** The run's language, settled from everything heard so far, weighted by words (an hour heard whole outweighs a window).
+ *  Nov 23 2026: the moment checker was told to write "in the stream's language" without being told which, guessed it from
+ *  each short window, and wrote French titles for an English stream (zackrawrr, a window with some French in it). */
+export function runLanguage(votes: Map<string, number>): string | null {
+  let best: string | null = null, n = 0;
+  for (const [k, v] of votes) if (v > n) { best = k; n = v; }
+  return best;
+}
+export const voteLanguage = (votes: Map<string, number>, lang: string | null | undefined, words: number) => {
+  const k = String(lang ?? "").trim().toLowerCase();
+  if (k && words > 0) votes.set(k, (votes.get(k) ?? 0) + words);
+};
+const LANGUAGE_NAMES: Record<string, string> = { eng: "English", en: "English", fra: "French", fr: "French", spa: "Spanish", es: "Spanish", por: "Portuguese", pt: "Portuguese", deu: "German", ger: "German", de: "German", ita: "Italian", it: "Italian", ara: "Arabic", ar: "Arabic", tur: "Turkish", tr: "Turkish", rus: "Russian", ru: "Russian", pol: "Polish", pl: "Polish", nld: "Dutch", dut: "Dutch", nl: "Dutch", jpn: "Japanese", ja: "Japanese", kor: "Korean", ko: "Korean", hin: "Hindi", hi: "Hindi", zho: "Chinese", chi: "Chinese", cmn: "Chinese", zh: "Chinese", swe: "Swedish", sv: "Swedish", ukr: "Ukrainian", uk: "Ukrainian", ind: "Indonesian", id: "Indonesian", tha: "Thai", th: "Thai", vie: "Vietnamese", vi: "Vietnamese", fil: "Filipino", tgl: "Tagalog" };
+export const languageName = (code: string | null) => (code ? LANGUAGE_NAMES[code] ?? code : null);
+/** The line the moment checker gets about the language (empty when nothing has been heard yet). */
+export function languageLine(code: string | null): string {
+  const name = languageName(code);
+  return name ? ` The stream is in ${name}: write the title, hook_line and caption in ${name}, even when a line of this window is in another language.` : "";
+}
 /** The hours to read whole: the strongest by the chat's candidates (their scores summed), not muted, in stream order. */
 /** A quiet chat (owner, Nov 22 2026: a 3.4 h Kick stream at 18 messages a minute gave 15 chat moments and 8 more from the
  *  2 hours heard; 2 of the 23 passed, for 10 asked, and 1.4 h was never heard): when the chat is quiet or its moments are
@@ -505,7 +525,7 @@ async function readHour(deps: StreamDeps, b: Broadcast, audioUrl: string, hour: 
     const raw: RawMoment[] = [];
     for (const w of windows(lines)) raw.push(...await (deps.pick ?? ((ls: Line[]) => chooseWithClaude(pickDeps, { lines: ls, meta: { title: b.title || null, channel: b.channel || null, description: "", chapters: [], replay: [] } as any, length, wanted: HYBRID.wanted_per_window }, u)))(w));
     const moments = finalizeMoments(raw, lines, heard.words, length, 12, CLIP_LIMITS.min_score, heard.events).map((m) => ({ ...m, start: round2(m.start + start), end: round2(m.end + start) }));
-    return { read: { hour, start, seconds: got, words: heard.words, events: heard.events, door: sttProvider(env) }, moments };
+    return { read: { hour, start, seconds: got, words: heard.words, events: heard.events, door: sttProvider(env), language: heard.language ?? null }, moments };
   } catch (err: any) { (deps.log ?? console.log)(`[live] hour ${hour} not read: ${String(err?.message ?? err).slice(0, 160)}`); return null; }
   finally { await rm(file, { force: true }).catch(() => undefined); }
 }
@@ -754,6 +774,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // the hybrid (HYBRID): the strongest hours heard whole and read by Clips' own picker; its moments join the candidates
     // (a chat candidate within 90 s takes the picker's cut instead), the two orders interleaved, the chat's first
     const hourReads: HourRead[] = [];
+    const langVotes = new Map<string, number>(); // the run's language, from all it hears (runLanguage)
     if ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off") {
       // a part of up to the hybrid's hours is read whole, newest first (what nobody has clipped yet); otherwise the
       // clock hours the chat reacted to most, inside the part
@@ -772,6 +793,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         const reads = (await Promise.all(hours.map((h, k) => readHour(deps, b, pl.audio, h, dir!, u, length, stretches[k])))).filter((r): r is NonNullable<typeof r> => !!r);
         const picked = reads.flatMap((r) => r.moments).filter((m) => inPart(m.start)).sort((x, y) => y.score - x.score);
         hourReads.push(...reads.map((r) => r.read));
+        for (const r of reads) voteLanguage(langVotes, r.read.language, r.read.words.length);
         const extra: Candidate[] = []; const pickScore = new Map<Candidate, number>();
         for (const m of picked) {
           const near = cands.find((c) => Math.abs(c.t_event - m.start) < HYBRID.near_s || (m.start < c.t_event + 60 && m.end > c.t_event - 60));
@@ -833,6 +855,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         const got = deps.fetchWindow ? span : (await probeLocal(audio).catch(() => ({ seconds: 0 }))).seconds || 0;
         if (got < Math.min(30, span * 0.5)) { unheard++; log(`[live] window ${c.rank} of ${job.id} at ${Math.round(start)} s is ${Math.round(got)} s of ${Math.round(span)}: muted or empty, skipped`); continue; }
         heard = await hear(audio, dir); heardOk++;
+        voteLanguage(langVotes, heard.language, heard.words.length);
       } catch (err: any) { unheard++; log(`[live] window ${c.rank} of ${job.id} at ${Math.round(start)} s not heard: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
       finally { await rm(audio, { force: true }).catch(() => undefined); }
       checked++;
@@ -854,7 +877,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const before = read && start > read.start ? heardFromRead(read, Math.max(read.start, start - 300), Math.min(300, start - read.start)).words : [];
       const context = before.length ? `\n\nThe five minutes before the window, for context only (the clip cannot start here):\n${before.map((w) => w.text).join(" ").slice(-1800)}` : "";
       const peaks = heard.excess ? loudPeaks(heard.excess, 5) : [];
-      const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.${c.source === "words" ? " This moment was found in the words of the stream, not by a chat burst; the proposed cut is the picker's." : c.cut ? " The chat burst here and the picker of the words proposed this cut." : ""}`;
+      const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.${languageLine(runLanguage(langVotes))}${c.source === "words" ? " This moment was found in the words of the stream, not by a chat burst; the proposed cut is the picker's." : c.cut ? " The chat burst here and the picker of the words proposed this cut." : ""}`;
       const times = [...new Set([lines[cut.s]?.start ?? 0, eventRel, peakRel, (lines[cut.s]?.start ?? 0 + (lines[cut.e]?.end ?? span)) / 2, lines[cut.e]?.end ?? span, Math.min(span - 1, peakRel + 20)].map((t) => Math.round(Math.max(0, Math.min(span - 1, t)))))].sort((a, c) => a - c).slice(0, 6);
       const frames = await stills(pl.video, times.map((t) => start + t), dir, `s${c.rank}`);
       let v: Verdict;

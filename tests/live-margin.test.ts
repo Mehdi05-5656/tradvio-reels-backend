@@ -57,3 +57,19 @@ test("when many moments were explicit or slurs, the run's note says so and why i
 test("a little mixing of languages is normal and never a reason to turn a moment down", () => {
   assert.match(VERIFY_SYSTEM, /A little mixing is never a reason to lower a grade/);
 });
+
+test("the run's language is settled from all it heard, by words, and the moment checker is told it (Nov 23 2026: French titles for an English stream)", async () => {
+  const { runLanguage, voteLanguage, languageLine } = await import("../src/studio-live-clips.js");
+  const v = new Map<string, number>();
+  assert.equal(runLanguage(v), null);
+  assert.equal(languageLine(null), "", "nothing heard yet: no line");
+  voteLanguage(v, "eng", 5000); // an hour heard whole
+  voteLanguage(v, "fra", 300);  // one window with French in it
+  voteLanguage(v, null, 900); voteLanguage(v, "eng", 0);
+  assert.equal(runLanguage(v), "eng");
+  assert.match(languageLine("eng"), /The stream is in English: write the title, hook_line and caption in English/);
+  assert.match(languageLine("ara"), /in Arabic/);
+  assert.match(languageLine("xyz"), /in xyz/, "an unknown code is passed as it is");
+  const fr = new Map<string, number>(); voteLanguage(fr, "fra", 4000); voteLanguage(fr, "eng", 800);
+  assert.equal(runLanguage(fr), "fra", "a French stream with some English stays French");
+});
