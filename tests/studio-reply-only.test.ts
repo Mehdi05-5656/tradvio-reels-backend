@@ -286,8 +286,8 @@ test("attach: a post with the DM off gets a reply-only rule on Instagram and Fac
   assert.deepEqual(sb.tables.studio_reply_rules.map((r: any) => [r.account_id, r.post_id, r.comment_reply]), [["acc-ig", "zpost1", "It's in my bio 🔗"], ["acc-fb", "zpost1", "It's in my bio 🔗"]]);
   assert.equal(svc.calls.filter((c) => c.method === "POST" && c.path === "/comment-automations").length, 0);
   const batch = [1, 2].map((i) => ({ provider_post_id: `zpostb${i}`, platforms: ["instagram"], status: "scheduled" }));
-  assert.deepEqual((await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {} })).on, [{ platform: "instagram", username: "ann", scope: "account" }]);
-  assert.deepEqual((await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {} })).on, [{ platform: "instagram", username: "ann", scope: "account", reused: true }]);
+  assert.deepEqual((await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {} })).on, [{ platform: "instagram", username: "ann", account_id: "acc-ig", scope: "account" }]);
+  assert.deepEqual((await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {} })).on, [{ platform: "instagram", username: "ann", account_id: "acc-ig", scope: "account", reused: true }]);
   const noText = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost2", platforms: ["instagram"], status: "scheduled" }], { keywords: ["X"], dm: false }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
   assert.deepEqual(noText.skipped.map((x) => x.reason), ["no_reply_text"]);
   const off = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost3", platforms: ["instagram"], status: "scheduled" }], spec, { env: { ...ENV, STUDIO_AUTOREPLY_REPLY_ONLY: "" }, fetch: svc.fetchFn, log: () => {} });

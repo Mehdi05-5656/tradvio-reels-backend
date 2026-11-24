@@ -15,7 +15,7 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SocialError, type SocialDeps } from "./social-provider.js";
-import { zernioClient } from "./social-zernio.js";
+import { zernioClient, DM_NETWORKS, REPLY_NETWORKS } from "./social-zernio.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import { touchSocial } from "./studio-social-upkeep.js";
@@ -23,8 +23,6 @@ import { cleanOwnRule, isOwnRuleId, ownRulesOf, publicOwnRule, replyOnlyOn, stat
 
 /** Live rules a person may have at once, by plan (owner may change; the owner's own account is not limited). */
 export const AUTOREPLY_LIMITS: Record<string, number> = { starter: 3, creator: 10, studio: 25 };
-const DM_NETWORKS = ["instagram", "facebook"];
-const REPLY_NETWORKS = ["instagram", "facebook", "tiktok", "youtube", "threads", "linkedin"];
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 type Env = Record<string, string | undefined>;
@@ -95,12 +93,15 @@ export function publicRule(a: any, platformOf: (accountId: string) => string | n
   };
 }
 
-/** What a linked account can do, from the permissions the person granted (comments, messages). */
+/** What a linked account can do, from the permissions the person granted (comments, messages). The service sums them up
+ *  per area (scopeAreas: comments / messaging "granted"); its scope lists leave some out (a TikTok business account
+ *  lists no comment scope there although it has one: @alexwilltry, Nov 24 2026), so either counts. */
 export function capabilityOf(platform: string, health: any): { reply: boolean; dm: boolean } {
+  const areas = health?.permissions?.scopeAreas ?? {};
   const scopes: Array<{ scope: string; granted: boolean }> = [...(health?.permissions?.posting ?? []), ...(health?.permissions?.analytics ?? []), ...(health?.permissions?.optional ?? [])];
   const granted = scopes.filter((x) => x?.granted).map((x) => String(x.scope).toLowerCase());
-  const reply = granted.some((s) => /comment|engagement|force-ssl|replies|read_user_content/.test(s));
-  const dm = DM_NETWORKS.includes(platform) && granted.some((s) => /messag/.test(s));
+  const reply = areas.comments === "granted" || granted.some((s) => /comment|engagement|force-ssl|replies|read_user_content/.test(s));
+  const dm = DM_NETWORKS.includes(platform) && (areas.messaging === "granted" || granted.some((s) => /messag/.test(s)));
   return { reply: REPLY_NETWORKS.includes(platform) && reply, dm };
 }
 
@@ -183,7 +184,23 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
       const stats = await statsOf(sb, own.map((r) => r.id));
       const rules = [...theirs, ...own.map((r) => publicOwnRule(r, stats.get(r.id)))].sort((x, y) => String(x.created_at ?? "").localeCompare(String(y.created_at ?? "")));
       // reply_only: whether a rule on Instagram or Facebook may leave the DM off
-      res.json({ enabled: true, reply_only: replyOnlyOn(env), accounts, rules, limit: limitOf(ctx.cust), used: rules.filter((r) => r.active).length });
+      const waiting = (await waitingSummary(sb, u)).filter((w) => accounts.some((a) => a.id === w.account_id));
+      res.json({ enabled: true, reply_only: replyOnlyOn(env), accounts, rules, limit: limitOf(ctx.cust), used: rules.filter((r) => r.active).length, waiting });
+    } catch (e) { fail(res, e); }
+  });
+
+  // Start the auto-replies that waited for a permission (after Allow; the relink webhook does the same by itself).
+  const resuming = new Map<string, number>();
+  app.post("/api/studio/autoreply/resume", async (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    if (!client()) return res.json({ on: [], skipped: [], waiting: 0 });
+    const last = resuming.get(u) ?? 0;
+    if (Date.now() - last < 5000) return res.status(429).json({ error: "slow_down", detail: "One moment" });
+    resuming.set(u, Date.now());
+    try {
+      const sb = sbFn(); await ctxOf(sb, u); // a plan and a posting profile
+      const accountId = typeof req.body?.account_id === "string" && ID_RE.test(req.body.account_id) ? req.body.account_id : undefined;
+      res.json(await resumeAutoReplies(sb, u, { env, log, fetch: deps.fetch, accountId }));
     } catch (e) { fail(res, e); }
   });
 
@@ -354,12 +371,16 @@ export function registerAutoReplies(app: Express, sbFn: () => SupabaseClient, de
 /** What the person asked for alongside a post: one keyword set, the DM (Instagram, Facebook) and the public reply. */
 /** dm: false on Instagram and Facebook means a public reply only (studio-reply-only.ts); left out, a DM is sent as before. */
 export type AutoReplySpec = { keywords?: string[]; dm_message?: string; button?: { title: string; url: string } | null; comment_reply?: string; name?: string; dm?: boolean };
-export type AttachResult = { on: Array<{ platform: string; username?: string | null; scope: "post" | "account"; reused?: boolean }>; skipped: Array<{ platform: string; username?: string | null; reason: "needs_permission" | "limit" | "no_reply_text" | "not_linked" | "failed"; detail?: string }> };
+export type AttachResult = { on: Array<{ platform: string; username?: string | null; account_id?: string; scope: "post" | "account"; reused?: boolean }>; skipped: Array<{ platform: string; username?: string | null; account_id?: string; reason: "needs_permission" | "limit" | "no_reply_text" | "not_linked" | "failed"; detail?: string; /** kept on the post; starts once the account allows it */ waiting?: boolean }> };
+/** An auto-reply waiting for an account's permission, kept on the post (options.autoreply_wait) so it starts by itself
+ *  once the person allows replies and DMs (the Allow button or the relink), instead of being lost (owner, Nov 24 2026). */
+export type AutoReplyWait = { spec: AutoReplySpec; accounts: string[]; via?: string; since: string };
+type PostIn = { id?: string; batch_id?: string | null; provider_post_id: string | null; platforms: string[]; options?: any; status: string };
 
 /** Turn on the auto-reply for posts just made. One post: a rule bound to that post on each network (it arms itself when
  *  a scheduled post goes out). Several posts (a batch of clips): one rule per account for every post, reused when the
  *  same keywords already have one. Never throws: the posts went out either way; what could not be set up is reported. */
-export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Array<{ provider_post_id: string | null; platforms: string[]; options?: any; status: string }>, spec: AutoReplySpec, deps: SocialDeps & { via?: string } = {}): Promise<AttachResult> {
+export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: PostIn[], spec: AutoReplySpec, deps: SocialDeps & { via?: string; /** only these accounts (resuming waiting ones) */ only?: string[] } = {}): Promise<AttachResult> {
   const env = deps.env ?? process.env, log = deps.log ?? ((s: string) => console.log(s));
   const out: AttachResult = { on: [], skipped: [] };
   try {
@@ -382,57 +403,59 @@ export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Ar
     const accOf = (t: { id: string | null; platform: string }) => (t.id ? accounts.find((a) => String(a._id) === t.id && a.isActive !== false) : accounts.find((a) => a.platform === t.platform && a.isActive !== false)) ?? null;
     const wanted = new Map<string, { platform: string; acc: any }>();
     for (const p of live) for (const t of sendsIn(p)) { const acc = accOf(t); const k = acc ? `a:${acc._id}` : `n:${t.platform}`; if (!wanted.has(k)) wanted.set(k, { platform: t.platform, acc }); }
+    const only = deps.only ? new Set(deps.only.map(String)) : null;
     for (const { platform, acc } of wanted.values()) {
+      if (only && (!acc || !only.has(String(acc._id)))) continue;
       if (!acc) { out.skipped.push({ platform, reason: "not_linked" }); continue; }
-      const username = acc.username ? String(acc.username) : null;
+      const username = acc.username ? String(acc.username) : null, account_id = String(acc._id);
       const dmNet = DM_NETWORKS.includes(platform);
       const replyOnly = dmNet && spec.dm === false;
-      if ((!dmNet || replyOnly) && !spec.comment_reply?.trim()) { out.skipped.push({ platform, username, reason: "no_reply_text" }); continue; }
-      if (replyOnly && !replyOnlyOn(env)) { out.skipped.push({ platform, username, reason: "failed", detail: "Replies without a DM are not available yet" }); continue; }
+      if ((!dmNet || replyOnly) && !spec.comment_reply?.trim()) { out.skipped.push({ platform, username, account_id, reason: "no_reply_text" }); continue; }
+      if (replyOnly && !replyOnlyOn(env)) { out.skipped.push({ platform, username, account_id, reason: "failed", detail: "Replies without a DM are not available yet" }); continue; }
       const h = await c.call("GET", `/accounts/${encodeURIComponent(acc._id)}/health`).catch(() => null);
       const can = capabilityOf(platform, h?.body);
-      if (dmNet && !replyOnly ? !(can.dm && can.reply) : !can.reply) { out.skipped.push({ platform, username, reason: "needs_permission" }); continue; }
+      if (dmNet && !replyOnly ? !(can.dm && can.reply) : !can.reply) { out.skipped.push({ platform, username, account_id, reason: "needs_permission", waiting: true }); continue; }
       if (replyOnly) {
         // reply only on Instagram or Facebook: our own rule (one post, or one for every post in a batch)
         let fields: Partial<OwnRuleRow>;
         try { fields = cleanOwnRule({ name: spec.name || `Keyword ${spec.keywords?.[0] ?? ""}`.trim(), keywords: spec.keywords, comment_reply: spec.comment_reply, match: "word" }); }
-        catch (e: any) { out.skipped.push({ platform, username, reason: "failed", detail: e?.message }); continue; }
+        catch (e: any) { out.skipped.push({ platform, username, account_id, reason: "failed", detail: e?.message }); continue; }
         const mineOwn = live.filter((p) => sendsIn(p).some((t) => accOf(t) && String(accOf(t)!._id) === String(acc._id)));
         if (mineOwn.length > 1) {
           const same = own.find((r) => r.account_id === String(acc._id) && !r.post_id && !r.platform_post_id && (r.keywords ?? []).map((k) => k.toLowerCase()).sort().join("|") === keys);
           if (same) {
-            if (!same.active) { if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; } room--; }
+            if (!same.active) { if (room <= 0) { out.skipped.push({ platform, username, account_id, reason: "limit" }); continue; } room--; }
             await sb.from("studio_reply_rules").update({ comment_reply: fields.comment_reply, active: true, updated_at: new Date().toISOString() }).eq("id", same.id).eq("user_id", u);
-            out.on.push({ platform, username, scope: "account", reused: true }); continue;
+            out.on.push({ platform, username, account_id, scope: "account", reused: true }); continue;
           }
         }
-        if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; }
+        if (room <= 0) { out.skipped.push({ platform, username, account_id, reason: "limit" }); continue; }
         const one = mineOwn.length === 1 ? String(mineOwn[0].provider_post_id) : null;
         const ins = await sb.from("studio_reply_rules").insert({ ...fields, name: (one ? fields.name! : `${fields.name} (every post)`).slice(0, 60), post_id: one, user_id: u, account_id: String(acc._id), platform }).select("id").maybeSingle();
-        if (ins.error) { out.skipped.push({ platform, username, reason: "failed", detail: "Could not set it up" }); continue; }
-        room--; out.on.push({ platform, username, scope: one ? "post" : "account" });
+        if (ins.error) { out.skipped.push({ platform, username, account_id, reason: "failed", detail: "Could not set it up" }); continue; }
+        room--; out.on.push({ platform, username, account_id, scope: one ? "post" : "account" });
         continue;
       }
       let fields: Record<string, any>;
       try { fields = cleanRule({ name: spec.name || `Keyword ${spec.keywords?.[0] ?? ""}`.trim(), keywords: spec.keywords, dm_message: dmNet ? spec.dm_message : undefined, button: dmNet ? spec.button ?? undefined : undefined, comment_reply: spec.comment_reply, match: "word" }, platform); }
-      catch (e: any) { out.skipped.push({ platform, username, reason: "failed", detail: e?.message }); continue; }
+      catch (e: any) { out.skipped.push({ platform, username, account_id, reason: "failed", detail: e?.message }); continue; }
       const mine = live.filter((p) => sendsIn(p).some((t) => accOf(t) && String(accOf(t)!._id) === String(acc._id)));
       if (mine.length > 1) {
         // a batch: one rule for every post on this account; the same keywords reuse the rule already there
         const same = rules.find((r) => String(r.accountId) === String(acc._id) && !r.platformPostId && !r.postId && (r.keywords ?? []).map((k: string) => k.toLowerCase()).sort().join("|") === keys);
         if (same) {
-          if (same.isActive === false) { if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; } room--; }
+          if (same.isActive === false) { if (room <= 0) { out.skipped.push({ platform, username, account_id, reason: "limit" }); continue; } room--; }
           await c.call("PATCH", `/comment-automations/${encodeURIComponent(same.id ?? same._id)}`, { body: { ...fields, isActive: true } });
-          out.on.push({ platform, username, scope: "account", reused: true }); continue;
+          out.on.push({ platform, username, account_id, scope: "account", reused: true }); continue;
         }
-        if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; }
+        if (room <= 0) { out.skipped.push({ platform, username, account_id, reason: "limit" }); continue; }
         const r = await c.call("POST", "/comment-automations", { body: { ...fields, name: `${fields.name} (every post)`.slice(0, 60), profileId, accountId: String(acc._id) } });
-        if (r.status >= 300) { out.skipped.push({ platform, username, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
-        room--; out.on.push({ platform, username, scope: "account" });
+        if (r.status >= 300) { out.skipped.push({ platform, username, account_id, ...(r.status === 403 ? { reason: "needs_permission" as const, waiting: true } : { reason: "failed" as const, detail: c.clean(r.body?.error, "Could not set it up") }) }); continue; }
+        room--; out.on.push({ platform, username, account_id, scope: "account" });
         continue;
       }
       // one post: bound to it; a scheduled post arms the rule when it goes out, a published one is bound by its network id
-      if (room <= 0) { out.skipped.push({ platform, username, reason: "limit" }); continue; }
+      if (room <= 0) { out.skipped.push({ platform, username, account_id, reason: "limit" }); continue; }
       const postId = String(mine[0].provider_post_id);
       let r = await c.call("POST", "/comment-automations", { body: { ...fields, profileId, accountId: String(acc._id), postId } });
       if (r.status >= 300 && r.status !== 403) {
@@ -440,9 +463,13 @@ export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Ar
         const pid = ((got.body?.post?.platforms ?? []) as any[]).find((x) => (x.accountId?._id ?? x.accountId) ? String(x.accountId?._id ?? x.accountId) === String(acc._id) : x.platform === platform)?.platformPostId;
         if (pid) r = await c.call("POST", "/comment-automations", { body: { ...fields, profileId, accountId: String(acc._id), platformPostId: String(pid) } });
       }
-      if (r.status >= 300) { out.skipped.push({ platform, username, reason: r.status === 403 ? "needs_permission" : "failed", detail: c.clean(r.body?.error, "Could not set it up") }); continue; }
-      room--; out.on.push({ platform, username, scope: "post" });
+      if (r.status >= 300) { out.skipped.push({ platform, username, account_id, ...(r.status === 403 ? { reason: "needs_permission" as const, waiting: true } : { reason: "failed" as const, detail: c.clean(r.body?.error, "Could not set it up") }) }); continue; }
+      room--; out.on.push({ platform, username, account_id, scope: "post" });
     }
+    // what waits for a permission stays on its posts; what started (or can no longer start) is cleared
+    const waitIds = new Set(out.skipped.filter((x) => x.waiting && x.account_id).map((x) => x.account_id!));
+    const touched = new Set([...out.on, ...out.skipped].map((x) => x.account_id).filter(Boolean) as string[]);
+    await noteWaiting(sb, u, live, (p) => sendsIn(p).map((t) => accOf(t)).filter(Boolean).map((a) => String(a._id)), waitIds, touched, spec, deps.via, log);
     for (const x of out.on) recordEvent({ user_id: u, kind: "feature", name: "autoreply_created", props: { platform: x.platform, via: deps.via ?? "post", scope: x.scope, reused: !!x.reused, dm: DM_NETWORKS.includes(x.platform) && spec.dm !== false } });
     for (const x of out.skipped) recordEvent({ user_id: u, kind: "feature", name: "autoreply_skipped", props: { platform: x.platform, via: deps.via ?? "post", reason: x.reason } });
     if (out.on.length) await touchSocial(sb, u);
@@ -450,5 +477,81 @@ export async function attachAutoReplies(sb: SupabaseClient, u: string, posts: Ar
     log(`[autoreply] attach for ${u} failed: ${String(e?.message ?? e).slice(0, 160)}`);
     for (const p of [...new Set(posts.flatMap((x) => x.platforms))]) if (!out.on.some((o) => o.platform === p) && !out.skipped.some((s) => s.platform === p)) out.skipped.push({ platform: p, reason: "failed" });
   }
+  return out;
+}
+
+/** Keep (or clear) the waiting auto-reply on each post: the accounts of the post still waiting for a permission. */
+async function noteWaiting(sb: SupabaseClient, u: string, posts: PostIn[], accountsOf: (p: PostIn) => string[], waitIds: Set<string>, touched: Set<string>, spec: AutoReplySpec, via: string | undefined, log: (s: string) => void) {
+  const ids = posts.map((p) => p.id).filter(Boolean) as string[];
+  if (!ids.length || (!waitIds.size && !posts.some((p) => p.options?.autoreply_wait))) return;
+  const now = new Date().toISOString();
+  // read the options fresh (a webhook may have written results since) and change only autoreply_wait
+  const cur = await sb.from("studio_social_posts").select("id,options").eq("user_id", u).in("id", ids);
+  if (cur.error) { log(`[autoreply] could not note waiting auto-replies for ${u}: ${String(cur.error.message).slice(0, 120)}`); return; }
+  for (const row of (cur.data ?? []) as Array<{ id: string; options: any }>) {
+    const post = posts.find((p) => p.id === row.id); if (!post) continue;
+    const prev: AutoReplyWait | undefined = row.options?.autoreply_wait;
+    const mine = accountsOf(post);
+    // accounts not looked at this time keep waiting as they were
+    const still = [...new Set([...mine.filter((a) => waitIds.has(a)), ...(prev?.accounts ?? []).filter((a) => !touched.has(a))])];
+    if (!still.length && !prev) continue;
+    const { autoreply_wait: _w, ...rest } = row.options ?? {};
+    const next = still.length ? { ...rest, autoreply_wait: { spec: prev?.spec ?? spec, accounts: still, via: prev?.via ?? via, since: prev?.since ?? now } satisfies AutoReplyWait } : rest;
+    if (prev && still.length === prev.accounts.length && still.every((a) => prev.accounts.includes(a))) continue;
+    const w = await sb.from("studio_social_posts").update({ options: next }).eq("id", row.id).eq("user_id", u);
+    if (w.error) log(`[autoreply] could not save the waiting auto-reply on ${row.id}: ${String(w.error.message).slice(0, 120)}`);
+  }
+}
+
+const WAIT_DAYS = 30;
+/** Posts of the person with an auto-reply waiting for a permission (the last 30 days, still live). */
+async function waitingPosts(sb: SupabaseClient, u: string): Promise<Array<PostIn & { id: string; options: any }>> {
+  const r = await sb.from("studio_social_posts").select("id,batch_id,provider_post_id,platforms,options,status,created_at")
+    .eq("user_id", u).not("options->autoreply_wait", "is", null).gte("created_at", new Date(Date.now() - WAIT_DAYS * 86400_000).toISOString())
+    .in("status", ["scheduled", "sending", "published", "partial"]).order("created_at", { ascending: true }).limit(500);
+  if (r.error) throw r.error;
+  return ((r.data ?? []) as any[]).filter((p) => Array.isArray(p.options?.autoreply_wait?.accounts) && p.options.autoreply_wait.accounts.length);
+}
+
+/** What waits, by account (the Auto-replies page and the post add-on show it with an Allow button). */
+export async function waitingSummary(sb: SupabaseClient, u: string): Promise<Array<{ account_id: string; posts: number; keyword: string | null; since: string }>> {
+  const by = new Map<string, { account_id: string; posts: number; keyword: string | null; since: string }>();
+  for (const p of await waitingPosts(sb, u).catch(() => [])) {
+    const w: AutoReplyWait = p.options.autoreply_wait;
+    for (const a of w.accounts) { const x = by.get(a) ?? { account_id: a, posts: 0, keyword: w.spec?.keywords?.[0] ?? null, since: w.since }; x.posts++; if (w.since < x.since) x.since = w.since; by.set(a, x); }
+  }
+  return [...by.values()];
+}
+
+/** Start the auto-replies that were waiting for a permission (all, or one account's). Each send (batch) is resumed as it
+ *  was asked: one post gets a rule on that post, a batch one rule for every post. What still lacks the permission keeps
+ *  waiting. Never throws. */
+const resumeChain = new Map<string, Promise<unknown>>();
+export function resumeAutoReplies(sb: SupabaseClient, u: string, deps: SocialDeps & { accountId?: string } = {}): Promise<AttachResult & { waiting: number }> {
+  // one at a time per person: the relink webhook and the app's Allow both resume, and two at once would make the same
+  // rule twice (two DMs per comment); the second one runs after the first and finds nothing left waiting
+  const prev = resumeChain.get(u) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(() => resumeOnce(sb, u, deps));
+  resumeChain.set(u, run);
+  void run.finally(() => { if (resumeChain.get(u) === run) resumeChain.delete(u); });
+  return run;
+}
+async function resumeOnce(sb: SupabaseClient, u: string, deps: SocialDeps & { accountId?: string }): Promise<AttachResult & { waiting: number }> {
+  const out: AttachResult & { waiting: number } = { on: [], skipped: [], waiting: 0 };
+  const log = deps.log ?? ((s: string) => console.log(s));
+  try {
+    const rows = await waitingPosts(sb, u);
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) { const k = p.batch_id ?? p.id; groups.set(k, [...(groups.get(k) ?? []), p]); }
+    for (const list of groups.values()) {
+      const accounts = [...new Set(list.flatMap((p) => (p.options.autoreply_wait as AutoReplyWait).accounts))].filter((a) => !deps.accountId || a === deps.accountId);
+      if (!accounts.length) continue;
+      const w: AutoReplyWait = list[0].options.autoreply_wait;
+      const r = await attachAutoReplies(sb, u, list, w.spec, { ...deps, via: "allowed", only: accounts });
+      out.on.push(...r.on); out.skipped.push(...r.skipped);
+    }
+    out.waiting = (await waitingPosts(sb, u)).length;
+    if (out.on.length) log(`[autoreply] ${u}: ${out.on.length} waiting auto-repl${out.on.length === 1 ? "y" : "ies"} started`);
+  } catch (e: any) { log(`[autoreply] resume for ${u} failed: ${String(e?.message ?? e).slice(0, 160)}`); }
   return out;
 }

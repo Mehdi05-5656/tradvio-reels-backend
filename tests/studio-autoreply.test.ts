@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { cleanRule, publicRule, capabilityOf, registerAutoReplies, AUTOREPLY_LIMITS } from "../src/studio-autoreply.js";
-import { zernioProvider } from "../src/social-zernio.js";
+import { zernioProvider, linkScopes } from "../src/social-zernio.js";
 import { accountAccess } from "../src/account-access.js";
 
 const ANN = "11111111-1111-4111-8111-111111111111", BOB = "22222222-2222-4222-8222-222222222222";
@@ -31,6 +31,18 @@ test("capability: replies need a comments permission, DMs a messages permission 
   assert.deepEqual(capabilityOf("instagram", h(["instagram_business_manage_comments", "instagram_business_manage_messages"])), { reply: true, dm: true });
   assert.deepEqual(capabilityOf("tiktok", h(["comment.list.manage", "message.list.send"])), { reply: true, dm: false });
   assert.deepEqual(capabilityOf("youtube", h(["https://www.googleapis.com/auth/youtube.force-ssl"])), { reply: true, dm: false });
+  // the service's per-area summary counts too: a TikTok business account lists no comment scope but has the area (live, Nov 24 2026)
+  assert.deepEqual(capabilityOf("tiktok", { permissions: { posting: [{ scope: "video.publish", granted: true }], scopeAreas: { posting: "granted", comments: "granted" } } }), { reply: true, dm: false });
+  assert.deepEqual(capabilityOf("instagram", { permissions: { optional: [{ scope: "instagram_business_manage_comments", granted: false }], scopeAreas: { comments: "not_requested", messaging: "not_requested" } } }), { reply: false, dm: false });
+  assert.deepEqual(capabilityOf("instagram", { permissions: { scopeAreas: { comments: "granted", messaging: "granted" } } }), { reply: true, dm: true });
+});
+
+test("linking asks for what auto-replies need from the first link", () => {
+  assert.equal(linkScopes("instagram"), "posting,analytics,comments,messaging");
+  assert.equal(linkScopes("facebook"), "posting,analytics,comments,messaging");
+  assert.equal(linkScopes("tiktok"), "posting,analytics,comments");
+  assert.equal(linkScopes("youtube"), "posting,analytics,comments");
+  assert.equal(linkScopes("bluesky"), "posting,analytics", "no auto-replies there, nothing more asked");
 });
 
 test("public rule: the page's own shape with a click-through rate", () => {
@@ -157,16 +169,16 @@ test("attach: one post binds a rule to it; a batch makes one rule per account an
   const sb = sbFor("starter");
   const spec = { keywords: ["GUIDE"], dm_message: "Here it is", comment_reply: "Sent you a DM 📩" };
   const one = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000a1", platforms: ["instagram", "tiktok"], status: "scheduled" }], spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "publish" });
-  assert.deepEqual(one.on, [{ platform: "instagram", username: "ann", scope: "post" }]);
+  assert.deepEqual(one.on, [{ platform: "instagram", username: "ann", account_id: "acc-ig", scope: "post" }]);
   assert.deepEqual(one.skipped.map((x) => [x.platform, x.reason]), [["tiktok", "needs_permission"]]);
   const made = svc.calls.filter((c) => c.method === "POST" && c.path === "/comment-automations");
   assert.equal(made[0].body.postId, "zpost000000000000000000a1", "bound to the post, armed when it goes out");
   assert.equal(made[0].body.dmMessage, "Here it is");
   const batch = [1, 2, 3].map((i) => ({ provider_post_id: `zpost00000000000000000b${i}`, platforms: ["instagram"], status: "scheduled" }));
   const b1 = await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "clips" });
-  assert.deepEqual(b1.on, [{ platform: "instagram", username: "ann", scope: "account" }]);
+  assert.deepEqual(b1.on, [{ platform: "instagram", username: "ann", account_id: "acc-ig", scope: "account" }]);
   const b2 = await attachAutoReplies(sb, ANN, batch, spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "clips" });
-  assert.deepEqual(b2.on, [{ platform: "instagram", username: "ann", scope: "account", reused: true }], "the same keywords reuse the batch rule");
+  assert.deepEqual(b2.on, [{ platform: "instagram", username: "ann", account_id: "acc-ig", scope: "account", reused: true }], "the same keywords reuse the batch rule");
   const third = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000c1", platforms: ["instagram"], status: "scheduled" }], { ...spec, keywords: ["NEW"] }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
   assert.equal(third.on.length, 1, "the third rule fits Starter's 3");
   const full = await attachAutoReplies(sb, ANN, [{ provider_post_id: "zpost000000000000000000c2", platforms: ["instagram"], status: "scheduled" }], { ...spec, keywords: ["MORE"] }, { env: ENV, fetch: svc.fetchFn, log: () => {} });
@@ -179,4 +191,69 @@ test("chat: the assistant's suggested auto-reply is cleaned", () => {
   assert.deepEqual(suggestReply({ keyword: "recipe!!", dm_message: "Here you go {{first_name}}", comment_reply: "Sent 📩" }), { keyword: "RECIPE", dm_message: "Here you go {{first_name}}", comment_reply: "Sent 📩" });
   assert.equal(suggestReply({ keyword: "   " }), null);
   assert.equal(suggestReply(null), null);
+});
+
+import { resumeAutoReplies, waitingSummary } from "../src/studio-autoreply.js";
+
+/** A database with the posts table, enough for waiting auto-replies (eq, in, not-null json, gte, order, limit, update). */
+function sbWithPosts(posts: any[]) {
+  const tables: Record<string, any[]> = {
+    studio_customers: [{ user_id: ANN, plan_id: "creator", status: "active" }],
+    studio_social_profiles: [{ user_id: ANN, provider: "zernio", profile_key: "prof-ann" }],
+    studio_social_posts: posts,
+  };
+  return {
+    tables,
+    from(t: string) {
+      const f: Array<(r: any) => boolean> = []; let one = false, upd: any = null;
+      const q: any = {
+        select() { return q; }, order() { return q; }, limit() { return q; }, maybeSingle() { one = true; return q; }, update(v: any) { upd = v; return q; },
+        eq(k: string, v: any) { f.push((r) => r[k] === v); return q; }, in(k: string, v: any[]) { f.push((r) => v.includes(r[k])); return q; },
+        gte(k: string, v: any) { f.push((r) => String(r[k]) >= String(v)); return q; },
+        not(k: string, _op: string, _v: any) { const [col, key] = k.split("->"); f.push((r) => r[col]?.[key] != null); return q; },
+        then(res: any, rej: any) { const rows = (tables[t] ?? []).filter((r) => f.every((g) => g(r))); if (upd) rows.forEach((r) => Object.assign(r, JSON.parse(JSON.stringify(upd)))); return Promise.resolve({ data: one ? rows[0] ?? null : JSON.parse(JSON.stringify(rows)), error: null }).then(res, rej); },
+      };
+      return q;
+    },
+  } as any;
+}
+
+test("waiting: an auto-reply refused for a missing permission stays on the post and starts once the account allows it", async () => {
+  const svc = fakeService();
+  const now = new Date().toISOString();
+  const post = { id: "p1", user_id: ANN, batch_id: "b1", provider_post_id: "zpost000000000000000000d1", platforms: ["instagram", "tiktok"], options: { accounts: [{ id: "acc-ig", platform: "instagram" }, { id: "acc-tt", platform: "tiktok" }], results: { x: 1 } }, status: "published", created_at: now };
+  const sb = sbWithPosts([post]);
+  const spec = { keywords: ["GUIDE"], dm_message: "Here it is", comment_reply: "Sent you a DM 📩" };
+  const first = await attachAutoReplies(sb, ANN, [post], spec, { env: ENV, fetch: svc.fetchFn, log: () => {}, via: "publish" });
+  assert.deepEqual(first.on.map((x) => x.account_id), ["acc-ig"]);
+  assert.deepEqual(first.skipped.map((x) => [x.account_id, x.reason, x.waiting]), [["acc-tt", "needs_permission", true]]);
+  const saved = sb.tables.studio_social_posts[0].options;
+  assert.deepEqual(saved.autoreply_wait.accounts, ["acc-tt"], "only the account that lacks the permission waits");
+  assert.deepEqual(saved.autoreply_wait.spec.keywords, ["GUIDE"]); assert.deepEqual(saved.results, { x: 1 }, "the post's other options are kept");
+  assert.deepEqual((await waitingSummary(sb, ANN)).map((w) => [w.account_id, w.posts, w.keyword]), [["acc-tt", 1, "GUIDE"]]);
+
+  // still not allowed: resuming leaves it waiting and makes no rule
+  const before = svc.calls.filter((c) => c.method === "POST").length;
+  const still = await resumeAutoReplies(sb, ANN, { env: ENV, fetch: svc.fetchFn, log: () => {} });
+  assert.equal(still.on.length, 0); assert.equal(still.waiting, 1);
+  assert.equal(svc.calls.filter((c) => c.method === "POST").length, before, "Instagram (already on) is not set up twice");
+
+  // the person allows it: the TikTok rule starts on that post and nothing waits any more
+  const allowed = fakeService();
+  const fetchAllowed = async (u: string, init: any) => (/\/accounts\/acc-tt\/health$/.test(new URL(u).pathname) ? new Response(JSON.stringify({ permissions: { scopeAreas: { comments: "granted" } } }), { status: 200 }) : /comment-automations$/.test(new URL(u).pathname) && init.method === "POST" ? new Response(JSON.stringify({ automation: { id: "ruleTT", ...JSON.parse(init.body) } }), { status: 201 }) : allowed.fetchFn(u, init));
+  const done = await resumeAutoReplies(sb, ANN, { env: ENV, fetch: fetchAllowed as any, log: () => {} });
+  assert.deepEqual(done.on.map((x) => [x.account_id, x.scope]), [["acc-tt", "post"]]);
+  assert.equal(done.waiting, 0);
+  assert.equal(sb.tables.studio_social_posts[0].options.autoreply_wait, undefined, "cleared once it started");
+  assert.deepEqual(sb.tables.studio_social_posts[0].options.results, { x: 1 });
+});
+
+test("waiting: two resumes at once (the relink webhook and Allow) make the rule once", async () => {
+  const post = { id: "p2", user_id: ANN, batch_id: "b2", provider_post_id: "zpost000000000000000000e1", platforms: ["tiktok"], options: { accounts: [{ id: "acc-tt", platform: "tiktok" }], autoreply_wait: { spec: { keywords: ["GUIDE"], comment_reply: "Sent!" }, accounts: ["acc-tt"], since: new Date().toISOString() } }, status: "published", created_at: new Date().toISOString() };
+  const sb = sbWithPosts([post]);
+  const base = fakeService(); let made = 0;
+  const f = async (u: string, init: any) => { const p = new URL(u).pathname; if (/\/accounts\/acc-tt\/health$/.test(p)) return new Response(JSON.stringify({ permissions: { scopeAreas: { comments: "granted" } } }), { status: 200 }); if (/comment-automations$/.test(p) && init.method === "POST") { made++; await new Promise((r) => setTimeout(r, 20)); return new Response(JSON.stringify({ automation: { id: `r${made}` } }), { status: 201 }); } return base.fetchFn(u, init); };
+  const [a, b] = await Promise.all([resumeAutoReplies(sb, ANN, { env: ENV, fetch: f as any, log: () => {} }), resumeAutoReplies(sb, ANN, { env: ENV, fetch: f as any, log: () => {}, accountId: "acc-tt" })]);
+  assert.equal(made, 1, "one rule, not two");
+  assert.equal(a.on.length + b.on.length, 1);
 });

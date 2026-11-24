@@ -1290,7 +1290,7 @@ export function registerAssistant(app: Express, sbFn: () => SupabaseClient, deps
         // what the auto-reply asked with the post did (it never held the post back)
         const ar = (posts as any).autoreply as { on: Array<{ platform: string }>; skipped: Array<{ platform: string; reason: string }> } | null | undefined;
         if (ar && (ar.on.length || ar.skipped.length)) {
-          const why: Record<string, string> = { needs_permission: "allow DMs and replies for it on the Auto-replies page", limit: "your plan's auto-replies are all on; pause one on the Auto-replies page", no_reply_text: "it needs a public reply text there", not_linked: "that account is not linked", failed: "it could not be set up" };
+          const why: Record<string, string> = { needs_permission: "it waits for one permission and starts on this post as soon as you press Allow on the Auto-replies page", limit: "your plan's auto-replies are all on; pause one on the Auto-replies page", no_reply_text: "it needs a public reply text there", not_linked: "that account is not linked", failed: "it could not be set up" };
           say(conv, [ar.on.length ? `Auto-reply on for ${listNames(ar.on.map((x) => x.platform))}: every matching comment gets answered.` : "", ar.skipped.length ? `No auto-reply on ${ar.skipped.map((x) => `${x.platform} (${why[x.reason] ?? "not set up"})`).join(", ")}.` : ""].filter(Boolean).join(" "));
         }
       });

@@ -14,7 +14,7 @@ import { getSocialProvider, providerNamed, isSocialPlatform, SocialError, status
 import { groupsOf, publicGroup, staggerTimes, varyCaptions } from "./studio-post-groups.js";
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
-import { attachAutoReplies, type AutoReplySpec } from "./studio-autoreply.js";
+import { attachAutoReplies, resumeAutoReplies, type AutoReplySpec } from "./studio-autoreply.js";
 import { handleComment, parseCommentEvent } from "./studio-reply-only.js";
 import { CLEAR_MESSAGE, clearProfile, keepUntil, recordSocialCosts, socialUpkeep, touchSocial, upkeepFacts, upkeepSettings, type ClearReason } from "./studio-social-upkeep.js";
 
@@ -496,6 +496,8 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
         if (accounts) await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", prof.data.user_id);
         log(`[social] ${hook.platform} ${hook.change}${hook.bySystem ? " (by the network)" : ""} for ${prof.data.user_id}`);
         if (!hook.bySystem) await touchSocial(sb, prof.data.user_id); // linking or relinking is use; a network dropping a link is not
+        // a (re)link may have granted replies and DMs: start any auto-reply that waited for it (never blocks the answer)
+        if (hook.change !== "unlink" && env.SOCIAL_PROVIDER === "zernio") void resumeAutoReplies(sb, prof.data.user_id, { env, log, fetch: deps.fetch, accountId: hook.accountId ?? undefined });
         recordEvent({ user_id: prof.data.user_id, kind: "feature", name: "social_network_changed", props: { platform: hook.platform, change: hook.change, by: hook.bySystem ? "network" : "person" } });
       }
       res.json({ ok: true });

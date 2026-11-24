@@ -74,6 +74,13 @@ function metricsOf(a: any): Pick<ProviderPost, "views" | "likes" | "comments" | 
 let webhookReady: string | null = null; // the URL registered in this process (one workspace endpoint)
 
 /** The bare HTTP client (also used by studio-autoreply.ts), or null without a key. */
+/** Networks whose comments Clone8 can answer, and the ones it can also DM from (auto-replies). */
+export const REPLY_NETWORKS = ["instagram", "facebook", "tiktok", "youtube", "threads", "linkedin"];
+export const DM_NETWORKS = ["instagram", "facebook"];
+/** The permission areas asked when an account is linked: posting and analytics, plus comments and messages where
+ *  auto-replies use them, so a first link already allows auto-replies (a later "Allow" only repairs a refusal). */
+export const linkScopes = (platform: string) => ["posting", "analytics", ...(REPLY_NETWORKS.includes(platform) ? ["comments"] : []), ...(DM_NETWORKS.includes(platform) ? ["messaging"] : [])].join(",");
+
 export function zernioClient(deps: SocialDeps = {}) {
   const env = deps.env ?? process.env;
   const key = env.ZERNIO_API_KEY;
@@ -158,8 +165,9 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
     async connectUrl(profileKey, opts = {}) {
       const platform = opts.platform;
       if (!platform || !offered().includes(platform)) throw new SocialError("pick_network", "Pick the network to link", 400);
-      // posting + analytics by default; auto-replies add comments + messages (asked only when someone turns them on)
-      const q = new URLSearchParams({ profileId: profileKey, welcome: "true", brandName: ZERNIO_BRAND.brandName, logoUrl: ZERNIO_BRAND.logoUrl, welcomeTheme: JSON.stringify(ZERNIO_BRAND.theme), scopes: opts.engage ? "posting,analytics,comments,messaging" : "posting,analytics" });
+      // posting + analytics, and from the first link what auto-replies need (owner, Nov 24 2026: the permissions are on
+      // from the start): comments where a network can answer them, messages where it can DM (Instagram, Facebook)
+      const q = new URLSearchParams({ profileId: profileKey, welcome: "true", brandName: ZERNIO_BRAND.brandName, logoUrl: ZERNIO_BRAND.logoUrl, welcomeTheme: JSON.stringify(ZERNIO_BRAND.theme), scopes: linkScopes(platform) });
       if (opts.redirect) q.set("redirect_url", opts.redirect);
       // relinking (or asking an account for comments and messages): that account refreshes in place, nothing is added
       if (opts.accountId || opts.engage) {

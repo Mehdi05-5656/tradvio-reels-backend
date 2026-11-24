@@ -65,13 +65,13 @@ test("zernio: a profile per person tagged with our id; an orphan from an earlier
   assert.equal((await taken.p.createProfile("t", "user-1")).profileKey, "old-1");
 });
 
-test("zernio: the link is Clone8-branded, asks only for posting and analytics, needs a network, relinks in place at the limit", async () => {
+test("zernio: the link is Clone8-branded, asks for posting, analytics and what auto-replies need from the start, needs a network, relinks in place at the limit", async () => {
   const { p, calls } = z();
   await assert.rejects(p.connectUrl(PROFILE, {}), (e: any) => e.code === "pick_network");
   const l = await p.connectUrl(PROFILE, { platform: "tiktok", redirect: "https://app.clone8.io/#studio/publish" });
   assert.match(l.url, /^https:\/\/zernio\.com\/connect\/welcome/);
   const q = calls.at(-1)!.url.searchParams;
-  assert.equal(q.get("welcome"), "true"); assert.equal(q.get("brandName"), "Clone8"); assert.equal(q.get("scopes"), "posting,analytics");
+  assert.equal(q.get("welcome"), "true"); assert.equal(q.get("brandName"), "Clone8"); assert.equal(q.get("scopes"), "posting,analytics,comments", "TikTok: comments for auto-replies (no DMs there)");
   assert.equal(q.get("logoUrl"), "https://clone8.io/brand/icon-512.png");
   assert.equal(JSON.parse(q.get("welcomeTheme")!).heading, "Link your {platform} to Clone8");
   assert.equal(q.get("redirect_url"), "https://app.clone8.io/#studio/publish");
