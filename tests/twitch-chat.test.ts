@@ -34,8 +34,10 @@ test("a plain read: every message once, in order", async () => {
 });
 
 test("Twitch answering pages EMPTY mid-stream is waited out and asked again, never taken as the end of the chat", async () => {
-  // every third call answers empty: the old reader stopped at the first one and called a busy chat quiet
-  const tw = fakeTwitch(300, (n) => (n % 3 === 1 ? "empty" : null));
+  // every page answers empty the first time it is asked (Twitch slowing us down), in full when asked again: the old
+  // reader stopped at the first empty page and called a busy chat quiet
+  const asked = new Set<number>();
+  const tw = fakeTwitch(300, (_n, at) => { if (asked.has(at)) return null; asked.add(at); return "empty"; });
   let r: ChatReadReport | null = null;
   const waits: number[] = [];
   const msgs = await twitchChatReplay({ env: {}, fetch: tw.fetch, sleep: async (ms) => { waits.push(ms); } }, "v2", 300, { slices: 3, report: (x) => { r = x; } });

@@ -180,11 +180,18 @@ const GQL_HASH = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf
  *  as too quiet; the same code from another address read everything). A stretch Twitch says is over is asked again by
  *  time; a read that comes out thin is read once more through the residential proxy (STUDIO_YT_PROXY) and the fuller
  *  read is kept. A quiet chat is small, so the proxy costs little when the chat really is quiet. */
-export const TWITCH_CHAT = { thin_per_minute: 60, reseeks: 300, page_tries: 6, empty_tries: 6, cool_ms: 1500, max_cool_ms: 30_000 };
-/** Twitch slows a reader down by answering pages EMPTY (status 200, no messages), not with a 429 (measured Nov 23 2026:
- *  single pages answer in full, a fast parallel read gets empty pages mid-stream). An empty page inside the stream is
- *  "busy": every reader of this server pauses together, the pause doubling while it lasts, and the page is asked again. */
-let twitchCoolUntil = 0, twitchCool = 0;
+export const TWITCH_CHAT = { thin_per_minute: 60, reseeks: 300, page_tries: 6, empty_tries: 7, in_flight: 2, empty_wait_ms: 400 };
+/** Twitch slows a reader down by answering pages EMPTY (status 200, no messages), not with a 429. Measured from one
+ *  address, Nov 23 2026: 1 request at a time 7.4 pages a second and none empty, 2 at a time 13.9 and none empty, 4 at a
+ *  time 20 % empty, 8 at a time half empty. So every chat read on this server shares TWITCH_CHAT.in_flight requests at
+ *  once (all runs together), and an empty page inside the stream is asked again after a short, growing wait. */
+let twitchActive = 0; const twitchWaiting: Array<() => void> = [];
+async function twitchSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (twitchActive >= TWITCH_CHAT.in_flight) await new Promise<void>((ok) => twitchWaiting.push(ok));
+  twitchActive++;
+  try { return await fn(); }
+  finally { twitchActive--; twitchWaiting.shift()?.(); }
+}
 export const twitchChatStats = { pages: 0, empty: 0 };
 export type ChatReadReport = { via: "direct" | "proxy"; pages: number; reseeks: number; found_after_end: number; empty_answers: number; direct_messages: number | null; odd: string | null };
 
@@ -238,18 +245,15 @@ async function readTwitch(deps: LiveDeps, videoId: string, seconds: number, o: {
     const nearEnd = Number.isFinite(Number(vars.contentOffsetSeconds)) && Number(vars.contentOffsetSeconds) >= seconds - 30;
     let empties = 0;
     for (let attempt = 0; ; attempt++) {
-      const wait = twitchCoolUntil - Date.now();
-      if (wait > 0) await sleep(wait);
-      const r = await twitchPage(deps, body, proxy, o.signal);
+      const r = await twitchSlot(() => twitchPage(deps, body, proxy, o.signal));
       report.pages++; twitchChatStats.pages++;
       const comments = r?.json?.[0]?.data?.video?.comments;
       if (comments && !(comments.edges ?? []).length && !nearEnd && empties < TWITCH_CHAT.empty_tries - 1 && !o.signal?.aborted) {
         empties++; report.empty_answers++; twitchChatStats.empty++;
-        twitchCool = Math.min(TWITCH_CHAT.max_cool_ms, twitchCool ? twitchCool * 2 : TWITCH_CHAT.cool_ms);
-        twitchCoolUntil = Math.max(twitchCoolUntil, Date.now() + twitchCool);
+        await sleep(TWITCH_CHAT.empty_wait_ms * 2 ** (empties - 1)); // 0.4, 0.8, 1.6, 3.2, 6.4, 12.8 s
         continue;
       }
-      if (comments) { if ((comments.edges ?? []).length) twitchCool = Math.max(0, Math.floor(twitchCool / 2)); return comments; }
+      if (comments) return comments;
       // what Twitch sent instead, once per read, for the log (the first sign of a change on their side)
       if (!report.odd) report.odd = `answer ${r?.status ?? "none"}: ${JSON.stringify(r?.json?.[0]?.errors ?? r?.json ?? null).slice(0, 200)}`;
       if (attempt >= TWITCH_CHAT.page_tries - 1 || o.signal?.aborted) throw new LiveSourceError("chat_unreadable", `Twitch's chat replay could not be read (${r?.status ?? "no answer"})`, 502, true);
