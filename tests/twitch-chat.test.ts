@@ -86,3 +86,12 @@ test("a chat that really is quiet is read once more through the proxy and stays 
   assert.equal(msgs.length, 30);
   assert.equal(r!.via, "direct", "not fuller through the proxy: the direct read is kept");
 });
+
+test("a part of a stream: only that stretch's chat is read (Nov 23 2026: a 2-hour part of a 15-hour stream read all 15 hours)", async () => {
+  const tw = fakeTwitch(3000);
+  let r: ChatReadReport | null = null;
+  const msgs = await twitchChatReplay({ env: {}, fetch: tw.fetch, sleep: noWait }, "v8", 2400, { from: 2100, report: (x) => { r = x; } });
+  assert.equal(msgs.length, 301, "seconds 2100 to 2400 only (the end second included, as at a stream's real end)");
+  assert.equal(msgs[0].t, 2100); assert.equal(msgs.at(-1)!.t, 2400);
+  assert.ok(r!.pages < 80, `about 60 pages, not 600 (${r!.pages})`);
+});

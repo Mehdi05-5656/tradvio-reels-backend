@@ -280,6 +280,9 @@ export function robustZ(x: number[], back = 60, least = 12): number[] {
 export type Candidate = { rank: number; onset: number; peak: number; last: number; t_event: number; score: number; zs: Record<string, number>; asks: number; sample: string[];
   /** "words" when Clips' picker found it in a read hour (HYBRID), else the chat's; `cut` is the picker's proposed cut (absolute seconds), on a chat candidate too when the picker marked the same minute */
   source?: "chat" | "words"; cut?: { start: number; end: number }; title?: string };
+/** How much chat is read around a part of a stream: before it, the chat's usual pace (a burst is a burst against it);
+ *  after it, room for the end-of-broadcast skip only at the real end. */
+export const CHAT_AROUND = { before_s: 900, after_s: 300 };
 export const CANDIDATE = { combined: 6, single: 3, rate_only: 3, asks: 3, merge_s: 90, min_messages: 8,
   /** a burst stays open while the combined signal holds this much (hysteresis); off: it chained neighbouring moments into one on the Nov 18 chats */ sustain: Infinity,
   /** a moment is at most this long; a longer wave of chat is several moments (a saturated chat merged whole stretches into one candidate) */ max_span_s: 180,
@@ -751,14 +754,22 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const tChat = Date.now(); let lastSaid = 0;
     // how the read went (Twitch: pages, empty answers waited out, stretches asked again, the proxy), for the log
     let chatRead: ChatReadReport | null = null;
-    const chat = await (deps.chat ?? ((x, onProgress) => b.platform === "twitch" ? twitchChatReplay(deps, x.id, x.seconds, { onProgress, signal: job.signal, report: (r) => { chatRead = r; } }) : kickChatReplay(deps, x.channel_id, x.started_at, x.seconds, { onProgress, signal: job.signal })))(b, (share) => {
+    // a part of the stream: only its chat is read, with CHAT_AROUND before it (the chat's usual pace there) and after it
+    // (Nov 23 2026: a 2-hour part of a 15-hour stream read all 15 hours of chat, 7 times the reading, behind Twitch's throttle)
+    const readFrom = part ? Math.max(0, part.from - CHAT_AROUND.before_s) : 0, readTo = part ? Math.min(b.seconds, part.to + CHAT_AROUND.after_s) : b.seconds;
+    const chatAll = await (deps.chat ?? ((x, onProgress) => b.platform === "twitch" ? twitchChatReplay(deps, x.id, readTo, { from: readFrom, onProgress, signal: job.signal, report: (r) => { chatRead = r; } }) : kickChatReplay(deps, x.channel_id, x.started_at, readTo, { from: readFrom, onProgress, signal: job.signal })))(b, (share) => {
       if (Date.now() - lastSaid > 15_000) { lastSaid = Date.now(); void renew(sb, job, { message: `Reading the chat replay · ${Math.round(share * 100)} %` }).catch(() => undefined); }
     });
-    timing.chat_s = Math.round((Date.now() - tChat) / 1000); timing.chat_messages = chat.length;
-    const signals = chatSignals(chat, b.seconds);
+    const chat = chatAll.filter((m) => m.t >= readFrom && m.t < readTo);
+    timing.chat_s = Math.round((Date.now() - tChat) / 1000); timing.chat_messages = chat.length; timing.chat_read = [readFrom, readTo];
+    // the read stretch's own signals (its pace, its bursts against its own usual), and the whole stream's clock for
+    // the lookups by stream time below (chatAt, baseAt)
+    const near = chatSignals(chat.map((m) => ({ ...m, t: m.t - readFrom })), readTo - readFrom);
+    const signals = chatSignals(chat, b.seconds); signals.perMinute = near.perMinute;
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute && chatRead) log(`[live] quiet read ${JSON.stringify({ job: job.id, messages: chat.length, read: chatRead })}`);
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute) throw new ClipsError("chat_too_quiet", `This stream's chat was too quiet to read (${Math.round(signals.perMinute)} messages a minute); Live Clips needs a chat that reacts`, 422);
-    const cands = chatCandidates(signals, chat).filter((c) => inPart(c.t_event));
+    const cands = chatCandidates(near, chat.map((m) => ({ ...m, t: m.t - readFrom })))
+      .map((c) => ({ ...c, onset: c.onset + readFrom, peak: c.peak + readFrom, last: c.last + readFrom, t_event: c.t_event + readFrom })).filter((c) => inPart(c.t_event));
     // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
     // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked;
     // most of those were likely past the 26.5-hour timestamp wrap, not muted: see hls-stretch.ts)

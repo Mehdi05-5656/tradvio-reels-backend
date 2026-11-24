@@ -208,10 +208,12 @@ async function twitchPage(deps: LiveDeps, body: string, proxy: string | null, si
   try { return { status, json: JSON.parse(lines.join("\n")) }; } catch { return { status, json: null }; }
 }
 
-export async function twitchChatReplay(deps: LiveDeps, videoId: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; report?: (r: ChatReadReport) => void; proxy?: "never" | "when_thin" } = {}): Promise<ChatMsg[]> {
+/** `seconds` is where the read ends; `o.from` where it starts (default 0): a run on a part of a stream reads only that
+ *  part's chat (and a little around it), not the whole stream's. */
+export async function twitchChatReplay(deps: LiveDeps, videoId: string, seconds: number, o: { from?: number; slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; report?: (r: ChatReadReport) => void; proxy?: "never" | "when_thin" } = {}): Promise<ChatMsg[]> {
   const log = deps.log ?? ((l: string) => console.log(l));
   const direct = await readTwitch(deps, videoId, seconds, o, null);
-  const minutes = Math.max(1, seconds / 60);
+  const minutes = Math.max(1, (seconds - Math.max(0, o.from ?? 0)) / 60);
   const proxy = e(deps).STUDIO_YT_PROXY || null;
   if (direct.msgs.length / minutes >= TWITCH_CHAT.thin_per_minute || !proxy || o.proxy === "never" || o.signal?.aborted) {
     o.report?.({ ...direct.report, via: "direct", direct_messages: null });
@@ -232,9 +234,10 @@ export async function twitchChatReplay(deps: LiveDeps, videoId: string, seconds:
   }
 }
 
-async function readTwitch(deps: LiveDeps, videoId: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal }, proxy: string | null): Promise<{ msgs: ChatMsg[]; report: ChatReadReport }> {
-  const slices = Math.max(1, Math.min(12, o.slices ?? Math.ceil(seconds / 1800)));
-  const span = seconds / slices;
+async function readTwitch(deps: LiveDeps, videoId: string, seconds: number, o: { from?: number; slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal }, proxy: string | null): Promise<{ msgs: ChatMsg[]; report: ChatReadReport }> {
+  const base = Math.max(0, Math.min(seconds, Math.floor(o.from ?? 0)));
+  const slices = Math.max(1, Math.min(12, o.slices ?? Math.ceil((seconds - base) / 1800)));
+  const span = (seconds - base) / slices;
   const out: ChatMsg[][] = Array.from({ length: slices }, () => []);
   const done = new Array(slices).fill(0);
   const report: ChatReadReport = { via: proxy ? "proxy" : "direct", pages: 0, reseeks: 0, found_after_end: 0, empty_answers: 0, direct_messages: null, odd: null };
@@ -261,7 +264,7 @@ async function readTwitch(deps: LiveDeps, videoId: string, seconds: number, o: {
     }
   };
   await Promise.all(out.map(async (bucket, k) => {
-    const from = Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : Math.floor((k + 1) * span);
+    const from = base + Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : base + Math.floor((k + 1) * span);
     let cursor: string | null = null; let seek: number | null = from; let last = from; let reseeks = 0;
     const kept = new Set<string>();
     /** Keeps this page's messages inside the stretch (once each); "end" when the page reaches past the stretch. */
@@ -393,15 +396,16 @@ export const KICK_CHAT_RETRIES = 6;
  *  message once, 25 a call, and a quiet stretch costs one call for minutes of chat. (Reading by `start_time` answered at
  *  most ~5 s of chat a call, empty or not: about ten times the calls, at Kick's ~2 calls a second.) The stream is read in
  *  up to 3 stretches at once; every call takes its turn in kickWeb's pace. */
-export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIso: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; maxCalls?: number } = {}): Promise<ChatMsg[]> {
+export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIso: string, seconds: number, o: { from?: number; slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; maxCalls?: number } = {}): Promise<ChatMsg[]> {
   const t0 = Date.parse(startedAtIso);
   if (!Number.isFinite(t0)) throw new LiveSourceError("chat_unreadable", "The broadcast's start time is unknown", 502);
-  const slices = Math.max(1, Math.min(3, o.slices ?? Math.ceil(seconds / 1800)));
-  const span = seconds / slices, maxCalls = o.maxCalls ?? 8000;
+  const base = Math.max(0, Math.min(seconds, Math.floor(o.from ?? 0)));
+  const slices = Math.max(1, Math.min(3, o.slices ?? Math.ceil((seconds - base) / 1800)));
+  const span = (seconds - base) / slices, maxCalls = o.maxCalls ?? 8000;
   const wait = deps.sleep ?? ((ms: number) => new Promise<void>((ok) => setTimeout(ok, ms)));
   const out: ChatMsg[][] = Array.from({ length: slices }, () => []); const done = new Array(slices).fill(0); let calls = 0;
   await Promise.all(out.map(async (bucket, k) => {
-    const from = Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : Math.floor((k + 1) * span);
+    const from = base + Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : base + Math.floor((k + 1) * span);
     // the cursor is a moment in microseconds; it walks back from the stretch's end to its start
     let cursor = (t0 + to * 1000) * 1000; const seen = new Set<string>(); let fails = 0; let empties = 0;
     while (calls < maxCalls && !o.signal?.aborted) {
