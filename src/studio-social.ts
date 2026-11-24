@@ -275,9 +275,17 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn();
-      const r = await sb.from("studio_social_posts").select("*").eq("user_id", u).order("created_at", { ascending: false }).limit(200);
-      if (r.error) throw r.error;
-      res.json({ posts: await withPostPosters(sb, u, (r.data ?? []) as SocialPostRow[]) });
+      // every post still to go out (a big schedule is never cut short), plus the 200 latest of the rest; one project's only when asked
+      const project = typeof req.query.project_id === "string" && /^[0-9a-f-]{36}$/i.test(req.query.project_id) ? req.query.project_id : null;
+      const scope = (q: any) => (project ? q.eq("project_id", project) : q);
+      const [waiting, recent] = await Promise.all([
+        scope(sb.from("studio_social_posts").select("*").eq("user_id", u).in("status", ["scheduled", "queued", "sending"])).order("schedule_at", { ascending: true }).limit(2000),
+        scope(sb.from("studio_social_posts").select("*").eq("user_id", u).not("status", "in", "(scheduled,queued,sending)")).order("created_at", { ascending: false }).limit(200),
+      ]);
+      if (waiting.error) throw waiting.error;
+      if (recent.error) throw recent.error;
+      const rows = [...(waiting.data ?? []), ...(recent.data ?? [])].filter((x: any, i, a: any[]) => a.findIndex((y) => y.id === x.id) === i) as SocialPostRow[];
+      res.json({ posts: await withPostPosters(sb, u, rows) });
     } catch (e) { fail(res, e); }
   });
 

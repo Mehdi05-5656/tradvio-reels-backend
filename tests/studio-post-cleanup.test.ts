@@ -42,7 +42,9 @@ test("delete after posting: an upload whose posts all went out goes; one still w
     studio_jobs: [], studio_projects: [],
   };
   const sb = fakeSb(tables);
-  const n = await sweepPosted(sb, () => {}, now);
+  assert.equal(await sweepPosted(sb, () => {}, now, {}), 0, "off until switched on");
+  const ENV = { STUDIO_DELETE_AFTER_POST_FROM: new Date(now - 2 * 86400_000).toISOString() };
+  const n = await sweepPosted(sb, () => {}, now, ENV);
   assert.equal(n, 1);
   const st = (id: string) => tables.studio_assets.find((a) => a.id === id).status;
   assert.equal(st("a1"), "deleted", "posted everywhere: deleted (the setting is on by default)");
@@ -52,5 +54,5 @@ test("delete after posting: an upload whose posts all went out goes; one still w
   assert.equal(st("old"), "ready", "only recent posts are looked at");
   assert.equal(st("b1"), "ready", "turned off");
   assert.deepEqual(sb.removed, [`${ANN}/a1.mp4`]);
-  assert.equal(await sweepPosted(sb, () => {}, now), 0, "nothing twice");
+  assert.equal(await sweepPosted(sb, () => {}, now, ENV), 0, "nothing twice");
 });

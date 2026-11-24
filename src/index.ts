@@ -55,6 +55,7 @@ import { registerPostingPlan } from "./studio-posting-plan.js";
 import { registerPostCaptions, startPostCaptionsLoop } from "./studio-post-captions.js";
 import { registerPostProjects } from "./studio-post-projects.js";
 import { registerPostCleanup } from "./studio-post-cleanup.js";
+import { registerScheduleAi } from "./studio-schedule-ai.js";
 import { registerAutoReplies } from "./studio-autoreply.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerOutputAsset } from "./studio-output-asset.js";
@@ -152,6 +153,7 @@ async function main() {
   registerPostCaptions(app, getSb); // captions for many videos (watched once, paid) + Smart post
   registerPostProjects(app, getSb); // projects on the Post page: their own boards, accounts, folders and posts
   registerPostCleanup(app, getSb); // delete uploads once posted (the person's setting, on by default)
+  registerScheduleAi(app, getSb); // change the schedule in plain words (proposes; the page applies)
   registerPostUploads(app, getSb); // your own videos to post: library usage, a per-network check of each file // posting groups ("Group A" = IG A + TikTok A), drafts and the post tray
   registerAutoReplies(app, getSb); // keyword comments and DMs answered on the person's own accounts (posting service rules)
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions

@@ -73,6 +73,7 @@ test("projects: made with a Library folder, only the person's own accounts kept,
     assert.deepEqual([folder.name, folder.kind, folder.source.project], ["Block Town", "folder", true]);
     assert.deepEqual(tables.studio_post_drafts[0].payload.rows, [], "the general board starts empty");
     assert.deepEqual(tables.studio_post_drafts[0].payload.nets, ["acc-ig"], "its other settings kept");
+    assert.deepEqual([tables.studio_post_projects[0].tray.nets, tables.studio_post_projects[0].tray.gids], [["acc-ig"], [G1]], "the moved board posts to the project's accounts, not All's");
 
     tables.studio_social_posts.push({ user_id: ANN, project_id: p.id, status: "scheduled" }, { user_id: ANN, project_id: p.id, status: "posted" }, { user_id: ANN, project_id: null, status: "posted" });
     const list = await s.call("GET", "/api/studio/post-projects");
@@ -81,6 +82,7 @@ test("projects: made with a Library folder, only the person's own accounts kept,
 
     assert.equal((await s.call("PUT", `/api/studio/post-projects/${p.id}/tray`, { payload: { rows: [{ key: "a:3" }] } })).status, 200);
     assert.deepEqual((await s.call("GET", `/api/studio/post-projects/${p.id}`)).body.project.tray.rows, [{ key: "a:3" }]);
+    assert.equal((await s.call("GET", "/api/studio/post-projects")).body.projects[0].videos, 1, "the count follows the board");
     assert.equal((await s.call("GET", `/api/studio/post-projects/${p.id}`, undefined, BOB)).status, 404, "someone else's project");
     assert.equal((await s.call("PUT", `/api/studio/post-projects/${p.id}/tray`, { payload: {} }, BOB)).status, 404);
 
@@ -92,6 +94,7 @@ test("projects: made with a Library folder, only the person's own accounts kept,
     assert.equal((await s.call("DELETE", `/api/studio/post-projects/${p.id}`)).status, 200);
     assert.equal(tables.studio_post_projects.length, 0);
     assert.ok(tables.studio_collections.some((c) => c.id === p.collection_id), "the folder stays unless asked");
+    assert.equal(folder.source.project, false, "and stops being a project's folder");
     assert.equal(tables.studio_social_posts.length, 3, "posts stay");
 
     const p2 = (await s.call("POST", "/api/studio/post-projects", { name: "Two" })).body.project;

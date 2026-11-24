@@ -19,8 +19,12 @@ export async function deleteAfterPost(sb: SupabaseClient, u: string): Promise<bo
 }
 
 /** One sweep: uploads whose posts all went out in the last few days, deleted for the people who have it on. */
-export async function sweepPosted(sb: SupabaseClient, log: (s: string) => void = (s) => console.log(s), now = Date.now()): Promise<number> {
-  const since = new Date(now - 3 * 86400_000).toISOString();
+export async function sweepPosted(sb: SupabaseClient, log: (s: string) => void = (s) => console.log(s), now = Date.now(), env: Record<string, string | undefined> = process.env): Promise<number> {
+  // switched on with the date it starts from (STUDIO_DELETE_AFTER_POST_FROM, ISO): posts that went out before it are never
+  // looked at, so nothing already posted disappears the day this is switched on; unset = off
+  const from = Date.parse(env.STUDIO_DELETE_AFTER_POST_FROM ?? "");
+  if (!Number.isFinite(from)) return 0;
+  const since = new Date(Math.max(from, now - 3 * 86400_000)).toISOString();
   const done = await sb.from("studio_social_posts").select("user_id,asset_id").eq("status", "posted").not("asset_id", "is", null).gte("updated_at", since).limit(1000);
   if (done.error) { log(`[cleanup] read failed: ${done.error.message}`); return 0; }
   const byUser = new Map<string, Set<string>>();

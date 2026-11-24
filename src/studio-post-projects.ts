@@ -12,7 +12,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export const MAX_PROJECTS = 50;
 const COLORS = ["teal", "violet", "amber", "rose", "sky", "lime", "orange", "fuchsia", "slate"];
 const UUID = /^[0-9a-f-]{36}$/i;
-const FIELDS = "id,name,color,account_ids,group_ids,collection_id,position,created_at,updated_at";
+const FIELDS = "id,name,color,account_ids,group_ids,collection_id,position,video_count,created_at,updated_at";
 
 export class ProjectError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); } }
 
@@ -58,12 +58,12 @@ export function registerPostProjects(app: Express, sbFn: () => SupabaseClient, d
     const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
     try {
       const sb = sbFn();
-      const r = await sb.from("studio_post_projects").select(`${FIELDS},tray`).eq("user_id", u).order("position", { ascending: true }).order("created_at", { ascending: true }).limit(MAX_PROJECTS);
+      const r = await sb.from("studio_post_projects").select(FIELDS).eq("user_id", u).order("position", { ascending: true }).order("created_at", { ascending: true }).limit(MAX_PROJECTS);
       if (r.error) throw r.error;
       const rows = (r.data ?? []) as any[];
       const posts = rows.length ? await sb.from("studio_social_posts").select("project_id,status").eq("user_id", u).in("project_id", rows.map((x) => x.id)).limit(5000) : { data: [] as any[] };
       const count = (id: string, st: string[]) => ((posts.data ?? []) as any[]).filter((p) => p.project_id === id && st.includes(p.status)).length;
-      res.json({ projects: rows.map(({ tray, ...x }) => ({ ...x, videos: Array.isArray(tray?.rows) ? tray.rows.length : 0, up_next: count(x.id, ["scheduled", "queued", "sending"]), posted: count(x.id, ["posted", "partial"]) })) });
+      res.json({ projects: rows.map(({ tray: _t, ...x }) => ({ ...x, videos: Number(x.video_count) || 0, up_next: count(x.id, ["scheduled", "queued", "sending"]), posted: count(x.id, ["posted", "partial"]) })) });
     } catch (e) { fail(res, e); }
   });
 
@@ -81,14 +81,18 @@ export function registerPostProjects(app: Express, sbFn: () => SupabaseClient, d
       if (folder.error) throw folder.error;
       let tray: any = {};
       if (b.from_tray === true) {
-        const t = await sb.from("studio_post_drafts").select("id,payload").eq("user_id", u).eq("kind", "tray").maybeSingle();
-        if (t.data?.payload) tray = t.data.payload;
+        // the board as the page has it (sent with the request), else as last saved
+        if (b.tray && typeof b.tray === "object" && JSON.stringify(b.tray).length <= 500_000) tray = b.tray;
+        else { const t = await sb.from("studio_post_drafts").select("id,payload").eq("user_id", u).eq("kind", "tray").maybeSingle(); if (t.data?.payload) tray = t.data.payload; }
+        // it posts to the project's accounts, never to whatever All had picked
+        tray = { ...tray, nets: accounts, gids: groups, dist: "all" };
       }
-      const ins = await sb.from("studio_post_projects").insert({ user_id: u, name, color: cleanColor(b.color), account_ids: accounts, group_ids: groups, collection_id: folder.data.id, tray, position: Number(n.count ?? 0) }).select(FIELDS).single();
+      const videos = Array.isArray(tray?.rows) ? tray.rows.length : 0;
+      const ins = await sb.from("studio_post_projects").insert({ user_id: u, name, color: cleanColor(b.color), account_ids: accounts, group_ids: groups, collection_id: folder.data.id, tray, video_count: videos, position: Number(n.count ?? 0) }).select(FIELDS).single();
       if (ins.error) { await sb.from("studio_collections").delete().eq("id", folder.data.id).eq("user_id", u); throw ins.error; }
       // the board moved into the project: the general one starts empty (accounts and settings kept)
       if (b.from_tray === true && tray?.rows?.length) await sb.from("studio_post_drafts").update({ payload: { ...tray, rows: [] }, updated_at: new Date().toISOString() }).eq("user_id", u).eq("kind", "tray");
-      res.status(201).json({ project: { ...ins.data, videos: Array.isArray(tray?.rows) ? tray.rows.length : 0, up_next: 0, posted: 0 } });
+      res.status(201).json({ project: { ...ins.data, videos, up_next: 0, posted: 0 } });
     } catch (e) { fail(res, e); }
   });
 
@@ -129,6 +133,7 @@ export function registerPostProjects(app: Express, sbFn: () => SupabaseClient, d
       const cur = await mine(sb, u, req.params.id);
       const del = await sb.from("studio_post_projects").delete().eq("id", cur.id).eq("user_id", u);
       if (del.error) throw del.error;
+      if (req.query.folder !== "1" && cur.collection_id) await sb.from("studio_collections").update({ source: { project: false, was_project: cur.name }, updated_at: new Date().toISOString() }).eq("id", cur.collection_id).eq("user_id", u);
       if (req.query.folder === "1" && cur.collection_id) {
         await sb.from("studio_assets").update({ collection_id: null, updated_at: new Date().toISOString() }).eq("user_id", u).eq("collection_id", cur.collection_id);
         await sb.from("studio_collections").delete().eq("id", cur.collection_id).eq("user_id", u);
@@ -145,7 +150,7 @@ export function registerPostProjects(app: Express, sbFn: () => SupabaseClient, d
       const cur = await mine(sb, u, req.params.id, "id");
       const payload = req.body?.payload && typeof req.body.payload === "object" ? req.body.payload : {};
       if (JSON.stringify(payload).length > 500_000) throw new ProjectError("board_too_large", "That board is too large to keep; post or remove some videos", 413);
-      const upd = await sb.from("studio_post_projects").update({ tray: payload, updated_at: new Date().toISOString() }).eq("id", cur.id).eq("user_id", u).select("id,updated_at").single();
+      const upd = await sb.from("studio_post_projects").update({ tray: payload, video_count: Array.isArray(payload.rows) ? payload.rows.length : 0, updated_at: new Date().toISOString() }).eq("id", cur.id).eq("user_id", u).select("id,updated_at").single();
       if (upd.error) throw upd.error;
       res.json({ ok: true, updated_at: upd.data.updated_at });
     } catch (e) { fail(res, e); }

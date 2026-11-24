@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS public.studio_post_projects (
   group_ids uuid[] NOT NULL DEFAULT '{}',
   collection_id uuid REFERENCES public.studio_collections(id) ON DELETE SET NULL,
   tray jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (pg_column_size(tray) <= 512000),
+  video_count integer NOT NULL DEFAULT 0, -- videos on its board (the list shows it without reading the boards)
   position integer NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
