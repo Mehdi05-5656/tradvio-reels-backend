@@ -1080,7 +1080,11 @@ export function startSocialLoop(sbFn: () => SupabaseClient, deps: SocialDeps = {
       // unused profiles go first, then today's bill is shared out over the ones left
       await socialUpkeep(sb, deps).catch((e) => console.error("[social] upkeep", String(e?.message ?? e)));
       await recordSocialCosts(sb, deps).catch((e) => console.error("[social] costs", String(e?.message ?? e)));
-    })().finally(() => { busy = false; });
+    })().then(async () => {
+      // uploads already posted, deleted for the people who keep that on (every tick: a quick read when there is none)
+      const { sweepPosted } = await import("./studio-post-cleanup.js");
+      await sweepPosted(sb).catch((e) => console.error("[social] cleanup", String(e?.message ?? e)));
+    }).finally(() => { busy = false; });
   }, every).unref?.();
 }
 
