@@ -10,7 +10,8 @@
 import { spawn } from "node:child_process";
 import { ensureYtDlp } from "./studio-youtube.js";
 
-export type LiveDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; /** tests: kick.com answers and waits without the network or the clock */ kickCurl?: (path: string) => Promise<{ code: number | null; so: string; se: string }>; sleep?: (ms: number) => Promise<void> };
+export type LiveDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; /** tests: kick.com answers and waits without the network or the clock */ kickCurl?: (path: string) => Promise<{ code: number | null; so: string; se: string }>; sleep?: (ms: number) => Promise<void>;
+  /** tests: Twitch's chat replay through the proxy without the network */ twitchProxyCurl?: (body: string) => Promise<{ code: number | null; so: string; se: string }> };
 export class LiveSourceError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 /** One chat message, reduced: seconds into the broadcast, who (an id), the text, how many emotes it carried. */
 export type ChatMsg = { t: number; u: string; c: string; e: number };
@@ -174,42 +175,128 @@ const GQL_CLIENT = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
 const GQL_HASH = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a";
 /** The chat replay of a broadcast, in parallel slices of time, reduced to ChatMsg as it arrives. `onProgress` gets the
  *  share done. Twitch's comments come about 60 a page; a 4-hour chat of 115k messages is ~2,000 pages. */
-export async function twitchChatReplay(deps: LiveDeps, videoId: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal } = {}): Promise<ChatMsg[]> {
+/** How the Twitch chat reader checks itself (Nov 23 2026: from the server, Twitch began ending chat stretches early and
+ *  answering empty pages, so three runs of a channel with ~200 messages a minute read as "5 messages a minute" and failed
+ *  as too quiet; the same code from another address read everything). A stretch Twitch says is over is asked again by
+ *  time; a read that comes out thin is read once more through the residential proxy (STUDIO_YT_PROXY) and the fuller
+ *  read is kept. A quiet chat is small, so the proxy costs little when the chat really is quiet. */
+export const TWITCH_CHAT = { thin_per_minute: 60, reseeks: 300, page_tries: 6, empty_tries: 6, cool_ms: 1500, max_cool_ms: 30_000 };
+/** Twitch slows a reader down by answering pages EMPTY (status 200, no messages), not with a 429 (measured Nov 23 2026:
+ *  single pages answer in full, a fast parallel read gets empty pages mid-stream). An empty page inside the stream is
+ *  "busy": every reader of this server pauses together, the pause doubling while it lasts, and the page is asked again. */
+let twitchCoolUntil = 0, twitchCool = 0;
+export const twitchChatStats = { pages: 0, empty: 0 };
+export type ChatReadReport = { via: "direct" | "proxy"; pages: number; reseeks: number; found_after_end: number; empty_answers: number; direct_messages: number | null; odd: string | null };
+
+/** One page of Twitch's chat replay: straight from this server, or through the proxy (curl -x). Null when Twitch did not answer. */
+async function twitchPage(deps: LiveDeps, body: string, proxy: string | null, signal?: AbortSignal): Promise<{ status: number; json: any } | null> {
+  if (!proxy) {
+    const r = await f(deps)("https://gql.twitch.tv/gql", { method: "POST", headers: { "Client-ID": GQL_CLIENT, "content-type": "application/json" }, body, signal: signal ?? AbortSignal.timeout(30_000) }).catch(() => null);
+    if (!r) return null;
+    return { status: r.status, json: r.ok ? await r.json().catch(() => null) : null };
+  }
+  const r = deps.twitchProxyCurl ? await deps.twitchProxyCurl(body) : await run("curl", ["-sS", "-m", "30", "-x", proxy, "-w", "\n%{http_code}", "-H", `Client-ID: ${GQL_CLIENT}`, "-H", "content-type: application/json", "--data-binary", body, "https://gql.twitch.tv/gql"], 40_000);
+  const lines = r.so.trim().split("\n"); const status = Number(lines.pop());
+  if (!status) return null;
+  try { return { status, json: JSON.parse(lines.join("\n")) }; } catch { return { status, json: null }; }
+}
+
+export async function twitchChatReplay(deps: LiveDeps, videoId: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal; report?: (r: ChatReadReport) => void; proxy?: "never" | "when_thin" } = {}): Promise<ChatMsg[]> {
+  const log = deps.log ?? ((l: string) => console.log(l));
+  const direct = await readTwitch(deps, videoId, seconds, o, null);
+  const minutes = Math.max(1, seconds / 60);
+  const proxy = e(deps).STUDIO_YT_PROXY || null;
+  if (direct.msgs.length / minutes >= TWITCH_CHAT.thin_per_minute || !proxy || o.proxy === "never" || o.signal?.aborted) {
+    o.report?.({ ...direct.report, via: "direct", direct_messages: null });
+    return direct.msgs;
+  }
+  // thin: a quiet chat, or Twitch cutting this server short. Read it again from elsewhere and keep the fuller read.
+  log(`[twitch-chat] thin read of ${videoId} (${direct.msgs.length} messages over ${Math.round(minutes)} min${direct.report.odd ? `; ${direct.report.odd}` : ""}): reading it again through the proxy`);
+  try {
+    const again = await readTwitch(deps, videoId, seconds, o, proxy);
+    const better = again.msgs.length > direct.msgs.length;
+    log(`[twitch-chat] proxy read of ${videoId}: ${again.msgs.length} messages (direct ${direct.msgs.length}); keeping the ${better ? "proxy" : "direct"} read`);
+    o.report?.({ ...(better ? again.report : direct.report), via: better ? "proxy" : "direct", direct_messages: direct.msgs.length });
+    return better ? again.msgs : direct.msgs;
+  } catch (err: any) {
+    log(`[twitch-chat] proxy read of ${videoId} failed: ${String(err?.message ?? err).slice(0, 160)}`);
+    o.report?.({ ...direct.report, via: "direct", direct_messages: null });
+    return direct.msgs;
+  }
+}
+
+async function readTwitch(deps: LiveDeps, videoId: string, seconds: number, o: { slices?: number; onProgress?: (share: number) => void; signal?: AbortSignal }, proxy: string | null): Promise<{ msgs: ChatMsg[]; report: ChatReadReport }> {
   const slices = Math.max(1, Math.min(12, o.slices ?? Math.ceil(seconds / 1800)));
   const span = seconds / slices;
   const out: ChatMsg[][] = Array.from({ length: slices }, () => []);
   const done = new Array(slices).fill(0);
+  const report: ChatReadReport = { via: proxy ? "proxy" : "direct", pages: 0, reseeks: 0, found_after_end: 0, empty_answers: 0, direct_messages: null, odd: null };
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((ok) => setTimeout(ok, ms)));
   const page = async (vars: Record<string, any>) => {
+    const body = JSON.stringify([{ operationName: "VideoCommentsByOffsetOrCursor", variables: { videoID: videoId, ...vars }, extensions: { persistedQuery: { version: 1, sha256Hash: GQL_HASH } } }]);
+    // the end of the recording really is empty; anywhere before it, an empty page is Twitch asking us to slow down
+    const nearEnd = Number.isFinite(Number(vars.contentOffsetSeconds)) && Number(vars.contentOffsetSeconds) >= seconds - 30;
+    let empties = 0;
     for (let attempt = 0; ; attempt++) {
-      const r = await f(deps)("https://gql.twitch.tv/gql", { method: "POST", headers: { "Client-ID": GQL_CLIENT, "content-type": "application/json" }, body: JSON.stringify([{ operationName: "VideoCommentsByOffsetOrCursor", variables: { videoID: videoId, ...vars }, extensions: { persistedQuery: { version: 1, sha256Hash: GQL_HASH } } }]), signal: o.signal ?? AbortSignal.timeout(30_000) }).catch(() => null);
-      const b: any = r && r.ok ? await r.json().catch(() => null) : null;
-      const comments = b?.[0]?.data?.video?.comments;
-      if (comments) return comments;
-      if (attempt >= 5 || o.signal?.aborted) throw new LiveSourceError("chat_unreadable", `Twitch's chat replay could not be read (${r?.status ?? "no answer"})`, 502, true);
-      await new Promise((ok) => setTimeout(ok, 1000 * (attempt + 1)));
+      const wait = twitchCoolUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+      const r = await twitchPage(deps, body, proxy, o.signal);
+      report.pages++; twitchChatStats.pages++;
+      const comments = r?.json?.[0]?.data?.video?.comments;
+      if (comments && !(comments.edges ?? []).length && !nearEnd && empties < TWITCH_CHAT.empty_tries - 1 && !o.signal?.aborted) {
+        empties++; report.empty_answers++; twitchChatStats.empty++;
+        twitchCool = Math.min(TWITCH_CHAT.max_cool_ms, twitchCool ? twitchCool * 2 : TWITCH_CHAT.cool_ms);
+        twitchCoolUntil = Math.max(twitchCoolUntil, Date.now() + twitchCool);
+        continue;
+      }
+      if (comments) { if ((comments.edges ?? []).length) twitchCool = Math.max(0, Math.floor(twitchCool / 2)); return comments; }
+      // what Twitch sent instead, once per read, for the log (the first sign of a change on their side)
+      if (!report.odd) report.odd = `answer ${r?.status ?? "none"}: ${JSON.stringify(r?.json?.[0]?.errors ?? r?.json ?? null).slice(0, 200)}`;
+      if (attempt >= TWITCH_CHAT.page_tries - 1 || o.signal?.aborted) throw new LiveSourceError("chat_unreadable", `Twitch's chat replay could not be read (${r?.status ?? "no answer"})`, 502, true);
+      await (deps.sleep ?? ((ms: number) => new Promise((ok) => setTimeout(ok, ms))))(1000 * (attempt + 1));
     }
   };
   await Promise.all(out.map(async (bucket, k) => {
     const from = Math.floor(k * span), to = k === slices - 1 ? seconds + 1 : Math.floor((k + 1) * span);
-    let cursor: string | null = null; let first = true; let last = from;
-    for (let n = 0; n < 5000; n++) {
-      const c = await page(first ? { contentOffsetSeconds: from } : { cursor });
-      first = false;
-      let stop = false;
-      for (const ed of c.edges ?? []) {
+    let cursor: string | null = null; let seek: number | null = from; let last = from; let reseeks = 0;
+    const kept = new Set<string>();
+    /** Keeps this page's messages inside the stretch (once each); "end" when the page reaches past the stretch. */
+    const take = (edges: any[]): "end" | "more" => {
+      for (const ed of edges) {
         const node = ed.node; const t = Number(node?.contentOffsetSeconds);
         if (!Number.isFinite(t)) continue;
-        if (t >= to) { stop = true; break; }
+        if (t >= to) return "end";
         if (t < from) continue;
         const frags = Array.isArray(node.message?.fragments) ? node.message.fragments : [];
-        bucket.push({ t: Math.floor(t), u: String(node.commenter?.id ?? node.commenter?.login ?? ""), c: frags.map((x: any) => String(x?.text ?? "")).join("").slice(0, 200), e: frags.filter((x: any) => x?.emote).length });
-        last = t; cursor = ed.cursor ?? cursor;
+        const m: ChatMsg = { t: Math.floor(t), u: String(node.commenter?.id ?? node.commenter?.login ?? ""), c: frags.map((x: any) => String(x?.text ?? "")).join("").slice(0, 200), e: frags.filter((x: any) => x?.emote).length };
+        const key = String(node.id ?? `${t}|${m.u}|${m.c}`);
+        cursor = ed.cursor ?? cursor;
+        if (kept.has(key)) continue;
+        kept.add(key); bucket.push(m); last = Math.max(last, t);
       }
+      return "more";
+    };
+    for (let n = 0; n < 20000; n++) {
+      const bySeek = seek != null;
+      const c = await page(bySeek ? { contentOffsetSeconds: seek } : { cursor });
+      seek = null;
+      const edges: any[] = c.edges ?? [];
+      const had = bucket.length;
+      const end = take(edges);
+      if (bySeek && n > 0) report.found_after_end += bucket.length - had;
       done[k] = Math.min(1, (last - from) / Math.max(1, to - from)); o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices);
-      if (stop || !c.pageInfo?.hasNextPage || !cursor) break;
+      if (end === "end") break;
+      if (c.pageInfo?.hasNextPage && cursor && bucket.length > had) continue;
+      // Twitch says this stretch is over, or the page held nothing new. Asked by time and nothing new: it is over.
+      // Otherwise ask again by time from the last message: an answer that holds more means Twitch had cut it short.
+      if (bySeek && bucket.length === had) break;
+      if (reseeks >= TWITCH_CHAT.reseeks) break;
+      reseeks++; report.reseeks++;
+      seek = Math.floor(last); cursor = null;
     }
+    done[k] = 1; o.onProgress?.(done.reduce((a, b) => a + b, 0) / slices);
   }));
-  return out.flat().sort((a, b) => a.t - b.t);
+  return { msgs: out.flat().sort((a, b) => a.t - b.t), report };
 }
 
 // ---------------------------------------------------------------------------------------------------

@@ -29,7 +29,7 @@ import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
-import { hlsVariants, kickGames, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { type ChatReadReport, hlsVariants, kickGames, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -729,18 +729,21 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // A. the chat replay, reduced to signals; the broadcast's playlists
     await renew(sb, job, { collection_id: collectionId, stage: "reading", done: 0, total: 0, message: "Reading the chat replay" });
     const tChat = Date.now(); let lastSaid = 0;
-    const chat = await (deps.chat ?? ((x, onProgress) => b.platform === "twitch" ? twitchChatReplay(deps, x.id, x.seconds, { onProgress, signal: job.signal }) : kickChatReplay(deps, x.channel_id, x.started_at, x.seconds, { onProgress, signal: job.signal })))(b, (share) => {
+    // how the read went (Twitch: pages, empty answers waited out, stretches asked again, the proxy), for the log
+    let chatRead: ChatReadReport | null = null;
+    const chat = await (deps.chat ?? ((x, onProgress) => b.platform === "twitch" ? twitchChatReplay(deps, x.id, x.seconds, { onProgress, signal: job.signal, report: (r) => { chatRead = r; } }) : kickChatReplay(deps, x.channel_id, x.started_at, x.seconds, { onProgress, signal: job.signal })))(b, (share) => {
       if (Date.now() - lastSaid > 15_000) { lastSaid = Date.now(); void renew(sb, job, { message: `Reading the chat replay · ${Math.round(share * 100)} %` }).catch(() => undefined); }
     });
     timing.chat_s = Math.round((Date.now() - tChat) / 1000); timing.chat_messages = chat.length;
     const signals = chatSignals(chat, b.seconds);
+    if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute && chatRead) log(`[live] quiet read ${JSON.stringify({ job: job.id, messages: chat.length, read: chatRead })}`);
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute) throw new ClipsError("chat_too_quiet", `This stream's chat was too quiet to read (${Math.round(signals.perMinute)} messages a minute); Live Clips needs a chat that reacts`, 422);
     const cands = chatCandidates(signals, chat).filter((c) => inPart(c.t_event));
     // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
     // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked;
     // most of those were likely past the 26.5-hour timestamp wrap, not muted: see hls-stretch.ts)
     const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
-    log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
+    log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), read: chatRead, candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     // a part is read whole below, so a quiet chat there does not end the run (the chat replay runs ~4 min behind live)
     if (!cands.length && !(part && (deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off")) throw new ClipsError("clips_none_found", part ? "The chat never lit up in that part of the stream: no moment stands out enough to clip" : "The chat never lit up: no moment in this stream stands out enough to clip", 422);
     const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id, lines) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master), lines)))(b);
