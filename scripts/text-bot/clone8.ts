@@ -65,13 +65,13 @@ export function makeApi(cfg: Config, deps: { fetch?: typeof fetch; now?: () => n
   let refreshing: Promise<string> | null = null;
   const token = async (): Promise<string> => {
     const s = readJson<Session | null>(file, null);
-    if (!s?.refresh_token) throw new Clone8Error("not_signed_in", "The test bot is not signed in to Clone8. Run ops/text-bot/login.sh");
+    if (!s?.refresh_token) throw new Clone8Error("not_signed_in", "The test bot is not signed in to Clone8. Run: node ops/text-bot/login.mjs");
     if (s.access_token && s.expires_at - now() > 90_000) return s.access_token;
     // Supabase hands out a new refresh token each time; the new one is saved before anything else can use the old one
     refreshing ??= (async () => {
       const r = await f(`${cfg.supabaseUrl}/auth/v1/token?grant_type=refresh_token`, { method: "POST", headers: { apikey: cfg.supabaseAnon, "content-type": "application/json" }, body: JSON.stringify({ refresh_token: s.refresh_token }), signal: AbortSignal.timeout(20_000) });
       const j: any = await r.json().catch(() => null);
-      if (!r.ok || !j?.access_token) throw new Clone8Error("sign_in_expired", "The Clone8 sign-in for the test bot ended. Run ops/text-bot/login.sh again");
+      if (!r.ok || !j?.access_token) throw new Clone8Error("sign_in_expired", "The Clone8 sign-in for the test bot ended. Run: node ops/text-bot/login.mjs");
       writeJson(file, { access_token: j.access_token, refresh_token: j.refresh_token ?? s.refresh_token, expires_at: now() + Number(j.expires_in ?? 3600) * 1000 } satisfies Session);
       return j.access_token as string;
     })().finally(() => { refreshing = null; });

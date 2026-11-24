@@ -31,25 +31,25 @@ export function telegram(token: string, deps: { fetch?: typeof fetch; onGuard?: 
     if (!j?.ok) throw new Error(`telegram_${method}_${r.status}: ${String(j?.description ?? "").slice(0, 120)}`);
     return j.result;
   };
-  const safe = (text: string) => { const g = guard(text); if (g.hit) deps.onGuard?.(g.hit, text); return g.text; };
+  const safe = (text: string, own?: string[]) => { const g = guard(text, own); if (g.hit) deps.onGuard?.(g.hit, text); return g.text; };
   const out: Transport = {
-    async text(chat, text, buttons) {
-      const parts = pieces(safe(text));
+    async text(chat, text, buttons, own) {
+      const parts = pieces(safe(text, own));
       for (const [i, p] of parts.entries()) await call("sendMessage", { chat_id: chat, text: p, link_preview_options: { is_disabled: true }, ...(i === parts.length - 1 && buttons?.length ? { reply_markup: keyboard(buttons) } : {}) });
     },
-    async media(chat, items, caption, buttons) {
+    async media(chat, items, caption, buttons, own) {
       const photos = items.filter((m) => m.kind === "photo"), others = items.filter((m) => m.kind !== "photo");
-      if (caption && (photos.length > 1 || !items.length)) await call("sendMessage", { chat_id: chat, text: safe(caption) });
+      if (caption && (photos.length > 1 || !items.length)) await call("sendMessage", { chat_id: chat, text: safe(caption, own) });
       if (photos.length > 1) {
         const form = new FormData(); form.set("chat_id", chat);
-        form.set("media", JSON.stringify(photos.slice(0, 10).map((p, i) => ({ type: "photo", media: `attach://p${i}`, caption: safe(p.caption ?? "").slice(0, 900) }))));
+        form.set("media", JSON.stringify(photos.slice(0, 10).map((p, i) => ({ type: "photo", media: `attach://p${i}`, caption: safe(p.caption ?? "", own).slice(0, 900) }))));
         photos.slice(0, 10).forEach((p, i) => form.set(`p${i}`, new Blob([new Uint8Array(p.bytes)]), p.name));
         await call("sendMediaGroup", form, 180_000);
       }
       const singles = [...(photos.length === 1 ? photos : []), ...others];
       for (const m of singles) {
         const form = new FormData(); form.set("chat_id", chat);
-        const cap = safe([photos.length <= 1 && singles.length === 1 ? caption : "", m.caption].filter(Boolean).join("\n")).slice(0, 1000);
+        const cap = safe([photos.length <= 1 && singles.length === 1 ? caption : "", m.caption].filter(Boolean).join("\n"), own).slice(0, 1000);
         if (cap) form.set("caption", cap);
         const field = m.kind === "photo" ? "photo" : m.kind === "video" ? "video" : "audio";
         if (m.kind === "video") form.set("supports_streaming", "true");

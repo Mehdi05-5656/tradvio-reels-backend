@@ -31,10 +31,10 @@ async function main() {
 
   let out: Transport, tg: ReturnType<typeof telegram> | null = null;
   if (sim) {
-    const show = (text: string) => { const g = guard(text); if (g.hit) log("guard", { hit: g.hit }); return g.text; };
+    const show = (text: string, own?: string[]) => { const g = guard(text, own); if (g.hit) log("guard", { hit: g.hit }); return g.text; };
     out = {
-      async text(_c, text, buttons) { console.log(`\nCLONE8: ${show(text)}${buttons?.length ? `\n        [${buttons.map((b) => b.label).join("] [")}]` : ""}`); },
-      async media(_c, items, caption, buttons) { console.log(`\nCLONE8: ${caption ? `${show(caption)}\n` : ""}${items.map((m) => `        <${m.kind} ${Math.round(m.bytes.length / 1024)} KB> ${show(m.caption ?? "")}`).join("\n")}${buttons?.length ? `\n        [${buttons.map((b) => b.label).join("] [")}]` : ""}`); },
+      async text(_c, text, buttons, own) { console.log(`\nCLONE8: ${show(text, own)}${buttons?.length ? `\n        [${buttons.map((b) => b.label).join("] [")}]` : ""}`); },
+      async media(_c, items, caption, buttons, own) { console.log(`\nCLONE8: ${caption ? `${show(caption, own)}\n` : ""}${items.map((m) => `        <${m.kind} ${Math.round(m.bytes.length / 1024)} KB> ${show(m.caption ?? "", own)}`).join("\n")}${buttons?.length ? `\n        [${buttons.map((b) => b.label).join("] [")}]` : ""}`); },
       async typing() { /* nothing to show */ },
     };
     state.owner = "sim";
@@ -44,7 +44,7 @@ async function main() {
     out = tg.out;
   }
   const brain: BrainDeps = { cfg, api, out, index, log };
-  const bot = makeBot({ cfg, api, out, state, save, log, think: (st, text) => think(brain, st, text), forget: () => { index.current = null; } });
+  const bot = makeBot({ cfg, api, out, state, save, log, think: (st, text, o) => think(brain, st, text, o), forget: () => { index.current = null; } });
   console.error(`Text Clone8 test · model ${cfg.model} · ${mock ? "pretend account" : `Clone8 at ${cfg.apiBase}`} · by text today ${cfg.dailyCredits} credits, ${cfg.maxActionCredits} an action · time zone ${cfg.timezone}`);
 
   if (sim) {
@@ -61,9 +61,10 @@ async function main() {
   if (!state.owner) console.error(`\nOpen this on your phone to connect the bot to you (only the first chat that opens it is accepted):\n  https://t.me/${me.username}?start=${pairCode(state)}\n`);
   else console.error(`Connected to your Telegram. Bot @${me.username}. Ctrl-C stops it.`);
   save();
-  setInterval(() => { void bot.watch(); }, 20_000);
-  // one message at a time: a second text waits for the first to finish
+  // one thing at a time: messages in order, and the look at running jobs in between, never during a message
+  let looked = 0;
   for (;;) {
+    if (Date.now() - looked > 20_000) { looked = Date.now(); await bot.watch(); }
     let batch: Awaited<ReturnType<NonNullable<typeof tg>["updates"]>> = [];
     try { batch = await tg!.updates(state.offset); } catch (e: any) { log("poll_error", { detail: String(e?.message ?? e).slice(0, 160) }); await new Promise((r) => setTimeout(r, 5000)); continue; }
     for (const u of batch) {

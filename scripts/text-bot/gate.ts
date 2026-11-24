@@ -8,7 +8,7 @@ export type Inbound =
   | { kind: "no" } | { kind: "cancel" } | { kind: "stop" } | { kind: "help" } | { kind: "pause" } | { kind: "resume" }
   | { kind: "text"; text: string };
 
-const norm = (s: string) => s.normalize("NFKC").replace(/[​-‍﻿]/g, "").trim();
+const norm = (s: string) => s.normalize("NFKC").replace(/[\u200b-\u200d\ufeff]/g, "").trim();
 
 export function classify(raw: string): Inbound {
   const text = norm(raw), low = text.toLowerCase().replace(/[.!]+$/, "").trim();
@@ -16,15 +16,15 @@ export function classify(raw: string): Inbound {
   const start = text.match(/^\/start(?:@\w+)?(?:\s+([A-Za-z0-9_-]{4,64}))?\s*$/);
   if (start) return { kind: "start", code: start[1] ?? null };
   // "yes 47", "YES47", "y 47", "yes 47 24" (the code, then the count for a large action). A bare "yes" carries no code.
-  const yes = low.match(/^\/?(?:yes|y|yep|yeah|confirm|ok|okay|do it|go)(?:[\s,:-]*(\d{2}))?(?:[\s,:-]+(\d{1,4}))?$/);
+  const yes = low.match(/^\/?(?:yes|y|yep|yeah|confirm)(?:[\s,:-]*(\d{2}))?(?:[\s,:-]+(\d{1,4}))?$/);
   if (yes) return { kind: "yes", code: yes[1] ?? null, count: yes[2] != null ? Number(yes[2]) : null };
   if (/^\/?(?:no|n|nope|don'?t|not now|never ?mind)$/.test(low)) return { kind: "no" };
   // leaving: any reasonable wording ends all texts (the SMS rule; the same words work everywhere so nobody has to learn two)
-  if (/^\/?(?:stop|stopall|unsubscribe|end|quit|opt ?out|stop texting(?: me)?|stop messaging(?: me)?|leave me alone)$/.test(low)) return { kind: "stop" };
+  if (/^\/?(?:stop|stopall|unsubscribe|opt ?out|stop texting(?: me)?|stop messaging(?: me)?)$/.test(low)) return { kind: "stop" };
   if (/^\/?(?:cancel|cancel (?:it|that|this))$/.test(low)) return { kind: "cancel" };
   if (/^\/?(?:help|\?|commands|what can you do)$/.test(low)) return { kind: "help" };
-  if (/^\/?(?:pause|quiet|mute)$/.test(low)) return { kind: "pause" };
-  if (/^\/?(?:resume|unmute|unpause)$/.test(low)) return { kind: "resume" };
+  if (/^(?:\/pause|\/mute|mute)$/.test(low)) return { kind: "pause" };
+  if (/^\/?(?:resume|unmute)$/.test(low)) return { kind: "resume" };
   return { kind: "text", text };
 }
 
@@ -40,6 +40,10 @@ export type Pending = {
   /** a large action also needs its count in the reply ("YES 47 24") */
   count: number | null; created_at: number; expires_at: number;
   status: "live" | "claimed" | "done" | "failed" | "expired" | "replaced" | "declined";
+  /** true once the question has actually reached the person's chat; until then no reply can release it */
+  shown?: boolean;
+  /** the person's own words quoted in the question (captions, titles): exempt from the supplier-word check */
+  own?: string[];
   /** times stored as "minutes after the YES" are worked out when it is released, so they cannot go stale while the person reads */
   meta?: Record<string, any>;
 };
@@ -60,10 +64,10 @@ const retire = (store: PendingStore, status: Pending["status"]) => {
 };
 
 /** A new action becomes the only live one. The one before it (if any) can no longer be released by anything. */
-export function setPending(store: PendingStore, p: Omit<Pending, "code" | "created_at" | "expires_at" | "status">, now: number, rand?: () => number): Pending {
+export function setPending(store: PendingStore, p: Omit<Pending, "code" | "created_at" | "expires_at" | "status" | "shown">, now: number, rand?: () => number): Pending {
   retire(store, "replaced");
   const code = newCode(store, rand);
-  const live: Pending = { ...p, code, created_at: now, expires_at: now + PENDING_TTL_MS, status: "live" };
+  const live: Pending = { ...p, code, created_at: now, expires_at: now + PENDING_TTL_MS, status: "live", shown: false };
   store.live = live; store.last_code = code;
   return live;
 }
@@ -76,6 +80,8 @@ export type ClaimResult =
 export function claim(store: PendingStore, by: { code?: string | null; count?: number | null; id?: string | null }, now: number): ClaimResult {
   const p = store.live;
   if (!p) return { ok: false, why: "nothing" };
+  // a question that never reached the chat (a send failed, the turn broke) cannot be answered
+  if (!p.shown) { retire(store, "failed"); return { ok: false, why: "nothing" }; }
   if (now > p.expires_at) { retire(store, "expired"); return { ok: false, why: "expired", pending: p }; }
   if (by.id != null) { if (by.id !== p.id) return { ok: false, why: "wrong_code", pending: p }; }
   else {
@@ -92,6 +98,10 @@ export function claim(store: PendingStore, by: { code?: string | null; count?: n
   store.live = null;
   return { ok: true, pending: p };
 }
+/** The question is in the person's chat: from now on their reply can release it. */
+export function markShown(store: PendingStore, id: string): void { if (store.live?.id === id) store.live.shown = true; }
+/** Drops a live action whose question was never shown (the turn that made it failed). */
+export function dropUnshown(store: PendingStore): Pending | null { const p = store.live; if (p && !p.shown) { retire(store, "failed"); return p; } return null; }
 export function decline(store: PendingStore): Pending | null { const p = store.live; retire(store, "declined"); return p; }
 export function expire(store: PendingStore, now: number): Pending | null { const p = store.live; if (p && now > p.expires_at) { retire(store, "expired"); return p; } return null; }
 
