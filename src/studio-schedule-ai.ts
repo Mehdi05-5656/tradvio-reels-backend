@@ -32,8 +32,11 @@ export function zonedToUtc(local: string, tz: string): number | null {
   if (!m) return null;
   const want = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
   const off = (t: number) => { const p = parts(t, tz); return Date.UTC(p.y, p.m - 1, p.d, p.h, p.min) - t; };
-  let t = want - off(want);
-  t = want - off(t);
+  const wall = (t: number) => { const p = parts(t, tz); return Date.UTC(p.y, p.m - 1, p.d, p.h, p.min); };
+  // the offsets either side of the day; a time that exists matches one of them, a skipped one (spring forward) does not
+  const a = want - off(want - 86400_000), b = want - off(want + 86400_000);
+  const hit = [a, b].filter((t) => wall(t) === want).sort((x, y) => x - y)[0];
+  const t = hit ?? Math.max(a, b);
   return Number.isFinite(t) ? t : null;
 }
 export const localLabel = (t: number, tz: string) => { const p = parts(t, tz); return `${p.wd} ${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")} ${String(p.h).padStart(2, "0")}:${String(p.min).padStart(2, "0")}`; };
@@ -44,18 +47,25 @@ export type Change = { post_id: string; action: "move" | "cancel" | "caption"; f
 
 /** Each account's other posts, so a moved time keeps 30+ minutes from them (all of the person's waiting posts). */
 const accountsOf = (p: Post): string[] => { const a = (Array.isArray(p.options?.accounts) ? p.options.accounts : []).map((x: any) => x?.id || x?.platform).filter(Boolean); return a.length ? a : p.platforms; };
+/** Each account of a post with its own time (accounts can post at different times), shifted by `delta`. */
+const timesOf = (p: Post, delta = 0): Array<[string, number]> => {
+  const base = Date.parse(p.schedule_at ?? ""), list = Array.isArray(p.options?.accounts) ? p.options.accounts : [];
+  if (!list.length) return p.platforms.map((x) => [x, base + delta]);
+  return list.map((x: any) => [String(x?.id || x?.platform), (x?.at ? Date.parse(x.at) : base) + delta] as [string, number]).filter(([, t]: [string, number]) => Number.isFinite(t));
+};
 
 /** Keep every account 30+ minutes from its other posts: a clashing move goes later in 30-minute steps. */
-export function spaceOut(moves: Array<{ post: Post; at: number }>, others: Post[], now: number): Array<{ post: Post; at: number; nudged: number }> {
+export function spaceOut(moves: Array<{ post: Post; at: number }>, others: Post[], now: number, gap = GAP): Array<{ post: Post; at: number; nudged: number }> {
   const taken = new Map<string, number[]>();
   const moved = new Set(moves.map((m) => m.post.id));
-  for (const o of others) if (!moved.has(o.id) && o.schedule_at) for (const a of accountsOf(o)) taken.set(a, [...(taken.get(a) ?? []), Date.parse(o.schedule_at)]);
+  for (const o of others) if (!moved.has(o.id) && o.schedule_at) for (const [a, t] of timesOf(o)) taken.set(a, [...(taken.get(a) ?? []), t]);
   const out: Array<{ post: Post; at: number; nudged: number }> = [];
   for (const m of [...moves].sort((a, b) => a.at - b.at)) {
-    const accs = accountsOf(m.post);
+    const base = Date.parse(m.post.schedule_at ?? "") || m.at;
     let at = m.at, steps = 0;
-    while (steps < 48 && accs.some((a) => (taken.get(a) ?? []).some((t) => Math.abs(t - at) < GAP))) { at += GAP; steps++; }
-    for (const a of accs) taken.set(a, [...(taken.get(a) ?? []), at]);
+    const clash = () => timesOf(m.post, at - base).some(([a, t]) => (taken.get(a) ?? []).some((x) => Math.abs(x - t) < gap));
+    while (steps < 48 && clash()) { at += gap; steps++; }
+    for (const [a, t] of timesOf(m.post, at - base)) taken.set(a, [...(taken.get(a) ?? []), t]);
     out.push({ post: m.post, at, nudged: at - m.at });
   }
   void now;
@@ -103,13 +113,16 @@ export function registerScheduleAi(app: Express, sbFn: () => SupabaseClient, dep
       if (!env.ANTHROPIC_API_KEY && !deps.ask) throw new ScheduleAiError("ai_off", "This is not switched on yet", 503);
       if (!allow(u, now)) throw new ScheduleAiError("rate_limited", "That is a lot of changes for one hour; try again soon", 429);
       const sb = sbFn();
-      const all = await sb.from("studio_social_posts").select("id,schedule_at,status,caption,platforms,options").eq("user_id", u).in("status", ["scheduled", "queued"]).limit(2000);
+      const c = await sb.from("studio_customers").select("status,owner_pass").eq("user_id", u).maybeSingle();
+      if (!(c.data && (["active", "trialing"].includes((c.data as any).status) || (c.data as any).owner_pass))) throw new ScheduleAiError("subscription_required", "Changing the schedule this way comes with a plan", 409);
+      const all = await sb.from("studio_social_posts").select("id,schedule_at,status,caption,platforms,options").eq("user_id", u).in("status", ["scheduled", "queued", "sending"]).limit(2000);
       if (all.error) throw all.error;
       const waiting = (all.data ?? []) as Post[];
-      const inView = waiting.filter((p) => ids.includes(p.id) && p.schedule_at).sort((a, b2) => Date.parse(a.schedule_at!) - Date.parse(b2.schedule_at!));
+      const inView = waiting.filter((p) => ids.includes(p.id) && p.schedule_at && p.status !== "sending").sort((a, b2) => Date.parse(a.schedule_at!) - Date.parse(b2.schedule_at!));
       if (!inView.length) throw new ScheduleAiError("no_posts", "None of these posts can still be changed");
       const who = (p: Post) => accountsOf(p).length ? (Array.isArray(p.options?.accounts) ? p.options.accounts.map((a: any) => `${a?.username ? `@${String(a.username).replace(/^@/, "")}` : ""} ${a?.platform ?? ""}`.trim()).join(", ") : p.platforms.join(", ")) : p.platforms.join(", ");
-      const list = inView.map((p, i) => `${i + 1}. ${localLabel(Date.parse(p.schedule_at!), tz)} · ${who(p)} · "${String(p.caption ?? "").replace(/\s+/g, " ").slice(0, 140)}"`).join("\n");
+      // whole captions (a caption edit keeps everything it was not asked to change), as JSON strings so line breaks survive
+      const list = inView.map((p, i) => `${i + 1}. ${localLabel(Date.parse(p.schedule_at!), tz)} · ${who(p)} · caption ${JSON.stringify(String(p.caption ?? "").slice(0, 2500))}`).join("\n");
       const today = parts(now, tz);
       const prompt = `Today is ${localLabel(now, tz)} (${tz}).\nTheir scheduled posts:\n${list}\n\nWhat they want: """${text}"""`;
       let out: any;
@@ -139,12 +152,14 @@ export function registerScheduleAi(app: Express, sbFn: () => SupabaseClient, dep
         if (seen.has(k)) continue; seen.add(k);
         if (c.action === "cancel") other.push({ post_id: p.id, action: "cancel", from: p.schedule_at });
         else if (c.action === "caption") {
-          const cap = String(c.caption ?? "").trim().slice(0, 2200);
-          if (cap) other.push({ post_id: p.id, action: "caption", from: p.schedule_at, caption: cap });
+          const cap = String(c.caption ?? "").trim().slice(0, 5000);
+          const own = (Array.isArray(p.options?.accounts) ? p.options.accounts : []).some((a: any) => a?.own && a?.caption);
+          if (own) { problems.push(`post ${c.n}: each account has its own caption; change those one by one`); continue; }
+          if (cap && cap !== String(p.caption ?? "").trim()) other.push({ post_id: p.id, action: "caption", from: p.schedule_at, caption: cap });
         } else if (c.action === "move") {
           const at = zonedToUtc(String(c.when ?? ""), tz);
           if (at == null) { problems.push(`post ${c.n}: the new time was not readable`); continue; }
-          if (at < now + LEAD) { problems.push(`post ${c.n}: ${localLabel(at, tz)} has passed or is too soon`); continue; }
+          if (at < now + LEAD) { problems.push(`post ${c.n}: ${localLabel(at, tz).slice(4)} has passed or is too soon, so it stays as it is`); continue; }
           if (at > now + AHEAD) { problems.push(`post ${c.n}: more than 90 days ahead`); continue; }
           if (Math.abs(at - Date.parse(p.schedule_at!)) < 60_000) continue;
           moves.push({ post: p, at });

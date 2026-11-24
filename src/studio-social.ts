@@ -377,6 +377,8 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
         const at = t.at ? new Date(Date.parse(t.at) + delta).toISOString() : newAt ? newAt.toISOString() : null;
         if (newCaption == null) return { ...t, at };
         const extra = t.group ? groups.get(t.group)?.defaults?.caption_extra : undefined;
+        // a caption the person wrote for this one account stays its own
+        if (t.own && t.caption) return { ...t, at };
         return { ...t, at, caption: extra && !newCaption.includes(extra) ? `${newCaption.trim()}\n\n${extra}`.slice(0, 5000) : null };
       });
       if (accounts.some((t) => t.at && Date.parse(t.at) > now + MAX_AHEAD_DAYS * 86400_000)) throw new SocialError("too_late", `Posts can be scheduled up to ${MAX_AHEAD_DAYS} days ahead`);
@@ -389,10 +391,22 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
         if (others.error) throw others.error;
         const per = new Map<string, number>(), cap = dailyPerAccount(env);
         const tok = (t: { id: string | null; platform: string }) => (t.id ? `acct:${t.id}` : `net:${t.platform}`);
+        const near = new Map<string, number[]>();
         for (const o of (others.data ?? []) as any[]) {
           if (o.status === "failed" && o.error !== UNCONFIRMED) continue;
           const st = (Array.isArray(o.options?.accounts) ? o.options.accounts : []) as StoredTarget[];
-          for (const t of sendsOf(o)) { const s2 = st.find((x) => x.id && x.id === t.id); const k = `${tok(t)}|${dayOf(Date.parse(s2?.at ?? o.schedule_at))}`; per.set(k, (per.get(k) ?? 0) + 1); }
+          for (const t of sendsOf(o)) {
+            const s2 = st.find((x) => x.id && x.id === t.id), at = Date.parse(s2?.at ?? o.schedule_at);
+            const k = `${tok(t)}|${dayOf(at)}`; per.set(k, (per.get(k) ?? 0) + 1);
+            if (["scheduled", "queued", "sending"].includes(o.status) && Number.isFinite(at)) near.set(tok(t), [...(near.get(tok(t)) ?? []), at]);
+          }
+        }
+        // each account keeps its posts apart (the same floor as when they were made)
+        const gapMs = minGapMinutes(env) * 60_000;
+        if (gapMs > 0) for (const t of accounts) {
+          const at = t.at ? Date.parse(t.at) : newAt.getTime();
+          const clash = (near.get(tok(t)) ?? []).find((x) => Math.abs(x - at) < gapMs);
+          if (clash != null) throw new SocialError("too_close", `${t.username ? `@${t.username}` : t.platform} already posts at ${new Date(clash).toISOString().slice(11, 16)} UTC; keep ${minGapMinutes(env)} minutes between its posts.`, 409);
         }
         for (const t of accounts) {
           const k = `${tok(t)}|${dayOf(t.at ? Date.parse(t.at) : newAt.getTime())}`;

@@ -10,6 +10,22 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { deleteAssets } from "./studio-library.js";
 
 const KEEP_FOR = ["scheduled", "queued", "sending", "failed", "partial"];
+/** Uploads a board or draft still holds (the tray, saved drafts, every project's board): never deleted. */
+async function heldOnBoards(sb: SupabaseClient, u: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const add = (payload: any) => { for (const r of Array.isArray(payload?.rows) ? payload.rows : []) { const id = r?.pick?.asset_id; if (typeof id === "string") out.add(id); } };
+  const [d, p] = await Promise.all([
+    sb.from("studio_post_drafts").select("payload").eq("user_id", u).limit(200),
+    sb.from("studio_post_projects").select("tray").eq("user_id", u).limit(100),
+  ]);
+  if (d.error) throw d.error; // unsure what boards hold: delete nothing for this person
+  for (const x of (d.data ?? []) as any[]) add(x.payload);
+  if (!p.error) for (const x of (p.data ?? []) as any[]) add(x.tray);
+  return out;
+}
+// where the last sweep got to (per server): posts are read in time order from there, so a busy day never starves it
+let cursor = 0;
+export const resetCursor = () => { cursor = 0; };
 
 /** Whether the person has delete-after-posting on (on unless they turned it off). */
 export async function deleteAfterPost(sb: SupabaseClient, u: string): Promise<boolean> {
@@ -24,9 +40,12 @@ export async function sweepPosted(sb: SupabaseClient, log: (s: string) => void =
   // looked at, so nothing already posted disappears the day this is switched on; unset = off
   const from = Date.parse(env.STUDIO_DELETE_AFTER_POST_FROM ?? "");
   if (!Number.isFinite(from)) return 0;
-  const since = new Date(Math.max(from, now - 3 * 86400_000)).toISOString();
-  const done = await sb.from("studio_social_posts").select("user_id,asset_id").eq("status", "posted").not("asset_id", "is", null).gte("updated_at", since).limit(1000);
+  const since = new Date(Math.max(from, now - 3 * 86400_000, cursor)).toISOString();
+  const done = await sb.from("studio_social_posts").select("user_id,asset_id,updated_at").eq("status", "posted").not("asset_id", "is", null).gte("updated_at", since).order("updated_at", { ascending: true }).limit(500);
   if (done.error) { log(`[cleanup] read failed: ${done.error.message}`); return 0; }
+  const rowsRead = (done.data ?? []) as any[];
+  // next time from the last one read (the same instant again: a post updated in the same millisecond is not lost)
+  if (rowsRead.length) cursor = Date.parse(rowsRead[rowsRead.length - 1].updated_at) || cursor;
   const byUser = new Map<string, Set<string>>();
   for (const p of (done.data ?? []) as any[]) if (p.asset_id) byUser.set(p.user_id, (byUser.get(p.user_id) ?? new Set()).add(p.asset_id));
   let gone = 0;
@@ -39,7 +58,8 @@ export async function sweepPosted(sb: SupabaseClient, log: (s: string) => void =
         sb.from("studio_assets").select("id,collection_id").eq("user_id", u).in("id", ids).neq("status", "deleted"),
       ]);
       if (waiting.error || assets.error) continue;
-      const busy = new Set(((waiting.data ?? []) as any[]).map((x) => x.asset_id));
+      const held = await heldOnBoards(sb, u);
+      const busy = new Set([...((waiting.data ?? []) as any[]).map((x) => x.asset_id), ...held]);
       const rows = ((assets.data ?? []) as any[]).filter((a) => !busy.has(a.id));
       if (!rows.length) continue;
       // a video in a Clips set stays (the set is something the person made, not a file brought in to post)
