@@ -21,7 +21,8 @@ export function classify(raw: string): Inbound {
   if (yes) return { kind: "yes", code: yes[1] ? yes[1].toUpperCase() : null, count: yes[2] != null ? Number(yes[2]) : null };
   if (/^\/?(?:no|n|nope|don'?t|not now|never ?mind)$/.test(low)) return { kind: "no" };
   // leaving: any reasonable wording ends all texts (the SMS rule; the same words work everywhere so nobody has to learn two)
-  if (/^\/?(?:stop|stopall|unsubscribe|opt ?out|stop texting(?: me)?|stop messaging(?: me)?)$/.test(low)) return { kind: "stop" };
+  // every usual way of saying "stop texting me" (a phone line must honour any reasonable wording)
+  if (/^\/?(?:stop|stop ?all|unsubscribe|opt ?out|end|quit|revoke|stop texting(?: me)?|stop messaging(?: me)?|leave me alone)$/.test(low)) return { kind: "stop" };
   if (/^\/?(?:cancel|cancel (?:it|that|this))$/.test(low)) return { kind: "cancel" };
   if (/^\/?(?:help|\?|commands|what can you do)$/.test(low)) return { kind: "help" };
   if (/^(?:\/pause|\/mute|mute)$/.test(low)) return { kind: "pause" };

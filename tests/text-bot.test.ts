@@ -37,7 +37,9 @@ test("the gate reads the words that must always work", () => {
   assert.equal(classify("help").kind, "help");
   assert.deepEqual(classify("/start abcDEF123_-x"), { kind: "start", code: "abcDEF123_-x" }, "the pairing code keeps its capitals");
   // ordinary sentences and ordinary single words are not commands
-  for (const t of ["yes post it to tiktok", "stop the clips at 5", "no caption please", "cancel the 4:45 post", "yes km and also schedule the rest", "yes go", "yes ok", "yes do", "can you help me find the cat video", "ok 30", "go 20", "end", "quit", "quiet", "pause", "do it"]) assert.equal(classify(t).kind, "text", t);
+  for (const t of ["yes post it to tiktok", "stop the clips at 5", "no caption please", "cancel the 4:45 post", "yes km and also schedule the rest", "yes go", "yes ok", "yes do", "can you help me find the cat video", "ok 30", "go 20", "quiet", "pause", "do it", "end the clip at 10", "quit posting at night"]) assert.equal(classify(t).kind, "text", t);
+  // every usual opt-out word works alone (a phone line must honour them)
+  for (const t of ["END", "quit", "Revoke", "stop all", "STOPALL", "unsubscribe", "opt out"]) assert.equal(classify(t).kind, "stop", t);
 });
 
 test("a YES releases only the live action, with its code, once, in time, and only if its question was shown", () => {
@@ -308,7 +310,7 @@ test("a whole chat: nobody but the owner, nothing without the YES, nothing twice
   assert.equal(b.api.acts.length, 1); assert.match(b.sent.at(-1)!.text, /Nothing is waiting|ran out of time/);
   // STOP quiets the bot and cancels nothing; an empty message and a sticker do not reach the brain
   await b.bot.handle({ chat: "1", from: "1", text: "STOP", private: true });
-  assert.equal(st.muted, true); assert.match(b.sent.at(-1)!.text, /won't message you/);
+  assert.equal(st.muted, true); assert.match(b.sent.at(-1)!.text, /won.t message you on my own/);
   await b.bot.handle({ chat: "1", from: "1", text: "", private: true });
   assert.match(b.sent.at(-1)!.text, /text and links/);
 });

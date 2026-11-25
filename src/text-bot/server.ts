@@ -309,7 +309,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (u.callback_id && ch.name === "telegram") { void (deps.out?.answerTap ?? tg?.answerTap)?.(u.callback_id); if (u.message_id && /^(y|n):/.test(u.text)) void (deps.out?.clearButtons ?? tg?.clearButtons)?.(u.chat, u.message_id); }
     if (!link) return stranger(sb, ch, u);
     if (link.chat_id !== u.chat) return; // a person's linked chat is the private chat with the bot; anything else is ignored
-    if (!(await mayUse(sb, link.user_id, ch.name))) { if (!u.callback_id) await say.text(u.chat, `Texting Clone8 on ${ch.label} isn't open for your account yet. We'll let you know when it is.`); return; }
+    if (!(await mayUse(sb, link.user_id, ch.name))) { if (!u.callback_id) await say.text(u.chat, `Texting Clone8 on ${ch.label} isn't open for your account yet.`); return; }
     if (ch.startCode(u.text)) { await say.text(u.chat, "This chat is already connected to your Clone8 account. To connect a different account, remove this one first in the app (Account → Text Clone8)."); return; }
     if (ch.name === "imessage") shareProfile(u.chat);
     if (!(await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file })))) return "busy";
@@ -388,7 +388,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       // housekeeping, about once an hour: answered messages after 7 days, used or expired codes after a day
       if (Date.now() - swept > 3600_000) {
         swept = Date.now();
-        await sb.from("studio_text_inbox").delete().in("channel", live()).lt("done_at", new Date(Date.now() - 7 * 86400_000).toISOString());
+        await sb.from("studio_text_inbox").delete().in("channel", ["telegram", "imessage"]).lt("done_at", new Date(Date.now() - 7 * 86400_000).toISOString());
         await sb.from("studio_text_codes").delete().lt("expires_at", new Date(Date.now() - 86400_000).toISOString());
         // what the privacy policy (section 2C) promises: the message log is kept 12 months; a disconnected or unfinished
         // connection (with its phone number or Telegram id) is deleted after 30 days
@@ -546,7 +546,8 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         const ch = chOf(row.channel) ?? channels.telegram;
         logFor(u, row.chat_id, ch.name)(row.status === "linked" ? "unlinked" : "link_refused", {});
         if (row.status === "linked") {
-          await sb.from("studio_text_chats").update({ watching: false }).eq("channel", ch.name).eq("chat_id", row.chat_id).eq("user_id", u);
+          // the conversation kept for the assistant goes with the connection (the message log stays, as the policy says)
+          await sb.from("studio_text_chats").delete().eq("channel", ch.name).eq("chat_id", row.chat_id).eq("user_id", u);
           if (ch.out) await ch.out.text(row.chat_id, `This chat is no longer connected to Clone8. To connect again: ${CONNECT}`).catch(() => undefined);
         }
       }

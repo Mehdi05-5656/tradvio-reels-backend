@@ -25,8 +25,9 @@ export type BotDeps = {
 export const HELP = [
   "I'm Clone8 in your texts. Tell me what you want to make, post or check, in your own words.",
   "I ask before anything is posted, changed or costs credits: you answer YES with the code I give.",
-  "NO leaves things as they are. STOP ends my messages, RESUME brings them back.",
+  "NO leaves things as they are. STOP pauses the messages I'd send on my own (like results being ready); RESUME turns them back on.",
   "Plans, payments and linking accounts are in the app: https://app.clone8.io",
+  "Help: support@clone8.io. Message frequency varies with what you ask; message and data rates may apply.",
 ].join("\n");
 const PRIVATE_LINE = "This is a private Clone8 test. Connect your own account in the app: https://app.clone8.io";
 const PER_5_MIN = 20, PER_DAY = 200;
@@ -128,7 +129,7 @@ export function makeBot(d: BotDeps) {
       if (m.tap) return; // a tap that is none of ours
       if (!m.text.trim()) { await d.out.text(m.chat, m.has_file ? "I can't take files sent in the chat yet. Send me a link to the video, or tell me which one in your library." : "I can read text and links for now."); return; }
       if (gate.kind === "start" || gate.kind === "help") { await say(st, HELP); return; }
-      if (gate.kind === "stop" || gate.kind === "pause") { st.muted = true; d.log("muted", { from: m.from }); await d.out.text(m.chat, gate.kind === "stop" ? "Okay. I won't message you until you say RESUME. Nothing that is running was cancelled." : "Quiet until you say RESUME. Your runs keep going."); return; }
+      if (gate.kind === "stop" || gate.kind === "pause") { st.muted = true; d.log("muted", { from: m.from }); await d.out.text(m.chat, gate.kind === "stop" ? "Okay. I won't message you on my own (results, updates) until you say RESUME. If you text me, I'll still answer that message. Nothing that is running was cancelled." : "Quiet until you say RESUME: I'll only answer what you text me. Your runs keep going."); return; }
       if (gate.kind === "resume") { st.muted = false; const missed = st.missed ?? []; st.missed = []; await say(st, missed.length ? `I'm back. While I was quiet:\n${missed.join("\n")}` : "I'm back. What do you need?"); return; }
       if (gate.kind === "yes") {
         if (!st.pending.live) { if (gate.code) { await say(st, "Nothing is waiting for a YES right now."); return; } return await talk(st, m.text); }
@@ -144,6 +145,8 @@ export function makeBot(d: BotDeps) {
           : (r.why === "need_count" || r.why === "wrong_count") && p ? `This one is large, so the count goes with it. ${howToAnswer(p)}` : "Nothing is waiting for a YES right now.");
         return;
       }
+      // "cancel" with nothing waiting reads as "stop texting me": honoured as STOP
+      if (gate.kind === "cancel" && !st.pending.live) { st.muted = true; d.log("muted", { from: m.from, by: "cancel" }); await d.out.text(m.chat, "Okay. I won't message you on my own (results, updates) until you say RESUME. If you text me, I'll still answer that message."); return; }
       if ((gate.kind === "no" || gate.kind === "cancel") && st.pending.live) {
         st.history.push({ role: "user", text: m.text, at: t });
         const p = decline(st.pending)!; d.log("declined", { id: p.id }); note(st, `The person said no to: ${p.question.split("\n")[0]}`);
