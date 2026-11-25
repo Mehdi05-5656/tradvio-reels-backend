@@ -3,7 +3,7 @@
 // read back. Pure counting here (tested); server.ts reads the tables and is the only one that serves it, to admins.
 
 export type TextLinkRow = { id: string; user_id: string; channel: string; handle: string | null; status: string; created_at: string; confirmed_at: string | null; last_used_at: string | null };
-export type TextEventRow = { user_id: string | null; chat_id: string | null; event: string; at: string; data: Record<string, any> | null };
+export type TextEventRow = { user_id: string | null; chat_id: string | null; channel?: string | null; event: string; at: string; data: Record<string, any> | null };
 export type TextPerson = {
   user_id: string; email: string | null; plan: string | null; channel: string; handle: string | null; status: "connected" | "removed" | "waiting";
   connected_at: string | null; last_message_at: string | null;
@@ -68,12 +68,16 @@ export function textAdminView(o: { links: TextLinkRow[]; events: TextEventRow[];
   };
 }
 
-export type ChatLine = { at: string; who: "person" | "bot" | "system"; text: string; files?: number };
+export type ChatLine = { at: string; who: "person" | "bot" | "system"; text: string; files?: number; channel?: string };
 /** One person's chat as it read on the phone, oldest first, with the system's marks (asked, done, errors) between. */
 export function chatLines(events: TextEventRow[]): ChatLine[] {
   const out: ChatLine[] = [];
+  let was: string | null = null;
   for (const e of events) {
     const d = e.data ?? {};
+    // a person on two channels: a mark where the chat moves from one to the other
+    if (e.channel && was && e.channel !== was) out.push({ at: e.at, who: "system", text: `On ${e.channel === "imessage" ? "iMessage" : "Telegram"}`, channel: e.channel });
+    if (e.channel) was = e.channel;
     if (e.event === "in") out.push({ at: e.at, who: "person", text: /^y:/.test(String(d.text)) ? "(tapped Yes)" : /^n:/.test(String(d.text)) ? "(tapped No)" : /^pick:/.test(String(d.text)) ? "(tapped a choice)" : String(d.text ?? "") });
     else if (e.event === "out") out.push({ at: e.at, who: "bot", text: String(d.text ?? ""), ...(Array.isArray(d.media) && d.media.length ? { files: d.media.length } : {}) });
     else if (e.event === "executed") out.push({ at: e.at, who: "system", text: d.ok ? `Done after YES${d.credits ? ` · ${d.credits} credits` : ""}` : "Not done after YES" });

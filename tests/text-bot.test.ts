@@ -3,7 +3,7 @@
 // brain against a pretend account.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classify, claim, setPending, markShown, dropUnshown, decline, expire, newCode, spendRoom, addSpend, PENDING_TTL_MS, type Pending, type PendingStore } from "../src/text-bot/gate.js";
+import { MAX_WRONG, classify, claim, setPending, markShown, dropUnshown, decline, expire, newCode, spendRoom, addSpend, PENDING_TTL_MS, type Pending, type PendingStore } from "../src/text-bot/gate.js";
 import { levelOf, makeApi } from "../scripts/text-bot/clone8.js";
 import { guard, blanked, SAFE_LINE } from "../src/text-bot/guard.js";
 import { buildCards, find, history, describeJob } from "../src/text-bot/account.js";
@@ -486,4 +486,15 @@ test("every caption move says where they were, so the chat remembers earlier spo
   assert.match(spot.question, /Captions moved from 55% to 80% of the way down \(bottom\)\./);
   doc.captions.style = { id: "bold_pop" }; // never moved: its style's own height
   assert.match((await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { caption_y: 0.5 } })).question, /from 70% to 50% of the way down/);
+});
+
+test("a question is withdrawn after three wrong codes: guessing the 2-letter code doesn't pay", () => {
+  const s = store(), p = shownPending(s, { ...base, id: "g1" }, 1000);
+  const wrong = p.code === "BC" ? "BD" : "BC";
+  assert.equal(claim(s, { code: wrong }, 1001).why, "wrong_code");
+  assert.equal(claim(s, { code: wrong }, 1002).why, "wrong_code");
+  assert.equal(claim(s, { code: wrong }, 1003).why, "too_many");
+  assert.equal(MAX_WRONG, 3);
+  assert.equal(s.live, null, "withdrawn");
+  assert.equal(claim(s, { code: p.code }, 1004).why, "nothing", "even the right code is too late");
 });

@@ -102,7 +102,13 @@ export function makeBot(d: BotDeps) {
       }
       st = chatOf(s, m.chat);
       const hits = (s.rate[m.from] ?? []).filter((x) => t - x < 86400_000);
-      if (hits.filter((x) => t - x < 5 * 60_000).length >= PER_5_MIN || hits.length >= PER_DAY) { s.rate[m.from] = hits; d.log("rate_limited", { from: m.from }); await d.out.text(m.chat, "That's a lot of messages at once. Give me a few minutes."); return; }
+      if (hits.filter((x) => t - x < 5 * 60_000).length >= PER_5_MIN || hits.length >= PER_DAY) {
+        s.rate[m.from] = hits; d.log("rate_limited", { from: m.from });
+        // said once per five minutes, not to every extra message (each reply costs, and floods look like spam)
+        const told = s.rate[`${m.from}:told`]?.[0] ?? 0;
+        if (t - told > 5 * 60_000) { s.rate[`${m.from}:told`] = [t]; await d.out.text(m.chat, "That's a lot of messages at once. Give me a few minutes."); }
+        return;
+      }
       s.rate[m.from] = [...hits, t];
       d.log("in", { from: m.from, text: m.text.slice(0, 2000), tap: !!m.tap });
       // a question that never reached the chat (the turn that made it broke) is gone before anything can answer it
@@ -130,7 +136,9 @@ export function makeBot(d: BotDeps) {
         const r = claim(st.pending, { code: gate.code, count: gate.count }, t);
         if (r.ok) return await release(st, r.pending, "text");
         const p = r.pending;
-        await say(st, r.why === "expired" ? "That question ran out of time (10 minutes). Ask me again and I'll set it up."
+        if (r.why === "too_many") d.log("pending_wrong_codes", { id: p?.id ?? null });
+        await say(st, r.why === "too_many" ? "That was the third wrong code, so I withdrew the question and nothing was done. Ask me again and I'll set it up with a new code."
+          : r.why === "expired" ? "That question ran out of time (10 minutes). Ask me again and I'll set it up."
           : r.why === "no_code" && p ? `To be sure it's this one, include the code. ${howToAnswer(p)}`
           : r.why === "wrong_code" && p ? `That code doesn't match the question that is waiting. ${howToAnswer(p)}`
           : (r.why === "need_count" || r.why === "wrong_count") && p ? `This one is large, so the count goes with it. ${howToAnswer(p)}` : "Nothing is waiting for a YES right now.");

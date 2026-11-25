@@ -43,7 +43,7 @@ const anyEnabled = (env: Env) => textEnabled(env) || imessageEnabled(env);
 export const WEBHOOK_PATH = "/api/studio/text/telegram/webhook";
 export const IMESSAGE_WEBHOOK_PATH = "/api/studio/text/imessage/webhook";
 /** "LINK <code>": what the Connect iMessage button types into Messages. */
-const LINK_RE = /^\s*LINK\s+([A-Za-z0-9_-]{8,64})\s*[.!]?\s*$/i;
+const LINK_RE = /^\s*LINK\s+([A-Za-z0-9_-]{24})\s*[.!]?\s*$/i; // (exactly a connect code: "link instagram" is a request)
 const APP = "https://app.clone8.io";
 const CONNECT = `${APP}/#studio/account?text=1`;
 const CODE_TTL_MS = 10 * 60_000, CONFIRM_TTL_MS = 15 * 60_000;
@@ -108,12 +108,14 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   const channels: Record<ChannelName, Channel> = {
     telegram: { name: "telegram", label: "Telegram", enabled: () => textEnabled(env), open: () => textOpen(env), out: deps.out ?? tg?.out ?? null, parse: parseUpdate,
       startCode: (t) => { const g = classify(t); return g.kind === "start" && g.code ? g.code : null; } },
-    imessage: { name: "imessage", label: "iMessage", enabled: () => imessageEnabled(env), open: () => imessageOpen(env), out: deps.imessageOut ?? sbl?.out ?? null, parse: parseSendblue,
+    imessage: { name: "imessage", label: "iMessage", enabled: () => imessageEnabled(env), open: () => imessageOpen(env), out: deps.imessageOut ?? sbl?.out ?? null, parse: (p) => parseSendblue(p, env.SENDBLUE_FROM_NUMBER),
       startCode: (t) => LINK_RE.exec(t)?.[1] ?? null,
       onLinked: async (chat) => {
         if (!sbl || deps.imessageOut) return;
-        if (!card) card = await sbl.upload({ kind: "photo", bytes: Buffer.from(contactCard(String(env.SENDBLUE_FROM_NUMBER))), name: "Clone8.vcf" } as any);
-        await sbl.sendUrl(chat, card);
+        const make = async () => (card = await sbl.upload({ kind: "photo", bytes: Buffer.from(contactCard(String(env.SENDBLUE_FROM_NUMBER))), name: "Clone8.vcf" } as any));
+        if (!card) await make();
+        // (an upload kept from earlier may have expired at Sendblue: made again once)
+        try { await sbl.sendUrl(chat, card!); } catch { await make(); await sbl.sendUrl(chat, card!); }
       } },
   };
   const chOf = (name: unknown): Channel | null => (name === "telegram" || name === "imessage" ? channels[name] : null);
@@ -243,10 +245,11 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     const api: Api = { ...api0, bytes: async (url, max) => { if (!freeFiles) freeFiles = await takeFileLock(); return api0.bytes(url, max); } };
     if (!indexes.has(link.user_id)) indexes.set(link.user_id, { current: null });
     const brain: BrainDeps = { cfg, api, out, index: indexes.get(link.user_id)!, log: log2, basics: basics.get(link.user_id) ?? null, ...(deps.think ? { fetch: deps.think } : {}) };
-    const state: BotState = { owner: link.sender_id, pair_code: null, offset: 0, chats: { [chat]: st }, strangers: {}, rate: { [link.sender_id]: rate.get(link.sender_id) ?? [] } };
+    const toldKey = `${link.sender_id}:told`;
+    const state: BotState = { owner: link.sender_id, pair_code: null, offset: 0, chats: { [chat]: st }, strangers: {}, rate: { [link.sender_id]: rate.get(link.sender_id) ?? [], [toldKey]: rate.get(toldKey) ?? [] } };
     const bot = makeBot({ cfg, api, out, state, log: log2, save: () => saveChat(sb, link, st), think: (s, text, o) => think(brain, s, text, o), forget: () => { indexes.get(link.user_id)!.current = null; brain.basics = null; } });
     try { await run(bot); }
-    finally { (freeFiles as (() => void) | null)?.(); rate.set(link.sender_id, state.rate[link.sender_id] ?? []); basics.set(link.user_id, brain.basics ?? null); }
+    finally { (freeFiles as (() => void) | null)?.(); rate.set(link.sender_id, state.rate[link.sender_id] ?? []); rate.set(toldKey, state.rate[toldKey] ?? []); basics.set(link.user_id, brain.basics ?? null); }
   }
 
   // ---- linking: a first message carrying a connect code, from someone not connected yet ----
@@ -256,6 +259,8 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     // with 24 random characters, but there is no reason to let anyone try)
     const key = `${ch.name}:${u.from}`, day = new Date().toISOString().slice(0, 10), k0 = strangers.get(key), k = k0 && k0.day === day ? k0 : { day, n: 0, bad: 0 };
     const n = k.n; k.n++; strangers.set(key, k);
+    // STOP and the like from someone not connected: nothing is sent back, ever (a phone line must honour it)
+    if (["stop", "pause"].includes(classify(u.text).kind) || /^\s*(unsubscribe|cancel|end|quit|stopall)\s*$/i.test(u.text)) { logFor(null, u.chat, ch.name)("stranger_stop", {}); return; }
     const start = ch.startCode(u.text);
     if (start && k.bad < 10) {
       const c = await sb.from("studio_text_codes").select("*").eq("code_hash", hash(start)).maybeSingle();
@@ -305,7 +310,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       const sb = sbFn();
       const stale = Date.now() - 5 * 60_000;
       const r = await sb.from("studio_text_inbox").select("channel,update_id,payload,claimed_at,attempts").in("channel", live()).is("done_at", null)
-        .or(`claimed_at.is.null,claimed_at.lt.${new Date(stale).toISOString()}`).order("update_id", { ascending: true }).limit(50);
+        .or(`claimed_at.is.null,claimed_at.lt.${new Date(stale).toISOString()}`).order("received_at", { ascending: true }).order("update_id", { ascending: true }).limit(50);
       if (r.error) throw r.error;
       for (const row of (r.data ?? []) as any[]) {
         const ch = chOf(row.channel); if (!ch) continue;
@@ -412,7 +417,11 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (!imessageEnabled(env)) return res.status(404).json({ error: "not_found" });
     if (!verifySendblue(req.headers as any, env.SENDBLUE_WEBHOOK_SECRET)) { log(`[text] imessage webhook refused (headers: ${Object.keys(req.headers).join(",").slice(0, 300)})`); return res.status(401).json({ error: "unauthorized" }); }
     const b = req.body ?? {};
-    if (b.is_outbound === true || typeof b.message_handle !== "string" || !parseSendblue(b)) return res.json({ ok: true });
+    if (b.is_outbound === true || typeof b.message_handle !== "string" || !parseSendblue(b, env.SENDBLUE_FROM_NUMBER)) {
+      // (a person whose Mac sends from an email address, or a plain SMS, can't be answered: noted for the review)
+      if (b.is_outbound !== true && b.message_handle && !b.group_id) logFor(null, null, "imessage")("imessage_ignored", { service: String(b.service ?? "").slice(0, 20), from: /@/.test(String(b.from_number ?? "")) ? "email" : /^\+\d/.test(String(b.from_number ?? "")) ? "number" : "other", reaction: !!b.message_type && b.message_type !== "message" });
+      return res.json({ ok: true });
+    }
     try {
       const w = await sbFn().from("studio_text_inbox").upsert({ channel: "imessage", update_id: handleId(b.message_handle), payload: b, received_at: new Date().toISOString() }, { onConflict: "channel,update_id", ignoreDuplicates: true });
       if (w.error) throw w.error;
@@ -548,7 +557,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       const sb = sbFn();
       if (!(await isStudioAdmin(req, sb, env))) return res.status(404).json({ error: "not_found" });
       const u = String(req.query.user ?? ""); if (!UUID.test(u)) return res.status(400).json({ error: "user" });
-      const r = await sb.from("studio_text_events").select("user_id,chat_id,event,at,data").eq("user_id", u).in("event", ["in", "out", "executed", "declined", "linked", "unlinked", "error", "claude_error", "send_failed", "watch_error", "execute_unconfirmed"]).order("at", { ascending: false }).limit(300);
+      const r = await sb.from("studio_text_events").select("user_id,chat_id,channel,event,at,data").eq("user_id", u).in("event", ["in", "out", "executed", "declined", "linked", "unlinked", "error", "claude_error", "send_failed", "watch_error", "execute_unconfirmed"]).order("at", { ascending: false }).limit(300);
       if (r.error) throw r.error;
       res.json({ lines: chatLines(((r.data ?? []) as TextEventRow[]).reverse()) });
     } catch (e) { fail(res, e); }

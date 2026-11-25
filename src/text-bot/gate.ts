@@ -78,7 +78,9 @@ export function setPending(store: PendingStore, p: Omit<Pending, "code" | "creat
 
 export type ClaimResult =
   | { ok: true; pending: Pending; why?: undefined }
-  | { ok: false; why: "nothing" | "expired" | "no_code" | "wrong_code" | "need_count" | "wrong_count"; pending?: Pending };
+  | { ok: false; why: "nothing" | "expired" | "no_code" | "wrong_code" | "need_count" | "wrong_count" | "too_many"; pending?: Pending };
+/** Wrong codes a question takes before it is withdrawn (a code is 2 of 19 letters: guessing must not pay). */
+export const MAX_WRONG = 3;
 
 /** Release the live action for a YES. Exactly one caller can win: the action leaves `live` the moment it is claimed. */
 export function claim(store: PendingStore, by: { code?: string | null; count?: number | null; id?: string | null }, now: number): ClaimResult {
@@ -90,7 +92,11 @@ export function claim(store: PendingStore, by: { code?: string | null; count?: n
   if (by.id != null) { if (by.id !== p.id) return { ok: false, why: "wrong_code", pending: p }; }
   else {
     if (!by.code) return { ok: false, why: "no_code", pending: p };
-    if (by.code !== p.code) return { ok: false, why: "wrong_code", pending: p };
+    if (by.code !== p.code) {
+      (p as any).misses = Number((p as any).misses ?? 0) + 1;
+      if ((p as any).misses >= MAX_WRONG) { retire(store, "failed"); return { ok: false, why: "too_many", pending: p }; }
+      return { ok: false, why: "wrong_code", pending: p };
+    }
   }
   // a large action: the count must come with it, typed (a button alone is not enough)
   if (p.count != null) {

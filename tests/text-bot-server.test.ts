@@ -436,3 +436,25 @@ test("iMessage: Connect makes a Messages link with the code; LINK code → 4 dig
   // the same number on Telegram is a different chat: not connected there
   assert.equal((tables.studio_text_links ?? []).filter((l) => l.status === "linked").length, 1);
 });
+
+test("iMessage review fixes: no SMS, no reactions, only our line; exact codes; silence after STOP", async () => {
+  const line = "+15550001111";
+  assert.equal(parseSendblue({ ...inbound("+15557654321", "post it"), service: "SMS" }, line), null, "an SMS sender can be faked");
+  assert.equal(parseSendblue({ ...inbound("+15557654321", "x"), service: undefined }, line), null);
+  assert.equal(parseSendblue(inbound("+15557654321", "Liked “To go ahead, reply: YES KM”"), line), null, "a tapback is not a request");
+  assert.equal(parseSendblue({ ...inbound("+15557654321", "hi"), to_number: "+15559999999" }, line), null, "another line's message");
+  assert.equal(parseSendblue({ ...inbound(line, "hi") }, line), null, "never from our own line");
+  assert.ok(parseSendblue(inbound("+15557654321", "link my instagram please"), line));
+  // a stranger: STOP gets nothing back; "link instagram" is not a connect code
+  const sent: string[] = [];
+  const imessageOut: any = { text: async (_c: string, t: string) => { sent.push(t); }, media: async () => undefined, typing: async () => undefined };
+  const tables: Record<string, Row[]> = {};
+  const sb = fakeSb(tables, {});
+  const app: any = { get: () => undefined, post: () => undefined, delete: () => undefined };
+  const bot = registerTextBot(app, () => sb, { env: IM_ENV, out: { text: async () => undefined, media: async () => undefined, typing: async () => undefined } as any, imessageOut, log: () => undefined, port: 1 });
+  await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", "STOP"), line)!, "imessage");
+  await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", "unsubscribe"), line)!, "imessage");
+  assert.equal(sent.length, 0);
+  await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", "LINK instagram"), line)!, "imessage");
+  assert.match(sent.at(-1)!, /Connect your Clone8 account first/, "treated as hello, not as a bad code");
+});

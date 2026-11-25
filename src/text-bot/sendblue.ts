@@ -22,12 +22,21 @@ const MAX = 3000; // long replies are split at a line, so each bubble stays read
 /** A Sendblue message handle as the inbox's number (the inbox is keyed by a number per channel). */
 export function handleId(handle: string): number { return parseInt(createHash("sha256").update(handle).digest("hex").slice(0, 12), 16); }
 
-/** One inbound message in the common shape, or null for anything else (our own messages echoed back, statuses, groups). */
-export function parseSendblue(p: any): Incoming | null {
+/** A tapback ("Liked “…”") arrives as words on some setups: it is not something the person asked. */
+const REACTION = /^(Liked|Loved|Emphasi[sz]ed|Laughed at|Questioned|Disliked|Reacted .{1,12} to)\s+[“"]/;
+/** One inbound message in the common shape, or null for anything else: our own messages echoed back, statuses,
+ *  groups, reactions, and anything that is not iMessage. Plain SMS is refused: an SMS sender's number can be faked,
+ *  and the number is the only proof of who is texting (iMessage senders can't be faked that way). `line` is our own
+ *  number: a message must be to it, and never from it. */
+export function parseSendblue(p: any, line?: string): Incoming | null {
   if (!p || p.is_outbound === true || p.group_id || typeof p.message_handle !== "string") return null;
   if (p.status && !/^received$/i.test(String(p.status))) return null;
+  if (!/^imessage$/i.test(String(p.service ?? ""))) return null;
+  if (p.message_type && !/^(message|text)$/i.test(String(p.message_type))) return null;
   const from = String(p.from_number ?? p.number ?? "");
   if (!/^\+\d{7,15}$/.test(from)) return null;
+  if (line && (from === line || (p.to_number && String(p.to_number) !== line))) return null;
+  if (REACTION.test(String(p.content ?? ""))) return null;
   return { update_id: handleId(p.message_handle), chat: from, from, name: mask(from), text: String(p.content ?? ""), message_id: null, private: true, has_file: !!p.media_url };
 }
 
@@ -69,11 +78,14 @@ export function sendblue(o: { keyId: string; secret: string; from: string; fetch
   // one send at a time with a short gap: the line takes 10 a second and refuses the rest
   let line: Promise<unknown> = Promise.resolve();
   const queued = <T,>(fn: () => Promise<T>): Promise<T> => { const p = line.then(fn); line = p.then(() => new Promise((r) => setTimeout(r, 150)), () => new Promise((r) => setTimeout(r, 150))); return p; };
-  const call = async (path: string, body: Record<string, unknown> | FormData, timeoutMs = 60_000): Promise<any> => {
+  const call = async (path: string, body: Record<string, unknown> | FormData, timeoutMs = 60_000, retried = false): Promise<any> => {
     const form = body instanceof FormData;
     const r = await f(`${BASE}${path}`, { method: "POST", headers: form ? auth : { ...auth, "content-type": "application/json" }, body: form ? body : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+    // too fast for the line: one wait and one more try (nothing was sent)
+    if (r.status === 429 && !retried) { await new Promise((res) => setTimeout(res, 1500)); return call(path, body, timeoutMs, true); }
     const j: any = await r.json().catch(() => null);
-    if (!r.ok || /^(DECLINED|ERROR)$/i.test(String(j?.status ?? ""))) throw new Error(`sendblue_${path.split("/").pop()}_${r.status}: ${String(j?.error_message ?? j?.message ?? j?.error_key ?? "").slice(0, 120)}`);
+    // (numbers are masked in the error: it goes to the server's log)
+    if (!r.ok || /^(DECLINED|ERROR)$/i.test(String(j?.status ?? ""))) throw new Error(`sendblue_${path.split("/").pop()}_${r.status}: ${String(j?.error_message ?? j?.message ?? j?.error_key ?? "").replace(/\+?\d{7,15}/g, (x) => mask(x)).slice(0, 120)}`);
     return j;
   };
   const safe = (text: string, own?: string[]) => { const g = guard(text, own); if (g.hit) o.onGuard?.(g.hit, text); return g.text; };
@@ -93,7 +105,7 @@ export function sendblue(o: { keyId: string; secret: string; from: string; fetch
     async media(chat, items, caption, buttons, own) {
       for (const m of items) {
         const url = await upload(m);
-        await queued(() => call("/api/send-message", { number: chat, from_number: o.from, media_url: url }, 120_000));
+        await queued(() => call("/api/send-message", { number: chat, from_number: o.from, media_url: url }, 30_000));
       }
       const words = [caption, ...items.map((m) => m.caption).filter(Boolean)].filter(Boolean).join("\n");
       if (words || buttons?.length) await out.text(chat, words || "", buttons, own);
