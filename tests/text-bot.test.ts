@@ -22,10 +22,12 @@ const base = { id: "a1", kind: "job", question: "q", steps: [], checks: [], cred
 const shownPending = (s: PendingStore, p: Parameters<typeof setPending>[1], t: number, rand?: () => number): Pending => { const x = setPending(s, p, t, rand); markShown(s, x.id); return x; };
 
 test("the gate reads the words that must always work", () => {
-  assert.deepEqual(classify("YES 47"), { kind: "yes", code: "47", count: null });
-  assert.deepEqual(classify("yes47"), { kind: "yes", code: "47", count: null });
-  assert.deepEqual(classify(" y 47. "), { kind: "yes", code: "47", count: null });
-  assert.deepEqual(classify("Yes 47 24"), { kind: "yes", code: "47", count: 24 });
+  assert.deepEqual(classify("YES KM"), { kind: "yes", code: "KM", count: null });
+  assert.deepEqual(classify("yeskm"), { kind: "yes", code: "KM", count: null });
+  assert.deepEqual(classify(" y km. "), { kind: "yes", code: "KM", count: null });
+  assert.deepEqual(classify("Yes KM 24"), { kind: "yes", code: "KM", count: 24 });
+  // a number after YES is never a code (codes are letters, so a price can't be taken for one): the bot asks for the code
+  assert.deepEqual(classify("YES 47"), { kind: "yes", code: null, count: 47 });
   assert.deepEqual(classify("yes"), { kind: "yes", code: null, count: null });
   assert.equal(classify("no").kind, "no");
   assert.equal(classify("STOP").kind, "stop");
@@ -35,7 +37,7 @@ test("the gate reads the words that must always work", () => {
   assert.equal(classify("help").kind, "help");
   assert.deepEqual(classify("/start abcDEF123_-x"), { kind: "start", code: "abcDEF123_-x" }, "the pairing code keeps its capitals");
   // ordinary sentences and ordinary single words are not commands
-  for (const t of ["yes post it to tiktok", "stop the clips at 5", "no caption please", "cancel the 4:45 post", "yes 47 and also schedule the rest", "can you help me find the cat video", "ok 30", "go 20", "end", "quit", "quiet", "pause", "do it"]) assert.equal(classify(t).kind, "text", t);
+  for (const t of ["yes post it to tiktok", "stop the clips at 5", "no caption please", "cancel the 4:45 post", "yes km and also schedule the rest", "yes go", "yes ok", "yes do", "can you help me find the cat video", "ok 30", "go 20", "end", "quit", "quiet", "pause", "do it"]) assert.equal(classify(t).kind, "text", t);
 });
 
 test("a YES releases only the live action, with its code, once, in time, and only if its question was shown", () => {
@@ -68,7 +70,8 @@ test("a YES releases only the live action, with its code, once, in time, and onl
   assert.equal(claim(s, { code: big.code, count: 24 }, t0 + 1).ok, true);
   shownPending(s, { ...base, id: "e" }, t0, () => 0.3);
   assert.equal(decline(s)?.id, "e"); assert.equal(expire(s, t0), null);
-  assert.notEqual(newCode({ live: null, past: [], last_code: "55" }, () => 0.5), "55");
+  assert.notEqual(newCode({ live: null, past: [], last_code: "PP" }, () => 0.5), "PP");
+  for (let i = 0; i < 200; i++) assert.match(newCode({ live: null, past: [] }), /^[BCDFGHJKMNPQRSTVWXZ]{2}$/);
   assert.equal(spendRoom({ day: "2026-11-23", credits: 250 }, "2026-11-23", 300), 50);
   assert.equal(spendRoom({ day: "2026-11-22", credits: 250 }, "2026-11-23", 300), 300);
   assert.deepEqual(addSpend({ day: "2026-11-23", credits: 250 }, "2026-11-23", 40), { day: "2026-11-23", credits: 290 });
@@ -105,7 +108,7 @@ test("no supplier or internal name leaves in a message; the person's own words a
   assert.equal(h.text, "Watch (link removed) now"); assert.equal(h.hit, "link:example-cdn.net");
   // a caption the person wrote is theirs to read back and to post, whatever it mentions
   const cap = "I asked ChatGPT to roast my setup. Full video: https://mysite.example/roast";
-  assert.deepEqual(guard(`Caption: "${cap}"\nReply YES 47`, [cap]), { text: `Caption: "${cap}"\nReply YES 47`, hit: null });
+  assert.deepEqual(guard(`Caption: "${cap}"\nReply YES KM`, [cap]), { text: `Caption: "${cap}"\nReply YES KM`, hit: null });
   assert.equal(blanked(`Caption: "${cap}"`, [cap]), null);
   assert.equal(blanked(`Caption: "${cap}" (sent through Zernio)`, [cap]), "zernio", "the exemption covers their words only");
   assert.equal(blanked("See https://example-cdn.net/x"), null, "a removed link does not blank a message");
@@ -172,7 +175,8 @@ test("a job question names the tool and what will run; it is held for the YES an
   const p = await prepareJob(ctx, { tool: "swap", asset_id: IDS.podcast, options: { model: "light", character_asset_id: IDS.cat } });
   assert.equal(api.acts.length, 0, "preparing starts nothing");
   assert.match(p.question, /^Start Swap \(43 s × 2\)\.\nVideo: "Podcast clip 3"\nPlayed by: your character "tabby cat"\n/, "the tool, the video and the character, from the account's records");
-  assert.match(p.question, /86 credits/); assert.match(p.question, /Balance 1840 → 1754/); assert.match(p.question, new RegExp(`Reply YES ${p.code}`));
+  assert.match(p.question, /\nCost: 86 credits\. Balance 1,840 → 1,754\.\n/); assert.match(p.question, new RegExp(`reply: YES ${p.code}\n\\(${p.code} is this question's code\\.\\)`));
+  assert.ok(!/YES \d/.test(p.question), "nothing next to YES can be read as a price");
   // a library picture passed where a preset's name belongs is put in the right place before anything is priced
   const slip = await prepareJob(ctxOf(api), { tool: "swap", asset_id: IDS.podcast, options: { model: "light", character: IDS.cat } });
   assert.equal(slip.steps[0].body.options.character_asset_id, IDS.cat); assert.equal(slip.steps[0].body.options.character, undefined); assert.match(slip.question, /Played by: your character "tabby cat"/);
@@ -245,7 +249,7 @@ test("a post is named by the account's own title, shows everything sent, and is 
   assert.match(k.question, /Cancel this scheduled post/); assert.equal(k.steps[0].method, "DELETE");
   // more than ten posts: the count goes in the reply
   const many = await preparePost(ctxOf(api), { videos: Array.from({ length: 12 }, () => ({ asset_id: IDS.clipA })), account_ids: [IDS.tiktok], when: "now" });
-  assert.equal(many.count, 12); assert.match(many.question, new RegExp(`Reply YES ${many.code} 12`));
+  assert.equal(many.count, 12); assert.match(many.question, new RegExp(`reply: YES ${many.code} 12\n`)); assert.match(many.question, /12 is how many/);
 });
 
 // A brain that does what the test tells it, so whole chats can be checked without an AI.
@@ -268,20 +272,20 @@ test("a whole chat: nobody but the owner, nothing without the YES, nothing twice
   assert.equal(b.state.owner, "1"); assert.equal(b.state.pair_code, null, "the code works once");
   await b.bot.handle({ chat: "8", from: "8", text: `/start ${code}`, private: true });
   assert.equal(b.state.owner, "1");
-  for (let i = 0; i < 5; i++) await b.bot.handle({ chat: "9", from: "9", text: "YES 50", private: true });
+  for (let i = 0; i < 5; i++) await b.bot.handle({ chat: "9", from: "9", text: "YES KM", private: true });
   assert.equal(b.sent.filter((s) => /private Clone8 test/.test(s.text)).length, 4, "three lines a day for one stranger, one for the other");
   await b.bot.handle({ chat: "g", from: "1", text: "swap it", private: false }); // a group: silence
   b.sent.length = 0;
 
   await b.bot.handle({ chat: "1", from: "1", text: "swap the podcast clip", private: true });
   const st = chatOf(b.state, "1"), p = st.pending.live!;
-  assert.match(b.sent.at(-1)!.text, /86 credits/); assert.deepEqual(b.sent.at(-1)!.buttons, [`y:${p.id}`, `n:${p.id}`]); assert.equal(p.shown, true);
+  assert.match(b.sent.at(-1)!.text, /Cost: 86 credits/); assert.deepEqual(b.sent.at(-1)!.buttons, [`y:${p.id}`, `n:${p.id}`]); assert.equal(p.shown, true);
   // someone else taps the button, or texts the code: a stranger's line, nothing released
   await b.bot.handle({ chat: "1", from: "9", text: `y:${p.id}`, private: true, tap: true });
   assert.equal(b.api.acts.length, 0); assert.equal(st.pending.live?.id, p.id);
   await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true });
   assert.match(b.sent.at(-1)!.text, /include the code/); assert.equal(b.api.acts.length, 0);
-  await b.bot.handle({ chat: "1", from: "1", text: `YES ${p.code === "11" ? "12" : "11"}`, private: true });
+  await b.bot.handle({ chat: "1", from: "1", text: `YES ${p.code === "KM" ? "KP" : "KM"}`, private: true });
   assert.match(b.sent.at(-1)!.text, /doesn't match/); assert.equal(b.api.acts.length, 0);
   await b.bot.handle({ chat: "1", from: "1", text: `yes ${p.code}`, private: true });
   assert.equal(b.api.acts.length, 1); assert.match(b.sent.at(-1)!.text, /^Started: Swap/);
@@ -312,7 +316,7 @@ test("a whole chat: nobody but the owner, nothing without the YES, nothing twice
 test("a question that never reached the chat cannot be answered", async () => {
   // Telegram fails exactly when the question is sent: the person only ever sees "something went wrong"
   let fail = true;
-  const b = botWith(swapTurn, { failSend: (text) => fail && /Reply YES/.test(text) });
+  const b = botWith(swapTurn, { failSend: (text) => fail && /reply: YES/.test(text) });
   b.state.owner = "1";
   await b.bot.handle({ chat: "1", from: "1", text: "swap the podcast clip", private: true });
   const st = chatOf(b.state, "1");

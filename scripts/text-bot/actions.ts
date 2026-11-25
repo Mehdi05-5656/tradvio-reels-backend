@@ -139,7 +139,7 @@ export async function prepareJob(ctx: Ctx, a: { tool: string; asset_id?: string 
   const topup = auto?.enabled && Number.isFinite(after) && after < Number(auto.below) ? `Your auto top-up is on: this takes the balance under ${auto.below}, so your card is charged $${auto.usd} as usual.` : "";
   return put(ctx, { kind: "job", credits, posts: 0, own: [...d.own, ...(rights ? [rights] : [])], checks: [{ kind: "price_at_most", quote: quoteBody, credits }], meta: { tool, summary: name },
     steps: [{ method: "POST", path: "/api/studio/jobs", body: quoteBody, save: "job", label: name }],
-    body: [`Start ${name}${summary ? ` (${summary})` : ""}.`, ...d.lines, ...(rights ? [`You said it is yours to use: "${rights}"`] : []), `${credits} credits${estimate}.${Number.isFinite(balance) ? ` Balance ${balance} → ${after}.` : ""}`, topup].filter(Boolean).join("\n") });
+    body: [`Start ${name}${summary ? ` (${summary})` : ""}.`, ...d.lines, ...(rights ? [`You said it is yours to use: "${rights}"`] : []), `Cost: ${credits} credit${credits === 1 ? "" : "s"}${estimate}.${Number.isFinite(balance) ? ` Balance ${balance.toLocaleString("en-US")} → ${after.toLocaleString("en-US")}.` : ""}`, topup].filter(Boolean).join("\n") });
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -274,7 +274,7 @@ export async function prepareCaptionRead(ctx: Ctx, a: { videos: VideoRef[]; plat
   if (!Number.isFinite(credits) || credits > Math.min(ctx.maxActionCredits, spendRoom(ctx.spend, today(ctx.now, ctx.timezone), ctx.dailyCredits))) throw new ActionError("over_daily_limit", `Reading these is ${credits} credits, over what is left for today by text.`);
   const names = titles.map((t) => short(t, 60));
   return put(ctx, { kind: "caption_read", credits, posts: 0, own: names, steps: [{ method: "POST", path: "/api/studio/social/captions/batch", body, save: "batch", label: "read" }], checks: [],
-    body: `Watch ${names.slice(0, 5).map((n) => `"${n}"`).join(", ")}${names.length > 5 ? ` and ${names.length - 5} more` : ""} once, so captions can be written from ${names.length === 1 ? "it" : "them"}.\n${credits} credits (videos already watched are free).` });
+    body: `Watch ${names.slice(0, 5).map((n) => `"${n}"`).join(", ")}${names.length > 5 ? ` and ${names.length - 5} more` : ""} once, so captions can be written from ${names.length === 1 ? "it" : "them"}.\nCost: ${credits} credits (videos already watched are free).` });
 }
 
 export async function prepareAutomationRun(ctx: Ctx, a: { automation_id: string; inputs?: Record<string, any> }): Promise<Pending> {
@@ -287,7 +287,7 @@ export async function prepareAutomationRun(ctx: Ctx, a: { automation_id: string;
   const steps: string[] = (q.json?.steps ?? []).slice(0, 8).map((s: any) => `${num(s.index) ?? "·"}. ${short(s.label, 70)} (${num(s.credits) ?? "?"} credits)`);
   const given = Object.entries(body.inputs).slice(0, 8).map(([k, v]) => { const id = typeof v === "string" && UUID.test(v) ? ctx.nameOf?.(v) : null; return `${short(k, 30)}: ${id ? `"${short(id, 60)}"` : `"${short(typeof v === "string" ? v : JSON.stringify(v), 80)}"`}`; });
   return put(ctx, { kind: "automation_run", credits, posts: 0, own: [name, ...given, ...steps], steps: [{ method: "POST", path: `/api/studio/automations/${a.automation_id}/run`, body, save: "run", label: name }], checks: [],
-    body: [`Run your automation "${name}".`, ...steps, given.length ? `This time: ${given.join("; ")}` : "", `About ${credits} credits.`].filter(Boolean).join("\n") });
+    body: [`Run your automation "${name}".`, ...steps, given.length ? `This time: ${given.join("; ")}` : "", `Cost: about ${credits} credits.`].filter(Boolean).join("\n") });
 }
 
 // ---------------------------------------------------------------------------------------------------

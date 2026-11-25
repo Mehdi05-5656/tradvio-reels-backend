@@ -50,7 +50,7 @@ export function makeBot(d: BotDeps) {
     const hit = blanked(p.question, p.own);
     if (hit) { decline(st.pending); d.log("pending_unsafe", { id: p.id, hit }); await say(st, "I couldn't set that one up from here. Start it in the app: https://app.clone8.io"); return; }
     // a large action has no Yes button (its count must be typed)
-    await d.out.text(st.chat, p.question, p.count == null ? [{ label: `Yes ${p.code}`, data: `y:${p.id}` }, { label: "No", data: `n:${p.id}` }] : [{ label: "No", data: `n:${p.id}` }], p.own);
+    await d.out.text(st.chat, p.question, p.count == null ? [{ label: "Yes, go ahead", data: `y:${p.id}` }, { label: "No", data: `n:${p.id}` }] : [{ label: "No", data: `n:${p.id}` }], p.own);
     // only now, with the question in the chat, can a reply release it
     markShown(st.pending, p.id);
     // the brain sees that a question is waiting and what it says, but not its code: it has no reason to repeat or reword it

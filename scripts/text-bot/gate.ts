@@ -16,8 +16,9 @@ export function classify(raw: string): Inbound {
   const start = text.match(/^\/start(?:@\w+)?(?:\s+([A-Za-z0-9_-]{4,64}))?\s*$/);
   if (start) return { kind: "start", code: start[1] ?? null };
   // "yes 47", "YES47", "y 47", "yes 47 24" (the code, then the count for a large action). A bare "yes" carries no code.
-  const yes = low.match(/^\/?(?:yes|y|yep|yeah|confirm)(?:[\s,:-]*(\d{2}))?(?:[\s,:-]+(\d{1,4}))?$/);
-  if (yes) return { kind: "yes", code: yes[1] ?? null, count: yes[2] != null ? Number(yes[2]) : null };
+  // the code is two letters (never a number, so it can't be read as a price); a large action adds its count
+  const yes = low.match(/^\/?(?:yes|y|yep|yeah|confirm)(?:[\s,:-]*([bcdfghjkmnpqrstvwxz]{2}))?(?:[\s,:-]+(\d{1,4}))?$/);
+  if (yes) return { kind: "yes", code: yes[1] ? yes[1].toUpperCase() : null, count: yes[2] != null ? Number(yes[2]) : null };
   if (/^\/?(?:no|n|nope|don'?t|not now|never ?mind)$/.test(low)) return { kind: "no" };
   // leaving: any reasonable wording ends all texts (the SMS rule; the same words work everywhere so nobody has to learn two)
   if (/^\/?(?:stop|stopall|unsubscribe|opt ?out|stop texting(?: me)?|stop messaging(?: me)?)$/.test(low)) return { kind: "stop" };
@@ -51,9 +52,12 @@ export type PendingStore = { live: Pending | null; past: Pending[]; last_code?: 
 
 export const PENDING_TTL_MS = 10 * 60_000;
 /** A two-digit code that is not the one before it. */
+/** Two letters, no vowels (so it never spells a word) and none that look alike (no L, no O, no I). */
+export const CODE_LETTERS = "BCDFGHJKMNPQRSTVWXZ";
 export function newCode(store: PendingStore, rand: () => number = Math.random): string {
-  for (let i = 0; i < 20; i++) { const c = String(10 + Math.floor(rand() * 90)); if (c !== store.last_code) return c; }
-  return store.last_code === "42" ? "43" : "42";
+  const pick = () => CODE_LETTERS[Math.floor(rand() * CODE_LETTERS.length) % CODE_LETTERS.length];
+  for (let i = 0; i < 20; i++) { const c = pick() + pick(); if (c !== store.last_code) return c; }
+  return store.last_code === "KM" ? "KP" : "KM";
 }
 
 const retire = (store: PendingStore, status: Pending["status"]) => {
@@ -107,7 +111,7 @@ export function expire(store: PendingStore, now: number): Pending | null { const
 
 /** The line under every question: how to answer it. */
 export function howToAnswer(p: Pending): string {
-  return p.count != null ? `Reply YES ${p.code} ${p.count} to go ahead, or NO.` : `Reply YES ${p.code} to go ahead, or NO.`;
+  return p.count != null ? `To go ahead, reply: YES ${p.code} ${p.count}\n(${p.code} is this question's code; ${p.count} is how many, so a stray yes can't send them all.) Or reply NO.` : `To go ahead, reply: YES ${p.code}\n(${p.code} is this question's code.) Or reply NO.`;
 }
 
 /** Credits spent by text per day, against the person's ceiling. */
