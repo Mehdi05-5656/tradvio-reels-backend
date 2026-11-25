@@ -77,7 +77,7 @@ export function setPending(store: PendingStore, p: Omit<Pending, "code" | "creat
 }
 
 export type ClaimResult =
-  | { ok: true; pending: Pending }
+  | { ok: true; pending: Pending; why?: undefined }
   | { ok: false; why: "nothing" | "expired" | "no_code" | "wrong_code" | "need_count" | "wrong_count"; pending?: Pending };
 
 /** Release the live action for a YES. Exactly one caller can win: the action leaves `live` the moment it is claimed. */

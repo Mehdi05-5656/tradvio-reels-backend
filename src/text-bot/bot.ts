@@ -15,7 +15,7 @@ export type BotState = { owner: string | null; pair_code: string | null; offset:
 export const emptyState = (): BotState => ({ owner: null, pair_code: null, offset: 0, chats: {}, strangers: {}, rate: {} });
 export type Msg = { chat: string; from: string; text: string; private: boolean; tap?: boolean; has_file?: boolean };
 export type BotDeps = {
-  cfg: Config; api: Api; out: Transport; state: BotState; save: () => void; now?: () => number;
+  cfg: Config; api: Api; out: Transport; state: BotState; /** may be async (the backend writes to its database); awaited where it matters */ save: () => void | Promise<void>; now?: () => number;
   think: (st: ChatState, text: string, o?: { tap?: boolean }) => Promise<TurnResult>;
   log: (event: string, data?: Record<string, unknown>) => void;
   /** dropped after an action so the next lookup reads the account fresh */
@@ -56,13 +56,13 @@ export function makeBot(d: BotDeps) {
     // the brain sees that a question is waiting and what it says, but not its code: it has no reason to repeat or reword it
     note(st, `The system asked the person to confirm (the code is in their chat, not here): ${p.question.split("\n").slice(0, -1).join(" / ")}`);
     d.log("pending", { id: p.id, kind: p.kind, code: p.code, credits: p.credits, posts: p.posts, question: p.question, steps: p.steps.map((s) => ({ method: s.method, path: s.path, body: s.body })) });
-    d.save();
+    await d.save();
   };
 
   async function release(st: ChatState, p: Pending, by: string) {
     d.log("confirmed", { id: p.id, by });
     // on disk as claimed BEFORE anything is sent: if this process stops mid-call, a second YES cannot run it again
-    d.save();
+    await d.save();
     let out: Awaited<ReturnType<typeof execute>>;
     try { out = await busy(st, () => execute(d.api, p, { now: now(), timezone: d.cfg.timezone })); }
     catch (e: any) {
@@ -148,7 +148,7 @@ export function makeBot(d: BotDeps) {
       if (st) { const lost = dropUnshown(st.pending); if (lost) d.log("pending_never_shown", { id: lost.id }); }
       const signIn = /not_signed_in|sign_in_expired/.test(String(e?.code ?? e?.message ?? ""));
       await d.out.text(m.chat, signIn ? "I've lost my sign-in to your Clone8 account. Run the login step on the Mac again." : "Something went wrong on my side, and nothing was changed. Try again in a moment, or use the app: https://app.clone8.io").catch(() => undefined);
-    } finally { d.save(); }
+    } finally { await Promise.resolve(d.save()).catch((e) => d.log("save_failed", { detail: String(e?.message ?? e).slice(0, 200) })); }
   }
 
   /** Keeps "typing…" showing for as long as the work takes (Telegram drops it after a few seconds), so a slow answer
@@ -255,7 +255,7 @@ export function makeBot(d: BotDeps) {
         } catch (e: any) { d.log("watch_error", { job: w.job_id, detail: String(e?.message ?? e).slice(0, 200) }); }
       }
     }
-    d.save();
+    await d.save();
   }
   return { handle, watch };
 }

@@ -29,6 +29,7 @@ import { configurePublerRate } from "./publer-rate.js";
 import { corsMiddleware } from "./cors.js";
 import { registerStudio } from "./studio.js";
 import { registerMcp } from "./studio-mcp.js";
+import { registerTextBot } from "./text-bot/server.js";
 import { registerByo } from "./studio-byo.js";
 import { registerByoReport } from "./studio-byo-report.js";
 import { registerClipsHealth, startClipsWatch } from "./clips-watch.js";
@@ -138,6 +139,7 @@ async function main() {
   registerFailures(app, getSb); // the owner's failure list, every tool (src/failure-watch.ts)
   registerByoReport(app, getSb); // the owner's cost-vs-price card for films written in a chat (src/studio-byo-report.ts) // Signature written in the person's own chat: the scene tools' routes (src/studio-byo.ts)
   registerMcp(app, getSb); // the Clone8 connector for Claude/ChatGPT (docs/mcp/PLAN.md); off unless STUDIO_MCP_ENABLED, owner-only unless STUDIO_MCP_OPEN
+  registerTextBot(app, getSb); // Text Clone8: the assistant people text on Telegram (docs/text-bot/PLAN.md); off unless STUDIO_TEXT_ENABLED, owner-only unless STUDIO_TEXT_OPEN
   registerStudioAdmin(app, getSb); // the owner's Studio admin panel (support@clone8.io only)
   registerCommunity(app, getSb); // Community: the shared library of generative films (off unless STUDIO_COMMUNITY_ENABLED)
   registerEditor(app, getSb); // the editor: a clip's project, saving edits, re-rendering (off unless STUDIO_EDITOR_ENABLED; paying plans)

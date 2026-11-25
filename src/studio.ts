@@ -1308,7 +1308,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       }
       // Blueprint versions: every version's edit plan is written first; the job carries its key (studio-blueprints-routes.ts)
       if (q.tool === "blueprint_versions" && asset) q.options.plan_key = await writePlan(sb, { env, log }, u, asset, q.options as any);
-      const create = () => sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: { ...q.options, via: (req.auth as any)?.client_id ? "connector" : "tool" }, p_credits: q.credits });
+      const create = () => sb.rpc("studio_create_job", { p_user: u, p_tool: q.tool, p_asset: asset?.id ?? null, p_options: { ...q.options, via: (req.auth as any)?.via === "text" ? "text" : (req.auth as any)?.client_id ? "connector" : "tool" }, p_credits: q.credits });
       const dropCollection = async () => { if (madeCollection && collectionId) await sb.from("studio_collections").delete().eq("id", collectionId).eq("user_id", u); };
       let r = await create();
       // short of credits with auto top-up on: top up, then start the job (once)

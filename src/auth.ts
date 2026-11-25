@@ -13,12 +13,14 @@ import type { Request, Response, NextFunction } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { supabase } from "./supabase.js";
 import { loadOrgSlots } from "./org-visibility.js";
+import { INTERNAL_HEADER, verifyInternal } from "./text-bot/internal.js";
 
 // --- Types shared with route handlers -----------------------------------------
 export type AuthCtx =
   | null
   | { admin_secret: true }
-  | { user_id: string; email?: string; /** set when the token was issued to an OAuth app (the Claude connector) */ client_id?: string };
+  | { user_id: string; email?: string; /** set when the token was issued to an OAuth app (the Claude connector) */ client_id?: string;
+      /** set when the request is the text bot acting for this person (src/text-bot/internal.ts) */ via?: "text" };
 
 export type ProfileCtx = null | {
   user_id: string;
@@ -69,6 +71,18 @@ export async function resolveAuth(req: Request, _res: Response, next: NextFuncti
   const providedSecret = req.header("x-app-secret") || "";
   if (secret && providedSecret === secret) {
     req.auth = { admin_secret: true };
+    return next();
+  }
+
+  // the text bot, inside this process, acting for one person on one listed route (src/text-bot/internal.ts): an
+  // ordinary customer identity, no email, a plain user profile, so no admin check can pass for it
+  if (req.header(INTERNAL_HEADER)) {
+    const who = verifyInternal(req);
+    if (who) {
+      req.auth = { user_id: who, via: "text" };
+      req.profile = { user_id: who, external_user_id: "", role: "user", email: null, display_name: null };
+      req.orgSlots = new Set();
+    }
     return next();
   }
 
