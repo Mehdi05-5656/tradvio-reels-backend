@@ -29,7 +29,7 @@ import { studioFail } from "./studio-fail.js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { gatherStretch } from "./hls-stretch.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
-import { type ChatReadReport, hlsVariants, kickGames, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
+import { type ChatReadReport, hlsVariants, kickGames, kickBroadcastSource, kickBroadcasts, kickChannel, kickChatProbe, kickChatReplay, kickTopStreams, kickSiteLive, twitchGameId, TWITCH_GAME, LiveSourceError, nicheOf, NICHES, parseStreamLink, pickRungs, twitchBroadcastById, twitchBroadcasts, twitchChatReplay, twitchTopStreams, twitchUser, twitchVodPlaylists, twitchLiveNow, isRecordingOf, twitchSearch, twitchFollowers, type Broadcast, type ChatMsg, type LiveDeps, type LiveStream, type Platform, mutedRanges } from "./live-sources.js";
 
 // ---------------------------------------------------------------------------------------------------
 // Switches, limits, prices
@@ -206,8 +206,14 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const source: StreamSource = { platform: b.platform, url: b.url, asset_id: null, title: b.title || null, channel: b.channel || null, login: b.login, channel_id: b.channel_id, vod_id: b.id, seconds: b.seconds, started_at: b.started_at, thumbnail_url: b.thumbnail_url, permission, ...(live ? { live: true, part: part ?? { from: 0, to: b.seconds, scope: "all" as const } } : {}) };
   const minutes = Math.ceil(span / 60), hours = Math.round((span / 3600) * 10) / 10;
   const what = part ? `${hours}-hour stretch` : `${hours}-hour stream`;
-  const warning = Number.isFinite(asked) && asked > cap ? `A ${what} fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
+  const kept = await chatKept(deps, b, part);
+  const countWarning = Number.isFinite(asked) && asked > cap ? `A ${what} fits at most ${cap} clips, so we'll aim for ${cap}. You're only charged for the clips we make.`
     : count > likely ? `A ${what} usually holds about ${likely} strong ${likely === 1 ? "clip" : "clips"}. We'll make as many as the chat really reacted to, up to ${count}; you're only charged for the clips we make.` : null;
+  // no chat kept for the part (Nov 25 2026): heard whole instead when it is short enough, else how to pick one that is
+  const noChat = kept === 0 ? (listenOnly(0, 0, part, b.seconds, env)
+    ? `${platformName(b.platform)} kept no chat for ${part ? "this part of the stream" : "this stream"}, so we'll find its moments by listening to every word instead of following the chat.`
+    : `${platformName(b.platform)} kept no chat for ${part ? "this part of the stream" : "this stream"}. Pick a part of up to ${listenHours(env)} hours and we'll find its moments by listening to it.`) : null;
+  const warning = [noChat, countWarning].filter(Boolean).join(" ") || null;
   // how long, from the Nov 18 2026 live runs (a 7.8 h stream: chat in 15 s, 34 checks in 666 s, 5 cuts in 157 s; the
   // old formula promised 42 min for that 14-min run): the chat, then each candidate heard and checked, then the cuts
   const cands = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
@@ -217,7 +223,7 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   return {
     tool: "clips", credits: clipsCharge(price, count),
     options: { platform: b.platform, url: b.url, stream: { platform: b.platform, vod_id: b.id, login: b.login, channel_id: b.channel_id, started_at: b.started_at, permission, strictness: strictnessOf(opt.strictness), framing: framingOf(opt.framing), ...(live ? { live: true } : {}) }, ...(part ? { part } : {}),
-      format, length, count, likely, cap, max_clips: count, seconds: b.seconds, minutes, source, youtube_direct: true, price, warning, language: "original", captions, eta_seconds, ahead: 0, quality: qualityOf(opt.quality) },
+      format, length, count, likely, cap, max_clips: count, seconds: b.seconds, minutes, source, youtube_direct: true, price, warning, ...(kept !== null ? { chat_kept: kept > 0 } : {}), language: "original", captions, eta_seconds, ahead: 0, quality: qualityOf(opt.quality) },
     summary: `${part || live ? partWords(part, b.seconds, b.channel, live) : `${hours} h of ${b.channel}`} · up to ${count} ${count === 1 ? "clip" : "clips"}`,
   };
 }
@@ -505,6 +511,41 @@ export function languageLine(code: string | null): string {
  *  an hour costs ~$0.05 (Groq + Haiku's picker). Off with STUDIO_LIVE_QUIET=off. */
 export const QUIET = { per_minute: 60, cands_per_clip: 3, max_hours: 6 };
 export const isQuiet = (perMinute: number, candidates: number, asked: number) => perMinute < QUIET.per_minute || candidates < asked * QUIET.cands_per_clip;
+/** The most a run hears whole: the hybrid's hours, or the quiet chat's when that rule is on. */
+export function listenHours(env: Record<string, string | undefined> = process.env): number { return env.STUDIO_LIVE_QUIET !== "off" ? Math.max(hybridHours(env), QUIET.max_hours) : hybridHours(env); }
+/** A chat under the floor that the run need not stop for (Nov 25 2026): the stretch it would hear whole instead, or null.
+ *  A part of up to listenHours() is heard whole whatever its chat; a whole stream that short only when the platform kept
+ *  no chat at all for it (under a message a minute), so a stream with a thin chat still says so as before. */
+export function listenOnly(perMinute: number, messages: number, part: { from: number; to: number } | null, seconds: number, env: Record<string, string | undefined> = process.env): { from: number; to: number } | null {
+  if (perMinute >= LIVE_LIMITS.min_chat_per_minute || env.STUDIO_LIVE_HYBRID === "off") return null;
+  const from = part ? part.from : 0, to = part ? part.to : seconds, span = to - from;
+  if (span < HYBRID.min_heard_s || span > listenHours(env) * 3600 + 60) return null;
+  if (!part && perMinute >= 1 && messages > 0) return null;
+  return { from, to };
+}
+export const platformName = (p: string) => (p === "kick" ? "Kick" : "Twitch");
+const hm = (s: number) => `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}`;
+/** What a run refused for its chat tells the person: why, where the chat is when only part of the stream kept one, and
+ *  what will work (a part short enough to hear whole). */
+export function quietChatWords(b: { platform: string; seconds: number }, part: { from: number; to: number } | null, chat: Array<{ t: number }>, perMinute: number, env: Record<string, string | undefined> = process.env): string {
+  const P = platformName(b.platform), where = part ? "that part of the stream" : "this stream", H = listenHours(env);
+  const pick = env.STUDIO_LIVE_HYBRID !== "off" ? `. Pick a part of up to ${H} hours and we'll find its moments by listening to it instead` : "";
+  if (perMinute < 1) {
+    const first = chat.length ? chat[0].t : null, last = chat.length ? chat[chat.length - 1].t : null;
+    const kept = !part && first !== null && last !== null && last - first >= 600 ? ` (its saved chat runs only from ${hm(first)} to ${hm(last)} into the stream)` : "";
+    return `${P} kept no chat for ${part || !kept ? where : "most of this stream"}${kept}, and Live Clips follows the chat to find moments in a stretch this long${pick}`;
+  }
+  return `This stream's chat was too quiet to read (${Math.round(perMinute)} messages a minute); Live Clips needs a chat that reacts${pick}`;
+}
+/** Whether the platform kept chat for the part about to be quoted (Kick only; a call or two, remembered 10 minutes; null when
+ *  unknown). A stretch with none is said before anyone pays, not after the run has read it. */
+export async function chatKept(deps: LiveDeps, b: Broadcast, part: { from: number; to: number } | null): Promise<number | null> {
+  if (b.platform !== "kick" || b.live || !b.channel_id || !b.started_at) return null;
+  const from = part ? part.from : 0, to = part ? part.to : b.seconds;
+  const probe = briefly(`kc:${b.id}:${from}:${to}`, 10 * 60_000, () => kickChatProbe(deps, b.channel_id, b.started_at, from, to));
+  const late = new Promise<null>((ok) => { const t = setTimeout(() => ok(null), 4000); (t as any).unref?.(); });
+  return Promise.race([probe, late]).catch(() => null);
+}
 export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours, everyHour = false): number[] {
   const score = new Map<number, number>();
   // every hour is a choice when the chat is quiet; the ones it reacted to still come first
@@ -767,7 +808,15 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const near = chatSignals(chat.map((m) => ({ ...m, t: m.t - readFrom })), readTo - readFrom);
     const signals = chatSignals(chat, b.seconds); signals.perMinute = near.perMinute;
     if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute && chatRead) log(`[live] quiet read ${JSON.stringify({ job: job.id, messages: chat.length, read: chatRead })}`);
-    if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute) throw new ClipsError("chat_too_quiet", `This stream's chat was too quiet to read (${Math.round(signals.perMinute)} messages a minute); Live Clips needs a chat that reacts`, 422);
+    // a chat under the floor: a part (or a whole stream with no chat saved at all) the run can hear whole is clipped by
+    // listening, as YouTube Clips is; only what cannot be heard whole stops here (Nov 25 2026: a new Starter customer's
+    // first run, the first 2 hours of a 13-hour Kick stream whose replay holds no chat before hour 10, was refused here
+    // although the hearing below needs no chat)
+    const hearAll = listenOnly(signals.perMinute, chat.length, part, b.seconds, deps.env ?? process.env);
+    if (signals.perMinute < LIVE_LIMITS.min_chat_per_minute && !hearAll) throw new ClipsError("chat_too_quiet", quietChatWords(b, part, chat, signals.perMinute, deps.env ?? process.env), 422);
+    const noChat = !!hearAll && signals.perMinute < 1;
+    if (hearAll) { timing.listen_only = true; log(`[live] listening only ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: round2(signals.perMinute), heard: [hearAll.from, hearAll.to] })}`); }
+    const listenPart: Part | null = part ?? (hearAll ? { from: 0, to: b.seconds, scope: "range" } : null);
     const cands = chatCandidates(near, chat.map((m) => ({ ...m, t: m.t - readFrom })))
       .map((c) => ({ ...c, onset: c.onset + readFrom, peak: c.peak + readFrom, last: c.last + readFrom, t_event: c.t_event + readFrom })).filter((c) => inPart(c.t_event));
     // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
@@ -776,7 +825,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), read: chatRead, candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     // a part is read whole below, so a quiet chat there does not end the run (the chat replay runs ~4 min behind live)
-    if (!cands.length && !(part && (deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off")) throw new ClipsError("clips_none_found", part ? "The chat never lit up in that part of the stream: no moment stands out enough to clip" : "The chat never lit up: no moment in this stream stands out enough to clip", 422);
+    if (!cands.length && !(listenPart && (deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off")) throw new ClipsError("clips_none_found", part ? "The chat never lit up in that part of the stream: no moment stands out enough to clip" : "The chat never lit up: no moment in this stream stands out enough to clip", 422);
     const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id, lines) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master), lines)))(b);
     // the stretches the platform muted (music it recognised): their moments cannot be heard or posted, so they are not checked
     const muted = deps.muted ?? (b.platform === "twitch" ? await mutedRanges(deps, pl.audio).catch(() => [] as Array<[number, number]>) : []);
@@ -792,14 +841,14 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const quiet = (deps.env ?? process.env).STUDIO_LIVE_QUIET !== "off" && isQuiet(signals.perMinute, cands.length, count);
       const maxHours = quiet ? Math.max(hybridHours(deps.env ?? process.env), QUIET.max_hours) : hybridHours(deps.env ?? process.env);
       const stretches: Array<{ start: number; seconds: number }> = [];
-      if (part && part.to - part.from <= maxHours * 3600 + 60) {
-        for (let z = part.to; z - part.from >= HYBRID.min_heard_s && stretches.length < maxHours; z -= 3600) { const a = Math.max(part.from, z - 3600); if (mutedShare(a, z) <= 0.4) stretches.push({ start: a, seconds: z - a }); }
+      if (listenPart && listenPart.to - listenPart.from <= maxHours * 3600 + 60) {
+        for (let z = listenPart.to; z - listenPart.from >= HYBRID.min_heard_s && stretches.length < maxHours; z -= 3600) { const a = Math.max(listenPart.from, z - 3600); if (mutedShare(a, z) <= 0.4) stretches.push({ start: a, seconds: z - a }); }
         stretches.reverse();
       }
       const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours, quiet);
       if (quiet) log(`[live] quiet ${JSON.stringify({ job: job.id, per_minute: Math.round(signals.perMinute), candidates: cands.length, asked: count, hearing: hours.length })}`);
       if (hours.length) {
-        await renew(sb, job, { stage: "transcribing", message: stretches.length ? `Listening to the ${part!.scope === "since" ? "new part" : part!.scope === "range" ? "part you picked" : "latest part"} of the stream, every word` : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
+        await renew(sb, job, { stage: "transcribing", message: stretches.length ? (part ? `Listening to the ${part.scope === "since" ? "new part" : part.scope === "range" ? "part you picked" : "latest part"} of the stream, every word` : "Listening to the whole stream, every word") : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
         const tHours = Date.now();
         const reads = (await Promise.all(hours.map((h, k) => readHour(deps, b, pl.audio, h, dir!, u, length, stretches[k])))).filter((r): r is NonNullable<typeof r> => !!r);
         const picked = reads.flatMap((r) => r.moments).filter((m) => inPart(m.start)).sort((x, y) => y.score - x.score);
@@ -826,7 +875,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     }
     if (!cands.length) throw new ClipsError("clips_none_found", "Nothing in that part of the stream stands out enough to clip yet", 422);
     // B. each candidate's window heard, then checked by the model, until `count` are kept
-    await renew(sb, job, { stage: "transcribing", message: `Listening to the ${want} moments the chat pointed at` });
+    await renew(sb, job, { stage: "transcribing", message: hearAll && cands.every((c) => c.source === "words") ? `Checking the ${Math.min(want, cands.length)} best moments it heard` : `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
     const baseAt = (abs: number) => { const bin = Math.floor(abs / 10); const h = signals.rate.slice(Math.max(0, bin - 60), Math.max(1, bin)).slice().sort((a, c) => a - c); return h.length ? h[Math.floor(h.length / 2)] : 0; };
     const kept: Moment[] = []; let checked = 0, heardOk = 0, unsafe = 0; const tListen = Date.now(); let claudeCalls = 0;
@@ -888,7 +937,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const before = read && start > read.start ? heardFromRead(read, Math.max(read.start, start - 300), Math.min(300, start - read.start)).words : [];
       const context = before.length ? `\n\nThe five minutes before the window, for context only (the clip cannot start here):\n${before.map((w) => w.text).join(" ").slice(-1800)}` : "";
       const peaks = heard.excess ? loudPeaks(heard.excess, 5) : [];
-      const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.${languageLine(runLanguage(langVotes))}${c.source === "words" ? " This moment was found in the words of the stream, not by a chat burst; the proposed cut is the picker's." : c.cut ? " The chat burst here and the picker of the words proposed this cut." : ""}`;
+      const head = `Stream: ${b.channel} on ${b.platform === "twitch" ? "Twitch" : "Kick"}${b.title ? `, titled "${b.title.slice(0, 80)}"` : ""}. Window: ${mmss(start)} to ${mmss(start + span)} into the stream; times below are seconds from the window's start. The chat's usual pace here is ${base} messages per 10 s. The proposed cut is L${lines[cut.s]?.i ?? 0} to L${lines[cut.e]?.i ?? 0} (${mmss(lines[cut.s]?.start ?? 0)}-${mmss(lines[cut.e]?.end ?? 0)}). Loudest stretches: ${peaks.map((p) => `${mmss(p.start)} (+${p.db} dB)`).join(", ") || "none"}. Clip length goal: ${len.low}-${len.high} s, never under ${len.min} or over ${len.max}.${languageLine(runLanguage(langVotes))}${noChat ? " The platform kept no chat for this part of the stream, so there is no chat reaction to weigh: judge it by what is said and shown." : ""}${c.source === "words" ? " This moment was found in the words of the stream, not by a chat burst; the proposed cut is the picker's." : c.cut ? " The chat burst here and the picker of the words proposed this cut." : ""}`;
       const times = [...new Set([lines[cut.s]?.start ?? 0, eventRel, peakRel, (lines[cut.s]?.start ?? 0 + (lines[cut.e]?.end ?? span)) / 2, lines[cut.e]?.end ?? span, Math.min(span - 1, peakRel + 20)].map((t) => Math.round(Math.max(0, Math.min(span - 1, t)))))].sort((a, c) => a - c).slice(0, 6);
       const frames = await stills(pl.video, times.map((t) => start + t), dir, `s${c.rank}`);
       let v: Verdict;
@@ -958,6 +1007,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     }
     timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls; timing.unheard = unheard; timing.skipped_muted = skippedMuted; timing.deferred = deferred; timing.extended = extended;
     // (no clip at all: the reason still says when it was the stream's content, as the fewer-clips note does)
+    if (!kept.length && hearAll && cands.every((c) => c.source === "words")) throw new ClipsError("clips_none_found", `${noChat ? `${platformName(b.platform)} kept no chat for ${part ? "that part of the stream" : "this stream"}, so we listened to all of it` : `The chat there was quiet, so we listened to all of it`}, but no moment stands alone as a clip.${unsafeNote(unsafe, checked)}`.replace(/\.$/, ""), 422);
     if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked === 1 ? "once" : `${checked} times`}, but none of those moments stands alone as a clip.${unsafeNote(unsafe, checked)}`.replace(/\.$/, "") : "No moment in this stream stands out enough to be a clip", 422);
     kept.sort((x, y) => y.score - x.score || x.start - y.start);
     // more kept than asked for: one head-to-head look settles the order (model grades bunch), and the extra ones go

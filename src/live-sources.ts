@@ -441,6 +441,20 @@ export async function kickChatReplay(deps: LiveDeps, chatId: string, startedAtIs
   return out.flat().sort((a, b) => a.t - b.t);
 }
 
+/** Whether Kick kept any chat for [from, to) seconds of a past broadcast, as the number of its messages seen (Nov 25 2026:
+ *  a 13-hour replay held no chat before hour 10). Kick answers the 25 messages before a moment however far back they are,
+ *  so one call at the stretch's end tells; a second at its middle when the first saw none inside it. */
+export async function kickChatProbe(deps: LiveDeps, chatId: string, startedAtIso: string, from: number, to: number): Promise<number | null> {
+  const t0 = Date.parse(startedAtIso);
+  if (!Number.isFinite(t0) || !chatId || !(to > from)) return null;
+  const inside = async (at: number) => {
+    const d = (await kickWeb(deps, `api/v2/channels/${encodeURIComponent(chatId)}/messages?cursor=${Math.round((t0 + at * 1000) * 1000)}`))?.data;
+    return (Array.isArray(d?.messages) ? d.messages : []).filter((m: any) => { const t = (Date.parse(m?.created_at) - t0) / 1000; return Number.isFinite(t) && t >= from && t < to; }).length;
+  };
+  const n = await inside(to);
+  return n ? n : inside(Math.round((from + to) / 2));
+}
+
 // ---------------------------------------------------------------------------------------------------
 // HLS: the rungs of a master playlist
 // ---------------------------------------------------------------------------------------------------
