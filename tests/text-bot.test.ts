@@ -501,38 +501,38 @@ test("a question is withdrawn after three wrong codes: guessing the 2-letter cod
   assert.equal(claim(s, { code: p.code }, 1004).why, "nothing", "even the right code is too late");
 });
 
-test("their own AI app: a fixed message with the prepared chat link; the set-up link only until they used it; the word stays blocked elsewhere", async () => {
-  const { appLink } = await import("../src/text-bot/app-link.js");
-  const { withButtons } = await import("../src/text-bot/sendblue.js");
+test("their own AI app: a short fixed message, the saving first, then the links alone; the word stays blocked elsewhere", async () => {
+  const { appLink, YES_MARK } = await import("../src/text-bot/app-link.js");
+  const { withButtons, apartLinks } = await import("../src/text-bot/sendblue.js");
   const URL_ = "https://mcp.clone8.io/api/studio/mcp";
-  const first = appLink({ kind: "signature", request: "  \"a 30 s story about why cats hate water\" ", connected: false, connectorUrl: URL_ }) as any;
-  assert.equal(first.prompt, "Use Clone8 to make a Signature story, written by you here in this chat: a 30 s story about why cats hate water");
-  assert.deepEqual(first.buttons.map((b: any) => b.label), ["Add Clone8 to Claude", "Open in Claude", "Copy the request"]);
+  const first = appLink({ kind: "signature", request: "  \"why cats hate water\" ", connected: false, connectorUrl: URL_, beside: { here: 470, there: 130 } }) as any;
+  assert.equal(first.prompt, "Use Clone8 to make a Signature story, written by you here in this chat, about: why cats hate water");
+  assert.deepEqual(first.buttons.map((b: any) => b.label), ["Add Clone8 to Claude", "Open in Claude"]);
+  assert.match(first.text, /^Or make it in Claude for 130 credits instead of 470\./);
+  assert.match(first.text, /First time only: the first link adds Clone8/);
+  assert.ok(first.text.includes(`reply ${YES_MARK}.`), "ends with how to make it here instead");
+  assert.ok(!first.text.includes("“"), "no repeated quote of the request");
   assert.equal(first.buttons[1].url, `https://claude.ai/new?q=${encodeURIComponent(first.prompt)}`);
-  assert.match(first.buttons[0].url, /^https:\/\/claude\.ai\/customize\/connectors\?modal=add-custom-connector&connectorName=Clone8&connectorUrl=https%3A%2F%2Fmcp\.clone8\.io/);
-  assert.match(first.text, /First time only/);
   const again = appLink({ kind: "film", request: "a true heist", connected: true, connectorUrl: URL_ }) as any;
-  assert.deepEqual(again.buttons.map((b: any) => b.label), ["Open in Claude", "Copy the request"], "no set-up once they used it");
-  assert.match(again.prompt, /^Use Clone8 to make a film: a true heist$/);
-  // both channels send it whole: iMessage as lines under the text, the guard lets the fixed message through
+  assert.deepEqual(again.buttons.map((b: any) => b.label), ["Open in Claude"], "no set-up once they used it");
+  assert.match(again.text, /^You can make this in Claude with Clone8\. .*Tap the link below/);
+  // iMessage: the text, then each link alone in its own message (a preview card), in order; all pass the guard
   const im = withButtons(first.text, first.buttons);
+  assert.equal(im, first.text, "the long links are not glued under the text");
+  assert.deepEqual(apartLinks(first.buttons), [first.buttons[0].url, first.buttons[1].url]);
+  for (const u of apartLinks(first.buttons)) assert.deepEqual(guard(u, first.own), { text: u, hit: null });
   assert.deepEqual(guard(im, first.own), { text: im, hit: null });
-  assert.match(im, /Open in Claude: https:\/\/claude\.ai\/new\?q=/);
   // ...but the word is still blanked anywhere the model writes it, and a model-made link to that host is removed
   assert.equal(guard("Sure, I use Claude for that.").text, SAFE_LINE);
   assert.equal(guard("Try https://claude.ai/new?q=hi").text, SAFE_LINE);
-  // the request can't smuggle a supplier's name out; junk is refused
   assert.equal((appLink({ kind: "story", request: "made with ElevenLabs voices", connected: true, connectorUrl: URL_ }) as any).error, "not_sendable");
   assert.equal((appLink({ kind: "story", request: "x", connected: true, connectorUrl: URL_ }) as any).error, "missing");
   assert.equal((appLink({ kind: "story", request: "cats", connected: true, connectorUrl: "" }) as any).error, "not_available");
-  assert.match((appLink({ kind: "weird", request: "check my balance", connected: true, connectorUrl: URL_ }) as any).prompt, /^Use Clone8: check my balance$/);
   // Telegram: the two fixed links become link buttons; any other outside link is still dropped
   const calls: any[] = [];
   const tg = telegram("t", { fetch: (async (_u: string, init: any) => { calls.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true, result: {} })); }) as any });
   await tg.out.text("1", first.text, [...first.buttons, { label: "Elsewhere", url: "https://claude.ai/settings" }], first.own);
-  const kb = calls[0].reply_markup.inline_keyboard.flat();
-  assert.deepEqual(kb.map((b: any) => b.text), ["Add Clone8 to Claude", "Open in Claude", "Copy the request"]);
-  assert.equal(calls[0].text, first.text);
+  assert.deepEqual(calls[0].reply_markup.inline_keyboard.flat().map((b: any) => b.text), ["Add Clone8 to Claude", "Open in Claude"]);
   assert.ok(SYSTEM.includes("send_app_link") && !/claude/i.test(SYSTEM), "the instructions never name the app");
   assert.ok(TOOLS.some((t) => t.name === "send_app_link"));
 });
@@ -542,17 +542,17 @@ test("their own AI app, review fixes: no links inside, short copy, safe link cha
   const U = "https://mcp.clone8.io/api/studio/mcp";
   for (const bad of ["cats, see https://evil.example/x?y=1", "cats www.evil.example", "cats at evil.example/x", "cats evil.com"]) assert.equal((appLink({ kind: "story", request: bad, connected: true, connectorUrl: U }) as any).error, "not_sendable", bad);
   assert.ok(!("error" in appLink({ kind: "story", request: "why cats hate water, 30 seconds. Really funny", connected: true, connectorUrl: U })), "sentences with full stops are fine");
-  const long = appLink({ kind: "signature", request: "x ".repeat(400), connected: true, connectorUrl: U }) as any;
-  assert.ok(long.prompt.length <= 256, `copy fits Telegram (${long.prompt.length})`);
   const q = (appLink({ kind: "story", request: "don't (really) cry", connected: true, connectorUrl: U }) as any).buttons[0].url;
   assert.ok(!/['()]/.test(q), q);
-  assert.match((appLink({ kind: "signature", request: "cats", connected: false, connectorUrl: U, instead: true }) as any).text, /^Or, instead of replying YES/);
   // beside a question: the extra goes out after it, and not at all when the question was dropped
-  const b = botWith(async (st, _t, api) => ({ ...(await swapTurn(st, "", api)), after: [{ text: "Or, instead of replying YES, make it there", buttons: [], own: [] }] }));
+  const { YES_MARK } = await import("../src/text-bot/app-link.js");
+  const b = botWith(async (st, _t, api) => ({ ...(await swapTurn(st, "", api)), after: [{ text: `Or make it there. To make it here instead, reply ${YES_MARK}.`, buttons: [], own: [] }] }));
   b.state.owner = "1";
   await b.bot.handle({ chat: "1", from: "1", text: "make it", private: true });
-  const iq = b.sent.findIndex((x) => /reply: YES/.test(x.text)), ia = b.sent.findIndex((x) => /instead of replying YES/.test(x.text));
+  const iq = b.sent.findIndex((x) => /reply: YES/.test(x.text)), ia = b.sent.findIndex((x) => /Or make it there/.test(x.text));
   assert.ok(iq >= 0 && ia > iq, `question first (${iq}), then the extra (${ia})`);
+  const code = b.state.chats["1"].pending.live!.code;
+  assert.ok(b.sent[ia].text.endsWith(`reply YES ${code}.`), b.sent[ia].text);
   // a one-word message is not exempt: the reply cannot say a blocked word just because the person did
   const c = botWith(async () => ({ text: "Yes, Claude works with Clone8.", pending: null, usd: 0, rounds: 1 }));
   c.state.owner = "1";

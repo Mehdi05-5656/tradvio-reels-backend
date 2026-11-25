@@ -15,7 +15,7 @@ import type { Pending } from "../../src/text-bot/gate.js";
 type Run = { replies: string[]; all: string; pending: Pending | null; body: any; tools: string[]; lookups: string[]; media: number; usd: number; calls: number; ms: number; blanks: string[]; acts: number; errors: string[] };
 type Case = { id: string; say: string[]; check: (r: Run) => string | null; setup?: (api: ReturnType<typeof mockApi>) => void; /** may offer the AI-app link (no other case may) */ appLink?: boolean };
 const has = (s: string, ...words: Array<string | RegExp>) => words.every((w) => (typeof w === "string" ? s.toLowerCase().includes(w.toLowerCase()) : w.test(s)));
-const offered = (r: Run) => /Open in Claude starts a new chat/.test(r.all);
+const offered = (r: Run) => /make (it|this) in Claude/.test(r.all);
 const noAction = (r: Run) => (r.pending ? `prepared a ${r.pending.kind} when it should not have` : null);
 const want = (r: Run, kind: string, tool?: string) => (!r.pending ? "prepared nothing" : r.pending.kind !== kind ? `prepared a ${r.pending.kind}, not a ${kind}` : tool && r.body?.tool !== tool ? `started ${r.body?.tool}, not ${tool}` : null);
 

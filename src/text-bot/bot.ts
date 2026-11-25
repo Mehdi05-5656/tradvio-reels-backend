@@ -10,6 +10,7 @@ import { execute, today } from "./actions.js";
 import { toolName } from "./account.js";
 import { blanked } from "./guard.js";
 import type { ChatState, Transport, TurnResult } from "./brain.js";
+import { YES_MARK } from "./app-link.js";
 
 export type BotState = { owner: string | null; pair_code: string | null; offset: number; chats: Record<string, ChatState>; strangers: Record<string, { day: string; n: number }>; rate: Record<string, number[]> };
 export const emptyState = (): BotState => ({ owner: null, pair_code: null, offset: 0, chats: {}, strangers: {}, rate: {} });
@@ -186,7 +187,10 @@ export function makeBot(d: BotDeps) {
     if (r.pending && st.pending.live?.id === r.pending.id) {
       await ask(st, r.pending);
       // what goes with the question (the "or make it in your own AI app" message), only if the question went out
-      if (st.pending.live?.id === r.pending.id) for (const x of r.after ?? []) await d.out.text(st.chat, x.text, x.buttons, x.own).catch(() => undefined);
+      if (st.pending.live?.id === r.pending.id) for (const x of r.after ?? []) {
+        const fill = (s: string) => s.split(YES_MARK).join(`YES ${r.pending!.code}`);
+        await d.out.text(st.chat, fill(x.text), x.buttons, x.own.map(fill)).catch(() => undefined);
+      }
     } else if (!r.text) await say(st, "I didn't get that. Could you say it another way?");
     if (st.history.length > 80) st.history = st.history.slice(-60);
   }

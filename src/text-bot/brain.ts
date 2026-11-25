@@ -175,12 +175,12 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     nameOf: (id) => d.index.current?.cards.find((c) => c.type === "file" && c.asset_id === id)?.title ?? null });
 
   /** The fixed "make it in your own AI app" message (app-link.ts): at most three a day in a chat. */
-  const offerApp = async (kind: string, request: string, beside = false): Promise<any> => {
+  const offerApp = async (kind: string, request: string, beside?: { here: number; there: number }): Promise<any> => {
     const l = light(); if ((l.app_links ?? 0) >= 3) return { error: "daily_limit", detail: "Already sent three of these today; point them to the earlier message." };
     const me = await d.api.call("GET", "/api/studio/me"), url = me.json?.connector?.url;
     if (!url) return { error: "not_available", detail: "Their AI app can't be used with Clone8 on this account; carry on here." };
     const ix = await index(d).catch(() => null);
-    const m = appLink({ kind, request, connected: !!ix?.connector_used, connectorUrl: String(url), instead: beside });
+    const m = appLink({ kind, request, connected: !!ix?.connector_used, connectorUrl: String(url), beside });
     if ("error" in m) return m;
     // beside a question: it follows the question (the bot sends it then, and only if the question went out)
     if (beside) after.push({ text: m.text, buttons: m.buttons, own: m.own }); else await d.out.text(st.chat, m.text, m.buttons, m.own);
@@ -251,7 +251,11 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     }
     if (name === "import_link") { if (light().links >= LIGHT_PER_DAY.links) return { error: "daily_limit", detail: `Only ${LIGHT_PER_DAY.links} links a day can be brought in by text; use the Library page for more.` }; light().links++; const r = await d.api.call("POST", "/api/studio/links", { url: String(a?.url ?? "") }, { timeoutMs: 300_000 }); d.index.current = null; return r.status < 300 ? { file: { asset_id: r.json?.asset?.id, name: r.json?.asset?.name, seconds: r.json?.asset?.probe?.duration ?? null } } : { error: r.json?.error ?? `http_${r.status}`, detail: r.json?.detail ?? null }; }
     if (name === "to_library") { if (light().copies >= LIGHT_PER_DAY.copies) return { error: "daily_limit", detail: "That is enough copies into the library for one day by text; use the app for more." }; light().copies++; const r = await d.api.call("POST", `/api/studio/jobs/${a?.job_id}/asset`, { key: String(a?.output_key ?? "") }, { timeoutMs: 180_000 }); d.index.current = null; return r.status === 200 ? { file: { asset_id: r.json?.asset?.id, name: r.json?.asset?.name, seconds: r.json?.asset?.probe?.duration ?? null } } : { error: r.json?.error ?? `http_${r.status}`, detail: r.json?.detail ?? null }; }
-    if (name === "send_app_link") return offerApp(String(a?.kind ?? ""), String(a?.request ?? ""));
+    if (name === "send_app_link") {
+      // only when the person brought up their own AI app (a Signature story asked for here gets the offer by itself)
+      if (!recent.slice(-3).some((t) => /\b(claude|chat ?gpt|ai (chat )?app|my (own )?ai|connector|my chat app)\b/i.test(t))) return { error: "not_asked", detail: "They did not ask about their own AI app. Do what they asked here (prepare it as usual); the system offers the other way by itself when it fits." };
+      return offerApp(String(a?.kind ?? ""), String(a?.request ?? ""));
+    }
     if (name === "remember") {
       const note = String(a?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
       // only what the person said themselves, and never something that reads as an order to the assistant
@@ -268,8 +272,14 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       // what will really run (the checked request in the question), not what the model wrote
       const body = held.pending?.steps.find((x) => x.body?.tool)?.body, o = body?.options ?? {};
       if (body?.tool === "story" && o.engine === "premium" && o.style !== "blocky" && !(light().app_links ?? 0)) {
-        const topic = String(o.topic ?? "").trim();
-        if (topic) await offerApp("signature", `${topic}${Number(o.seconds) ? `, ${Number(o.seconds)} seconds` : ""}`, true).catch(() => null);
+        const topic = String(o.topic ?? "").trim(), here = Number(held.pending?.credits);
+        // the same story written in their own chat (how the connector asks for it), priced by the real route; offered
+        // only when it costs less (the length there is the connector's own, so none is promised)
+        if (topic && here > 0) {
+          const q = await d.api.call("POST", "/api/studio/quote", { tool: "story", asset_id: null, options: { topic, seconds: 50, kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", engine: "premium", byo: true } }).catch(() => null);
+          const there = Number(q?.json?.credits ?? q?.json?.quote?.credits);
+          if (q?.status === 200 && there > 0 && there < here) await offerApp("signature", topic, { here, there }).catch(() => null);
+        }
       }
       return r;
     }

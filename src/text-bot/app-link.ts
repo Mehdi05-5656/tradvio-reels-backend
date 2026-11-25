@@ -14,7 +14,7 @@ import { linkLines } from "./sendblue.js";
 export const APP_KINDS = ["signature", "story", "motivation", "film", "other"] as const;
 export type AppKind = (typeof APP_KINDS)[number];
 const LEAD: Record<AppKind, string> = {
-  signature: "Use Clone8 to make a Signature story, written by you here in this chat:",
+  signature: "Use Clone8 to make a Signature story, written by you here in this chat, about:",
   story: "Use Clone8 to make a story video:",
   motivation: "Use Clone8 to make a motivation video:",
   film: "Use Clone8 to make a film:",
@@ -25,8 +25,11 @@ export type AppLink = { text: string; buttons: Button[]; own: string[]; prompt: 
 /** The message and its buttons. `connected`: they already made something through the connector (no setup step). */
 /** Encodes everything but letters, digits and - _ . ~ (iMessage ends a link at a quote or a bracket). */
 const enc = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-/** `instead`: sent beside a waiting YES question for the same thing (so it says "instead of YES"). */
-export function appLink(o: { kind: string; request: string; connected: boolean; connectorUrl: string; instead?: boolean }): AppLink | { error: string; detail: string } {
+/** The words in the message's place for the waiting question's "YES <code>" (filled in by the bot as it sends it). */
+export const YES_MARK = "\u0003YES\u0003";
+/** `beside`: sent right after a waiting YES question for the same thing, with both prices (only when this way costs
+ *  less). The message is short: why (the saving), what happens, one action; the links follow on their own. */
+export function appLink(o: { kind: string; request: string; connected: boolean; connectorUrl: string; beside?: { here: number; there: number } }): AppLink | { error: string; detail: string } {
   const kind = (APP_KINDS as readonly string[]).includes(o.kind) ? (o.kind as AppKind) : "other";
   const request = String(o.request ?? "").replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().replace(/^["“”']+|["“”']+$/g, "").trim().slice(0, 180);
   if (request.length < 3) return { error: "missing", detail: "Pass what they want made, in their words" };
@@ -38,11 +41,16 @@ export function appLink(o: { kind: string; request: string; connected: boolean; 
   const prompt = `${LEAD[kind]} ${request}`;
   const open: Button = { label: "Open in Claude", url: `https://claude.ai/new?q=${enc(prompt)}` };
   const add: Button = { label: "Add Clone8 to Claude", url: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Clone8&connectorUrl=${enc(o.connectorUrl)}` };
-  const copy: Button = { label: "Copy the request", copy: prompt };
-  const lead = o.instead ? "Or, instead of replying YES, make it in Claude with Clone8" : "Make it in Claude with Clone8";
-  const text = o.connected
-    ? `${lead}: Open in Claude starts a new chat with this already typed in. Just send it.\n\n“${prompt}”`
-    : `${o.instead ? "Or, instead of replying YES, you can make this in Claude with Clone8" : "You can make this in Claude with Clone8"}. First time only: Add Clone8 to Claude, sign in to Clone8 and tap Allow. Then Open in Claude starts a new chat with this already typed in. Just send it.\n\n“${prompt}”`;
-  const buttons = o.connected ? [open, copy] : [add, open, copy];
-  return { text, buttons, own: [text, prompt, ...linkLines(buttons), ...buttons.map((b) => b.label)], prompt };
+  const n = (x: number) => x.toLocaleString("en-US");
+  const what = kind === "signature"
+    ? "Claude writes the scene in your own chat (it takes 30 to 60 minutes there), then Clone8 voices and renders it."
+    : "Claude asks Clone8 to make it and shows you the result in that chat.";
+  const steps = o.connected
+    ? "Tap the link below and send the message it opens with."
+    : "First time only: the first link adds Clone8 to Claude (sign in, tap Allow). Then the second link opens a chat with your request typed in: send it.";
+  const text = o.beside
+    ? `Or make it in Claude for ${n(o.beside.there)} credits instead of ${n(o.beside.here)}. ${what} ${steps}\n\nTo make it here instead, reply ${YES_MARK}.`
+    : `You can make this in Claude with Clone8. ${what} ${steps}`;
+  const buttons = o.connected ? [open] : [add, open];
+  return { text, buttons, own: [text, prompt, ...linkLines(buttons), ...buttons.map((b) => b.label), ...buttons.map((b) => ("url" in b ? b.url : ""))], prompt };
 }
