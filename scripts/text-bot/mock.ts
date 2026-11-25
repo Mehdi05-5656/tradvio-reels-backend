@@ -12,7 +12,7 @@ export type MockApi = Api & { acts: Array<{ method: Method; path: string; body: 
 export function mockApi(now: () => number = Date.now): MockApi {
   const t = now();
   const data: any = {
-    balance: 1840, quote: { swap: 86, stunts: 40, clips: 70, story: 120, captions: 9 } as Record<string, number>,
+    balance: 1840, quote: { swap: 86, stunts: 40, clips: 70, story: 120, captions: 9, longform: 900, recast: 86, splitscreen: 50, blueprint: 60 } as Record<string, number>,
     accounts: [{ id: IDS.tiktok, platform: "tiktok", username: "clone8test", display_name: "Clone8 test", image_url: null, profile_url: null }, { id: IDS.insta, platform: "instagram", username: "clone8test", display_name: "Clone8 test", image_url: null, profile_url: null, followers: 38 }],
     assets: [
       { id: IDS.cat, kind: "image", name: "tabby cat.jpg", status: "ready", created_at: iso(-9000, t), collection_id: null, probe: { character: true, mode: "animal", prompt: "a friendly orange tabby cat, facing the camera" }, poster_url: null },
@@ -46,6 +46,7 @@ export function mockApi(now: () => number = Date.now): MockApi {
     if (method === "POST" && p === `${S}/social/posts`) { const made = (body?.accounts ?? []).length ? [{ id: id(20 + data.posts.length), status: body.schedule_at ? "scheduled" : "sending", schedule_at: body.schedule_at ?? null, platforms: ["tiktok"], caption: body.caption }] : []; data.posts.push(...made.map((x: any) => ({ ...x, options: { accounts: (body.accounts ?? []).map((a: string) => ({ id: a, platform: a === IDS.tiktok ? "tiktok" : "instagram", username: "clone8test" })) }, updated_at: iso(0, now()), results: [] }))); return ok({ posts: made, skipped: [], queued: 0 }, 201); }
     if (method === "PATCH" && /\/social\/posts\//.test(p)) { const row = data.posts.find((x: any) => p.endsWith(x.id)); if (!row) return ok({ error: "post_not_found" }, 404); if (body?.schedule_at) row.schedule_at = body.schedule_at; if (typeof body?.caption === "string") row.caption = body.caption; row.updated_at = iso(0, now()); return ok({ post: row }); }
     if (method === "DELETE" && /\/social\/posts\//.test(p)) { const row = data.posts.find((x: any) => p.endsWith(x.id)); if (!row) return ok({ error: "post_not_found" }, 404); row.status = "canceled"; return ok({ post: row }); }
+    if (method === "GET" && p === `${S}/live/lookup`) return ok({ platform: "twitch", channel: { login: "somestreamer", channel: "SomeStreamer", url: "https://www.twitch.tv/somestreamer", live: true, viewers: 18400, title: "FRIDAY NIGHT RANKED", permission: "open" }, broadcasts: [{ url: "https://www.twitch.tv/videos/2990011223", title: "FRIDAY NIGHT RANKED", live: true, seconds: 5400, started_at: iso(-90, now()) }], live_mode: true });
     if (method === "GET" && p === `${S}/characters`) return ok({ characters: [{ asset_id: IDS.cat, name: "tabby cat", url: null }] });
     if (method === "GET") return ok({});
     return ok({ error: "not_in_mock", detail: `${method} ${p}` }, 501);

@@ -96,6 +96,10 @@ export function jobDetails(tool: string, assetId: string | null, o: Record<strin
 export async function prepareJob(ctx: Ctx, a: { tool: string; asset_id?: string | null; from_result?: { job_id: string; output_key: string } | null; options?: Record<string, any>; rights_in_their_words?: string | null }): Promise<Pending> {
   const tool = String(a.tool ?? ""), options = { ...(a.options ?? {}) };
   if (!/^[a-z_]{3,30}$/.test(tool)) throw new ActionError("bad_tool", "Name the job tool from the recipe");
+  // a library picture named where a preset's name belongs: put it where it belongs, so a slip in which field was
+  // used cannot start the wrong thing or a refused one
+  const tidy = (m: any) => { if (m && typeof m === "object" && typeof m.character === "string" && UUID.test(m.character)) { m.character_asset_id = m.character_asset_id ?? m.character; delete m.character; } };
+  tidy(options); if (Array.isArray(options.cast)) options.cast = options.cast.map((m: any) => { const c = { ...m }; tidy(c); return c; });
   let rights: string | null = null;
   if (NEEDS_RIGHTS.has(tool)) {
     // their word, in their words: the AI cannot supply it for them, and the question shows it back

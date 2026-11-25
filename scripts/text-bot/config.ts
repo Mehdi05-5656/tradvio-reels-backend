@@ -20,6 +20,8 @@ export function readEnvFile(path: string): Env {
 export type Config = {
   home: string; apiBase: string; supabaseUrl: string; supabaseAnon: string; anthropicKey: string; telegramToken: string;
   model: string; dailyCredits: number; maxActionCredits: number; timezone: string;
+  /** how hard the AI thinks before it answers: low is the cheapest and quickest, and enough for chat */
+  effort: string;
 };
 
 export function loadConfig(env: Env = process.env): Config {
@@ -36,10 +38,13 @@ export function loadConfig(env: Env = process.env): Config {
     supabaseAnon: pick(env.SUPABASE_ANON_KEY, own.SUPABASE_ANON_KEY, app.VITE_SUPABASE_ANON_KEY),
     anthropicKey: pick(env.ANTHROPIC_API_KEY, own.ANTHROPIC_API_KEY, ops.ANTHROPIC_API_KEY),
     telegramToken: pick(env.TELEGRAM_BOT_TOKEN, own.TELEGRAM_BOT_TOKEN),
-    model: pick(env.TEXT_BOT_MODEL, own.TEXT_BOT_MODEL, "claude-opus-5-5"),
+    // chosen by measurement (scripts/text-bot/eval.ts, Nov 24 2026): on 22 requests run three times this model got 71 of
+    // 72 right at about 0.05 cents a message; the next two up got the same answers for 20 and 40 times the price
+    model: pick(env.TEXT_BOT_MODEL, own.TEXT_BOT_MODEL, "claude-haiku-5-5"),
     dailyCredits: Math.max(0, Number(pick(env.TEXT_BOT_DAILY_CREDITS, own.TEXT_BOT_DAILY_CREDITS, "300")) || 0),
     maxActionCredits: Math.max(0, Number(pick(env.TEXT_BOT_MAX_ACTION_CREDITS, own.TEXT_BOT_MAX_ACTION_CREDITS, "300")) || 0),
     timezone: pick(env.TEXT_BOT_TZ, own.TEXT_BOT_TZ, Intl.DateTimeFormat().resolvedOptions().timeZone, "UTC"),
+    effort: ["low", "medium", "high"].includes(pick(env.TEXT_BOT_EFFORT, own.TEXT_BOT_EFFORT)) ? pick(env.TEXT_BOT_EFFORT, own.TEXT_BOT_EFFORT) : "low",
   };
 }
 

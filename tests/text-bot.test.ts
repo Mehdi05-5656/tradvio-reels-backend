@@ -86,7 +86,7 @@ test("only listed routes can be called, and actions only by the executor", async
     assert.equal(levelOf(m as any, p), null, `${m} ${p} must not be reachable`);
   // the real client, with a network that records what leaves the Mac: a refused call never leaves
   const sent: string[] = [];
-  const api = makeApi({ home: "/nonexistent-text-bot", apiBase: "https://example.invalid", supabaseUrl: "", supabaseAnon: "", anthropicKey: "", telegramToken: "", model: "", dailyCredits: 0, maxActionCredits: 0, timezone: "UTC" }, { fetch: (async (u: any) => { sent.push(String(u)); return new Response("{}"); }) as any });
+  const api = makeApi({ home: "/nonexistent-text-bot", apiBase: "https://example.invalid", supabaseUrl: "", supabaseAnon: "", anthropicKey: "", telegramToken: "", model: "", dailyCredits: 0, maxActionCredits: 0, timezone: "UTC", effort: "low" }, { fetch: (async (u: any) => { sent.push(String(u)); return new Response("{}"); }) as any });
   await assert.rejects(() => api.call("POST", `${S}/jobs`, {}), (e: any) => e.code === "route_not_allowed", "the brain's door cannot start a job");
   await assert.rejects(() => api.call("PATCH", `${S}/social/posts/${id}`, {}), (e: any) => e.code === "route_not_allowed");
   await assert.rejects(() => api.call("GET", `${S}/admin/costs`), (e: any) => e.code === "route_not_allowed");
@@ -172,6 +172,9 @@ test("a job question names the tool and what will run; it is held for the YES an
   assert.equal(api.acts.length, 0, "preparing starts nothing");
   assert.match(p.question, /^Start Swap \(43 s × 2\)\.\nVideo: "Podcast clip 3"\nPlayed by: your character "tabby cat"\n/, "the tool, the video and the character, from the account's records");
   assert.match(p.question, /86 credits/); assert.match(p.question, /Balance 1840 → 1754/); assert.match(p.question, new RegExp(`Reply YES ${p.code}`));
+  // a library picture passed where a preset's name belongs is put in the right place before anything is priced
+  const slip = await prepareJob(ctxOf(api), { tool: "swap", asset_id: IDS.podcast, options: { model: "light", character: IDS.cat } });
+  assert.equal(slip.steps[0].body.options.character_asset_id, IDS.cat); assert.equal(slip.steps[0].body.options.character, undefined); assert.match(slip.question, /Played by: your character "tabby cat"/);
   api.data.quote.swap = 120; // the price went up while the person was reading
   const stopped = await execute(api, p, { now: Date.now(), timezone: "UTC" });
   assert.equal(stopped.ok, false); assert.match(stopped.text, /now 120 credits, more than the 86/); assert.equal(api.acts.length, 0);

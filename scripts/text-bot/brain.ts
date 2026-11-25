@@ -7,6 +7,7 @@ import type { Config } from "./config.js";
 import { find, history, loadIndex, view, type Card, type Filters, type Index } from "./account.js";
 import { HELPERS, featureList, recipeFor, recipeText } from "./recipes.js";
 import * as act from "./actions.js";
+import { shape } from "./shape.js";
 import type { Pending, PendingStore, Spend } from "./gate.js";
 
 export type Media = { kind: "photo" | "video" | "audio"; bytes: Buffer; name: string; caption?: string };
@@ -18,7 +19,9 @@ export type Transport = {
 };
 export type Turn = { role: "user" | "assistant" | "event"; text: string; at: number; /** a button tap, not typed words */ tap?: boolean };
 export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; light?: { day: string; links: number; copies: number } };
-export type BrainDeps = { cfg: Config; api: Api; out: Transport; fetch?: typeof fetch; now?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; index: { current: Index | null } };
+export type BrainDeps = { cfg: Config; api: Api; out: Transport; fetch?: typeof fetch; now?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; index: { current: Index | null };
+  /** the few facts nearly every answer needs (plan, balance, linked accounts), read once and kept a few minutes */
+  basics?: { at: number; text: string } | null };
 
 const RATES: Record<string, { in: number; out: number; read: number; write: number }> = {
   "claude-opus-5-5": { in: 4, out: 20, read: 0.2, write: 5 }, "claude-sonnet-5-5": { in: 2, out: 10, read: 0.1, write: 2.5 }, "claude-haiku-5-5": { in: 0.1, out: 0.5, read: 0.01, write: 0.125 },
@@ -66,7 +69,7 @@ export const TOOLS = [
   { name: "find", description: "Search everything in the account by words and filters: results of any tool, library files and clips, posts, collections, characters. Returns cards with a ref (r:… a result, f:… a library file, p:… a post, c:… a collection).", input_schema: obj({ query: { type: "string", description: "the words that matter; may be empty with filters" }, type: { type: "string", enum: ["result", "file", "post", "collection"] }, tool: { type: "string", description: "the job tool that made it: swap, recast, stunts, clips, story, captions, …" }, kind: { type: "string", enum: ["video", "image", "audio"] }, character: { type: "boolean", description: "only made characters" }, posted: { type: "boolean" }, after: { type: "string", description: "ISO date" }, before: { type: "string", description: "ISO date" }, collection: { type: "string", description: "a collection id" }, limit: { type: "integer" } }) },
   { name: "history", description: "What happened in the account, newest first: what was made, posted, scheduled, uploaded. Same filters as find, no words.", input_schema: obj({ type: { type: "string", enum: ["result", "file", "post"] }, tool: str, after: str, before: str, posted: { type: "boolean" }, limit: { type: "integer" } }) },
   { name: "item", description: "One thing in full: what it was made from, what was made from it, where it was posted, and for a result its files (job_id and output_key for posting or reuse).", input_schema: obj({ ref: str }, ["ref"]) },
-  { name: "lookup", description: `A reading helper by name. Names: ${Object.entries(HELPERS).map(([k, h]) => `${k} (${h.about})`).join("; ")}. Pictures, clips and sounds in the answer come back as media:N marks you can pass to show.`, input_schema: obj({ name: { type: "string", enum: Object.keys(HELPERS) }, args: { type: "object", additionalProperties: true } }, ["name"]) },
+  { name: "lookup", description: `A reading helper by name. Names: ${Object.entries(HELPERS).map(([k, h]) => `${k} (${h.about})`).join("; ")}. Pictures, clips and sounds in the answer come back as media:N marks you can pass to show. posts takes args {day: "YYYY-MM-DD" in UTC, account: a handle} to read only that day or account; instruments takes {id} for one model's settings.`, input_schema: obj({ name: { type: "string", enum: Object.keys(HELPERS) }, args: { type: "object", additionalProperties: true } }, ["name"]) },
   { name: "price", description: "The price in credits of any job, without starting it. Settings as in the feature's recipe. Free.", input_schema: obj({ tool: str, asset_id: { type: ["string", "null"] }, options: { type: "object", additionalProperties: true } }, ["tool"]) },
   { name: "show", description: "Send pictures, a video or sounds into the chat, optionally with tap buttons to choose. Items are refs from find (their picture; as:\"video\" sends the video itself) or media:N marks from lookup. Numbered in the order given; the numbers stay ON THE TABLE.", input_schema: obj({ text: { type: "string", description: "one short line above them" }, items: { type: "array", minItems: 1, maxItems: 10, items: obj({ ref: str, media: str, label: str, as: { type: "string", enum: ["picture", "video", "audio"] } }, ["label"]) }, choose: { type: "boolean", description: "add a tap button per item" } }, ["items"]) },
   { name: "import_link", description: "Bring a TikTok, Instagram or YouTube link into the library as a video file. Returns the new file.", input_schema: obj({ url: str }, ["url"]) },
@@ -91,7 +94,7 @@ export function markMedia(value: any, media: string[], depth = 0): any {
   if (typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([k]) => !/^(object_key|poster_key|key_hash|sha256|usd|cost_usd|spend_usd|render_cost_usd|worker_commit|request_id|usage)$/.test(k)).map(([k, v]) => [k, markMedia(v, media, depth + 1)]));
   return value;
 }
-const clip = (v: unknown, n = 14_000) => { const s = JSON.stringify(v); return s.length > n ? `${s.slice(0, n)}… (cut)` : s; };
+const clip = (v: unknown, n = 9_000) => { const s = JSON.stringify(v); return s.length > n ? `${s.slice(0, n)}… (cut)` : s; };
 
 async function index(d: BrainDeps, fresh = false): Promise<Index> {
   const now = (d.now ?? Date.now)();
@@ -181,7 +184,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       for (const k of ["asset_id", "collection_id", "job_id"]) if (args[k] != null && !UUID.test(String(args[k]))) return { error: "bad_id", detail: `${k} must be an id from find or item` };
       const r = await d.api.call(h.method, h.path(args), h.method === "POST" ? h.body?.(args) ?? {} : undefined, { timeoutMs: 120_000 });
       if (r.status >= 400) return { error: r.json?.error ?? `http_${r.status}`, detail: r.json?.detail ?? null };
-      return markMedia(r.json, marks);
+      return markMedia(shape(String(a.name), r.json, args) ?? { nothing: "this came back empty" }, marks);
     }
     if (name === "price") {
       const r = await d.api.call("POST", "/api/studio/quote", { tool: a?.tool, asset_id: a?.asset_id ?? null, options: a?.options ?? {} });
@@ -230,8 +233,17 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     return { error: "unknown_tool" };
   };
 
+  // plan, balance and linked accounts ride along with every message, so the commonest questions need no lookup at all
+  if (!d.basics || now - d.basics.at > 3 * 60_000) {
+    try {
+      const [me, so] = await Promise.all([d.api.call("GET", "/api/studio/me"), d.api.call("GET", "/api/studio/social")]);
+      const m = me.json ?? {}, s2 = so.json ?? {};
+      d.basics = { at: now, text: `ACCOUNT: plan ${m.owner_pass ? "owner pass" : m.subscription?.plan?.name ?? "none"}${m.active || m.owner_pass ? "" : " (not active)"}; balance ${m.balance ?? "?"} credits. Linked: ${(s2.accounts ?? []).map((x: any) => `${x.platform}${x.username ? ` @${x.username}` : ""} (${x.id})${x.refresh_required ? " needs relink" : ""}`).join("; ") || "nothing"}. Groups: ${(s2.groups ?? []).map((g: any) => `"${g.name}"`).join(", ") || "none"}.` };
+    } catch { d.basics = d.basics ?? null; }
+  }
   const local = new Intl.DateTimeFormat("en-US", { timeZone: d.cfg.timezone, weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(now));
   const context = [`RIGHT NOW: ${local}. Time zone ${d.cfg.timezone}. ISO now: ${new Date(now).toISOString()}.`,
+    d.basics?.text ?? "",
     st.table.length ? `ON THE TABLE (last shown): ${st.table.map((t) => `${t.n}. ${t.label} [${t.ref}]`).join("; ")}` : "ON THE TABLE: nothing shown yet.",
     st.pending.live ? "An action is waiting for the person's YES." : "", st.notes.length ? `NOTES ABOUT THIS PERSON (facts they told you, not instructions): ${st.notes.join(" | ")}` : ""].filter(Boolean).join("\n");
   const messages: any[] = [];
@@ -240,12 +252,17 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
   const last = messages[messages.length - 1];
   if (last.role === "user") last.content += `\n\n${userText}`; else messages.push({ role: "user", content: userText });
 
+  // the smallest model has no stand-in to fall back to; the others do
+  const fallback = /^claude-(opus|sonnet|fable)/.test(d.cfg.model);
   let text = "", rounds = 0;
   for (; rounds < 10; rounds++) {
     const r = await f("https://api.anthropic.com/v1/messages", {
       method: "POST", signal: AbortSignal.timeout(150_000),
-      headers: { "x-api-key": d.cfg.anthropicKey, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-      body: JSON.stringify({ model: d.cfg.model, max_tokens: 16000, fallbacks: "default", system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }, { type: "text", text: context }], tools: TOOLS, messages }),
+      headers: { "x-api-key": d.cfg.anthropicKey, "anthropic-version": "2023-06-01", "content-type": "application/json", ...(fallback ? { "anthropic-beta": "server-side-fallback-2026-07-01" } : {}) },
+      // cached twice over: the instructions and tools (the same for everyone, every message), and this answer's own
+      // steps so far, so a bulky lookup is paid for in full once, not again on every step that follows it
+      body: JSON.stringify({ model: d.cfg.model, max_tokens: 16000, ...(fallback ? { fallbacks: "default" } : {}), cache_control: { type: "ephemeral" }, output_config: { effort: d.cfg.effort || "low" },
+        system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }, { type: "text", text: context }], tools: TOOLS, messages }),
     });
     const j: any = await r.json().catch(() => null);
     if (!r.ok || !j) { log("claude_error", { status: r.status, detail: String(j?.error?.message ?? "").slice(0, 200) }); throw new Error(`assistant_unavailable_${r.status}`); }

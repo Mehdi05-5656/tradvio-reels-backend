@@ -51,7 +51,7 @@ async function main() {
     typing: (c) => raw.typing(c),
   };
   const brain: BrainDeps = { cfg, api, out, index, log };
-  const bot = makeBot({ cfg, api, out, state, save, log, think: (st, text, o) => think(brain, st, text, o), forget: () => { index.current = null; } });
+  const bot = makeBot({ cfg, api, out, state, save, log, think: (st, text, o) => think(brain, st, text, o), forget: () => { index.current = null; brain.basics = null; } });
   console.error(`Text Clone8 test · model ${cfg.model} · ${mock ? "pretend account" : `Clone8 at ${cfg.apiBase}`} · by text today ${cfg.dailyCredits} credits, ${cfg.maxActionCredits} an action · time zone ${cfg.timezone}`);
 
   if (sim) {
