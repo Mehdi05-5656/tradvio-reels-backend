@@ -81,15 +81,19 @@ export async function prepareEdit(ctx: Ctx, a: { asset_id?: string | null; job_i
         style = { id, ...(cur?.y != null ? { y: cur.y } : {}), ...(cur?.x != null ? { x: cur.x } : {}) };
         ops.push({ op: "captions.style", from: cur?.id ?? null, to: id });
       }
-      let y: number | null = null, where = "";
+      // where they sit now, when they show: the clip's own place, else its style's height. Every move is said "from X to
+      // Y", so the chat keeps a record of each earlier spot ("put them back", "15% above the original" need it)
+      const styleY = (id: unknown) => Number(presetById(id).y ?? 0.7);
+      const was = doc.captions?.on ? (Number.isFinite(Number(cur?.y)) ? Number(cur!.y) : styleY(cur?.id ?? style.id)) : null;
+      let y: number | null = null, where = "", moved = "";
       if (c.caption_y != null && Number.isFinite(Number(c.caption_y))) { y = Math.min(0.95, Math.max(0.05, Number(c.caption_y))); where = pct(y); }
       else if (c.move_by != null && Number.isFinite(Number(c.move_by))) {
         // from where they sit now: the clip's own place, else the style's (each style has its own height)
         const by = Math.min(0.9, Math.max(-0.9, Number(c.move_by)));
-        const from = Number.isFinite(Number(cur?.y)) ? Number(cur!.y) : Number(presetById(style.id).y ?? 0.7);
+        const from = was ?? (Number.isFinite(Number(cur?.y)) ? Number(cur!.y) : styleY(style.id));
         y = Math.min(0.95, Math.max(0.05, from + by));
         if (Math.abs(y - from) < 0.005) throw new ActionError("cannot_move", `The captions are already as far ${by < 0 ? "up" : "down"} as they go (${pct(from)}).`);
-        where = `${Math.round(Math.abs(y - from) * 100)}% ${y < from ? "higher" : "lower"}: from ${pct(from)} to ${pct(y)}`;
+        moved = `Captions moved ${Math.round(Math.abs(y - from) * 100)}% ${y < from ? "higher" : "lower"}: from ${Math.round(from * 100)}% to ${pct(y)}.`;
       } else if (c.position === "below_top_part") {
         // just under the top panel of a stacked clip (the face-cam); a captioned copy reads the panel from the clip it was made from
         let divider = doc.layout?.type === "stacked" ? Number(doc.layout.divider ?? 0.33) : null;
@@ -106,7 +110,9 @@ export async function prepareEdit(ctx: Ctx, a: { asset_id?: string | null; job_i
       }
       if (wantOn && !doc.captions.on) { ops.push({ op: "captions.on", from: false, to: true }); doc.captions.on = true; lines.unshift(`Captions on, in ${STYLES[style.id]?.name ?? style.id}.`); }
       else if (c.style) lines.push(`Caption style: ${STYLES[style.id].name}.`);
-      if (where) lines.push(`Captions placed ${where}.`);
+      if (moved) lines.push(moved);
+      else if (y != null && was != null && Math.abs(y - was) >= 0.005) lines.push(`Captions moved from ${Math.round(was * 100)}% to ${pct(y)}${where && where !== pct(y) ? ` (${where.replace(/ \(\d+% of the way down\)$/, "")})` : ""}.`);
+      else if (where) lines.push(`Captions placed ${where}.`);
       doc.captions.style = style;
     }
     for (const [k, label] of [["key_words", "keywords"], ["fillers", "fillers"], ["censor", "censor"]] as const) {

@@ -466,12 +466,24 @@ test("captions move by an amount from where they sit now ('15% higher', 'a bit l
   const doc = api.data.projects[IDS.projA].doc;
   doc.captions.on = true; doc.captions.style = { id: "bold_pop", y: 0.8 };
   const up = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { move_by: -0.15 } });
-  assert.match(up.question, /Captions placed 15% higher: from 80% of the way down to 65% of the way down\./);
+  assert.match(up.question, /Captions moved 15% higher: from 80% to 65% of the way down\./);
   assert.equal(up.steps[0].body.doc.captions.style.y, 0.65);
   // a clip never moved starts from its style's own height (Bold Pop sits at 70%)
   doc.captions.style = { id: "bold_pop" };
   const down = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { move_by: 0.05 } });
-  assert.match(down.question, /5% lower: from 70% of the way down to 75% of the way down/);
+  assert.match(down.question, /Captions moved 5% lower: from 70% to 75% of the way down\./);
   doc.captions.style = { id: "bold_pop", y: 0.95 };
   await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { move_by: 0.1 } }), (e: any) => e.code === "cannot_move");
+});
+
+test("every caption move says where they were, so the chat remembers earlier spots", async () => {
+  const api = mockApi();
+  const doc = api.data.projects[IDS.projA].doc;
+  doc.captions.on = true; doc.captions.style = { id: "bold_pop", y: 0.55 };
+  const exact = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { caption_y: 0.35 } });
+  assert.match(exact.question, /Captions moved from 55% to 35% of the way down\./);
+  const spot = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { position: "bottom" } });
+  assert.match(spot.question, /Captions moved from 55% to 80% of the way down \(bottom\)\./);
+  doc.captions.style = { id: "bold_pop" }; // never moved: its style's own height
+  assert.match((await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { caption_y: 0.5 } })).question, /from 70% to 50% of the way down/);
 });

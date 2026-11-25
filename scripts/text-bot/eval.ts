@@ -13,7 +13,7 @@ import { guard, blanked } from "../../src/text-bot/guard.js";
 import type { Pending } from "../../src/text-bot/gate.js";
 
 type Run = { replies: string[]; all: string; pending: Pending | null; body: any; tools: string[]; lookups: string[]; media: number; usd: number; calls: number; ms: number; blanks: string[]; acts: number; errors: string[] };
-type Case = { id: string; say: string[]; check: (r: Run) => string | null };
+type Case = { id: string; say: string[]; check: (r: Run) => string | null; setup?: (api: ReturnType<typeof mockApi>) => void };
 const has = (s: string, ...words: Array<string | RegExp>) => words.every((w) => (typeof w === "string" ? s.toLowerCase().includes(w.toLowerCase()) : w.test(s)));
 const noAction = (r: Run) => (r.pending ? `prepared a ${r.pending.kind} when it should not have` : null);
 const want = (r: Run, kind: string, tool?: string) => (!r.pending ? "prepared nothing" : r.pending.kind !== kind ? `prepared a ${r.pending.kind}, not a ${kind}` : tool && r.body?.tool !== tool ? `started ${r.body?.tool}, not ${tool}` : null);
@@ -32,6 +32,10 @@ export const CASES: Case[] = [
   { id: "story", say: ["make a 30 second story about why cats hate water, the cheap fast kind"], check: (r) => want(r, "job", "story") ?? (!has(String(r.body.options?.topic ?? ""), "cat") ? "topic lost" : Number(r.body.options?.seconds) !== 30 ? `length ${r.body.options?.seconds}, not 30` : r.body.options?.engine === "premium" ? "picked the dearer engine" : null) },
   // a move by an amount: worked out from where the captions sit now, never asked back (owner's live test, Nov 24 2026)
   { id: "captions 15% higher", say: ["move the captions on the $800 bet clip 15% higher"], check: (r) => want(r, "edit") ?? (Math.abs(Number(r.body?.doc?.captions?.style?.y) - 0.55) > 0.011 ? `captions at ${r.body?.doc?.captions?.style?.y}, not 15% above their 70% (0.55)` : null) },
+  // the original spot is in the chat's own record of the earlier edit; worked out, not asked back (owner's retest, Nov 24 2026)
+  { id: "captions from the original", setup: (api) => { const d = api.data.projects[IDS.projA].doc; d.captions.on = true; d.captions.style = { id: "bold_pop", y: 0.5 }; },
+    say: ["move the captions on the $800 bet clip to 70% of the way down", "actually no, make it 15% higher than where they were before"],
+    check: (r) => want(r, "edit") ?? (/\b0\.\d\d?\b/.test(r.all) ? "talked in decimals" : Math.abs(Number(r.body?.doc?.captions?.style?.y) - 0.35) > 0.011 ? `captions at ${r.body?.doc?.captions?.style?.y}, not 15% above the earlier 50% (0.35)` : null) },
   { id: "captions", say: ["put bold pop captions on the cashier singing clip"], check: (r) => want(r, "job", "captions") ?? ((r.body.options?.items ?? [])[0]?.asset_id !== IDS.clipB ? "wrong video" : !/bold_pop/.test(JSON.stringify(r.body.options?.style ?? "")) ? "wrong style" : null) },
   { id: "live clips", say: ["https://www.twitch.tv/somestreamer he just went live. clip the latest hour, 5 clips"], check: (r) => want(r, "job", "clips") ?? (!/twitch\.tv/.test(String(r.body.options?.url ?? "")) ? "no stream link" : Number(r.body.options?.count) !== 5 ? `asked for ${r.body.options?.count} clips, not 5` : r.body.options?.scope !== "latest_60" ? `part ${r.body.options?.scope}, not the latest hour` : null) },
   { id: "film price", say: ["how much would a 10 minute film about the Gardner museum heist cost? don't start it"], check: (r) => noAction(r) ?? (has(r.all, "900") ? null : "did not give the price (900)") },
@@ -55,7 +59,7 @@ export const CASES: Case[] = [
 
 async function runCase(c: Case, model: string, effort: string): Promise<Run & { fail: string | null }> {
   const cfg = { ...loadConfig(), model, effort, dailyCredits: 2000, maxActionCredits: 2000, timezone: "America/Los_Angeles" };
-  const api = mockApi(), state = emptyState(); state.owner = "e";
+  const api = mockApi(), state = emptyState(); state.owner = "e"; c.setup?.(api);
   const replies: string[] = [], blanks: string[] = [], tools: string[] = [], lookups: string[] = [], errors: string[] = []; let media = 0, usd = 0, calls = 0;
   const out: Transport = {
     async text(_c, text, _b, own) { const b = blanked(text, own); if (b) blanks.push(b); replies.push(guard(text, own).text); },
