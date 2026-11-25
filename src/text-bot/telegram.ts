@@ -22,6 +22,9 @@ export function parseUpdate(u: any): Incoming | null {
   return { update_id: u.update_id, chat: String(m.chat?.id), from: String(m.from?.id), name: String(m.from?.username ?? m.from?.first_name ?? ""), text: String(m.text ?? m.caption ?? ""), message_id: m.message_id ?? null, private: m.chat?.type === "private", has_file: !!(m.video || m.document || m.photo || m.voice || m.audio) };
 }
 
+/** the file's bytes without another copy (a Blob makes its own) */
+const view = (b: Buffer) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength) as Uint8Array<ArrayBuffer>;
+
 export function telegram(token: string, deps: { fetch?: typeof fetch; onGuard?: (hit: string, text: string) => void } = {}) {
   const f = deps.fetch ?? fetch, base = `https://api.telegram.org/bot${token}`;
   const call = async (method: string, body: Record<string, unknown> | FormData, timeoutMs = 60_000): Promise<any> => {
@@ -43,7 +46,7 @@ export function telegram(token: string, deps: { fetch?: typeof fetch; onGuard?: 
       if (photos.length > 1) {
         const form = new FormData(); form.set("chat_id", chat);
         form.set("media", JSON.stringify(photos.slice(0, 10).map((p, i) => ({ type: "photo", media: `attach://p${i}`, caption: safe(p.caption ?? "", own).slice(0, 900) }))));
-        photos.slice(0, 10).forEach((p, i) => form.set(`p${i}`, new Blob([new Uint8Array(p.bytes)]), p.name));
+        photos.slice(0, 10).forEach((p, i) => form.set(`p${i}`, new Blob([view(p.bytes)]), p.name));
         await call("sendMediaGroup", form, 180_000);
       }
       const singles = [...(photos.length === 1 ? photos : []), ...others];
@@ -53,7 +56,7 @@ export function telegram(token: string, deps: { fetch?: typeof fetch; onGuard?: 
         if (cap) form.set("caption", cap);
         const field = m.kind === "photo" ? "photo" : m.kind === "video" ? "video" : "audio";
         if (m.kind === "video") form.set("supports_streaming", "true");
-        form.set(field, new Blob([new Uint8Array(m.bytes)]), m.name);
+        form.set(field, new Blob([view(m.bytes)]), m.name);
         await call(m.kind === "photo" ? "sendPhoto" : m.kind === "video" ? "sendVideo" : "sendAudio", form, 300_000);
       }
       // buttons go on their own line under an album (an album cannot carry them)

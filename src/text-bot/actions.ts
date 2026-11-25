@@ -129,7 +129,7 @@ export async function prepareJob(ctx: Ctx, a: { tool: string; asset_id?: string 
   const balance = me.status === 200 ? Number(me.json?.balance) : NaN;
   if (me.status === 200 && !me.json?.active && !me.json?.owner_pass) throw new ActionError("plan_needed", "Making videos needs a plan: https://app.clone8.io/#studio/pricing");
   if (Number.isFinite(balance) && balance < credits) throw new ActionError("not_enough_credits", `This needs ${credits} credits and the balance is ${balance}. More credits: https://app.clone8.io/#studio/pricing`);
-  if (credits > ctx.maxActionCredits) throw new ActionError("over_action_limit", `This is ${credits} credits, over the ${ctx.maxActionCredits} one action may spend by text in this test. Start it in the app, or raise the limit.`);
+  if (credits > ctx.maxActionCredits) throw new ActionError("over_action_limit", `This is ${credits} credits, over the ${ctx.maxActionCredits} one action may spend by text. Start it in the app.`);
   const room = spendRoom(ctx.spend, today(ctx.now, ctx.timezone), ctx.dailyCredits);
   if (credits > room) throw new ActionError("over_daily_limit", `This is ${credits} credits and ${room} are left of today's ${ctx.dailyCredits} by text. Start it in the app, or raise the limit.`);
   const d = jobDetails(tool, assetId, real, ctx.nameOf);

@@ -86,6 +86,9 @@ export function registerMobile(app: Express, d: Deps): void {
       const apple = cust?.billing_source === "apple" && ["active", "trialing", "past_due"].includes(cust.status);
       try { const { releaseSocialProfile } = await import("./studio-social.js"); await releaseSocialProfile(sb, u); }
       catch (e: any) { console.error(`[account] ALERT posting profile of ${u} not removed on deletion: ${String(e?.message ?? e).slice(0, 160)}`); }
+      // chats connected for texting stop at once (src/text-bot/server.ts)
+      await sb.from("studio_text_links").update({ status: "removed" }).eq("user_id", u).in("status", ["pending", "linked"]).then(() => undefined, () => undefined);
+      await sb.from("studio_text_chats").delete().eq("user_id", u).then(() => undefined, () => undefined);
       let files = 0;
       for (const bucket of ["studio-outputs", "studio-uploads"]) files += await removeFiles(sb, bucket, u, d.log).catch(() => 0);
       const del = await sb.auth.admin.deleteUser(u);

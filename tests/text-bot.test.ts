@@ -258,7 +258,7 @@ function botWith(script: (st: ChatState, text: string, api: ReturnType<typeof mo
   const cfg: any = { timezone: "UTC", dailyCredits: 300, maxActionCredits: 300, home: "/nonexistent" };
   const out = { async text(_c: string, text: string, b?: any[]) { if (o.failSend?.(text)) throw new Error("telegram_down"); sent.push({ text, buttons: b?.map((x) => x.data) }); }, async media() { sent.push({ text: "<media>" }); }, async typing() { /* */ } };
   const bot = makeBot({ cfg, api, out, state, save() { saves++; }, log() { /* */ }, now: () => clock, think: (st, text, opt) => script(st, text, api, opt) });
-  return { api, sent, state, bot, tick: (ms: number) => { clock += ms; }, saves: () => saves };
+  return { api, sent, state, bot, out, tick: (ms: number) => { clock += ms; }, saves: () => saves };
 }
 const swapTurn = async (st: ChatState, _t: string, api: any): Promise<TurnResult> => ({ text: "", usd: 0, rounds: 1, pending: await prepareJob(ctxOf(api, { store: st.pending, spend: st.spend, timezone: "UTC" }), { tool: "swap", asset_id: IDS.podcast }) });
 
@@ -425,6 +425,25 @@ test("a Captions run's result is sent: it lands in the library, not in the run's
   await b.bot.watch();
   assert.equal(b.sent.at(-1)!.text, "<media>"); assert.deepEqual(st.table, [{ n: 1, ref: `f:${IDS.capAsset}`, label: "The cashier starts singing (captions)" }]);
   assert.equal(st.watches.length, 0);
+});
+
+test("a finished result that can't be sent (the chat service is down) is tried again, three times at most", async () => {
+  const b = botWith(swapTurn); b.state.owner = "1";
+  const st = chatOf(b.state, "1");
+  b.api.data.jobs.unshift({ id: IDS.capJob, tool: "captions", status: "done", outputs: [], options: { items: [{ asset_id: IDS.clipB, name: "The cashier starts singing.mp4" }] }, progress: { made: [{ source: IDS.clipB, asset_id: IDS.capAsset, credits: 5 }] } });
+  st.watches.push({ job_id: IDS.capJob, collection_id: null, label: "Captions", tool: "captions", started: Date.now(), sent: [] });
+  const media = b.out.media; let fails = 1;
+  b.out.media = async (...a: any[]) => { if (fails-- > 0) throw new Error("telegram_down"); return (media as any)(...a); };
+  await b.bot.watch();
+  assert.equal(st.watches.length, 1, "kept after a failed send"); assert.equal(st.watches[0].send_tries, 1);
+  await b.bot.watch();
+  assert.equal(b.sent.at(-1)!.text, "<media>"); assert.equal(st.watches.length, 0);
+  // never sendable: dropped after the third try, with a note for the brain
+  st.watches.push({ job_id: IDS.capJob, collection_id: null, label: "Captions", tool: "captions", started: Date.now(), sent: [] });
+  b.out.media = async () => { throw new Error("telegram_down"); };
+  for (let i = 0; i < 3; i++) await b.bot.watch();
+  assert.equal(st.watches.length, 0);
+  assert.match(st.history.at(-1)!.text, /could not be sent/);
 });
 
 test("telegram: long replies are cut at a line; updates are read into one shape", () => {

@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS public.studio_text_links (
   handle text,                              -- the name Telegram showed, for the app's "is this you?" line
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'linked', 'removed')),
   timezone text,
+  confirm_hash text,                        -- sha256 of the 4-digit code the bot sent to that chat; typed in the app
+  confirm_tries int NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT now(),
   confirmed_at timestamptz,
   last_used_at timestamptz
@@ -44,10 +46,13 @@ CREATE TABLE IF NOT EXISTS public.studio_text_chats (
   user_id uuid NOT NULL,
   state jsonb NOT NULL DEFAULT '{}'::jsonb,
   watching boolean NOT NULL DEFAULT false,
+  -- one server at a time works on a chat (during a deploy two run for about a minute): it holds the chat until then
+  lease_by text,
+  lease_until timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (channel, chat_id)
 );
-CREATE INDEX IF NOT EXISTS studio_text_chats_watching_idx ON public.studio_text_chats (channel) WHERE watching;
+CREATE INDEX IF NOT EXISTS studio_text_chats_watching_idx ON public.studio_text_chats (channel, updated_at) WHERE watching;
 
 -- Every message Telegram delivers, written before it is answered, so a restart or deploy loses nothing. The unique
 -- update id is what makes a message Telegram sends twice count once.
@@ -58,6 +63,7 @@ CREATE TABLE IF NOT EXISTS public.studio_text_inbox (
   received_at timestamptz NOT NULL DEFAULT now(),
   claimed_at timestamptz,
   claimed_by text,
+  attempts int NOT NULL DEFAULT 0,          -- a message that keeps failing is given up after three tries
   done_at timestamptz,
   PRIMARY KEY (channel, update_id)
 );

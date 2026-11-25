@@ -75,13 +75,19 @@ export async function resolveAuth(req: Request, _res: Response, next: NextFuncti
   }
 
   // the text bot, inside this process, acting for one person on one listed route (src/text-bot/internal.ts): an
-  // ordinary customer identity, no email, a plain user profile, so no admin check can pass for it
+  // ordinary customer identity with no email and never more than a "user" role, so no admin check can pass for it.
+  // The person must still have a profile, like any signed-in request (a deleted account gets nothing).
   if (req.header(INTERNAL_HEADER)) {
     const who = verifyInternal(req);
     if (who) {
-      req.auth = { user_id: who, via: "text" };
-      req.profile = { user_id: who, external_user_id: "", role: "user", email: null, display_name: null };
-      req.orgSlots = new Set();
+      try {
+        const { data, error } = await supabase().from("profiles").select("user_id, external_user_id").eq("user_id", who).maybeSingle();
+        if (!error && data) {
+          req.auth = { user_id: who, via: "text" };
+          req.profile = { user_id: who, external_user_id: (data as any).external_user_id ?? "", role: "user", email: null, display_name: null };
+          req.orgSlots = new Set();
+        }
+      } catch { /* no profile read: treated as signed out */ }
     }
     return next();
   }

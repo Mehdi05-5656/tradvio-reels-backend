@@ -55,7 +55,7 @@ export function makeBot(d: BotDeps) {
     markShown(st.pending, p.id);
     // the brain sees that a question is waiting and what it says, but not its code: it has no reason to repeat or reword it
     note(st, `The system asked the person to confirm (the code is in their chat, not here): ${p.question.split("\n").slice(0, -1).join(" / ")}`);
-    d.log("pending", { id: p.id, kind: p.kind, code: p.code, credits: p.credits, posts: p.posts, question: p.question, steps: p.steps.map((s) => ({ method: s.method, path: s.path, body: s.body })) });
+    d.log("pending", { id: p.id, kind: p.kind, credits: p.credits, posts: p.posts, question: p.question, steps: p.steps.map((s) => ({ method: s.method, path: s.path, body: s.body })) });
     await d.save();
   };
 
@@ -147,7 +147,7 @@ export function makeBot(d: BotDeps) {
       // whatever the broken turn prepared was never shown, so it must not stay answerable
       if (st) { const lost = dropUnshown(st.pending); if (lost) d.log("pending_never_shown", { id: lost.id }); }
       const signIn = /not_signed_in|sign_in_expired/.test(String(e?.code ?? e?.message ?? ""));
-      await d.out.text(m.chat, signIn ? "I've lost my sign-in to your Clone8 account. Run the login step on the Mac again." : "Something went wrong on my side, and nothing was changed. Try again in a moment, or use the app: https://app.clone8.io").catch(() => undefined);
+      await d.out.text(m.chat, signIn ? "I've lost access to your Clone8 account. Connect this chat again in the app: Account → Text Clone8." : "Something went wrong on my side, and nothing was changed. Try again in a moment, or use the app: https://app.clone8.io").catch(() => undefined);
     } finally { await Promise.resolve(d.save()).catch((e) => d.log("save_failed", { detail: String(e?.message ?? e).slice(0, 200) })); }
   }
 
@@ -180,8 +180,11 @@ export function makeBot(d: BotDeps) {
   async function watch(): Promise<void> {
     for (const st of Object.values(d.state.chats)) {
       for (const w of [...st.watches]) {
+        // a run is crossed off only once its result reached the chat: if sending fails (the chat service is down), the
+        // next look tries again, three times at most
+        let fin: string | null = null, failed = false;
         try {
-          const done = (text: string) => { st.watches = st.watches.filter((x) => x !== w); note(st, text); };
+          const done = (text: string) => { fin = text; };
           if (now() - w.started > 4 * 3600_000) { done(`Stopped watching ${q(w.label)} after 4 hours`); continue; }
           // an edit made by text: the clip is sent once the editor has made it again
           if (w.project) {
@@ -252,7 +255,13 @@ export function makeBot(d: BotDeps) {
           const own = rows.map((x) => x.label);
           if (media.length) await d.out.media(st.chat, media, `Your ${name} is ready.${outs.length > media.length ? ` ${outs.length} files in all; the rest are in the app.` : ""}`, undefined, own);
           else await d.out.text(st.chat, `Your ${name} is ready, but I couldn't send the file here. It's in the app: https://app.clone8.io`);
-        } catch (e: any) { d.log("watch_error", { job: w.job_id, detail: String(e?.message ?? e).slice(0, 200) }); }
+        } catch (e: any) { failed = true; d.log("watch_error", { job: w.job_id, detail: String(e?.message ?? e).slice(0, 200) }); }
+        finally {
+          if (fin != null) {
+            const tries = failed ? (w.send_tries = (w.send_tries ?? 0) + 1) : 0;
+            if (!failed || tries >= 3) { st.watches = st.watches.filter((x) => x !== w); note(st, failed ? `${fin} (the result could not be sent to the chat)` : fin); }
+          }
+        }
       }
     }
     await d.save();

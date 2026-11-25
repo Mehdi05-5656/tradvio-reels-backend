@@ -170,6 +170,6 @@ export async function loadIndex(api: Api, now = Date.now()): Promise<Index> {
     before = r.next_before ?? null;
     if (!before) break;
   }
-  if ((jobs?.jobs ?? []).length >= 100) notes.push("Only the latest 100 jobs are visible in this test; older results are found only if they are library files.");
+  if ((jobs?.jobs ?? []).length >= 100) notes.push("Only the latest 100 jobs are visible here; older results are found only if they are library files.");
   return { cards: buildCards({ jobs: jobs?.jobs ?? [], assets, collections: cols?.collections ?? [], posts: posts?.posts ?? [], accounts: social?.accounts ?? [] }), built_at: now, notes };
 }

@@ -73,7 +73,11 @@ function fakeSb(tables: Record<string, Row[]>, users: Record<string, Row>) {
     const filters: Array<(r: Row) => boolean> = [];
     let op: "select" | "insert" | "update" | "upsert" | "delete" = "select", payload: any = null, head = false, conflict: string[] = [], ignore = false;
     const run = (): Row[] => {
-      if (op === "insert") { const add = (Array.isArray(payload) ? payload : [payload]).map((x: Row) => ({ id: crypto.randomUUID(), created_at: new Date().toISOString(), ...x })); rows().push(...add); return add; }
+      if (op === "insert") {
+        const add = (Array.isArray(payload) ? payload : [payload]).map((x: Row) => ({ id: crypto.randomUUID(), created_at: new Date().toISOString(), ...x }));
+        if (table === "studio_text_chats" && add.some((a: Row) => rows().some((r) => r.channel === a.channel && r.chat_id === a.chat_id))) throw new Error("duplicate key value");
+        rows().push(...add); return add;
+      }
       if (op === "upsert") {
         const out: Row[] = [];
         for (const v of Array.isArray(payload) ? payload : [payload]) {
@@ -85,9 +89,11 @@ function fakeSb(tables: Record<string, Row[]>, users: Record<string, Row>) {
       const hit = rows().filter((r) => filters.every((f) => f(r)));
       if (op === "update") { hit.forEach((r) => Object.assign(r, payload)); return hit; }
       if (op === "delete") { tables[table] = rows().filter((r) => !hit.includes(r)); return hit; }
-      return hit;
+      return hit.map((r) => ({ ...r })); // copies, like the real database
     };
-    const done = (single: boolean) => { const r = run(); return Promise.resolve({ data: single ? r[0] ?? null : head ? null : r, error: null, count: r.length }); };
+    const done = (single: boolean) => { try { const r = run(); return Promise.resolve({ data: single ? r[0] ?? null : head ? null : r, error: null, count: r.length }); } catch (e: any) { return Promise.resolve({ data: null, error: { message: e.message }, count: 0 }); } };
+    // PostgREST's or(): "a.is.null,b.lt.2026-...,c.eq.x"
+    const orOf = (expr: string) => expr.split(",").map((part) => { const [k, o, ...rest] = part.split("."); const v = rest.join("."); return (r: Row) => o === "is" ? (r[k] ?? null) === null : o === "lt" ? r[k] != null && r[k] < v : o === "eq" ? String(r[k]) === v : false; });
     const q: any = {
       select: (_c?: string, o?: { head?: boolean }) => { if (o?.head) head = true; return q; },
       insert: (v: any) => { op = "insert"; payload = v; return q; }, update: (v: any) => { op = "update"; payload = v; return q; },
@@ -96,6 +102,7 @@ function fakeSb(tables: Record<string, Row[]>, users: Record<string, Row>) {
       eq: (k: string, v: any) => { filters.push((r) => r[k] === v); return q; }, neq: (k: string, v: any) => { filters.push((r) => r[k] !== v); return q; },
       is: (k: string, v: any) => { filters.push((r) => (r[k] ?? null) === v); return q; }, in: (k: string, vs: any[]) => { filters.push((r) => vs.includes(r[k])); return q; },
       gte: (k: string, v: any) => { filters.push((r) => r[k] >= v); return q; }, lt: (k: string, v: any) => { filters.push((r) => r[k] < v); return q; },
+      or: (expr: string) => { const any = orOf(expr); filters.push((r) => any.some((f) => f(r))); return q; },
       order: () => q, limit: () => q,
       maybeSingle: () => done(true), then: (ok: any, bad: any) => done(false).then(ok, bad),
     };
@@ -123,6 +130,14 @@ function setup(env: Record<string, string> = ENV, fetchFn?: any) {
   const tgMsg = (from: string, text: string, update_id = 1) => ({ update_id, chat: from, from, name: "mehdi", text, message_id: 5, private: true });
   return { tables, sb, routes, call, sent, bot, tgMsg };
 }
+
+/** A pretend Claude and a pretend Clone8 (no network in these tests). */
+const fakeNet = (calls: string[] = []) => async (url: string, init: any) => {
+  calls.push(String(url));
+  if (String(url).startsWith("https://api.anthropic.com")) return new Response(JSON.stringify({ model: "claude-haiku-5-5", stop_reason: "end_turn", content: [{ type: "text", text: "Your balance is 120 credits." }], usage: { input_tokens: 900, output_tokens: 12, cache_read_input_tokens: 4000 } }), { status: 200 });
+  assert.ok(init.headers[INTERNAL_HEADER], "Clone8 is reached with the pass");
+  return new Response(JSON.stringify({ credits: 120, plan: "creator" }), { status: 200 });
+};
 
 test("webhook: only Telegram (the secret) is heard; each update is kept once", async () => {
   const s = setup();
@@ -156,7 +171,9 @@ test("linking: a code from the app, Start in Telegram, Confirm in the app; nothi
   assert.match(s.sent.at(-1)!.text, /Connect your Clone8 account first/);
   // Start with the code: a pending request, not a connection
   await s.bot.handleUpdate(s.sb, s.tgMsg("900", `/start ${code}`) as any);
-  assert.match(s.sent.at(-1)!.text, /tap Confirm/);
+  const digits = s.sent.at(-1)!.text.match(/Your code is (\d{4})/)?.[1];
+  assert.ok(digits, s.sent.at(-1)!.text);
+  assert.ok(!JSON.stringify(s.tables.studio_text_links).includes(`"${digits}"`), "the digits are not stored");
   assert.equal(s.tables.studio_text_links.length, 1);
   assert.equal(s.tables.studio_text_links[0].status, "pending");
   assert.equal(s.tables.studio_text_links[0].timezone, "Europe/Paris");
@@ -172,8 +189,13 @@ test("linking: a code from the app, Start in Telegram, Confirm in the app; nothi
   assert.equal(list.json.links.length, 1); assert.equal(list.json.links[0].handle, "mehdi"); assert.equal(list.json.links[0].status, "pending");
   const id = list.json.links[0].id;
   // someone else can't confirm it
-  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OTHER, params: { id } })).status, 410);
-  const ok = await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id } });
+  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OTHER, params: { id }, body: { code: digits } })).status, 410);
+  // the owner needs the digits that went to the chat
+  const wrong = String((Number(digits) + 1) % 10_000).padStart(4, "0");
+  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id }, body: { code: wrong } })).status, 400);
+  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id } })).status, 400);
+  assert.equal(s.tables.studio_text_links[0].status, "pending");
+  const ok = await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id }, body: { code: digits } });
   assert.equal(ok.status, 200);
   assert.equal(s.tables.studio_text_links[0].status, "linked");
   assert.match(s.sent.at(-1)!.text, /Connected to your Clone8 account \(b\*\*\*s@clone8\.io\)/);
@@ -199,7 +221,8 @@ test("a confirm that waited too long, or a request for an account linked elsewhe
     { id: "55555555-5555-4555-8555-555555555555", user_id: OTHER, channel: "telegram", sender_id: "901", chat_id: "901", status: "linked", created_at: new Date().toISOString() },
   ];
   assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id: "33333333-3333-4333-8333-333333333333" } })).status, 410);
-  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id: "44444444-4444-4444-8444-444444444444" } })).status, 409);
+  s.tables.studio_text_links[1].confirm_hash = createHash("sha256").update("901:1234").digest("hex");
+  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id: "44444444-4444-4444-8444-444444444444" }, body: { code: "1234" } })).status, 409);
   assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id: "nope" } })).status, 404);
 });
 
@@ -243,4 +266,43 @@ test("a linked chat: the message reaches the brain as that person, the chat's st
   const ev = s.tables.studio_text_events.map((e) => e.event);
   assert.ok(ev.includes("in") && ev.includes("claude"), ev.join(","));
   assert.ok(s.tables.studio_text_events.every((e) => e.user_id === OWNER));
+});
+
+test("five wrong codes end the request; 'Not me' sends nothing to that chat", async () => {
+  const s = setup();
+  s.tables.studio_text_links = [{ id: "44444444-4444-4444-8444-444444444444", user_id: OWNER, channel: "telegram", sender_id: "901", chat_id: "901", status: "pending", confirm_hash: createHash("sha256").update("901:1234").digest("hex"), confirm_tries: 0, created_at: new Date().toISOString() }];
+  for (let i = 0; i < 5; i++) await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id: "44444444-4444-4444-8444-444444444444" }, body: { code: "9999" } });
+  assert.equal(s.tables.studio_text_links[0].status, "removed");
+  assert.equal((await s.call("POST /api/studio/text/links/:id/confirm", { user: OWNER, params: { id: "44444444-4444-4444-8444-444444444444" }, body: { code: "1234" } })).status, 410, "even the right code is too late");
+  s.tables.studio_text_links[0].status = "pending";
+  await s.call("DELETE /api/studio/text/links/:id", { user: OWNER, params: { id: "44444444-4444-4444-8444-444444444444" } });
+  assert.equal(s.tables.studio_text_links[0].status, "removed");
+  assert.equal(s.sent.length, 0);
+});
+
+test("a chat another server is working on is left alone, and its message goes back in the queue", async () => {
+  const s = setup(ENV, fakeNet());
+  s.tables.studio_text_links = [{ id: "55555555-5555-4555-8555-555555555555", user_id: OWNER, channel: "telegram", sender_id: "900", chat_id: "900", status: "linked", created_at: new Date().toISOString() }];
+  s.tables.studio_text_chats = [{ channel: "telegram", chat_id: "900", user_id: OWNER, state: {}, watching: false, lease_by: "other-server", lease_until: new Date(Date.now() + 60_000).toISOString() }];
+  assert.equal(await s.bot.handleUpdate(s.sb, s.tgMsg("900", "hi") as any), "busy");
+  assert.equal(s.sent.length, 0);
+  const h = { "x-telegram-bot-api-secret-token": ENV.TELEGRAM_WEBHOOK_SECRET };
+  await s.call(`POST ${WEBHOOK_PATH}`, { body: { update_id: 21, message: { message_id: 21, text: "hi", chat: { id: 900, type: "private" }, from: { id: 900, username: "mehdi" } } }, headers: h });
+  await new Promise((r) => setTimeout(r, 30));
+  const row = s.tables.studio_text_inbox[0];
+  assert.equal(row.done_at ?? null, null, "not marked done");
+  assert.equal(row.claimed_at, null, "back in the queue");
+  // once the other server's hold runs out, this one takes the chat
+  s.tables.studio_text_chats[0].lease_until = new Date(Date.now() - 1000).toISOString();
+  await s.bot.drain(); await new Promise((r) => setTimeout(r, 100));
+  assert.ok(row.done_at);
+  assert.equal(s.sent.at(-1)!.text, "Your balance is 120 credits.");
+  assert.equal(s.tables.studio_text_chats[0].lease_by, null, "let go after the turn");
+});
+
+test("a deleted account's chat is not answered", async () => {
+  const s = setup({ ...ENV, STUDIO_TEXT_OPEN: "true" });
+  s.tables.studio_text_links = [{ id: "66666666-6666-4666-8666-666666666666", user_id: "77777777-7777-4777-8777-777777777777", channel: "telegram", sender_id: "902", chat_id: "902", status: "linked", created_at: new Date().toISOString() }];
+  await s.bot.handleUpdate(s.sb, s.tgMsg("902", "hi") as any);
+  assert.equal((s.tables.studio_text_chats ?? []).length, 0, "no state made, no AI call");
 });

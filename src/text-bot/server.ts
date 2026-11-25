@@ -11,11 +11,12 @@
 //   - every step goes to an append-only log (studio_text_events); every AI call to the cost ledger.
 // Switches: STUDIO_TEXT_ENABLED (routes and webhook exist; needs TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET and
 // ANTHROPIC_API_KEY), STUDIO_TEXT_OPEN (every customer may link; otherwise only the owner's account).
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { adminEmails, isStudioAdmin } from "../studio-admin-auth.js";
 import { recordEvent } from "../studio-events.js";
+import { isStopping, isSuperseded } from "../studio-leases.js";
 import { INTERNAL_HEADER, internalPass } from "./internal.js";
 import { levelOf, Clone8Error, pathOnly, type Api, type BotConfig, type Method, type Reply } from "./routes.js";
 import { makeBot, HELP, type BotState } from "./bot.js";
@@ -80,13 +81,18 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   const port = deps.port ?? Number(env.PORT || 10000);
   const tg = env.TELEGRAM_BOT_TOKEN ? telegram(env.TELEGRAM_BOT_TOKEN, { fetch: deps.fetch, onGuard: (hit) => log(`[text] guard: ${hit}`) }) : null;
   const out = deps.out ?? tg?.out ?? null;
+  // files go out one at a time across the whole server: each can be tens of megabytes held in memory
+  let sending: Promise<unknown> = Promise.resolve();
+  const sendOut = out && { ...out, media: (...a: Parameters<Transport["media"]>) => { const p = sending.then(() => out.media(...a)); sending = p.catch(() => undefined); return p; } } as Transport;
   let botName: string | null = env.STUDIO_TEXT_TELEGRAM_BOT ?? null;
+  const me = randomBytes(6).toString("hex"), LEASE_MS = 6 * 60_000; // longer than the longest single step (a link import may take 5 minutes)
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth && !(req.auth as any).via ? (req.auth as any).user_id : null);
   const fail = (res: Response, e: any) => { log(`[text] ${String(e?.message ?? e).slice(0, 200)}`); res.status(e?.status ?? 500).json({ error: e?.code ?? "text_failed", detail: e?.status ? String(e.message) : "Something went wrong on our side" }); };
 
   // ---- the append-only log: buffered, written every couple of seconds; AI calls also go to the cost ledger ----
   let buf: any[] = [], flushing = false;
-  const flush = async () => { if (flushing || !buf.length) return; flushing = true; const rows = buf.splice(0, 500); try { const r = await sbFn().from("studio_text_events").insert(rows); if (r.error) log(`[text] log write failed: ${r.error.message}`); } catch (e: any) { log(`[text] log write failed: ${e?.message ?? e}`); } finally { flushing = false; } };
+  // (a failed write keeps its rows for the next try, up to 5,000 waiting; past that the oldest go)
+  const flush = async () => { if (flushing || !buf.length) return; flushing = true; const rows = buf.splice(0, 500); let ok = false; try { const r = await sbFn().from("studio_text_events").insert(rows); if (r.error) log(`[text] log write failed: ${r.error.message}`); else ok = true; } catch (e: any) { log(`[text] log write failed: ${e?.message ?? e}`); } finally { if (!ok) buf = [...rows, ...buf].slice(-5000); flushing = false; } };
   const ticker = setInterval(() => { void flush(); }, 2000); (ticker as any).unref?.();
   const logFor = (user: string | null, chat: string | null) => (event: string, data: Record<string, unknown> = {}) => {
     buf.push({ user_id: user, channel: "telegram", chat_id: chat, event: event.slice(0, 40), data, at: new Date().toISOString() });
@@ -98,13 +104,16 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   const indexes = new Map<string, { current: Index | null }>(), basics = new Map<string, BrainDeps["basics"]>();
   const rate = new Map<string, number[]>(), strangers = new Map<string, { day: string; n: number; bad: number }>();
 
-  /** Before it opens to everyone, only the owner's account is answered, even if another one was linked earlier. */
+  /** A linked account is answered only while it exists; before texting opens to everyone, only the owner's account. */
   const allowed = new Map<string, { at: number; ok: boolean }>();
   async function mayUse(sb: SupabaseClient, user: string): Promise<boolean> {
-    if (textOpen(env)) return true;
     const hit = allowed.get(user); if (hit && Date.now() - hit.at < 5 * 60_000) return hit.ok;
     let ok = false;
-    try { const r: any = await (sb as any).auth.admin.getUserById(user); const who = r?.data?.user; ok = !!who?.email_confirmed_at && adminEmails(env).includes(String(who?.email ?? "").toLowerCase()); } catch { ok = false; }
+    try {
+      const r: any = await (sb as any).auth.admin.getUserById(user); const who = r?.data?.user;
+      ok = !!who && (textOpen(env) || (!!who.email_confirmed_at && adminEmails(env).includes(String(who.email ?? "").toLowerCase())));
+    } catch { ok = false; }
+    if (allowed.size > 5000) allowed.clear();
     allowed.set(user, { at: Date.now(), ok }); return ok;
   }
   async function linkOf(sb: SupabaseClient, sender: string): Promise<Link | null> {
@@ -123,25 +132,48 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (!r.data || (r.data as any).user_id !== link.user_id) return { st: emptyChat(chat), stamp: null };
     return { st: { ...emptyChat(chat), ...((r.data as any).state ?? {}), chat }, stamp: (r.data as any).updated_at };
   }
+  /** Only the server holding a chat writes it: a save from one that lost the chat fails, and with it the turn (the
+   *  bot saves a claimed action BEFORE running it, so a YES can never run on two servers). */
   async function saveChat(sb: SupabaseClient, link: Link, st: ChatState) {
     const now = new Date().toISOString();
-    const row = { channel: "telegram", chat_id: st.chat, user_id: link.user_id, state: { ...st, history: st.history.slice(-60) }, watching: st.watches.length > 0, updated_at: now };
-    const w = await sb.from("studio_text_chats").upsert(row, { onConflict: "channel,chat_id" });
+    const w = await sb.from("studio_text_chats").update({ user_id: link.user_id, state: { ...st, history: st.history.slice(-60) }, watching: st.watches.length > 0, updated_at: now, lease_until: new Date(Date.now() + LEASE_MS).toISOString() })
+      .eq("channel", "telegram").eq("chat_id", st.chat).eq("lease_by", me).select("chat_id");
     if (w.error) throw w.error;
+    if (!(w.data ?? []).length) throw Object.assign(new Error("chat_lease_lost"), { code: "chat_lease_lost" });
     await sb.from("studio_text_links").update({ last_used_at: now }).eq("id", link.id);
   }
+  /** Take a chat for this server for a few minutes; false when another server is working on it. */
+  async function lease(sb: SupabaseClient, link: Link, chat: string): Promise<boolean> {
+    const now = new Date().toISOString(), until = new Date(Date.now() + LEASE_MS).toISOString();
+    const r = await sb.from("studio_text_chats").update({ lease_by: me, lease_until: until }).eq("channel", "telegram").eq("chat_id", chat)
+      .or(`lease_until.is.null,lease_until.lt.${now},lease_by.eq.${me}`).select("chat_id");
+    if (r.error) throw r.error;
+    if ((r.data ?? []).length) return true;
+    const ex = await sb.from("studio_text_chats").select("chat_id").eq("channel", "telegram").eq("chat_id", chat).maybeSingle();
+    if (ex.error) throw ex.error;
+    if (ex.data) return false;
+    const ins = await sb.from("studio_text_chats").insert({ channel: "telegram", chat_id: chat, user_id: link.user_id, state: {}, lease_by: me, lease_until: until });
+    return !ins.error; // (another server made the row a moment ago: it has the chat)
+  }
+  const unlease = (sb: SupabaseClient, chat: string) => sb.from("studio_text_chats").update({ lease_by: null, lease_until: null }).eq("channel", "telegram").eq("chat_id", chat).eq("lease_by", me).then(() => undefined, () => undefined);
 
-  /** One person's bot for one chat, with its state loaded; `run` handles a message or looks at running jobs. */
-  async function withBot(sb: SupabaseClient, link: Link, chat: string, run: (bot: ReturnType<typeof makeBot>) => Promise<void>) {
-    if (!out) return;
+  /** One person's bot for one chat, with its state loaded; `run` handles a message or looks at running jobs.
+   *  False when another server holds the chat (the caller tries again later). */
+  async function withBot(sb: SupabaseClient, link: Link, chat: string, run: (bot: ReturnType<typeof makeBot>) => Promise<void>): Promise<boolean> {
+    if (!out) return true;
+    if (!(await lease(sb, link, chat))) return false;
+    try { await withLoaded(sb, link, chat, run); } finally { await unlease(sb, chat); }
+    return true;
+  }
+  async function withLoaded(sb: SupabaseClient, link: Link, chat: string, run: (bot: ReturnType<typeof makeBot>) => Promise<void>) {
     const { st } = await loadChat(sb, link, chat);
     const cfg = botConfig(env, await timezoneOf(sb, link));
     const log2 = logFor(link.user_id, chat);
     const api = serverApi(link.user_id, { port, fetch: deps.fetch, onCall: (e) => log2("route", e) });
     if (!indexes.has(link.user_id)) indexes.set(link.user_id, { current: null });
-    const brain: BrainDeps = { cfg, api, out, index: indexes.get(link.user_id)!, log: log2, basics: basics.get(link.user_id) ?? null, ...(deps.think ? { fetch: deps.think } : {}) };
+    const brain: BrainDeps = { cfg, api, out: sendOut!, index: indexes.get(link.user_id)!, log: log2, basics: basics.get(link.user_id) ?? null, ...(deps.think ? { fetch: deps.think } : {}) };
     const state: BotState = { owner: link.sender_id, pair_code: null, offset: 0, chats: { [chat]: st }, strangers: {}, rate: { [link.sender_id]: rate.get(link.sender_id) ?? [] } };
-    const bot = makeBot({ cfg, api, out, state, log: log2, save: () => saveChat(sb, link, st), think: (s, text, o) => think(brain, s, text, o), forget: () => { indexes.get(link.user_id)!.current = null; brain.basics = null; } });
+    const bot = makeBot({ cfg, api, out: sendOut!, state, log: log2, save: () => saveChat(sb, link, st), think: (s, text, o) => think(brain, s, text, o), forget: () => { indexes.get(link.user_id)!.current = null; brain.basics = null; } });
     try { await run(bot); }
     finally { rate.set(link.sender_id, state.rate[link.sender_id] ?? []); basics.set(link.user_id, brain.basics ?? null); }
   }
@@ -159,14 +191,15 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       if (code && !code.used_at && Date.parse(code.expires_at) > Date.now()) {
         const used = await sb.from("studio_text_codes").update({ used_at: new Date().toISOString(), sender_id: u.from }).eq("code_hash", code.code_hash).is("used_at", null).select("code_hash");
         if (!(used.data ?? []).length) return; // two taps at once: the first one won
-        const other = await sb.from("studio_text_links").select("user_id").eq("channel", "telegram").eq("sender_id", u.from).eq("status", "linked").maybeSingle();
-        if (other.data && (other.data as any).user_id !== code.user_id) { await out!.text(u.chat, "This Telegram account is already connected to a different Clone8 account. Remove it there first (Account → Text Clone8), then try again."); return; }
-        // any older unconfirmed request from this sender for this account is replaced
+        // any older unconfirmed request from this sender is replaced
         await sb.from("studio_text_links").update({ status: "removed" }).eq("channel", "telegram").eq("sender_id", u.from).eq("status", "pending");
-        const ins = await sb.from("studio_text_links").insert({ user_id: code.user_id, channel: "telegram", sender_id: u.from, chat_id: u.chat, handle: u.name ? short(u.name, 60) : null, status: "pending", timezone: code.timezone });
+        // the four digits go only to this chat; the account's owner types them in the app. Someone who saw or tapped
+        // the link first can't finish it: the digits land in their chat, not the owner's
+        const digits = String(randomInt(0, 10_000)).padStart(4, "0");
+        const ins = await sb.from("studio_text_links").insert({ user_id: code.user_id, channel: "telegram", sender_id: u.from, chat_id: u.chat, handle: u.name ? short(u.name, 60) : null, status: "pending", timezone: code.timezone, confirm_hash: hash(`${u.from}:${digits}`) });
         if (ins.error) throw ins.error;
         logFor(code.user_id, u.chat)("link_requested", { sender: u.from });
-        await out!.text(u.chat, `Almost done. Go back to Clone8 and tap Confirm next to "Telegram${u.name ? ` @${short(u.name, 40)}` : ""}" to connect this chat to your account.\n${CONNECT}`);
+        await out!.text(u.chat, `Almost done. Your code is ${digits}\nType it in Clone8 (Account → Text Clone8) to connect this chat to your account. It works for 15 minutes.\n${CONNECT}`);
         return;
       }
       k.bad++;
@@ -177,7 +210,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (n < 3) await out!.text(u.chat, `Hi, I'm Clone8. Connect your Clone8 account first, then text me what you want to make, post or check.\nOpen the app: Account → Text Clone8.\n${CONNECT}`);
   }
 
-  async function handleUpdate(sb: SupabaseClient, u: Incoming) {
+  async function handleUpdate(sb: SupabaseClient, u: Incoming): Promise<void | "busy"> {
     if (!u.private || !out) return;
     const link = await linkOf(sb, u.from);
     if (u.callback_id) { void (deps.out?.answerTap ?? tg?.answerTap)?.(u.callback_id); if (u.message_id && /^(y|n):/.test(u.text)) void (deps.out?.clearButtons ?? tg?.clearButtons)?.(u.chat, u.message_id); }
@@ -186,38 +219,48 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (!(await mayUse(sb, link.user_id))) { if (!u.callback_id) await out.text(u.chat, "Texting Clone8 isn't open for your account yet. We'll let you know when it is."); return; }
     const g = classify(u.text);
     if (g.kind === "start" && g.code) { await out.text(u.chat, "This chat is already connected to your Clone8 account. To connect a different account, remove this one first in the app (Account → Text Clone8)."); return; }
-    await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file }));
+    if (!(await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file })))) return "busy";
   }
 
   // ---- the inbox: written by the webhook, worked on in order, one chat at a time ----
-  const me = randomBytes(6).toString("hex");
   const chains = new Map<string, Promise<void>>();
   /** updates this process is working on: never taken twice, however long one takes */
   const inflight = new Set<number>();
   let draining = false;
   async function drain() {
-    if (draining || !textEnabled(env)) return; draining = true;
+    if (draining || !textEnabled(env) || isStopping() || isSuperseded()) return; draining = true;
     try {
       const sb = sbFn();
       const stale = Date.now() - 5 * 60_000;
-      const r = await sb.from("studio_text_inbox").select("update_id,payload,claimed_at").eq("channel", "telegram").is("done_at", null).order("update_id", { ascending: true }).limit(25);
+      const r = await sb.from("studio_text_inbox").select("update_id,payload,claimed_at,attempts").eq("channel", "telegram").is("done_at", null)
+        .or(`claimed_at.is.null,claimed_at.lt.${new Date(stale).toISOString()}`).order("update_id", { ascending: true }).limit(50);
       if (r.error) throw r.error;
       for (const row of (r.data ?? []) as any[]) {
         if (inflight.has(Number(row.update_id))) continue;
         if (row.claimed_at && Date.parse(row.claimed_at) > stale) continue;
-        const c = await sb.from("studio_text_inbox").update({ claimed_at: new Date().toISOString(), claimed_by: me }).eq("channel", "telegram").eq("update_id", row.update_id).is("done_at", null)
+        const attempts = Number(row.attempts) || 0;
+        const c = await sb.from("studio_text_inbox").update({ claimed_at: new Date().toISOString(), claimed_by: me, attempts: attempts + 1 }).eq("channel", "telegram").eq("update_id", row.update_id).is("done_at", null)
           [row.claimed_at ? "eq" : "is"]("claimed_at", row.claimed_at ?? null).select("update_id");
         if (!(c.data ?? []).length) continue; // another server took it (during a deploy two run for a minute)
-        inflight.add(Number(row.update_id));
         const u = parseUpdate(row.payload);
+        const finish = (extra: Record<string, unknown> = {}) => sb.from("studio_text_inbox").update({ done_at: new Date().toISOString(), ...extra, ...(u && /^\/start\s/.test(u.text) ? { payload: { update_id: row.update_id, redacted: "start" } } : {}) }).eq("channel", "telegram").eq("update_id", row.update_id).then(() => undefined, () => undefined);
+        // a message that already failed three times (it crashed the server, say) is put aside, not tried forever
+        if (attempts >= 3) { log(`[text] update ${row.update_id} given up after ${attempts} tries`); await finish({ claimed_by: `gave_up:${me}` }); continue; }
+        inflight.add(Number(row.update_id));
         const chat = u?.chat ?? "none";
-        const prev = chains.get(chat) ?? Promise.resolve();
-        const next = prev.then(async () => {
-          try { if (u) await handleUpdate(sb, u); }
+        const next: Promise<void> = (chains.get(chat) ?? Promise.resolve()).then(async () => {
+          let busy = false;
+          try { if (u) busy = (await handleUpdate(sb, u)) === "busy"; }
           catch (e: any) { log(`[text] update ${row.update_id} failed: ${String(e?.message ?? e).slice(0, 200)}`); }
-          finally { await sb.from("studio_text_inbox").update({ done_at: new Date().toISOString() }).eq("channel", "telegram").eq("update_id", row.update_id).then(() => undefined, () => undefined); inflight.delete(Number(row.update_id)); }
+          finally {
+            // another server is still on this chat (a deploy): the message goes back in the queue, untouched
+            if (busy) await sb.from("studio_text_inbox").update({ claimed_at: null, claimed_by: null, attempts }).eq("channel", "telegram").eq("update_id", row.update_id).then(() => undefined, () => undefined);
+            else await finish();
+            inflight.delete(Number(row.update_id));
+            if (chains.get(chat) === next) chains.delete(chat);
+          }
         });
-        chains.set(chat, next.finally(() => { if (chains.get(chat) === next) chains.delete(chat); }));
+        chains.set(chat, next);
       }
     } catch (e: any) { log(`[text] inbox: ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { draining = false; }
@@ -226,15 +269,18 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   // ---- the watcher: jobs and edits started by text, their results sent when ready ----
   let watching = false, swept = 0;
   async function watchAll() {
-    if (watching || !textEnabled(env)) return; watching = true;
+    if (watching || !textEnabled(env) || isStopping() || isSuperseded()) return; watching = true;
     try {
       const sb = sbFn();
-      const r = await sb.from("studio_text_chats").select("chat_id,user_id").eq("channel", "telegram").eq("watching", true).limit(200);
+      const r = await sb.from("studio_text_chats").select("chat_id,user_id").eq("channel", "telegram").eq("watching", true).order("updated_at", { ascending: true }).limit(200);
       for (const row of (r.data ?? []) as any[]) {
+        if (isStopping() || isSuperseded()) break;
         const l = await sb.from("studio_text_links").select("*").eq("channel", "telegram").eq("chat_id", row.chat_id).eq("user_id", row.user_id).eq("status", "linked").maybeSingle();
-        if (!l.data || !(await mayUse(sb, row.user_id))) continue;
-        const prev = chains.get(row.chat_id) ?? Promise.resolve();
-        const next = prev.then(() => withBot(sb, l.data as Link, row.chat_id, (bot) => bot.watch()).catch((e) => log(`[text] watch ${row.chat_id}: ${String(e?.message ?? e).slice(0, 160)}`)));
+        // a chat no longer connected (removed, relinked, account gone) is not watched again
+        if (!l.data || !(await mayUse(sb, row.user_id))) { await sb.from("studio_text_chats").update({ watching: false }).eq("channel", "telegram").eq("chat_id", row.chat_id).eq("user_id", row.user_id); continue; }
+        const next: Promise<void> = (chains.get(row.chat_id) ?? Promise.resolve()).then(() => withBot(sb, l.data as Link, row.chat_id, (bot) => bot.watch()).then(() => undefined))
+          .catch((e) => log(`[text] watch ${row.chat_id}: ${String(e?.message ?? e).slice(0, 160)}`))
+          .finally(() => { if (chains.get(row.chat_id) === next) chains.delete(row.chat_id); });
         chains.set(row.chat_id, next);
         await next;
       }
@@ -319,6 +365,14 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       const r = await sb.from("studio_text_links").select("*").eq("id", req.params.id).eq("user_id", u).eq("status", "pending").maybeSingle();
       const l = r.data as Link | null;
       if (!l || Date.now() - Date.parse(l.created_at) > CONFIRM_TTL_MS) return res.status(410).json({ error: "expired", detail: "That request ran out of time. Start again from Text Clone8." });
+      // the four digits the bot sent to that Telegram chat: proof that the person confirming is the person in the chat
+      const typed = String(req.body?.code ?? "").replace(/\D/g, "");
+      const want = Buffer.from(String((l as any).confirm_hash ?? "")), got = Buffer.from(hash(`${l.sender_id}:${typed}`));
+      if (typed.length !== 4 || want.length !== got.length || !timingSafeEqual(want, got)) {
+        const tries = Number((l as any).confirm_tries ?? 0) + 1;
+        await sb.from("studio_text_links").update({ confirm_tries: tries, ...(tries >= 5 ? { status: "removed" } : {}) }).eq("id", l.id).eq("status", "pending");
+        return res.status(400).json({ error: "wrong_code", detail: tries >= 5 ? "Too many wrong codes. Start again from Text Clone8." : "That code doesn't match. Use the 4 digits Clone8 sent you in Telegram." });
+      }
       const taken = await sb.from("studio_text_links").select("id,user_id").eq("channel", "telegram").eq("sender_id", l.sender_id).eq("status", "linked").maybeSingle();
       if (taken.data && (taken.data as any).user_id !== u) return res.status(409).json({ error: "taken", detail: "That Telegram account is connected to a different Clone8 account" });
       if (taken.data) await sb.from("studio_text_links").update({ status: "removed" }).eq("id", (taken.data as any).id);
@@ -341,10 +395,18 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     try {
       if (!UUID.test(req.params.id)) return res.status(404).json({ error: "not_found" });
       const sb = sbFn();
-      const r = await sb.from("studio_text_links").update({ status: "removed" }).eq("id", req.params.id).eq("user_id", u).in("status", ["pending", "linked"]).select("chat_id,status");
-      if (r.error) throw r.error;
-      const row: any = (r.data ?? [])[0];
-      if (row) { logFor(u, row.chat_id)("unlinked", {}); if (out) await out.text(row.chat_id, `This chat is no longer connected to Clone8. To connect again: ${CONNECT}`).catch(() => undefined); }
+      const before = await sb.from("studio_text_links").select("chat_id,status").eq("id", req.params.id).eq("user_id", u).in("status", ["pending", "linked"]).maybeSingle();
+      if (before.error) throw before.error;
+      const row: any = before.data;
+      if (row) {
+        const r = await sb.from("studio_text_links").update({ status: "removed" }).eq("id", req.params.id).eq("user_id", u).eq("status", row.status).select("id");
+        if (r.error) throw r.error;
+        logFor(u, row.chat_id)(row.status === "linked" ? "unlinked" : "link_refused", {});
+        if (row.status === "linked") {
+          await sb.from("studio_text_chats").update({ watching: false }).eq("channel", "telegram").eq("chat_id", row.chat_id).eq("user_id", u);
+          if (out) await out.text(row.chat_id, `This chat is no longer connected to Clone8. To connect again: ${CONNECT}`).catch(() => undefined);
+        }
+      }
       res.json({ ok: true });
     } catch (e) { fail(res, e); }
   });
