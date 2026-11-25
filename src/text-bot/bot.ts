@@ -188,7 +188,7 @@ export function makeBot(d: BotDeps) {
       await ask(st, r.pending);
       // what goes with the question (the "or make it in your own AI app" message), only if the question went out
       if (st.pending.live?.id === r.pending.id) for (const x of r.after ?? []) {
-        const fill = (s: string) => s.split(YES_MARK).join(`YES ${r.pending!.code}`);
+        const p = r.pending!, fill = (s: string) => s.split(YES_MARK).join(`YES ${p.code}${p.count != null ? ` ${p.count}` : ""}`);
         await d.out.text(st.chat, fill(x.text), x.buttons, x.own.map(fill)).catch(() => undefined);
       }
     } else if (!r.text) await say(st, "I didn't get that. Could you say it another way?");

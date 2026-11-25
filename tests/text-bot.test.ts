@@ -560,3 +560,12 @@ test("their own AI app, review fixes: no links inside, short copy, safe link cha
   await c.bot.handle({ chat: "1", from: "1", text: "Claude?", private: true });
   assert.ok(seen.includes(SAFE_LINE), seen.join(" | "));
 });
+
+test("their own AI app: a large question's count goes in the YES line", async () => {
+  const { YES_MARK } = await import("../src/text-bot/app-link.js");
+  const b = botWith(async (st, _t, api) => { const r = await swapTurn(st, "", api); r.pending!.count = 3; return { ...r, after: [{ text: `Or there. To make it here instead, reply ${YES_MARK}.`, buttons: [], own: [] }] }; });
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "make it", private: true });
+  const p = b.state.chats["1"].pending.live!;
+  assert.ok(b.sent.some((x) => x.text.endsWith(`reply YES ${p.code} 3.`)), b.sent.map((x) => x.text).join(" | "));
+});

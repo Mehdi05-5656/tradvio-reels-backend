@@ -266,7 +266,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       st.notes = [...st.notes.filter((n) => n !== note), note].slice(-30);
       return { saved: note };
     }
-    const prepared = async (make: () => Promise<Pending>) => { await index(d).catch(() => null); if (name === "prepare_job" && a?.from_result) { if (light().copies >= LIGHT_PER_DAY.copies) throw new act.ActionError("daily_limit", "That is enough copies into the library for one day by text; use the app for more."); light().copies++; } held.pending = await make(); return { ok: true, sent: "The system sent the person the question with its code. Do not repeat it, the price or the code. Stop here: reply with nothing, or one short line." }; };
+    const prepared = async (make: () => Promise<Pending>) => { await index(d).catch(() => null); if (name === "prepare_job" && a?.from_result) { if (light().copies >= LIGHT_PER_DAY.copies) throw new act.ActionError("daily_limit", "That is enough copies into the library for one day by text; use the app for more."); light().copies++; } after.length = 0; held.pending = await make(); return { ok: true, sent: "The system sent the person the question with its code. Do not repeat it, the price or the code. Stop here: reply with nothing, or one short line." }; };
     if (name === "prepare_job") {
       const r = await prepared(() => act.prepareJob(actx(), a ?? {}));
       // what will really run (the checked request in the question), not what the model wrote
