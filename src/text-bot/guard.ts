@@ -15,6 +15,10 @@ const RE = new RegExp(`(^|[^a-z0-9])(${BANNED.join("|")})(?![a-z])`, "i");
 const LINK = /https?:\/\/[^\s)>\]"']+/gi;
 const OK_HOSTS = /(^|\.)(clone8\.io|tiktok\.com|instagram\.com|youtube\.com|youtu\.be|twitch\.tv|kick\.com|facebook\.com|fb\.watch|x\.com|twitter\.com|linkedin\.com|threads\.net|threads\.com|bsky\.app|t\.me)$/i;
 
+/** Links the bot's own code may put on a button: Clone8's app, and the two fixed ways into the person's own AI app
+ *  (a new chat with their request typed in; adding the Clone8 connector). The model never writes these. */
+export const BUTTON_LINK = (url: string) => /^https:\/\/app\.clone8\.io\//.test(url) || /^https:\/\/claude\.ai\/(new\?q=|customize\/connectors\?modal=add-custom-connector&)/.test(url);
+
 export const SAFE_LINE = "I can't share that. Tell me what you want to make, post or check and I'll do it.";
 /** Letters split by invisible characters read the same to a person; they are removed before the check. */
 const plain = (s: string) => s.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");

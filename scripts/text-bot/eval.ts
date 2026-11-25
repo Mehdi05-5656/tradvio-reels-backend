@@ -13,8 +13,9 @@ import { guard, blanked } from "../../src/text-bot/guard.js";
 import type { Pending } from "../../src/text-bot/gate.js";
 
 type Run = { replies: string[]; all: string; pending: Pending | null; body: any; tools: string[]; lookups: string[]; media: number; usd: number; calls: number; ms: number; blanks: string[]; acts: number; errors: string[] };
-type Case = { id: string; say: string[]; check: (r: Run) => string | null; setup?: (api: ReturnType<typeof mockApi>) => void };
+type Case = { id: string; say: string[]; check: (r: Run) => string | null; setup?: (api: ReturnType<typeof mockApi>) => void; /** may offer the AI-app link (no other case may) */ appLink?: boolean };
 const has = (s: string, ...words: Array<string | RegExp>) => words.every((w) => (typeof w === "string" ? s.toLowerCase().includes(w.toLowerCase()) : w.test(s)));
+const offered = (r: Run) => /Open in Claude starts a new chat/.test(r.all);
 const noAction = (r: Run) => (r.pending ? `prepared a ${r.pending.kind} when it should not have` : null);
 const want = (r: Run, kind: string, tool?: string) => (!r.pending ? "prepared nothing" : r.pending.kind !== kind ? `prepared a ${r.pending.kind}, not a ${kind}` : tool && r.body?.tool !== tool ? `started ${r.body?.tool}, not ${tool}` : null);
 
@@ -54,6 +55,8 @@ export const CASES: Case[] = [
   { id: "edit trim", say: ["cut the first 2 seconds off the $800 bet clip"], check: (r) => want(r, "edit") ?? (Number(r.pending!.steps[0].body?.doc?.trim?.in) !== 12 ? `start at ${r.pending!.steps[0].body?.doc?.trim?.in}, not 12` : null) },
   { id: "the clip you just sent", say: ["send me the $800 bet clip", "put captions on the clip you just sent me, at the top"], check: (r) => want(r, "edit") ?? (!r.pending!.steps[0].path.includes(IDS.projA) ? "edited a different clip" : r.pending!.steps[0].body?.doc?.captions?.on !== true ? "captions not on" : null) },
   { id: "billing", say: ["cancel my plan and refund me"], check: (r) => noAction(r) ?? (has(r.all, "app.clone8.io") ? null : "did not send the page") },
+  { id: "ai app", appLink: true, say: ["can I use Claude with clone8?", "yes, a motivation video about discipline"], check: (r) => (!offered(r) ? "did not send the app link" : r.blanks.length ? `its own words named ${r.blanks.join(", ")}` : null) },
+  { id: "signature", appLink: true, say: ["make a signature story about why cats hate water"], check: (r) => want(r, "job", "story") ?? (r.body.options?.engine !== "premium" ? "not the Signature engine" : !offered(r) ? "the app link did not go with it" : r.blanks.length ? `its own words named ${r.blanks.join(", ")}` : null) },
   { id: "two steps", say: ["what clips came out of the friday stream?", "post the second one to tiktok now, no caption"], check: (r) => want(r, "post") ?? ((r.body.items ?? [])[0]?.asset_id !== IDS.clipB ? "not the second clip" : JSON.stringify(r.body.accounts) !== JSON.stringify([IDS.tiktok]) ? "wrong account" : r.body.caption ? "added a caption nobody asked for" : null) },
 ];
 
@@ -74,7 +77,7 @@ async function runCase(c: Case, model: string, effort: string): Promise<Run & { 
   const pending = chatOf(state, "e").pending.live;
   const run: Run = { replies, all: replies.join("\n"), pending, body: pending?.steps.find((s) => s.method !== "DELETE")?.body ?? pending?.steps[0]?.body ?? null, tools, lookups, media, usd, calls, ms: Date.now() - t0, blanks, acts: api.acts.length, errors };
   let fail: string | null = null;
-  try { fail = errors.length ? `error: ${errors[0]}` : run.acts ? "ACTED WITHOUT A YES" : c.check(run); } catch (e: any) { fail = `check broke: ${String(e?.message ?? e).slice(0, 80)}`; }
+  try { fail = errors.length ? `error: ${errors[0]}` : run.acts ? "ACTED WITHOUT A YES" : !c.appLink && offered(run) ? "offered the AI-app link unasked" : c.check(run); } catch (e: any) { fail = `check broke: ${String(e?.message ?? e).slice(0, 80)}`; }
   return { ...run, fail };
 }
 

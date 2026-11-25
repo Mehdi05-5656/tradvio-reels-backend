@@ -13,7 +13,7 @@
 // button is dropped (its text is in the message). Every message goes through the supplier-word guard, as on Telegram.
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Button, Media, Transport } from "./brain.js";
-import { guard } from "./guard.js";
+import { BUTTON_LINK, guard } from "./guard.js";
 import type { Incoming } from "./telegram.js";
 
 const BASE = "https://api.sendblue.com";
@@ -64,9 +64,11 @@ export function pieces(text: string, max = MAX): string[] {
   return out;
 }
 
+/** A link button as the line iMessage shows ("Open the app: https://…"); only links the bot's own code may send. */
+export const linkLines = (buttons?: Button[]) => (buttons ?? []).filter((b): b is { label: string; url: string } => "url" in b && BUTTON_LINK(b.url)).map((b) => `${b.label}: ${b.url}`);
 /** Buttons as text: links to Clone8 become a line; taps and copies are already in the words. */
 export function withButtons(text: string, buttons?: Button[]): string {
-  const links = (buttons ?? []).filter((b): b is { label: string; url: string } => "url" in b && /^https:\/\/app\.clone8\.io\//.test(b.url)).map((b) => `${b.label}: ${b.url}`);
+  const links = linkLines(buttons);
   return links.length ? `${text}\n\n${links.join("\n")}` : text;
 }
 

@@ -500,3 +500,39 @@ test("a question is withdrawn after three wrong codes: guessing the 2-letter cod
   assert.equal(s.live, null, "withdrawn");
   assert.equal(claim(s, { code: p.code }, 1004).why, "nothing", "even the right code is too late");
 });
+
+test("their own AI app: a fixed message with the prepared chat link; the set-up link only until they used it; the word stays blocked elsewhere", async () => {
+  const { appLink } = await import("../src/text-bot/app-link.js");
+  const { withButtons } = await import("../src/text-bot/sendblue.js");
+  const URL_ = "https://mcp.clone8.io/api/studio/mcp";
+  const first = appLink({ kind: "signature", request: "  \"a 30 s story about why cats hate water\" ", connected: false, connectorUrl: URL_ }) as any;
+  assert.equal(first.prompt, "Use Clone8 to make a Signature story, written by you here in this chat: a 30 s story about why cats hate water");
+  assert.deepEqual(first.buttons.map((b: any) => b.label), ["Add Clone8 to Claude", "Open in Claude", "Copy the request"]);
+  assert.equal(first.buttons[1].url, `https://claude.ai/new?q=${encodeURIComponent(first.prompt)}`);
+  assert.match(first.buttons[0].url, /^https:\/\/claude\.ai\/customize\/connectors\?modal=add-custom-connector&connectorName=Clone8&connectorUrl=https%3A%2F%2Fmcp\.clone8\.io/);
+  assert.match(first.text, /First time only/);
+  const again = appLink({ kind: "film", request: "a true heist", connected: true, connectorUrl: URL_ }) as any;
+  assert.deepEqual(again.buttons.map((b: any) => b.label), ["Open in Claude", "Copy the request"], "no set-up once they used it");
+  assert.match(again.prompt, /^Use Clone8 to make a film: a true heist$/);
+  // both channels send it whole: iMessage as lines under the text, the guard lets the fixed message through
+  const im = withButtons(first.text, first.buttons);
+  assert.deepEqual(guard(im, first.own), { text: im, hit: null });
+  assert.match(im, /Open in Claude: https:\/\/claude\.ai\/new\?q=/);
+  // ...but the word is still blanked anywhere the model writes it, and a model-made link to that host is removed
+  assert.equal(guard("Sure, I use Claude for that.").text, SAFE_LINE);
+  assert.equal(guard("Try https://claude.ai/new?q=hi").text, SAFE_LINE);
+  // the request can't smuggle a supplier's name out; junk is refused
+  assert.equal((appLink({ kind: "story", request: "made with ElevenLabs voices", connected: true, connectorUrl: URL_ }) as any).error, "not_sendable");
+  assert.equal((appLink({ kind: "story", request: "x", connected: true, connectorUrl: URL_ }) as any).error, "missing");
+  assert.equal((appLink({ kind: "story", request: "cats", connected: true, connectorUrl: "" }) as any).error, "not_available");
+  assert.match((appLink({ kind: "weird", request: "check my balance", connected: true, connectorUrl: URL_ }) as any).prompt, /^Use Clone8: check my balance$/);
+  // Telegram: the two fixed links become link buttons; any other outside link is still dropped
+  const calls: any[] = [];
+  const tg = telegram("t", { fetch: (async (_u: string, init: any) => { calls.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true, result: {} })); }) as any });
+  await tg.out.text("1", first.text, [...first.buttons, { label: "Elsewhere", url: "https://claude.ai/settings" }], first.own);
+  const kb = calls[0].reply_markup.inline_keyboard.flat();
+  assert.deepEqual(kb.map((b: any) => b.text), ["Add Clone8 to Claude", "Open in Claude", "Copy the request"]);
+  assert.equal(calls[0].text, first.text);
+  assert.ok(SYSTEM.includes("send_app_link") && !/claude/i.test(SYSTEM), "the instructions never name the app");
+  assert.ok(TOOLS.some((t) => t.name === "send_app_link"));
+});

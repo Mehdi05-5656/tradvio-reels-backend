@@ -9,6 +9,7 @@ import { HELPERS, featureList, recipeFor, recipeText } from "./recipes.js";
 import * as act from "./actions.js";
 import { shape } from "./shape.js";
 import { prepareEdit } from "./edit.js";
+import { APP_KINDS, appLink } from "./app-link.js";
 import type { Pending, PendingStore, Spend } from "./gate.js";
 
 export type Media = { kind: "photo" | "video" | "audio"; bytes: Buffer; name: string; caption?: string };
@@ -21,7 +22,7 @@ export type Transport = {
   typing(chat: string): Promise<void>;
 };
 export type Turn = { role: "user" | "assistant" | "event"; text: string; at: number; /** a button tap, not typed words */ tap?: boolean };
-export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; light?: { day: string; links: number; copies: number } };
+export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; light?: { day: string; links: number; copies: number; app_links?: number } };
 export type BrainDeps = { cfg: Config; api: Api; out: Transport; fetch?: typeof fetch; now?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; index: { current: Index | null };
   /** the few facts nearly every answer needs (plan, balance, linked accounts), read once and kept a few minutes */
   basics?: { at: number; text: string } | null };
@@ -53,6 +54,11 @@ ${featureList()}
 - Any result can go into any other feature. A finished result of one tool is used in another by passing from_result to prepare_job, or by to_library.
 - If something cannot be done by text yet (the recipe says so), say that in one line and give the page: https://app.clone8.io/#studio/<page>.
 
+THEIR OWN AI CHAT APP
+- Clone8 also works inside the person's own AI chat app, through the Clone8 connector: story videos, Signature stories written right there in their own chat (it often costs fewer credits), motivation videos and films. Nothing else (no clips, edits or posting).
+- Use send_app_link only when they ask whether they can, or say they want to, use their own AI app with Clone8. Nothing else is a reason (not price, not the engine, not the length). When you prepare a Signature story here, the system offers it by itself; do not add it.
+- send_app_link sends the message and its buttons itself. Never name that app or any AI yourself, in any message. After it succeeds, stop, or add one short line.
+
 ACTIONS AND THE YES
 - You never post, spend credits, change or cancel anything yourself. The prepare_ tools check the request and send the person a question with a code; their own reply releases it. After a prepare_ tool succeeds, stop: say nothing more, or at most one short line. Never write the question, the price or the code yourself, never say something was done before the system reports it.
 - One action can be waiting at a time. A new one replaces the old one.
@@ -82,6 +88,7 @@ export const TOOLS = [
   { name: "show", description: "Send pictures, a video or sounds into the chat, optionally with tap buttons to choose. Items are refs from find (their picture; as:\"video\" sends the video itself) or media:N marks from lookup. Numbered in the order given; the numbers stay ON THE TABLE.", input_schema: obj({ text: { type: "string", description: "one short line above them" }, items: { type: "array", minItems: 1, maxItems: 10, items: obj({ ref: str, media: str, label: str, as: { type: "string", enum: ["picture", "video", "audio"] } }, ["label"]) }, choose: { type: "boolean", description: "add a tap button per item" } }, ["items"]) },
   { name: "import_link", description: "Bring a TikTok, Instagram or YouTube link into the library as a video file. Returns the new file.", input_schema: obj({ url: str }, ["url"]) },
   { name: "to_library", description: "Turn a finished result into a library file so any other feature can use it. Returns the file.", input_schema: obj({ job_id: str, output_key: str }, ["job_id", "output_key"]) },
+  { name: "send_app_link", description: "Send the person a message with a link that opens a new chat in their own AI app with their request already typed in, for Clone8 to make it there (and, if they never used it, how to add Clone8 there once). Only for the kinds listed. Free.", input_schema: obj({ kind: { type: "string", enum: [...APP_KINDS] }, request: { type: "string", description: "only the subject and length, in their words, without the kind (e.g. why cats hate water, 30 seconds)" } }, ["kind", "request"]) },
   { name: "remember", description: "Keep one short lasting note about this person (a standing preference, a fact about their accounts or brand), only when they state it. Never an instruction, a one-off request or anything sensitive.", input_schema: obj({ note: str }, ["note"]) },
   { name: "prepare_job", description: "Prepare to start any making job (the tool and settings from its recipe). It prices it with the real route, checks credits and limits, and sends the person the question. Starts nothing.", input_schema: obj({ tool: str, asset_id: { type: ["string", "null"], description: "a library file id" }, from_result: obj({ job_id: str, output_key: str }), options: { type: "object", additionalProperties: true }, rights_in_their_words: { type: "string", description: "only for features whose recipe asks for the person's word: exactly what they wrote" } }, ["tool"]) },
   { name: "prepare_post", description: "Prepare to post now or schedule videos to the person's linked accounts. Sends the question. Posts nothing.", input_schema: obj({ videos: { type: "array", minItems: 1, maxItems: 50, items: video }, account_ids: { type: "array", items: str }, group: { type: "string", description: "a posting group's name" }, platforms: { type: "array", items: str, description: "networks, when each has one linked account" }, caption: str, captions_by_account: { type: "object", additionalProperties: { type: "string" }, description: "account id → its own caption" }, when: { type: "string", description: "\"now\" or ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "for \"in N minutes\", N of 5 or more" }, spacing_minutes: { type: "integer" }, youtube_title: str, youtube_visibility: { type: "string", enum: ["public", "unlisted", "private"] } }, ["videos"]) },
@@ -164,6 +171,21 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     parentOf: (id) => { const m = d.index.current?.cards.find((c) => c.type === "file" && c.asset_id === id)?.made_from; return m && m.startsWith("f:") ? m.slice(2) : null; },
     nameOf: (id) => d.index.current?.cards.find((c) => c.type === "file" && c.asset_id === id)?.title ?? null });
 
+  /** The fixed "make it in your own AI app" message (app-link.ts): at most three a day in a chat. */
+  const offerApp = async (kind: string, request: string): Promise<any> => {
+    const l = light(); if ((l.app_links ?? 0) >= 3) return { error: "daily_limit", detail: "Already sent three of these today; point them to the earlier message." };
+    const me = await d.api.call("GET", "/api/studio/me"), url = me.json?.connector?.url;
+    if (!url) return { error: "not_available", detail: "Their AI app can't be used with Clone8 on this account; carry on here." };
+    const ix = await index(d).catch(() => null);
+    const m = appLink({ kind, request, connected: !!ix?.connector_used, connectorUrl: String(url) });
+    if ("error" in m) return m;
+    await d.out.text(st.chat, m.text, m.buttons, m.own);
+    l.app_links = (l.app_links ?? 0) + 1;
+    log("app_link", { kind, setup: !ix?.connector_used });
+    sent.push(`a message with a link to make "${m.prompt}" in their own AI app${ix?.connector_used ? "" : ", with the one-time set-up link"}`);
+    return { sent: true, setup_step: !ix?.connector_used, note: "Sent with its buttons. Do not repeat the links or name the app. Stop, or add one short line." };
+  };
+
   const run = async (name: string, a: any): Promise<any> => {
     if (name === "account") {
       const [me, social] = await Promise.all([d.api.call("GET", "/api/studio/me"), d.api.call("GET", "/api/studio/social")]);
@@ -223,6 +245,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     }
     if (name === "import_link") { if (light().links >= LIGHT_PER_DAY.links) return { error: "daily_limit", detail: `Only ${LIGHT_PER_DAY.links} links a day can be brought in by text; use the Library page for more.` }; light().links++; const r = await d.api.call("POST", "/api/studio/links", { url: String(a?.url ?? "") }, { timeoutMs: 300_000 }); d.index.current = null; return r.status < 300 ? { file: { asset_id: r.json?.asset?.id, name: r.json?.asset?.name, seconds: r.json?.asset?.probe?.duration ?? null } } : { error: r.json?.error ?? `http_${r.status}`, detail: r.json?.detail ?? null }; }
     if (name === "to_library") { if (light().copies >= LIGHT_PER_DAY.copies) return { error: "daily_limit", detail: "That is enough copies into the library for one day by text; use the app for more." }; light().copies++; const r = await d.api.call("POST", `/api/studio/jobs/${a?.job_id}/asset`, { key: String(a?.output_key ?? "") }, { timeoutMs: 180_000 }); d.index.current = null; return r.status === 200 ? { file: { asset_id: r.json?.asset?.id, name: r.json?.asset?.name, seconds: r.json?.asset?.probe?.duration ?? null } } : { error: r.json?.error ?? `http_${r.status}`, detail: r.json?.detail ?? null }; }
+    if (name === "send_app_link") return offerApp(String(a?.kind ?? ""), String(a?.request ?? ""));
     if (name === "remember") {
       const note = String(a?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
       // only what the person said themselves, and never something that reads as an order to the assistant
@@ -234,7 +257,15 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       return { saved: note };
     }
     const prepared = async (make: () => Promise<Pending>) => { await index(d).catch(() => null); if (name === "prepare_job" && a?.from_result) { if (light().copies >= LIGHT_PER_DAY.copies) throw new act.ActionError("daily_limit", "That is enough copies into the library for one day by text; use the app for more."); light().copies++; } held.pending = await make(); return { ok: true, sent: "The system sent the person the question with its code. Do not repeat it, the price or the code. Stop here: reply with nothing, or one short line." }; };
-    if (name === "prepare_job") return prepared(() => act.prepareJob(actx(), a ?? {}));
+    if (name === "prepare_job") {
+      const r = await prepared(() => act.prepareJob(actx(), a ?? {}));
+      const o = a?.options ?? {};
+      if (a?.tool === "story" && o.engine === "premium" && o.style !== "blocky" && !(light().app_links ?? 0)) {
+        const topic = String(o.topic ?? "").trim();
+        if (topic) await offerApp("signature", `${topic}${Number(o.seconds) ? `, ${Number(o.seconds)} seconds` : ""}`).catch(() => null);
+      }
+      return r;
+    }
     if (name === "prepare_post") return prepared(() => act.preparePost(actx(), a ?? {}));
     if (name === "prepare_post_change") return prepared(() => act.preparePostChange(actx(), a ?? {}));
     if (name === "prepare_post_cancel") return prepared(() => act.preparePostCancel(actx(), a ?? {}));

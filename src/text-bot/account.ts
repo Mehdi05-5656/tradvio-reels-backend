@@ -14,7 +14,7 @@ export type Card = {
   /** a signed picture link, good for about 15 minutes after the index was built; never shown as text */
   poster?: string | null;
 };
-export type Index = { cards: Card[]; built_at: number; notes: string[] };
+export type Index = { cards: Card[]; built_at: number; notes: string[]; /** made something through the Clone8 connector (so it is set up in their AI app) */ connector_used?: boolean };
 
 const TOOL_NAME: Record<string, string> = {
   clips: "Clips", captions: "Captions", swap: "Swap", recast: "Recast", restyle: "Styles", trend: "Trends", character: "Character", instrument: "Instrument",
@@ -171,5 +171,6 @@ export async function loadIndex(api: Api, now = Date.now()): Promise<Index> {
     if (!before) break;
   }
   if ((jobs?.jobs ?? []).length >= 100) notes.push("Only the latest 100 jobs are visible here; older results are found only if they are library files.");
-  return { cards: buildCards({ jobs: jobs?.jobs ?? [], assets, collections: cols?.collections ?? [], posts: posts?.posts ?? [], accounts: social?.accounts ?? [] }), built_at: now, notes };
+  return { cards: buildCards({ jobs: jobs?.jobs ?? [], assets, collections: cols?.collections ?? [], posts: posts?.posts ?? [], accounts: social?.accounts ?? [] }), built_at: now, notes,
+    connector_used: (jobs?.jobs ?? []).some((j: any) => j?.options?.via === "connector") };
 }
