@@ -29,7 +29,7 @@ import { telegram, parseUpdate, type Incoming } from "./telegram.js";
 import { sendblue, parseSendblue, verifySendblue, handleId, contactCard, mask } from "./sendblue.js";
 import { classify } from "./gate.js";
 import type { Index } from "./account.js";
-import { chatLines, textAdminView, type TextEventRow, type TextLinkRow } from "./admin.js";
+import { CTA_ACTIONS, CTAS, chatLines, ctaReport, textAdminView, type CtaRow, type TextEventRow, type TextLinkRow } from "./admin.js";
 
 type Env = Record<string, string | undefined>;
 export type ChannelName = "telegram" | "imessage";
@@ -561,6 +561,29 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     for (let from = 0; from < max; from += 1000) { const r = await q(from); if (r.error) throw r.error; out.push(...(r.data ?? [])); if ((r.data ?? []).length < 1000) break; }
     return out;
   };
+  // what the app's "Text Clone8" calls to action did (shown, opened, dismissed, never, connected, assisted): kept as
+  // product events (studio_events kind "feature", name "text_cta"); at most 120 a person an hour
+  const ctaSeen = new Map<string, { n: number; at: number }>();
+  app.post("/api/studio/text/cta", (req, res) => {
+    const u = userId(req); if (!u) return res.status(401).json({ error: "unauthorized" });
+    const list = Array.isArray(req.body?.events) ? (req.body.events as any[]).slice(0, 20) : [];
+    const now = Date.now(), seen = ctaSeen.get(u);
+    const box = seen && now - seen.at < 3600_000 ? seen : { n: 0, at: now };
+    let kept = 0;
+    for (const e of list) {
+      if (box.n >= 120) break;
+      const cta = String(e?.cta ?? ""), action = String(e?.action ?? "");
+      if (!(CTAS as readonly string[]).includes(cta) || !(CTA_ACTIONS as readonly string[]).includes(action)) continue;
+      const tool = typeof e?.tool === "string" && /^[\w-]{1,40}$/.test(e.tool) ? e.tool : undefined;
+      const channel = e?.channel === "telegram" || e?.channel === "imessage" ? e.channel : undefined;
+      recordEvent({ user_id: u, kind: "feature", name: "text_cta", props: { cta, action, ...(tool ? { tool } : {}), ...(channel ? { channel } : {}) } });
+      box.n += 1; kept += 1;
+    }
+    ctaSeen.set(u, box);
+    if (ctaSeen.size > 5000) for (const [k, v] of ctaSeen) if (now - v.at > 3600_000) ctaSeen.delete(k);
+    res.json({ ok: true, kept });
+  });
+
   app.get("/api/studio/admin/text", async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     try {
@@ -573,7 +596,8 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       const emails: Record<string, string | null> = {}, plans: Record<string, string | null> = {};
       for (let i = 0; i < ids.length; i += 20) await Promise.all(ids.slice(i, i + 20).map(async (u) => { try { const r: any = await (sb as any).auth.admin.getUserById(u); emails[u] = r?.data?.user?.email ?? null; } catch { emails[u] = null; } }));
       for (let i = 0; i < ids.length; i += 200) { const c = await sb.from("studio_customers").select("user_id,plan_id,status").in("user_id", ids.slice(i, i + 200)); for (const r of (c.data ?? []) as any[]) plans[r.user_id] = r.plan_id && ["active", "trialing", "past_due"].includes(r.status) ? r.plan_id : null; }
-      res.json({ ...textAdminView({ links, events, days, since, emails, plans }), open: textOpen(env), bot: botName, imessage: imessageEnabled(env) ? { open: imessageOpen(env), number: env.SENDBLUE_FROM_NUMBER } : null });
+      const ctaRows = await pages<CtaRow>((f) => sb.from("studio_events").select("user_id,props,created_at").eq("kind", "feature").eq("name", "text_cta").gte("created_at", since).order("created_at").range(f, f + 999));
+      res.json({ ...textAdminView({ links, events, days, since, emails, plans }), ctas: ctaReport(ctaRows), open: textOpen(env), bot: botName, imessage: imessageEnabled(env) ? { open: imessageOpen(env), number: env.SENDBLUE_FROM_NUMBER } : null });
     } catch (e) { fail(res, e); }
   });
   app.get("/api/studio/admin/text/chat", async (req, res) => {

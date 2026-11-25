@@ -88,3 +88,32 @@ export function chatLines(events: TextEventRow[]): ChatLine[] {
   }
   return out;
 }
+
+// ---- the "Text Clone8" calls to action in the app (app src/lib/text-promo.ts): which ones get people to connect ----
+export const CTAS = ["result_modal", "result_card", "home_card", "publish_card", "toast_posted", "toast_idle", "account_card"] as const;
+export const CTA_ACTIONS = ["shown", "opened", "dismissed", "never", "connected", "assisted"] as const;
+export type CtaRow = { user_id: string | null; props: { cta?: string; action?: string; tool?: string; channel?: string } | null; created_at: string };
+export type CtaLine = { cta: string; shown: number; people: number; opened: number; dismissed: number; never: number; connected: number; assisted: number;
+  /** opened / shown, connected / shown (0..1), null with nothing shown */ open_rate: number | null; connect_rate: number | null };
+/** One line per CTA: how often it was shown (and to how many people), pressed, waved off, and how many chats it connected
+ *  (directly, or as the last thing seen within 7 days before a connect elsewhere: "assisted"); best connectors first. */
+export function ctaReport(rows: CtaRow[]): { lines: CtaLine[]; tools: Array<{ tool: string; shown: number; opened: number; connected: number }> } {
+  const by = new Map<string, CtaLine & { users: Set<string> }>();
+  const tools = new Map<string, { tool: string; shown: number; opened: number; connected: number }>();
+  for (const r of rows) {
+    const cta = r.props?.cta, action = r.props?.action;
+    if (!cta || !action || !(CTAS as readonly string[]).includes(cta) || !(CTA_ACTIONS as readonly string[]).includes(action)) continue;
+    const l = by.get(cta) ?? { cta, shown: 0, people: 0, opened: 0, dismissed: 0, never: 0, connected: 0, assisted: 0, open_rate: null, connect_rate: null, users: new Set<string>() };
+    (l as any)[action] += 1;
+    if (action === "shown" && r.user_id) l.users.add(r.user_id);
+    by.set(cta, l);
+    if (r.props?.tool && (action === "shown" || action === "opened" || action === "connected")) {
+      const t = tools.get(r.props.tool) ?? { tool: r.props.tool, shown: 0, opened: 0, connected: 0 };
+      t[action] += 1; tools.set(r.props.tool, t);
+    }
+  }
+  const rate = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 1000 : null);
+  const lines = [...by.values()].map(({ users, ...l }) => ({ ...l, people: users.size, open_rate: rate(l.opened, l.shown), connect_rate: rate(l.connected, l.shown) }))
+    .sort((a, b) => b.connected - a.connected || b.assisted - a.assisted || b.shown - a.shown);
+  return { lines, tools: [...tools.values()].sort((a, b) => b.shown - a.shown) };
+}

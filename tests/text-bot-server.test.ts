@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { internalPass, verifyInternal, INTERNAL_HEADER } from "../src/text-bot/internal.js";
 import { registerTextBot, serverApi, botConfig, WEBHOOK_PATH } from "../src/text-bot/server.js";
-import { textAdminView, chatLines } from "../src/text-bot/admin.js";
+import { textAdminView, chatLines, ctaReport } from "../src/text-bot/admin.js";
 import { parseSendblue, verifySendblue, withButtons, handleId, mask, contactCard, sendblue } from "../src/text-bot/sendblue.js";
 
 type Row = Record<string, any>;
@@ -495,4 +495,30 @@ test("retention the privacy policy promises: log 12 months, disconnected connect
   assert.deepEqual(s.tables.studio_text_events.map((e: any) => e.at), [ago(10)].map((x) => s.tables.studio_text_events[0].at), "only the recent entry stays");
   assert.equal(s.tables.studio_text_events.length, 1);
   assert.deepEqual(s.tables.studio_text_links.map((l: any) => l.id).sort(), ["b", "c"], "a connection still in use is never deleted");
+});
+
+test("calls to action: the app reports what each did; only known CTAs and actions are kept, a capped number an hour", async () => {
+  const s = setup();
+  assert.equal((await s.call("POST /api/studio/text/cta", { body: { events: [{ cta: "home_card", action: "shown" }] } })).status, 401);
+  const r = await s.call("POST /api/studio/text/cta", { user: OWNER, body: { events: [
+    { cta: "result_modal", action: "shown", tool: "clips" }, { cta: "result_modal", action: "opened", channel: "imessage" },
+    { cta: "nope", action: "shown" }, { cta: "home_card", action: "hacked" }, { cta: "home_card", action: "shown", tool: "<script>" },
+  ] } });
+  assert.equal(r.json.kept, 3, "two unknown ones dropped; a bad tool name is dropped, not the event");
+  let total = 0;
+  for (let i = 0; i < 10; i++) total += (await s.call("POST /api/studio/text/cta", { user: OTHER, body: { events: Array.from({ length: 20 }, () => ({ cta: "toast_idle", action: "shown" })) } })).json.kept;
+  assert.equal(total, 120, "at most 120 a person an hour");
+
+  const at = "2026-11-24T10:00:00Z", row = (u: string | null, cta: string, action: string, tool?: string) => ({ user_id: u, props: { cta, action, ...(tool ? { tool } : {}) }, created_at: at });
+  const rep = ctaReport([
+    row(OWNER, "result_modal", "shown", "clips"), row(OWNER, "result_modal", "shown", "clips"), row(OTHER, "result_modal", "shown", "stories"),
+    row(OWNER, "result_modal", "opened", "clips"), row(OWNER, "result_modal", "connected"), row(OTHER, "result_modal", "dismissed"),
+    row(OTHER, "home_card", "shown"), row(OTHER, "home_card", "assisted"), row(OTHER, "bogus", "shown"), row(OTHER, "home_card", "weird"),
+  ]);
+  const m = rep.lines.find((l) => l.cta === "result_modal")!;
+  assert.deepEqual([m.shown, m.people, m.opened, m.dismissed, m.connected, m.open_rate, m.connect_rate], [3, 2, 1, 1, 1, 0.333, 0.333]);
+  assert.equal(rep.lines[0].cta, "result_modal", "the best connector first");
+  assert.equal(rep.lines.find((l) => l.cta === "home_card")!.assisted, 1);
+  assert.equal(rep.lines.length, 2, "unknown CTAs are left out");
+  assert.deepEqual(rep.tools.find((t) => t.tool === "clips"), { tool: "clips", shown: 2, opened: 1, connected: 0 });
 });
