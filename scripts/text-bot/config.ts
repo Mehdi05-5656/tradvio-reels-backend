@@ -11,7 +11,8 @@ export function readEnvFile(path: string): Env {
   const out: Env = {};
   for (const line of readFileSync(path, "utf8").split("\n")) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    // quotes around a value, and the literal "\n" some tools leave at the end of one, are not part of it
+    if (m) out[m[1]] = m[2].trim().replace(/^["']|["']$/g, "").replace(/(\\n)+$/, "").trim();
   }
   return out;
 }
