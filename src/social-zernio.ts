@@ -320,7 +320,7 @@ export function zernioProvider(deps: SocialDeps = {}): SocialProvider | null {
       if (webhookReady === url) return;
       const secret = env.STUDIO_SOCIAL_WEBHOOK_SECRET;
       if (!secret) throw new SocialError("webhook_failed", "No signing secret", 502);
-      const events = ["post.published", "post.failed", "post.partial", "post.cancelled", "post.platform.published", "post.platform.failed", "post.tiktok.url.resolved", "account.connected", "account.disconnected"].concat(
+      const events = ["post.published", "post.failed", "post.partial", "post.cancelled", "post.platform.published", "post.platform.failed", "post.tiktok.url_resolved", "account.connected", "account.disconnected"].concat(
         // reply-only auto-replies on Instagram and Facebook run at Clone8 (studio-reply-only.ts): only then are comments asked for
         env.STUDIO_AUTOREPLY_REPLY_ONLY === "true" ? ["comment.received"] : []);
       const list = await call("GET", "/webhooks/settings");

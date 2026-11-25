@@ -304,6 +304,8 @@ test("webhook: comment events asked for only with the switch on; a signed commen
     const events = calls.find((c) => c.method === "POST" && c.path === "/webhooks/settings").body.events;
     assert.equal(events.includes("comment.received"), on);
     assert.ok(events.includes("post.published"));
+    // every name must be one the service knows (one unknown name and it refuses the whole list: never registered Nov 21-24 2026)
+    for (const e of events) assert.ok(["post.published", "post.failed", "post.partial", "post.cancelled", "post.platform.published", "post.platform.failed", "post.tiktok.url_resolved", "account.connected", "account.disconnected", "comment.received"].includes(e), e);
   }
   const url = "https://api.example/hook";
   assert.notEqual(webhookHash(url, { STUDIO_SOCIAL_WEBHOOK_SECRET: "s" }), webhookHash(url, { STUDIO_SOCIAL_WEBHOOK_SECRET: "s", STUDIO_AUTOREPLY_REPLY_ONLY: "true" }), "switching on re-registers once");
