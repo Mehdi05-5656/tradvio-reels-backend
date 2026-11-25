@@ -572,3 +572,16 @@ test("their own AI app: a large question's count goes in the YES line", async ()
   const p = b.state.chats["1"].pending.live!;
   assert.ok(b.sent.some((x) => x.text.endsWith(`reply YES ${p.code} 3.`)), b.sent.map((x) => x.text).join(" | "));
 });
+
+test("their own AI app: every request the bot builds is one the app's set-up page accepts", async () => {
+  const { appLink, APP_KINDS } = await import("../src/text-bot/app-link.js");
+  // the app's own list (tradvio-reels-v2 src/lib/ai-link.ts AI_LEADS), kept in step by hand
+  const LEADS = ["Use Clone8 to make a Signature story, written by you here in this chat, about:", "Use Clone8 to make a story video:", "Use Clone8 to make a motivation video:", "Use Clone8 to make a film:"];
+  for (const kind of APP_KINDS) {
+    const m = appLink({ kind, request: "y".repeat(500), connected: false, connectorUrl: "https://mcp.clone8.io/api/studio/mcp" }) as any;
+    const lead = LEADS.find((l) => m.prompt.startsWith(`${l} `));
+    assert.ok(lead, kind); assert.ok(m.prompt.length - lead!.length - 1 <= 180, `${kind} subject fits`);
+    assert.equal(decodeURIComponent(m.buttons[0].url.split("?ai=")[1]), m.prompt);
+  }
+  assert.equal((appLink({ kind: "other", request: "check my balance", connected: true, connectorUrl: "https://mcp.clone8.io/x" }) as any).error, "bad_kind");
+});

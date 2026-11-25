@@ -11,14 +11,14 @@ import type { Button } from "./brain.js";
 import { blanked } from "./guard.js";
 import { linkLines } from "./sendblue.js";
 
-export const APP_KINDS = ["signature", "story", "motivation", "film", "other"] as const;
+// (the app accepts exactly these openings on its set-up link, src/lib/ai-link.ts AI_LEADS: keep the two in step)
+export const APP_KINDS = ["signature", "story", "motivation", "film"] as const;
 export type AppKind = (typeof APP_KINDS)[number];
 const LEAD: Record<AppKind, string> = {
   signature: "Use Clone8 to make a Signature story, written by you here in this chat, about:",
   story: "Use Clone8 to make a story video:",
   motivation: "Use Clone8 to make a motivation video:",
   film: "Use Clone8 to make a film:",
-  other: "Use Clone8:",
 };
 
 export type AppLink = { text: string; buttons: Button[]; own: string[]; prompt: string };
@@ -30,7 +30,8 @@ export const YES_MARK = "\u0003YES\u0003";
 /** `beside`: sent right after a waiting YES question for the same thing, with both prices (only when this way costs
  *  less). The message is short: why (the saving), what happens, one action; the links follow on their own. */
 export function appLink(o: { kind: string; request: string; connected: boolean; connectorUrl: string; beside?: { here: number; there: number } }): AppLink | { error: string; detail: string } {
-  const kind = (APP_KINDS as readonly string[]).includes(o.kind) ? (o.kind as AppKind) : "other";
+  if (!(APP_KINDS as readonly string[]).includes(o.kind)) return { error: "bad_kind", detail: `kind must be one of ${APP_KINDS.join(", ")}` };
+  const kind = o.kind as AppKind;
   const request = String(o.request ?? "").replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().replace(/^["“”']+|["“”']+$/g, "").trim().slice(0, 180);
   if (request.length < 3) return { error: "missing", detail: "Pass what they want made, in their words" };
   // the request goes out inside an exempt message, so it must not carry a supplier's name itself
