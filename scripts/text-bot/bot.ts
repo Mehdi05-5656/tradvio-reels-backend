@@ -5,7 +5,7 @@
 import { randomBytes } from "node:crypto";
 import type { Api } from "./clone8.js";
 import type { Config } from "./config.js";
-import { claim, classify, decline, dropUnshown, expire, markShown, addSpend, howToAnswer, type Pending } from "./gate.js";
+import { claim, classify, decline, dropUnshown, expire, markShown, addSpend, howToAnswer, withdraw, type Pending } from "./gate.js";
 import { execute, today } from "./actions.js";
 import { toolName } from "./account.js";
 import { blanked } from "./guard.js";
@@ -161,8 +161,12 @@ export function makeBot(d: BotDeps) {
 
   async function talk(st: ChatState, text: string, tap = false): Promise<void> {
     const t = now();
+    // anything said while a question waits moves the talk on: the question is withdrawn before the AI reads the message
+    const old = withdraw(st.pending);
+    if (old) { d.log("pending_withdrawn", { id: old.id }); note(st, `The question that was waiting (${old.question.split("\n")[0]}) was withdrawn because the person wrote something else. Nothing was done.`); }
     const r = await busy(st, () => d.think(st, text, { tap }));
     st.history.push({ role: "user", text, at: t, ...(tap ? { tap: true } : {}) });
+    if (r.sent?.length) for (const x of r.sent) note(st, `Sent to the person: ${x}`);
     d.log("turn", { usd: Math.round(r.usd * 1e4) / 1e4, rounds: r.rounds, pending: r.pending?.id ?? null });
     // what the person typed and what is on the table are theirs: quoting them back is not a leak
     const own = [text, ...st.table.map((x) => x.label)];

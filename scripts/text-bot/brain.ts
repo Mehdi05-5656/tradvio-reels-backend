@@ -40,7 +40,8 @@ HOW YOU WORK
 - Text like a capable friend: short, plain sentences, no headings, no bullet walls, no markdown, no emoji. Usually one to three lines. One question at a time.
 - Look before you ask. "That video where we made him a cat", "yesterday's stream clips", "the post at 4:45": use find, history and item. Their words rarely match file names; try the words that matter (a character, a topic, a tool) and filters, and try again with other words before giving up.
 - Never guess which video, post or account is meant. One clear match: say which and carry on. Several: show them with the show tool and ask. None: say so and ask.
-- "Him", "that one", "the second", "the other four" refer to what was last shown or made; the list is under ON THE TABLE.
+- "Him", "that one", "the second", "the other four", "the clip you just sent me" refer to what was last shown or made: the list under ON THE TABLE and the latest "[System note … Sent to the person …]". Use that ref. Do not search for something else instead.
+- If an action was waiting for a YES and the person wrote about something else, that question was withdrawn: nothing was done. Prepare it again (with the right video) if they still want it.
 - Before working with a feature, read its recipe (recipe tool): it has the exact settings, the helper that prepares the choices, and the limits. Features:
 ${featureList()}
 - Choices are shown, not described: faces in a clip, characters, gameplay, styles, trends, voices. Fetch them with lookup and send them with show.
@@ -138,7 +139,7 @@ async function mediaFor(d: BrainDeps, it: { ref?: string; media?: string; label:
   return null;
 }
 
-export type TurnResult = { text: string; pending: Pending | null; usd: number; rounds: number };
+export type TurnResult = { text: string; pending: Pending | null; usd: number; rounds: number; /** what was shown in the chat this turn, numbered, with refs */ sent?: string[] };
 
 const wordsOf = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 3);
 const LIGHT_PER_DAY = { links: 5, copies: 12 };
@@ -146,7 +147,7 @@ const LIGHT_PER_DAY = { links: 5, copies: 12 };
 export async function think(d: BrainDeps, st: ChatState, userText: string, o: { tap?: boolean } = {}): Promise<TurnResult> {
   const now = (d.now ?? Date.now)(), f = d.fetch ?? fetch, log = d.log ?? (() => undefined);
   const marks: string[] = [];
-  const held: { pending: Pending | null } = { pending: null }; let spent = 0;
+  const held: { pending: Pending | null } = { pending: null }; let spent = 0; const sent: string[] = [];
   // only what the person typed: taps and system notes are not their words
   const recent = [...st.history.filter((t) => t.role === "user" && !t.tap).slice(-12).map((t) => t.text), ...(o.tap ? [] : [userText])];
   const titleOf = (v: { asset_id?: string; job_id?: string; output_key?: string }): string | null => {
@@ -210,6 +211,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
         if (m) got.push({ ...m, caption: `${i + 1}. ${label}` });
       }
       st.table = table;
+      sent.push(table.map((t) => `${t.n}. ${JSON.stringify(t.label)} [${t.ref}]`).join("; "));
       const buttons = a?.choose ? table.map((t) => ({ label: `${t.n}`, data: `pick:${t.n}` })) : undefined;
       const own = table.map((t) => t.label);
       if (got.length) await d.out.media(st.chat, got, a?.text ? String(a.text).slice(0, 300) : undefined, buttons, own);
@@ -297,5 +299,5 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     // once a question has gone out, anything the model says before it would only blur it
     if (held.pending) text = "";
   }
-  return { text, pending: held.pending, usd: spent, rounds: rounds + 1 };
+  return { text, pending: held.pending, usd: spent, rounds: rounds + 1, sent };
 }

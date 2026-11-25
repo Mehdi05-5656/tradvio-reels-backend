@@ -106,6 +106,9 @@ export function claim(store: PendingStore, by: { code?: string | null; count?: n
 export function markShown(store: PendingStore, id: string): void { if (store.live?.id === id) store.live.shown = true; }
 /** Drops a live action whose question was never shown (the turn that made it failed). */
 export function dropUnshown(store: PendingStore): Pending | null { const p = store.live; if (p && !p.shown) { retire(store, "failed"); return p; } return null; }
+/** The person wrote about something else while a question waited: the question is withdrawn, so a later "yes" (meant
+ *  for whatever was said since) can never release it. If they still want it, it is asked again with a new code. */
+export function withdraw(store: PendingStore): Pending | null { const p = store.live; retire(store, "replaced"); return p; }
 export function decline(store: PendingStore): Pending | null { const p = store.live; retire(store, "declined"); return p; }
 export function expire(store: PendingStore, now: number): Pending | null { const p = store.live; if (p && now > p.expires_at) { retire(store, "expired"); return p; } return null; }
 

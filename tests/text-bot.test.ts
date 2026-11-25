@@ -313,6 +313,24 @@ test("a whole chat: nobody but the owner, nothing without the YES, nothing twice
   assert.match(b.sent.at(-1)!.text, /text and links/);
 });
 
+test("talking about something else withdraws the waiting question, so a later yes can't release it", async () => {
+  // Nov 24: a question waited for the headband clip; the person said "no, the Speed clip"; the bot asked "the Speed clip
+  // instead?"; the person's "yes" was taken for the old question, and its code then edited the wrong clip
+  let turn = 0;
+  const b = botWith(async (st, _t, api) => (++turn === 1 ? swapTurn(st, "", api) : { text: "Do you mean the other clip instead?", pending: null, usd: 0, rounds: 1, sent: turn === 2 ? [`1. "The cashier starts singing" [f:${IDS.clipB}]`] : undefined }));
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "swap the podcast clip", private: true });
+  const st = chatOf(b.state, "1"), first = st.pending.live!;
+  await b.bot.handle({ chat: "1", from: "1", text: "no, on the clip you just sent me", private: true });
+  assert.equal(st.pending.live, null, "withdrawn"); assert.equal(first.status, "replaced");
+  assert.ok(st.history.some((h) => h.role === "event" && /withdrawn because the person wrote something else/.test(h.text)));
+  assert.ok(st.history.some((h) => h.role === "event" && /Sent to the person: 1\. "The cashier starts singing"/.test(h.text)), "what was shown is in the history for the next turn");
+  await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true });
+  await b.bot.handle({ chat: "1", from: "1", text: `YES ${first.code}`, private: true });
+  await b.bot.handle({ chat: "1", from: "1", text: `y:${first.id}`, private: true, tap: true });
+  assert.equal(b.api.acts.length, 0, "the old question's yes, code and button all release nothing");
+});
+
 test("a question that never reached the chat cannot be answered", async () => {
   // Telegram fails exactly when the question is sent: the person only ever sees "something went wrong"
   let fail = true;
