@@ -6,6 +6,7 @@
 import type { Ctx } from "./actions.js";
 import { ActionError, putPending } from "./actions.js";
 import type { Pending } from "./gate.js";
+import { presetById } from "../caption-engine.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -22,6 +23,8 @@ const pct = (y: number) => `${Math.round(y * 100)}% of the way down`;
 
 export type EditChanges = {
   captions?: "on" | "off"; style?: string; position?: "top" | "upper" | "middle" | "lower" | "bottom" | "below_top_part"; caption_y?: number; size?: number;
+  /** move the captions from where they sit now, as a share of the frame's height: -0.15 = 15% higher, 0.1 = 10% lower */
+  move_by?: number;
   key_words?: boolean; fillers?: boolean; censor?: boolean; fix_words?: Array<{ find: string; replace: string }>;
   trim_start?: number; trim_end?: number; remove_pauses?: boolean; bleep?: "off" | "mute" | "tone";
 };
@@ -57,9 +60,9 @@ export async function prepareEdit(ctx: Ctx, a: { asset_id?: string | null; job_i
   }
 
   // captions
-  const wantOn = c.captions === "on" || (c.captions !== "off" && (c.style != null || c.position != null || c.caption_y != null || c.size != null) && !(split ? doc.split?.layout?.captions : doc.captions?.on));
+  const wantOn = c.captions === "on" || (c.captions !== "off" && (c.style != null || c.position != null || c.caption_y != null || c.move_by != null || c.size != null) && !(split ? doc.split?.layout?.captions : doc.captions?.on));
   if (split) {
-    if (c.position || c.caption_y != null || c.size != null) throw new ActionError("split_position", "On a split screen the captions sit on the line between the two parts and follow it; their place can't be set on its own.");
+    if (c.position || c.caption_y != null || c.move_by != null || c.size != null) throw new ActionError("split_position", "On a split screen the captions sit on the line between the two parts and follow it; their place can't be set on its own.");
     if (c.captions === "off" || wantOn) { const on = c.captions !== "off"; ops.push({ op: "split.captions", from: doc.split.layout.captions, to: on }); doc.split.layout.captions = on; lines.push(on ? "Captions on." : "Captions off."); }
     if (c.style) {
       const id = String(c.style).toLowerCase().replace(/\s+/g, "_");
@@ -80,7 +83,14 @@ export async function prepareEdit(ctx: Ctx, a: { asset_id?: string | null; job_i
       }
       let y: number | null = null, where = "";
       if (c.caption_y != null && Number.isFinite(Number(c.caption_y))) { y = Math.min(0.95, Math.max(0.05, Number(c.caption_y))); where = pct(y); }
-      else if (c.position === "below_top_part") {
+      else if (c.move_by != null && Number.isFinite(Number(c.move_by))) {
+        // from where they sit now: the clip's own place, else the style's (each style has its own height)
+        const by = Math.min(0.9, Math.max(-0.9, Number(c.move_by)));
+        const from = Number.isFinite(Number(cur?.y)) ? Number(cur!.y) : Number(presetById(style.id).y ?? 0.7);
+        y = Math.min(0.95, Math.max(0.05, from + by));
+        if (Math.abs(y - from) < 0.005) throw new ActionError("cannot_move", `The captions are already as far ${by < 0 ? "up" : "down"} as they go (${pct(from)}).`);
+        where = `${Math.round(Math.abs(y - from) * 100)}% ${y < from ? "higher" : "lower"}: from ${pct(from)} to ${pct(y)}`;
+      } else if (c.position === "below_top_part") {
         // just under the top panel of a stacked clip (the face-cam); a captioned copy reads the panel from the clip it was made from
         let divider = doc.layout?.type === "stacked" ? Number(doc.layout.divider ?? 0.33) : null;
         if (divider == null) { const parent = a.asset_id ? ctx.parentOf?.(a.asset_id) : null; if (parent) { try { const pp = await ctx.api.call("GET", `/api/studio/projects/by-asset/${parent}`); if (pp.json?.doc?.layout?.type === "stacked") divider = Number(pp.json.doc.layout.divider ?? 0.33); } catch { /* a guess below */ } } }

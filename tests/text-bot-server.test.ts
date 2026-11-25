@@ -265,6 +265,8 @@ test("a linked chat: the message reaches the brain as that person, the chat's st
   await s.bot.flush();
   const ev = s.tables.studio_text_events.map((e) => e.event);
   assert.ok(ev.includes("in") && ev.includes("claude"), ev.join(","));
+  const outs = s.tables.studio_text_events.filter((e) => e.event === "out");
+  assert.deepEqual(outs.map((e) => e.data.text), ["Your balance is 120 credits."], "the reply is in the log");
   assert.ok(s.tables.studio_text_events.every((e) => e.user_id === OWNER));
 });
 

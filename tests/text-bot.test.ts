@@ -460,3 +460,18 @@ test("telegram buttons: a copy button, a link only to the Clone8 app, and taps",
   await tg.out.text("1", "Your Clone8 code: 4821", [{ label: "Copy 4821", copy: "4821" }, { label: "Back to Clone8", url: "https://app.clone8.io/#studio/account?text=1" }, { label: "Elsewhere", url: "https://evil.example/" }, { label: "Yes", data: "y:a1" }]);
   assert.deepEqual(bodies[0].reply_markup.inline_keyboard, [[{ text: "Copy 4821", copy_text: { text: "4821" } }, { text: "Back to Clone8", url: "https://app.clone8.io/#studio/account?text=1" }, { text: "Yes", callback_data: "y:a1" }]]);
 });
+
+test("captions move by an amount from where they sit now ('15% higher', 'a bit lower')", async () => {
+  const api = mockApi();
+  const doc = api.data.projects[IDS.projA].doc;
+  doc.captions.on = true; doc.captions.style = { id: "bold_pop", y: 0.8 };
+  const up = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { move_by: -0.15 } });
+  assert.match(up.question, /Captions placed 15% higher: from 80% of the way down to 65% of the way down\./);
+  assert.equal(up.steps[0].body.doc.captions.style.y, 0.65);
+  // a clip never moved starts from its style's own height (Bold Pop sits at 70%)
+  doc.captions.style = { id: "bold_pop" };
+  const down = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { move_by: 0.05 } });
+  assert.match(down.question, /5% lower: from 70% of the way down to 75% of the way down/);
+  doc.captions.style = { id: "bold_pop", y: 0.95 };
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { move_by: 0.1 } }), (e: any) => e.code === "cannot_move");
+});

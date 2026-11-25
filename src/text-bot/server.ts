@@ -80,7 +80,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
   const port = deps.port ?? Number(env.PORT || 10000);
   const tg = env.TELEGRAM_BOT_TOKEN ? telegram(env.TELEGRAM_BOT_TOKEN, { fetch: deps.fetch, onGuard: (hit) => log(`[text] guard: ${hit}`) }) : null;
-  const out = deps.out ?? tg?.out ?? null;
+  const out = deps.out ?? tg?.out ?? null, baseOut = out;
   // files: one turn at a time across the whole server moves files (each can be tens of megabytes in memory). A turn
   // takes the lock at its first download and keeps it until it ends, so its downloads and sends all fit in one slot
   let fileLock: Promise<void> = Promise.resolve();
@@ -187,10 +187,19 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     return true;
   }
   async function withLoaded(sb: SupabaseClient, link: Link, chat: string, run: (bot: ReturnType<typeof makeBot>) => Promise<void>) {
+    const out0 = baseOut;
     const { st } = await loadChat(sb, link, chat);
     const cfg = botConfig(env, await timezoneOf(sb, link));
     const log2 = logFor(link.user_id, chat);
     const api0 = serverApi(link.user_id, { port, fetch: deps.fetch, onCall: (e) => log2("route", e) });
+    // every reply and file that reaches the chat is in the log, so whole conversations can be read back (the weekly
+    // review reads them); a send that fails is logged as such and still fails
+    const said = (fn: () => Promise<void>, data: Record<string, unknown>) => fn().then(() => log2("out", data), (e) => { log2("send_failed", { ...data, detail: String(e?.message ?? e).slice(0, 200) }); throw e; });
+    const out: Transport = {
+      ...out0!,
+      text: (chat, text, buttons, own) => said(() => out0!.text(chat, text, buttons, own), { text: text.slice(0, 4000), ...(buttons?.length ? { buttons: buttons.map((b) => b.label) } : {}) }),
+      media: (chat, items, caption, buttons, own) => said(() => out0!.media(chat, items, caption, buttons, own), { text: (caption ?? "").slice(0, 2000), media: items.map((m) => ({ kind: m.kind, name: m.name, bytes: m.bytes.length, caption: m.caption ?? null })) }),
+    };
     let freeFiles: (() => void) | null = null;
     const api: Api = { ...api0, bytes: async (url, max) => { if (!freeFiles) freeFiles = await takeFileLock(); return api0.bytes(url, max); } };
     if (!indexes.has(link.user_id)) indexes.set(link.user_id, { current: null });
