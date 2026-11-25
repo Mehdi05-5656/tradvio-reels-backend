@@ -23,15 +23,15 @@ export type Preset = {
   /** the home-plan groups this suits, for the For you tab */
   groups: string[];
   /** the finished example (public demo media); none yet means admins only. `aspect`: its shape, for the card */
-  example?: { poster: string; clip?: string; aspect?: string } | null;
+  example?: { poster: string; clip?: string; aspect?: string; /** the photo it was made from, shown beside the result */ input?: string } | null;
   added: string;
 };
 
 // Examples made Nov 25 2026 on the same models from AI-made people and products (no real person): posters ship with the
 // app (public/explore/), clips sit in the public demo store under explore/.
 const DEMO = "https://n0vjuejp1iev9hnr.public.blob.vercel-storage.com/explore";
-const clipEx = (id: string, aspect = "3:4") => ({ poster: `/explore/${id}.jpg`, clip: `${DEMO}/${id}.mp4`, aspect });
-const picEx = (id: string, aspect = "3:4") => ({ poster: `/explore/${id}.jpg`, aspect });
+const clipEx = (id: string, from: string, aspect = "3:4") => ({ poster: `/explore/${id}.jpg`, clip: `${DEMO}/${id}.mp4`, aspect, input: `/explore/in-${from}.jpg` });
+const picEx = (id: string, from: string, aspect = "3:4") => ({ poster: `/explore/${id}.jpg`, aspect, input: `/explore/in-${from}.jpg` });
 const PHOTO: PresetInput = { field: "image_url", kind: "image", label: "A photo of you", hint: "One person, face clearly visible, from the waist up or closer." };
 const PRODUCT: PresetInput = { field: "image_url", kind: "image", label: "Your product", hint: "The product on its own, sharp, on a plain background if you have one." };
 const PHOTO_REF: PresetInput = { field: "image_urls", kind: "image", label: "A photo of you", hint: "One person, face clearly visible." };
@@ -41,45 +41,45 @@ export const PRESETS: Preset[] = [
   // ---- video, from a photo of a person ----
   { id: "main-character", title: "Main character", line: "Walk into frame like the film is about you.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "The person from the photo walks toward the camera in slow motion down a sunlit city street at golden hour, confident, wind moving their hair and clothes. People on the sidewalk turn to look. The camera tracks backward at eye level, shallow depth of field, warm cinematic film look." },
-    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("main-character"), added: "2026-11-25" },
+    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("main-character", "woman"), added: "2026-11-25" },
   { id: "paparazzi", title: "Paparazzi", line: "Out of the car, into a wall of flashes.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "The person from the photo steps onto a red carpet at night as dozens of camera flashes go off around them. Photographers crowd the rope and call their name. They pause, glance over their shoulder at the camera and smile. Handheld press-camera feel, bright flash pops, glamorous." },
-    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("paparazzi"), added: "2026-11-25" },
+    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("paparazzi", "man"), added: "2026-11-25" },
   { id: "walk-away", title: "Don't look back", line: "A blockbuster explosion behind you, with sound.", output: "video", endpoint: "clone8/halo/image-to-video",
     recipe: { duration: 5, aspect_ratio: "9:16", generate_audio: true, prompt: "The person from the photo walks calmly toward the camera without looking back as a huge fireball explosion erupts behind them in an abandoned industrial yard. Sparks and debris fly past. Slow push-in, blockbuster action-film look, deep booming explosion sound and rumbling bass." },
     inputs: [PHOTO], choose: ["aspect_ratio"], groups: ["ai", "characters", "personal"], added: "2026-11-25" },
   { id: "earth-zoom", title: "Earth zoom out", line: "From you to space in one move.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "Starting on the person in the photo, the camera rises straight up and pulls back in one continuous, seamless move: over the rooftops, through the clouds, until the whole Earth is visible from space, then it holds. Smooth, no cuts." },
-    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("earth-zoom"), added: "2026-11-25" },
+    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("earth-zoom", "woman"), added: "2026-11-25" },
   { id: "street-interview", title: "Street interview", line: "Stopped on the street, mic in your face. You say the line.", output: "video", endpoint: "clone8/halo/image-to-video",
     recipe: { duration: 6, aspect_ratio: "9:16", generate_audio: true, prompt: "The person from the photo is stopped on a busy city street by an interviewer who holds a microphone into the frame. They laugh, then answer straight to the camera, saying clearly: \"{text}\". Natural street sound and passing traffic, handheld vertical phone footage, like a viral street interview." },
     inputs: [PHOTO], text: { label: "What you say", placeholder: "I quit my job to do this full time", max: 80 }, groups: ["personal", "ai"], added: "2026-11-25" },
   // ---- video, from a product photo ----
   { id: "product-spin", title: "Product hero", line: "Your product on a pedestal, lit like an ad.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "The product from the photo turns slowly on a glossy black pedestal while a soft light sweeps across it. Tiny particles drift in the air. The camera orbits slowly. Studio commercial look, crisp reflections, premium." },
-    inputs: [PRODUCT], groups: ["ads", "ai"], example: clipEx("product-spin"), added: "2026-11-25" },
+    inputs: [PRODUCT], groups: ["ads", "ai"], example: clipEx("product-spin", "can"), added: "2026-11-25" },
   { id: "product-splash", title: "Splash drop", line: "Your product hits the water in slow motion, with sound.", output: "video", endpoint: "clone8/halo/image-to-video",
     recipe: { duration: 5, aspect_ratio: "9:16", generate_audio: true, prompt: "The product from the photo drops into crystal-clear water in slow motion. A big splash and bubbles burst around it, droplets catch the light, bright clean background, premium drink-commercial look, crisp splash sound." },
     inputs: [PRODUCT], choose: ["aspect_ratio"], groups: ["ads", "ai"], added: "2026-11-25" },
   { id: "unboxing", title: "Unboxing", line: "Hands lift it out of the box: real, cosy, UGC.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "Two hands slowly lift the product from the photo out of a minimal box on a wooden desk in soft morning window light, then turn it toward the camera. Authentic, cosy, phone-camera UGC feel." },
-    inputs: [PRODUCT], groups: ["ads", "personal"], example: clipEx("unboxing"), added: "2026-11-25" },
+    inputs: [PRODUCT], groups: ["ads", "personal"], example: clipEx("unboxing", "sneaker"), added: "2026-11-25" },
   // ---- pictures ----
   { id: "action-figure", title: "Action figure", line: "You, boxed as a collectible toy, your name on the card.", output: "image", endpoint: "kling-image/v4.0/edit",
     recipe: { resolution: "2k", aspect_ratio: "3:4", prompt: "Turn the person in @image_1 into a collectible action figure sealed in a retail blister pack. The figure keeps their face, hair and outfit, with small matching accessories in moulded slots beside it. The card backing shows the name \"{text}\" in bold toy-brand lettering. Product photo on a plain background, sharp, glossy plastic." },
-    inputs: [PHOTO_REF], text: { label: "Name on the box", placeholder: "CAPTAIN ALEX", max: 24 }, groups: ["characters", "personal", "ai"], example: picEx("action-figure"), added: "2026-11-25" },
+    inputs: [PHOTO_REF], text: { label: "Name on the box", placeholder: "CAPTAIN ALEX", max: 24 }, groups: ["characters", "personal", "ai"], example: picEx("action-figure", "woman"), added: "2026-11-25" },
   { id: "magazine-cover", title: "Cover star", line: "You on a magazine cover, your title on the masthead.", output: "image", endpoint: "kling-image/v4.0/edit",
     recipe: { resolution: "2k", aspect_ratio: "3:4", prompt: "A high-fashion magazine cover with the person in @image_1 as the cover star, studio portrait. The masthead at the top reads \"{text}\" in large elegant serif letters, with a few short cover lines in smaller type. Glossy print look." },
-    inputs: [PHOTO_REF], text: { label: "Magazine name", placeholder: "VOGUE-ISH", max: 20 }, groups: ["personal", "characters"], example: picEx("magazine-cover"), added: "2026-11-25" },
+    inputs: [PHOTO_REF], text: { label: "Magazine name", placeholder: "VOGUE-ISH", max: 20 }, groups: ["personal", "characters"], example: picEx("magazine-cover", "man"), added: "2026-11-25" },
   { id: "thumbnail", title: "Shock thumbnail", line: "A click-me YouTube thumbnail with your words.", output: "image", endpoint: "kling-image/v4.0/edit",
     recipe: { resolution: "2k", aspect_ratio: "16:9", prompt: "A YouTube thumbnail: the person in @image_1 at a podcast microphone with a shocked expression, neon-lit studio behind them, and big bold words \"{text}\" with a thick outline beside them. High contrast, saturated, 16:9." },
-    inputs: [PHOTO_REF], text: { label: "Thumbnail words", placeholder: "I WAS WRONG", max: 24 }, groups: ["clipping", "personal", "edit"], example: picEx("thumbnail", "16:9"), added: "2026-11-25" },
+    inputs: [PHOTO_REF], text: { label: "Thumbnail words", placeholder: "I WAS WRONG", max: 24 }, groups: ["clipping", "personal", "edit"], example: picEx("thumbnail", "man", "16:9"), added: "2026-11-25" },
   { id: "pet-ceo", title: "Pet CEO", line: "Your pet runs the board meeting.", output: "image", endpoint: "bytedance/seedream/v5.0/pro/edit",
     recipe: { resolution: "2k", aspect_ratio: "3:4", prompt: "The animal from the first picture sits at the head of a boardroom table in a tailored suit and tie, serious expression, city skyline through floor-to-ceiling windows. Corporate portrait photo, photorealistic." },
-    inputs: [PET_REF], groups: ["characters", "ai"], example: picEx("pet-ceo"), added: "2026-11-25" },
+    inputs: [PET_REF], groups: ["characters", "ai"], example: picEx("pet-ceo", "dog"), added: "2026-11-25" },
   { id: "anime-still", title: "Painted anime", line: "You as a soft, hand-painted anime film still.", output: "image", endpoint: "bytedance/seedream/v5.0/pro/edit",
     recipe: { resolution: "2k", aspect_ratio: "3:4", prompt: "Redraw the person in the first picture as a soft hand-painted anime film still: warm afternoon light, a lush green hillside under tall summer clouds, gentle watercolour textures. Keep their face, hair and outfit." },
-    inputs: [PHOTO_REF], groups: ["characters", "stories", "ai"], example: picEx("anime-still"), added: "2026-11-25" },
+    inputs: [PHOTO_REF], groups: ["characters", "stories", "ai"], example: picEx("anime-still", "woman"), added: "2026-11-25" },
 ];
 
 const byId = new Map(PRESETS.map((p) => [p.id, p]));
