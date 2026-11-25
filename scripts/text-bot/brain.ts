@@ -8,6 +8,7 @@ import { find, history, loadIndex, view, type Card, type Filters, type Index } f
 import { HELPERS, featureList, recipeFor, recipeText } from "./recipes.js";
 import * as act from "./actions.js";
 import { shape } from "./shape.js";
+import { prepareEdit } from "./edit.js";
 import type { Pending, PendingStore, Spend } from "./gate.js";
 
 export type Media = { kind: "photo" | "video" | "audio"; bytes: Buffer; name: string; caption?: string };
@@ -43,6 +44,8 @@ HOW YOU WORK
 - Before working with a feature, read its recipe (recipe tool): it has the exact settings, the helper that prepares the choices, and the limits. Features:
 ${featureList()}
 - Choices are shown, not described: faces in a clip, characters, gameplay, styles, trends, voices. Fetch them with lookup and send them with show.
+- What you said earlier came from what you looked up then. Do not take it back unless a new lookup shows it was wrong.
+- Editing a clip (captions on, their style or place, a word in them, trimming, pauses, swearing) is prepare_edit, and it is free. For captions on a Clone8 clip, turn them on with prepare_edit rather than starting a paid Captions run: it can place them in the same step. A Captions run is for videos the editor can't open (uploads, imports).
 - Any result can go into any other feature. A finished result of one tool is used in another by passing from_result to prepare_job, or by to_library.
 - If something cannot be done by text yet (the recipe says so), say that in one line and give the page: https://app.clone8.io/#studio/<page>.
 
@@ -63,6 +66,7 @@ WHAT YOU NEVER SAY
 
 const str = { type: "string" }, obj = (properties: Record<string, any>, required: string[] = []) => ({ type: "object", additionalProperties: false, properties, required });
 const video = obj({ asset_id: str, job_id: str, output_key: str, label: { type: "string", description: "its title, for the question" } });
+const bool = { type: "boolean" };
 export const TOOLS = [
   { name: "account", description: "The person's plan, credit balance, what the plan allows, recent charges, linked social accounts and posting groups. Free.", input_schema: obj({}) },
   { name: "recipe", description: "Everything about one feature: what it does, what it needs, the exact job settings, helpers, limits. Read it before using the feature.", input_schema: obj({ feature: { type: "string", description: "a feature id from the list, e.g. stunts, swap, live_clips, post" } }, ["feature"]) },
@@ -82,6 +86,8 @@ export const TOOLS = [
   { name: "prepare_post_retry", description: "Prepare to send a failed post again where it failed. Sends the question.", input_schema: obj({ post_id: str }, ["post_id"]) },
   { name: "prepare_job_cancel", description: "Prepare to cancel a job that is still waiting to start. Sends the question.", input_schema: obj({ job_id: str }, ["job_id"]) },
   { name: "prepare_caption_read", description: "Prepare the paid first reading of videos so captions can be written from them (when write_caption answers watch_needed). Sends the question.", input_schema: obj({ videos: { type: "array", minItems: 1, items: obj({ asset_id: str, job_id: str, output_key: str }) }, platforms: { type: "array", items: str }, note: str, line: str }, ["videos"]) },
+  { name: "prepare_edit", description: "Prepare an edit of a clip in the editor, by words: captions on or off, their style, where they sit, their size, key words, ums, swearing; fix a word in the captions; trim the start or end; cut long pauses; bleep swearing. Works on clips, captioned videos and split screens made in Clone8. Free; the clip in the library is replaced by the edited one. Sends the question; changes nothing.", input_schema: obj({ asset_id: { type: "string", description: "the library file to edit" }, job_id: { type: "string", description: "only for a split screen result that is not a library file" },
+    changes: obj({ captions: { type: "string", enum: ["on", "off"] }, style: { type: "string", description: "a caption style id: bold_pop, pill, one_word, karaoke, neon, comic, bubble, boxed, minimal, subtitle, typewriter, luxe, marker, headline" }, position: { type: "string", enum: ["top", "upper", "middle", "lower", "bottom", "below_top_part"], description: "below_top_part = just under the top panel (the person or face-cam) of a stacked clip" }, caption_y: { type: "number", description: "or an exact place: the share of the way down, 0.05 to 0.95" }, size: { type: "number", description: "1 = the style's size; 1.2 bigger, 0.8 smaller" }, key_words: bool, fillers: bool, censor: bool, fix_words: { type: "array", maxItems: 10, items: obj({ find: str, replace: str }, ["find", "replace"]) }, trim_start: { type: "number", description: "seconds to cut from the start" }, trim_end: { type: "number", description: "seconds to cut from the end" }, remove_pauses: bool, bleep: { type: "string", enum: ["off", "mute", "tone"] } }) }) },
   { name: "prepare_automation_run", description: "Prepare to run a saved automation with this run's inputs. Sends the question.", input_schema: obj({ automation_id: str, inputs: { type: "object", additionalProperties: true } }, ["automation_id"]) },
 ];
 
@@ -151,6 +157,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
   const lightDay = act.today(now, d.cfg.timezone);
   const light = () => (st.light && st.light.day === lightDay ? st.light : (st.light = { day: lightDay, links: 0, copies: 0 }));
   const actx = (): act.Ctx => ({ api: d.api, store: st.pending, spend: st.spend, now: (d.now ?? Date.now)(), timezone: d.cfg.timezone, dailyCredits: d.cfg.dailyCredits, maxActionCredits: d.cfg.maxActionCredits, recentUserText: recent, titleOf,
+    parentOf: (id) => { const m = d.index.current?.cards.find((c) => c.type === "file" && c.asset_id === id)?.made_from; return m && m.startsWith("f:") ? m.slice(2) : null; },
     nameOf: (id) => d.index.current?.cards.find((c) => c.type === "file" && c.asset_id === id)?.title ?? null });
 
   const run = async (name: string, a: any): Promise<any> => {
@@ -230,6 +237,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     if (name === "prepare_job_cancel") return prepared(() => act.prepareJobCancel(actx(), a ?? {}));
     if (name === "prepare_caption_read") return prepared(() => act.prepareCaptionRead(actx(), a ?? {}));
     if (name === "prepare_automation_run") return prepared(() => act.prepareAutomationRun(actx(), a ?? {}));
+    if (name === "prepare_edit") return prepared(() => prepareEdit(actx(), a ?? {}));
     return { error: "unknown_tool" };
   };
 

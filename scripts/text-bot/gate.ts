@@ -29,7 +29,7 @@ export function classify(raw: string): Inbound {
 }
 
 /** One request to a Clone8 route. `body` may hold "{{name.path}}" marks filled from an earlier step's answer. */
-export type Step = { method: "POST" | "PATCH" | "DELETE"; path: string; body?: any; save?: string; label?: string; light?: boolean };
+export type Step = { method: "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: any; save?: string; label?: string; light?: boolean };
 /** What must still be true when the YES arrives, checked by the executor right before it acts. */
 export type Check =
   | { kind: "post_unchanged"; post_id: string; updated_at: string }

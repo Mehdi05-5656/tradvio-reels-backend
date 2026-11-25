@@ -4,7 +4,7 @@
 import { levelOf, Clone8Error, type Api, type Method, type Reply } from "./clone8.js";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-export const IDS = { cat: id(1), podcast: id(2), clipA: id(3), clipB: id(4), col: id(5), swapJob: id(6), post: id(7), tiktok: "acc-tiktok-1", insta: "acc-insta-1", newJob: id(8), swapAsset: id(9), storyJob: id(10) };
+export const IDS = { cat: id(1), podcast: id(2), clipA: id(3), clipB: id(4), col: id(5), swapJob: id(6), post: id(7), tiktok: "acc-tiktok-1", insta: "acc-insta-1", newJob: id(8), swapAsset: id(9), storyJob: id(10), projA: id(11), capJob: id(12), capAsset: id(13) };
 const iso = (minsFromNow: number, now: number) => new Date(now + minsFromNow * 60_000).toISOString();
 
 export type MockApi = Api & { acts: Array<{ method: Method; path: string; body: any; claim: string }>; calls: Array<{ method: Method; path: string }>; data: any };
@@ -25,6 +25,10 @@ export function mockApi(now: () => number = Date.now): MockApi {
       { id: IDS.swapJob, tool: "swap", status: "done", asset_id: IDS.podcast, asset_name: "Podcast clip 3.mp4", options: { model: "light", character_asset_id: IDS.cat, prompt: "keep the microphone" }, credits_charged: 86, outputs: [{ key: `u/${IDS.swapJob}/out-01.mp4`, kind: "video", duration: 43, url: null, poster_url: null }], created_at: iso(-8000, t), finished_at: iso(-7990, t) },
       { id: IDS.storyJob, tool: "kage_motion", status: "done", asset_id: null, options: { story: { topic: "Want a pool in your backyard?" } }, credits_charged: 120, outputs: [{ key: `u/${IDS.storyJob}/out-01.mp4`, kind: "video", duration: 50, title: "Want a pool in your backyard?", url: null, poster_url: null }], created_at: iso(-4000, t), finished_at: iso(-3980, t) },
     ],
+    // the editor's file for clip A: a stacked stream clip whose top panel takes 32% of the height
+    projects: { [IDS.projA]: { id: IDS.projA, asset_id: IDS.clipA, job_id: null, rev: 3, rendered_rev: 3, render_state: "done", source: { kept: true },
+      doc: { kind: "clip", source: { seconds: 60 }, trim: { in: 10, out: 38, keep: null }, layout: { type: "stacked", divider: 0.32, panes: [], path: [] }, captions: { on: false, style: null, keywords: true, fillers: true, censor: false, fixes: [] }, extras: { title: null, punch_in: null, pause_trim: false, bottom_loop: null }, sound: { level: -14, limiter: true, muted: [], bleep: "off" } } } } as Record<string, any>,
+    words: ["eight", "hundred", "dollars", "if", "I", "die", "I", "die", "clone", "eight"].map((text, i) => ({ text, start: i * 0.4, end: i * 0.4 + 0.35 })),
     posts: [{ id: IDS.post, job_id: null, output_key: null, asset_id: IDS.clipA, caption: "Desert well, one hand, $800", platforms: ["tiktok"], options: { accounts: [{ id: IDS.tiktok, platform: "tiktok", username: "clone8test" }] }, schedule_at: iso(180, t), status: "scheduled", results: [], error: null, created_at: iso(-60, t), updated_at: iso(-60, t), poster_url: null }],
   };
   const acts: MockApi["acts"] = [], calls: MockApi["calls"] = [];
@@ -47,6 +51,12 @@ export function mockApi(now: () => number = Date.now): MockApi {
     if (method === "PATCH" && /\/social\/posts\//.test(p)) { const row = data.posts.find((x: any) => p.endsWith(x.id)); if (!row) return ok({ error: "post_not_found" }, 404); if (body?.schedule_at) row.schedule_at = body.schedule_at; if (typeof body?.caption === "string") row.caption = body.caption; row.updated_at = iso(0, now()); return ok({ post: row }); }
     if (method === "DELETE" && /\/social\/posts\//.test(p)) { const row = data.posts.find((x: any) => p.endsWith(x.id)); if (!row) return ok({ error: "post_not_found" }, 404); row.status = "canceled"; return ok({ post: row }); }
     if (method === "GET" && p === `${S}/live/lookup`) return ok({ platform: "twitch", channel: { login: "somestreamer", channel: "SomeStreamer", url: "https://www.twitch.tv/somestreamer", live: true, viewers: 18400, title: "FRIDAY NIGHT RANKED", permission: "open" }, broadcasts: [{ url: "https://www.twitch.tv/videos/2990011223", title: "FRIDAY NIGHT RANKED", live: true, seconds: 5400, started_at: iso(-90, now()) }], live_mode: true });
+    if (method === "GET" && /\/projects\/by-asset\//.test(p)) { const pr = Object.values(data.projects).find((x: any) => p.endsWith(x.asset_id)); return pr ? ok(pr) : ok({ error: "project_not_found", detail: "No project for that clip" }, 404); }
+    if (method === "GET" && /\/projects\/[0-9a-f-]{36}\/words$/.test(p)) return ok({ words: data.words });
+    if (method === "GET" && /\/projects\/[0-9a-f-]{36}$/.test(p)) { const pr = data.projects[p.split("/").pop()!]; return pr ? ok(pr) : ok({ error: "project_not_found" }, 404); }
+    if (method === "PUT" && /\/projects\/[0-9a-f-]{36}$/.test(p)) { const pr = data.projects[p.split("/").pop()!]; if (!pr) return ok({ error: "project_not_found" }, 404); if (Number(body?.rev) !== pr.rev) return ok({ error: "stale_revision", detail: "This clip was changed somewhere else" }, 409); pr.doc = body.doc; pr.rev += 1; data.lastOps = body.ops; return ok(pr); }
+    if (method === "POST" && /\/projects\/[0-9a-f-]{36}\/render$/.test(p)) { const pr = data.projects[p.split("/")[p.split("/").length - 2]]; pr.render_state = "queued"; data.renderLater = () => { pr.render_state = "done"; pr.rendered_rev = pr.rev; }; return ok(pr, 202); }
+    if (method === "GET" && /\/assets\/[0-9a-f-]{36}\/url$/.test(p)) return ok({ url: `https://mock.clone8.test/file/${p.split("/")[4]}.mp4`, expires_in: 900 });
     if (method === "GET" && p === `${S}/characters`) return ok({ characters: [{ asset_id: IDS.cat, name: "tabby cat", url: null }] });
     if (method === "GET") return ok({});
     return ok({ error: "not_in_mock", detail: `${method} ${p}` }, 501);
@@ -55,6 +65,6 @@ export function mockApi(now: () => number = Date.now): MockApi {
     acts, calls, data,
     async call(method, path, body) { const level = levelOf(method, path); if (level !== "read" && level !== "light") throw new Clone8Error("route_not_allowed", `${method} ${path}`); calls.push({ method, path }); return route(method, path, body, null); },
     async act(claim, method, path, body) { if (!claim) throw new Clone8Error("no_confirmation"); if (levelOf(method, path) !== "act") throw new Clone8Error("route_not_allowed", `${method} ${path}`); acts.push({ method, path, body, claim }); return route(method, path, body, claim); },
-    async bytes() { return null; },
+    async bytes(url: string) { return /^https:\/\/mock\.clone8\.test\//.test(url) ? Buffer.from("video") : null; },
   };
 }

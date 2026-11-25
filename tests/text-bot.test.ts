@@ -13,6 +13,7 @@ import { mockApi, IDS } from "../scripts/text-bot/mock.js";
 import { prepareJob, preparePost, preparePostChange, preparePostCancel, execute, saidByPerson, jobDetails, ActionError, CAPTION_MAX, type Ctx, type VideoRef } from "../scripts/text-bot/actions.js";
 import { makeBot, emptyState, pairCode, chatOf } from "../scripts/text-bot/bot.js";
 import { pieces, parseUpdate } from "../scripts/text-bot/telegram.js";
+import { prepareEdit } from "../scripts/text-bot/edit.js";
 import type { ChatState, TurnResult } from "../scripts/text-bot/brain.js";
 
 const store = (): PendingStore => ({ live: null, past: [] });
@@ -360,6 +361,48 @@ test("a tap on a list is a tap, not the person's words; the daily ceiling holds;
   assert.equal(b.api.acts.length, 3, "three swaps of 86 fit in 300; the fourth does not"); assert.match(b.sent.at(-1)!.text, /left of today's 300 by text/);
   for (let i = 0; i < 25; i++) await b.bot.handle({ chat: "1", from: "1", text: "hi", private: true });
   assert.ok(b.sent.some((s) => /a lot of messages/.test(s.text)));
+});
+
+test("an edit by text: captions on, placed under the top part, saved and made again, then the clip is sent", async () => {
+  const b = botWith(async (st, _t, api) => ({ text: "", usd: 0, rounds: 1, pending: await prepareEdit(ctxOf(api, { store: st.pending, timezone: "UTC" }), { asset_id: IDS.clipA, changes: { captions: "on", style: "bold_pop", position: "below_top_part" } }) }));
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "put captions on it, right under the person on top", private: true });
+  const st = chatOf(b.state, "1"), p = st.pending.live!;
+  assert.match(p.question, /^Edit "He bet \$800 on one hand":\nCaptions on, in Bold Pop\.\nCaptions placed just under the top part \(39% of the way down\)\.\nFree\./);
+  assert.equal(b.api.acts.length, 0, "nothing saved before the YES");
+  await b.bot.handle({ chat: "1", from: "1", text: `yes ${p.code}`, private: true });
+  assert.deepEqual(b.api.acts.map((x) => `${x.method} ${x.path.replace(/.*\/projects\//, "")}`), [`PUT ${IDS.projA}`, `POST ${IDS.projA}/render`]);
+  const saved = b.api.data.projects[IDS.projA];
+  assert.equal(saved.doc.captions.on, true); assert.deepEqual(saved.doc.captions.style, { id: "bold_pop", y: 0.39 }); assert.equal(saved.rev, 4);
+  assert.ok(b.api.data.lastOps.some((o: any) => o.op === "captions.y" && o.to === 0.39), "the edit is recorded as the assistant's, like the app's");
+  assert.match(b.sent.at(-1)!.text, /Making the edited clip now/);
+  await b.bot.watch(); assert.equal(st.watches.length, 1, "still being made: nothing sent yet");
+  b.api.data.renderLater(); await b.bot.watch();
+  assert.equal(b.sent.at(-1)!.text, "<media>", "the edited clip is sent into the chat"); assert.equal(st.watches.length, 0);
+});
+
+test("edits that can't be done say why; a word fix finds the word wherever it is", async () => {
+  const api = mockApi();
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.podcast, changes: { captions: "on" } }), (e: any) => e.code === "no_project");
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { trim_start: 20, trim_end: 8 } }), (e: any) => e.code === "too_short");
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: {} }), (e: any) => e.code === "nothing_to_change");
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { fix_words: [{ find: "zebra", replace: "x" }] } }), (e: any) => e.code === "word_not_found");
+  const f = await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { fix_words: [{ find: "Die!", replace: "DIE" }], trim_start: 2, remove_pauses: true } });
+  assert.deepEqual(f.steps[0].body.doc.captions.fixes, [{ i: 5, text: "DIE" }, { i: 7, text: "DIE" }]);
+  assert.match(f.question, /Cut the first 2 s \(28 s → 26 s\)\./); assert.match(f.question, /"Die!" in the captions becomes "DIE" \(2 times\)/); assert.match(f.question, /Long pauses cut/);
+  api.data.projects[IDS.projA].doc.kind = "split"; api.data.projects[IDS.projA].doc.split = { layout: { captions: true }, caption_style: "bold_pop" };
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { position: "top" } }), (e: any) => e.code === "split_position");
+  await assert.rejects(() => prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { style: "neon" } }), (e: any) => e.code === "style");
+});
+
+test("a Captions run's result is sent: it lands in the library, not in the run's outputs", async () => {
+  const b = botWith(swapTurn); b.state.owner = "1";
+  const st = chatOf(b.state, "1");
+  b.api.data.jobs.unshift({ id: IDS.capJob, tool: "captions", status: "done", outputs: [], options: { items: [{ asset_id: IDS.clipB, name: "The cashier starts singing.mp4" }] }, progress: { made: [{ source: IDS.clipB, asset_id: IDS.capAsset, credits: 5 }] } });
+  st.watches.push({ job_id: IDS.capJob, collection_id: null, label: "Captions", tool: "captions", started: Date.now(), sent: [] });
+  await b.bot.watch();
+  assert.equal(b.sent.at(-1)!.text, "<media>"); assert.deepEqual(st.table, [{ n: 1, ref: `f:${IDS.capAsset}`, label: "The cashier starts singing (captions)" }]);
+  assert.equal(st.watches.length, 0);
 });
 
 test("telegram: long replies are cut at a line; updates are read into one shape", () => {

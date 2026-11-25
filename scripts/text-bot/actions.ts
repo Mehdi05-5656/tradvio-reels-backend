@@ -15,7 +15,9 @@ export type Ctx = { api: Api; store: PendingStore; spend: Spend | undefined; now
   /** a library file's name by its id, from the account's own records (never from the AI) */
   nameOf?: (assetId: string) => string | null;
   /** a video's title from the account's own records; null when the account has no such video */
-  titleOf?: (v: VideoRef) => string | null };
+  titleOf?: (v: VideoRef) => string | null;
+  /** the library file a captioned copy (or another derived file) was made from */
+  parentOf?: (assetId: string) => string | null };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** One line, cut to n characters: nothing a setting holds can add a line to a question. */
@@ -44,6 +46,7 @@ export function saidByPerson(statement: string, recent: string[]): boolean {
   return recent.some((t) => norm(t).includes(s));
 }
 
+export const putPending = (ctx: Ctx, p: Parameters<typeof put>[1]): Pending => put(ctx, p);
 function put(ctx: Ctx, p: { kind: string; body: string; steps: Step[]; checks: Check[]; credits: number; posts: number; meta?: Record<string, any>; own?: string[] }): Pending {
   const big = p.posts > BIG_POSTS || p.credits > BIG_CREDITS;
   const pending = setPending(ctx.store, { id: randomUUID(), kind: p.kind, question: "", steps: p.steps, checks: p.checks, credits: p.credits, posts: p.posts, count: big ? (p.posts > BIG_POSTS ? p.posts : p.credits) : null, meta: p.meta, own: p.own }, ctx.now, ctx.rand);
@@ -290,7 +293,7 @@ export async function prepareAutomationRun(ctx: Ctx, a: { automation_id: string;
 // ---------------------------------------------------------------------------------------------------
 // The executor: runs a claimed action, after checking that what it depends on has not changed
 // ---------------------------------------------------------------------------------------------------
-export type Outcome = { ok: boolean; text: string; job_id?: string; collection_id?: string; credits?: number; post_ids?: string[]; calls: Array<{ method: string; path: string; status: number }> };
+export type Outcome = { ok: boolean; text: string; job_id?: string; collection_id?: string; credits?: number; post_ids?: string[]; project?: { id: string; asset_id: string | null; job_id: string | null; rev: number; name: string }; calls: Array<{ method: string; path: string; status: number }> };
 
 export async function execute(api: Api, p: Pending, o: { now: number; timezone: string }): Promise<Outcome> {
   const calls: Outcome["calls"] = [];
@@ -332,8 +335,9 @@ export async function execute(api: Api, p: Pending, o: { now: number; timezone: 
       out.text = [posts.length ? (times.length ? `Scheduled: ${[...new Set(times)].slice(0, 8).join(", ")}${times.length > 8 ? ", …" : ""}.` : "On its way. Each network takes a minute or two.") : "Nothing was sent.",
         r.json?.queued ? `${num(r.json.queued)} more are being sent in the background.` : "", failed.length ? `${failed.length} did not go out: ${short(failed[0].error, 120)}` : "", skipped.length ? `Left out: ${skipped.map((x) => `${short(x.platform ?? x.group ?? "an account", 30)} (${short(x.reason, 30)})`).join(", ")}.` : ""].filter(Boolean).join(" ");
     }
+    if (p.kind === "edit" && s.method === "POST") out.project = { id: p.meta?.project_id, asset_id: p.meta?.asset_id ?? null, job_id: p.meta?.job_id ?? null, rev: Number(p.meta?.rev) || 0, name: String(p.meta?.name ?? "your clip") };
     if (p.kind === "post_change") { const at = r.json?.post?.schedule_at; out.text = `Changed.${at ? ` It now goes out ${when(at, o.timezone, o.now)}.` : ""}`; }
   }
-  if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : "Done.";
+  if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "edit" ? "Saved. Making the edited clip now; I'll send it here when it's ready (usually under a minute)." : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : "Done.";
   return out;
 }

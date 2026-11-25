@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { readJson, writeJson, type Config } from "./config.js";
 
-export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type Reply = { status: number; json: any };
 const ID = "[0-9a-f-]{36}";
 const S = "/api/studio";
@@ -25,6 +25,8 @@ export const READ: Array<[Method, RegExp]> = [
   ["GET", rx("/instruments")], ["GET", rx("/styles")], ["GET", rx("/trends")], ["GET", rx("/voices")], ["GET", rx("/kage-motion/presets")],
   ["GET", rx("/stunts/config")], ["GET", rx("/reshoot/config")], ["GET", rx("/splitscreen/config")], ["GET", rx("/blueprints/config")],
   ["GET", rx("/autoreply")], ["GET", rx("/automations")], ["GET", rx(`/automations/${ID}`)],
+  // the editor: opening a clip's edit file (it is made the first time a captioned copy or a split screen is opened, as in the app)
+  ["GET", rx(`/projects/by-asset/${ID}`)], ["GET", rx(`/projects/by-job/${ID}`)], ["GET", rx(`/projects/${ID}`)], ["GET", rx(`/projects/${ID}/words`)],
   // reads that happen to be POSTs
   ["POST", rx("/quote")], ["POST", rx(`/assets/${ID}/people`)], ["POST", rx("/stunts/ideas")], ["POST", rx("/reshoot/plan")],
   ["POST", rx("/splitscreen/frame")], ["POST", rx("/blueprints/read")], ["POST", rx("/social/caption")], ["POST", rx("/social/captions/quote")],
@@ -35,6 +37,7 @@ export const ACT: Array<[Method, RegExp]> = [
   ["POST", rx("/jobs")], ["POST", rx(`/jobs/${ID}/cancel`)],
   ["POST", rx("/social/posts")], ["PATCH", rx(`/social/posts/${ID}`)], ["DELETE", rx(`/social/posts/${ID}`)], ["POST", rx(`/social/posts/${ID}/retry`)],
   ["POST", rx("/social/captions/batch")], ["POST", rx(`/automations/${ID}/run`)],
+  ["PUT", rx(`/projects/${ID}`)], ["POST", rx(`/projects/${ID}/render`)],
 ];
 export type Level = "read" | "light" | "act";
 const pathOnly = (p: string) => p.split("?")[0].replace(/\/+$/, "");

@@ -21,7 +21,7 @@ export const RECIPES: Recipe[] = [
     what: "Animated word-by-word captions burned into one or many videos; the captioned copy is a new library video.",
     needs: "Library videos, each up to 15 minutes; up to 50 at once.",
     options: "asset_id: null; options: {items:[{asset_id}], style: bold_pop|pill|one_word|karaoke|neon|comic|bubble|boxed|minimal|subtitle|typewriter|luxe|marker|headline, keywords?: true, fillers?: true, censor?: true}.",
-    limits: "1 credit per 5 seconds of video, at least 5 a video. A video whose name ends in (captions) already has them.", next: "post" },
+    limits: "1 credit per 5 seconds of video, at least 5 a video. A video whose name ends in (captions) already has them. For a clip made in Clone8, captions are free and can be placed with the editor instead (prepare_edit). The captioned copy can be edited afterwards too (style, place, words).", next: "post, edit" },
   { id: "import", name: "Copy an account / import", job_tool: "import", page: "accounts",
     what: "Bring a TikTok or Instagram account's videos, or a list of links, into the library as a collection.",
     needs: "A single link: use import_link (no job). Many: tool import with options {links:[...], name?}. The person must say in their own words that they own the account, manage it or have the creator's permission.",
@@ -106,7 +106,7 @@ export const RECIPES: Recipe[] = [
   { id: "account", name: "Account, plans and credits", job_tool: null, page: "account",
     what: "Plan, credit balance, recent charges, limits.", needs: "account; lookup plans for prices.",
     options: "Paying, changing or cancelling a plan, top-ups and extra social accounts are done in the app: Pricing page (#studio/pricing) and Account page (#studio/account). The bot never does these." },
-  { id: "editor", name: "Editor", job_tool: null, page: "library", what: "Trim a clip, drop silences, fix caption words, move captions.", needs: "Not available by text in this test.", options: "Send the person to the clip in the Library, where Edit opens it." },
+  { id: "editor", name: "Editor", job_tool: null, page: "library", what: "Change a clip that was made in Clone8 (a clip, a captioned video, a split screen) without making a new one: captions on or off, their style, where they sit (top, middle, bottom, just under the top part of a stacked clip, or an exact place), their size, highlighted key words, ums, swearing masked; fix a word in the captions; cut seconds off the start or end; cut long pauses; bleep or silence swearing.", needs: "The clip (asset_id from find; a split screen result can be its job_id).", options: "prepare_edit {asset_id, changes:{captions, style, position, caption_y, size, key_words, fillers, censor, fix_words:[{find, replace}], trim_start, trim_end, remove_pauses, bleep}}. Several changes go in one edit.", limits: "Free. The clip in the library is replaced by the edited one (it can be changed again). 25 edits a clip a day. Not for uploads or imports (no edit file): those get captions from a Captions run. On a split screen the captions follow the line between the two parts, and only Bold Pop, Pill and One Word fit there. Cutting out the middle of a clip, moving the camera framing and changing the gameplay are done in the app's editor for now.", next: "post" },
 ];
 
 export const recipeFor = (id: string): Recipe | null => { const k = String(id ?? "").toLowerCase().replace(/[\s-]+/g, "_"); return RECIPES.find((r) => r.id === k || r.name.toLowerCase() === String(id).toLowerCase() || r.job_tool === k) ?? null; };

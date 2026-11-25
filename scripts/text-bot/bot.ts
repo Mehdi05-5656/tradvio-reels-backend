@@ -76,6 +76,7 @@ export function makeBot(d: BotDeps) {
     p.status = out.ok ? "done" : "failed";
     d.log("executed", { id: p.id, ok: out.ok, calls: out.calls, job_id: out.job_id ?? null, post_ids: out.post_ids ?? null, credits: out.credits ?? 0 });
     if (out.ok && p.credits) st.spend = addSpend(st.spend, today(now(), d.cfg.timezone), out.credits ?? p.credits);
+    if (out.ok && out.project) st.watches.push({ project: out.project, label: `the edit of ${q(out.project.name)}`, started: now(), sent: [] as string[] });
     if (out.ok && out.job_id) st.watches.push({ job_id: out.job_id, collection_id: out.collection_id ?? null, label: p.meta?.summary ?? "your run", tool: p.meta?.tool ?? "", started: now(), sent: [] as string[] });
     note(st, `${out.ok ? "Done after the person's YES" : "Not done"}: ${p.question.split("\n")[0]} → ${out.text}${out.job_id ? ` (job ${out.job_id})` : ""}${out.post_ids?.length ? ` (posts ${out.post_ids.map((x) => `p:${x}`).join(", ")})` : ""}`);
     d.forget?.();
@@ -178,6 +179,21 @@ export function makeBot(d: BotDeps) {
         try {
           const done = (text: string) => { st.watches = st.watches.filter((x) => x !== w); note(st, text); };
           if (now() - w.started > 4 * 3600_000) { done(`Stopped watching ${q(w.label)} after 4 hours`); continue; }
+          // an edit made by text: the clip is sent once the editor has made it again
+          if (w.project) {
+            const pr = await d.api.call("GET", `/api/studio/projects/${w.project.id}`);
+            if (pr.status !== 200) continue;
+            const pj = pr.json ?? {};
+            if (pj.render_state === "error" || pj.render_state === "failed") { done(`The edit of ${q(w.project.name)} failed: ${q(pj.render_error ?? "no reason given")}`); await tell(st, `The edit of "${w.project.name}" didn't go through${pj.render_error ? `: ${String(pj.render_error).slice(0, 140)}` : ""}. Your clip is as it was.`, [w.project.name]); continue; }
+            if (!(pj.render_state === "done" && Number(pj.rendered_rev) >= w.project.rev)) continue;
+            done(`The edit of ${q(w.project.name)} is done [${w.project.asset_id ? `f:${w.project.asset_id}` : `r:${w.project.job_id}`}]`);
+            if (st.muted) { st.missed = [...(st.missed ?? []), `Your edit of "${w.project.name}" is ready.`].slice(-10); continue; }
+            const url = w.project.asset_id ? (await d.api.call("GET", `/api/studio/assets/${w.project.asset_id}/url`)).json?.url : ((await d.api.call("GET", `/api/studio/jobs/${w.project.job_id}`)).json?.job?.outputs ?? [])[0]?.url;
+            const b = url ? await d.api.bytes(url, 48_000_000) : null;
+            if (b) await d.out.media(st.chat, [{ kind: "video", bytes: b, name: "edited.mp4", caption: w.project.name }], "Here's the edited clip.", undefined, [w.project.name]);
+            else await d.out.text(st.chat, `Your edit of "${w.project.name}" is done, but I couldn't send the file here. It's in your library: https://app.clone8.io/#studio/library`, undefined, [w.project.name]);
+            continue;
+          }
           const r = await d.api.call("GET", `/api/studio/jobs/${w.job_id}`);
           if (r.status !== 200) continue;
           const j = r.json.job, name = toolName(j);
@@ -197,6 +213,21 @@ export function makeBot(d: BotDeps) {
           if (j.status === "queued" || j.status === "running") continue;
           if (j.status === "failed" || j.status === "canceled") { done(`${name} ${j.status}; credits returned`); await tell(st, j.status === "failed" ? `That ${name} didn't finish, and its credits came back. Want me to try it again?` : `That ${name} was cancelled; the credits are back.`); continue; }
           const outs: any[] = (j.outputs ?? []).filter((o: any) => o?.key);
+          // some tools (Captions) put what they make straight into the library and list it on the run, not as outputs
+          const made: any[] = (Array.isArray(j.progress?.made) ? j.progress.made : []).filter((m: any) => typeof m?.asset_id === "string" && /^[0-9a-f-]{36}$/i.test(m.asset_id) && !outs.some((o) => o.asset_id === m.asset_id));
+          if (!outs.length && made.length) {
+            const itemName = (src: string) => String((j.options?.items ?? []).find((x: any) => x?.asset_id === src)?.name ?? name).replace(/\.[a-z0-9]{2,4}$/i, "");
+            const rows2 = made.slice(0, 10).map((m, i) => ({ n: i + 1, ref: `f:${m.asset_id}`, label: `${itemName(m.source)}${j.tool === "captions" ? " (captions)" : ""}`.replace(/\s+/g, " ").slice(0, 80) }));
+            st.table = rows2;
+            done(`${name} finished: ${made.length} new library file(s) ${rows2.map((x) => `[${x.ref}] ${q(x.label)}`).join("; ")} (job ${j.id})`);
+            if (st.muted) { st.missed = [...(st.missed ?? []), `Your ${name} is ready. Ask me to send it.`].slice(-10); continue; }
+            const media2 = [] as Array<{ kind: "photo" | "video"; bytes: Buffer; name: string; caption?: string }>;
+            for (const row of rows2.slice(0, 2)) { const u = await d.api.call("GET", `/api/studio/assets/${row.ref.slice(2)}/url`); const b = u.json?.url ? await d.api.bytes(u.json.url, 48_000_000) : null; if (b) media2.push({ kind: "video", bytes: b, name: "result.mp4", caption: row.label }); else d.log("send_failed", { asset: row.ref, why: u.json?.url ? "too large or unreadable" : `no link (${u.status})` }); }
+            const own2 = rows2.map((x) => x.label);
+            if (media2.length) await d.out.media(st.chat, media2, `Your ${name} is ready.${made.length > media2.length ? ` ${made.length} files in all; the rest are in your library.` : ""}`, undefined, own2);
+            else await d.out.text(st.chat, `Your ${name} is ready, but I couldn't send the file here. It's in your library: https://app.clone8.io/#studio/library`, undefined, own2);
+            continue;
+          }
           if (w.collection_id) {
             const c = await d.api.call("GET", `/api/studio/collections/${w.collection_id}`);
             const clips: any[] = (c.json?.assets ?? []).filter((a: any) => a.kind === "video" && a.status === "ready");
@@ -216,7 +247,7 @@ export function makeBot(d: BotDeps) {
           for (const o of pictures) { const b = o.url ? await d.api.bytes(o.url, 9_000_000) : null; if (b) media.push({ kind: "photo", bytes: b, name: "result.jpg" }); }
           const own = rows.map((x) => x.label);
           if (media.length) await d.out.media(st.chat, media, `Your ${name} is ready.${outs.length > media.length ? ` ${outs.length} files in all; the rest are in the app.` : ""}`, undefined, own);
-          else await d.out.text(st.chat, `Your ${name} is ready. It's too large to send here; it's in the app: https://app.clone8.io`);
+          else await d.out.text(st.chat, `Your ${name} is ready, but I couldn't send the file here. It's in the app: https://app.clone8.io`);
         } catch (e: any) { d.log("watch_error", { job: w.job_id, detail: String(e?.message ?? e).slice(0, 200) }); }
       }
     }

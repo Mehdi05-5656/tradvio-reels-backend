@@ -96,19 +96,20 @@ export function buildCards(data: { jobs: any[]; assets: any[]; collections: any[
   }
   for (const a of data.assets) {
     const pr = a.probe ?? {}, col = a.collection_id ? cols.get(a.collection_id) : null;
-    const bits = [a.kind === "image" ? (pr.character ? "Character picture" : "Picture") : pr.clip ? "Clip" : pr.source_url ? "Imported video" : pr.derived_from_job ? "Made video" : "Video"];
+    const stream = col && ["twitch", "kick"].includes(String(col.source?.platform ?? "").toLowerCase());
+    const bits = [a.kind === "image" ? (pr.character ? "Character picture" : "Picture") : pr.captions?.from ? "Captioned video" : pr.clip ? (stream ? "Live stream clip" : "Clip") : pr.source_url ? "Imported video" : pr.derived_from_job ? "Made video" : "Video"];
     if (col) bits.push(`in "${col.name}"`);
     if (pr.hook) bits.push(`"${short(pr.hook, 70)}"`);
     if (pr.prompt) bits.push(short(pr.prompt, 70));
     if (Number(pr.score) > 0) bits.push(`score ${Math.round(Number(pr.score))}`);
     cards.push({ ref: `f:${a.id}`, type: "file", asset_id: a.id, collection_id: a.collection_id ?? undefined, kind: a.kind === "image" ? "image" : "video", seconds: Number(pr.duration) || null, character: !!pr.character,
-      made_from: pr.derived_from_job ? `r:${pr.derived_from_job}` : null, posted: postedBy.get(`f:${a.id}`), when: a.created_at, poster: a.poster_url ?? null,
+      made_from: pr.derived_from_job ? `r:${pr.derived_from_job}` : typeof pr.captions?.from === "string" && /^[0-9a-f-]{36}$/i.test(pr.captions.from) ? `f:${pr.captions.from}` : null, posted: postedBy.get(`f:${a.id}`), when: a.created_at, poster: a.poster_url ?? null,
       title: short(pr.title, 80) || stem(a.name), line: bits.join(" · "),
-      text: [a.name, pr.title, pr.hook, pr.why, Array.isArray(pr.tags) ? pr.tags.join(" ") : pr.tags, pr.prompt, col?.name, pr.source, Array.isArray(pr.people) ? pr.people.map((p: any) => p?.label).join(" ") : "", ...(postedBy.get(`f:${a.id}`) ?? []).map((x) => x.caption), short(pr.transcript, 1200)].filter(Boolean).join(" \n ") });
+      text: [a.name, stream ? `live stream clip ${col.source.platform} ${col.source?.channel ?? ""}` : "", pr.captions?.from ? "captions captioned" : "", pr.title, pr.hook, pr.why, Array.isArray(pr.tags) ? pr.tags.join(" ") : pr.tags, pr.prompt, col?.name, pr.source, Array.isArray(pr.people) ? pr.people.map((p: any) => p?.label).join(" ") : "", ...(postedBy.get(`f:${a.id}`) ?? []).map((x) => x.caption), short(pr.transcript, 1200)].filter(Boolean).join(" \n ") });
   }
   for (const c of data.collections) cards.push({ ref: `c:${c.id}`, type: "collection", collection_id: c.id, when: c.created_at, title: c.name,
     line: `${c.kind === "clips" ? "Clips run" : c.kind === "import" ? "Import" : "Folder"} · ${c.count ?? c.assets ?? "?"} files${c.status && c.status !== "ready" ? ` · ${c.status}` : ""}`,
-    text: [c.name, c.kind, c.source?.title, c.source?.channel, c.source?.handle, c.source?.url].filter(Boolean).join(" \n ") });
+    text: [c.name, c.kind, ["twitch", "kick"].includes(String(c.source?.platform ?? "").toLowerCase()) ? `live stream clips ${c.source.platform}` : c.source?.platform === "youtube" ? "youtube clips" : "", c.source?.title, c.source?.channel, c.source?.handle, c.source?.url].filter(Boolean).join(" \n ") });
   return cards;
 }
 
