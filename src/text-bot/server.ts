@@ -222,7 +222,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         const ins = await sb.from("studio_text_links").insert({ user_id: code.user_id, channel: "telegram", sender_id: u.from, chat_id: u.chat, handle: u.name ? short(u.name, 60) : null, status: "pending", timezone: code.timezone, confirm_hash: hash(`${u.from}:${digits}`) });
         if (ins.error) throw ins.error;
         logFor(code.user_id, u.chat)("link_requested", { sender: u.from });
-        await out!.text(u.chat, `Almost done. Your code is ${digits}\nType it in Clone8 (Account → Text Clone8) to connect this chat to your account. It works for 15 minutes.\n${CONNECT}`);
+        await out!.text(u.chat, `Your Clone8 code: ${digits}\n\nType it in the Clone8 app to finish connecting. It works for 15 minutes.\nDidn't ask for this? Just ignore it.`, [{ label: `Copy ${digits}`, copy: digits }, { label: "Back to Clone8", url: CONNECT }]);
         return;
       }
       k.bad++;

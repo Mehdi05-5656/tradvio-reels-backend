@@ -12,7 +12,7 @@ import { SYSTEM, TOOLS, markMedia } from "../src/text-bot/brain.js";
 import { mockApi, IDS } from "../scripts/text-bot/mock.js";
 import { prepareJob, preparePost, preparePostChange, preparePostCancel, execute, saidByPerson, jobDetails, ActionError, CAPTION_MAX, type Ctx, type VideoRef } from "../src/text-bot/actions.js";
 import { makeBot, emptyState, pairCode, chatOf } from "../src/text-bot/bot.js";
-import { pieces, parseUpdate } from "../src/text-bot/telegram.js";
+import { pieces, parseUpdate, telegram } from "../src/text-bot/telegram.js";
 import { prepareEdit } from "../src/text-bot/edit.js";
 import type { ChatState, TurnResult } from "../src/text-bot/brain.js";
 
@@ -452,4 +452,11 @@ test("telegram: long replies are cut at a line; updates are read into one shape"
   assert.deepEqual(parseUpdate({ update_id: 5, message: { message_id: 9, text: "hi", chat: { id: 1, type: "private" }, from: { id: 1, username: "o" } } }), { update_id: 5, chat: "1", from: "1", name: "o", text: "hi", message_id: 9, private: true, has_file: false });
   assert.equal(parseUpdate({ update_id: 6, callback_query: { id: "c", data: "y:abc", from: { id: 1 }, message: { message_id: 3, chat: { id: 1, type: "private" } } } })?.callback_id, "c");
   assert.equal(parseUpdate({ update_id: 7, message: { message_id: 1, text: "x", chat: { id: -5, type: "group" }, from: { id: 1 } } })?.private, false);
+});
+
+test("telegram buttons: a copy button, a link only to the Clone8 app, and taps", async () => {
+  const bodies: any[] = [];
+  const tg = telegram("t", { fetch: (async (_u: string, init: any) => { bodies.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true, result: {} })); }) as any });
+  await tg.out.text("1", "Your Clone8 code: 4821", [{ label: "Copy 4821", copy: "4821" }, { label: "Back to Clone8", url: "https://app.clone8.io/#studio/account?text=1" }, { label: "Elsewhere", url: "https://evil.example/" }, { label: "Yes", data: "y:a1" }]);
+  assert.deepEqual(bodies[0].reply_markup.inline_keyboard, [[{ text: "Copy 4821", copy_text: { text: "4821" } }, { text: "Back to Clone8", url: "https://app.clone8.io/#studio/account?text=1" }, { text: "Yes", callback_data: "y:a1" }]]);
 });

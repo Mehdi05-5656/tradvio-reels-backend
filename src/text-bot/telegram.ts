@@ -1,12 +1,16 @@
 // The Telegram adapter (PLAN.md section 1): the only file that knows the channel. It pulls updates (long polling: no
 // webhook, nothing to deploy), turns each into one common shape, and sends text, pictures, videos, sound and buttons.
 // Files are uploaded as bytes, never passed as links, so no storage address ever reaches the chat.
-import type { Media, Transport } from "./brain.js";
+import type { Button, Media, Transport } from "./brain.js";
 import { guard } from "./guard.js";
 
 export type Incoming = { update_id: number; chat: string; from: string; name: string; text: string; message_id: number | null; callback_id?: string; private: boolean; has_file?: boolean };
-type Btn = { label: string; data: string };
-const keyboard = (buttons?: Btn[]) => (buttons?.length ? { inline_keyboard: chunk(buttons.map((b) => ({ text: b.label.slice(0, 40), callback_data: b.data.slice(0, 64) })), 5) } : undefined);
+type Btn = Button;
+// (links only to Clone8's own app; a copy button puts its text on the person's clipboard)
+const button = (b: Btn) => "copy" in b ? { text: b.label.slice(0, 40), copy_text: { text: b.copy.slice(0, 256) } }
+  : "url" in b ? (/^https:\/\/app\.clone8\.io\//.test(b.url) ? { text: b.label.slice(0, 40), url: b.url } : null)
+  : { text: b.label.slice(0, 40), callback_data: b.data.slice(0, 64) };
+const keyboard = (buttons?: Btn[]) => { const row = (buttons ?? []).map(button).filter(Boolean); return row.length ? { inline_keyboard: chunk(row, 5) } : undefined; };
 const chunk = <T>(xs: T[], n: number): T[][] => xs.reduce<T[][]>((rows, x, i) => { if (i % n === 0) rows.push([]); rows[rows.length - 1].push(x); return rows; }, []);
 /** Telegram takes 4096 characters a message; long replies are cut at a line. */
 export function pieces(text: string, max = 3900): string[] {

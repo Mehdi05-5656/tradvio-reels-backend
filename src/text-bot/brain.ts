@@ -12,10 +12,12 @@ import { prepareEdit } from "./edit.js";
 import type { Pending, PendingStore, Spend } from "./gate.js";
 
 export type Media = { kind: "photo" | "video" | "audio"; bytes: Buffer; name: string; caption?: string };
+/** A button under a message: a tap the bot hears (data), a "copy this" button, or a link to Clone8. */
+export type Button = { label: string; data: string } | { label: string; copy: string } | { label: string; url: string };
 export type Transport = {
   /** `own`: the person's own words quoted in the text (captions, titles), exempt from the supplier-word check */
-  text(chat: string, text: string, buttons?: Array<{ label: string; data: string }>, own?: string[]): Promise<void>;
-  media(chat: string, items: Media[], caption?: string, buttons?: Array<{ label: string; data: string }>, own?: string[]): Promise<void>;
+  text(chat: string, text: string, buttons?: Button[], own?: string[]): Promise<void>;
+  media(chat: string, items: Media[], caption?: string, buttons?: Button[], own?: string[]): Promise<void>;
   typing(chat: string): Promise<void>;
 };
 export type Turn = { role: "user" | "assistant" | "event"; text: string; at: number; /** a button tap, not typed words */ tap?: boolean };

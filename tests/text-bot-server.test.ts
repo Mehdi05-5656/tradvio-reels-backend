@@ -171,7 +171,7 @@ test("linking: a code from the app, Start in Telegram, Confirm in the app; nothi
   assert.match(s.sent.at(-1)!.text, /Connect your Clone8 account first/);
   // Start with the code: a pending request, not a connection
   await s.bot.handleUpdate(s.sb, s.tgMsg("900", `/start ${code}`) as any);
-  const digits = s.sent.at(-1)!.text.match(/Your code is (\d{4})/)?.[1];
+  const digits = s.sent.at(-1)!.text.match(/Your Clone8 code: (\d{4})/)?.[1];
   assert.ok(digits, s.sent.at(-1)!.text);
   assert.ok(!JSON.stringify(s.tables.studio_text_links).includes(`"${digits}"`), "the digits are not stored");
   assert.equal(s.tables.studio_text_links.length, 1);
