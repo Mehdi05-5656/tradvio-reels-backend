@@ -57,6 +57,9 @@ export function clipsNotice(j: any, env: Record<string, string | undefined>, uns
   const reserved = Number(j.credits_reserved ?? 0), charged = Number(j.credits_charged ?? p.charged ?? 0);
   const back = Math.max(0, reserved - charged);
   const footer = ["You are getting this because you started a Clips run on Clone8 Studio. Runs keep going on our servers when you close the tab; this email tells you when yours is done."];
+  // a run we made again for the person, on us, after theirs stopped on our side (options.house, set by the owner: Nov 25
+  // 2026, a new customer's first Live Clips run): says what happened, that nothing was used, and where the clips are
+  if (o.house && typeof o.house === "object") return houseNotice(j, title, url);
   if (j.status !== "done") return { subject: `Your clips from "${title}" did not finish`, heading: "Your clips did not finish", paragraphs: [`The run on "${title}" stopped before it made any clips, so nothing was charged: the ${n(reserved)} credits it held are back on your balance.`, "You can start it again from the Clips page. If it stops again, reply to this email and we will look at it with you."], button: { label: "Open Clips", url }, footer };
   if (p.outcome === "needs_file") return { subject: `One step left for your clips from "${title}"`, heading: "One step left", paragraphs: [`YouTube would not let our servers download "${title}". We read it anyway and picked ${n(Number(p.total) || 0)} moments.`, "Upload the same video file on the run's page and we will cut them right away. Choosing them is already paid; the clips are charged when they are cut."], button: { label: "Upload the video", url }, footer };
   const made = Number(p.made_count ?? p.done ?? 0), asked = Number(p.asked ?? o.count ?? 0);
@@ -66,6 +69,23 @@ export function clipsNotice(j: any, env: Record<string, string | undefined>, uns
   if (p.outcome === "partial") paragraphs.push("The run stopped before it finished the rest.");
   paragraphs.push(`Charged: ${n(charged)} credits.${back ? ` The other ${n(back)} credits set aside for clips not made are back on your balance.` : ""}`);
   paragraphs.push("From the run's page you can post them or schedule them to your socials in one go.");
+  return { subject: `Your ${word(made)} from "${title}" ${made === 1 ? "is" : "are"} ready`, heading: `Your ${word(made)} ${made === 1 ? "is" : "are"} ready`, paragraphs, button: { label: "See your clips", url }, footer };
+}
+
+/** The email for a Clips run made again on us (options.house). The library is where the person finds it by hand. */
+function houseNotice(j: any, title: string, url: string): { subject: string; heading: string; paragraphs: string[]; button: { label: string; url: string }; footer: string[] } {
+  const o = j.options ?? {}, p = j.progress ?? {};
+  const footer = [`You are getting this because your first Clips run on "${title}" did not finish, and we made it again for you.`];
+  const find = `To find them later: open Clone8, go to Library, then open "${title}".`;
+  if (j.status !== "done") return { subject: `About your clips from "${title}"`, heading: "We tried your clips again", paragraphs: [`Your first run on "${title}" stopped before it made any clips. We ran it again on our side, and it still could not make any.`, "Nothing was used from your balance. Reply to this email and we will sort it out with you."], button: { label: "Open Clone8", url }, footer };
+  const made = Number(p.made_count ?? p.done ?? 0), asked = Number(p.asked ?? o.count ?? 0);
+  const word = (x: number) => `${n(x)} ${x === 1 ? "clip" : "clips"}`;
+  const paragraphs = [
+    `Your first run on "${title}" stopped before it made any clips. That was a problem on our side, and it is fixed now.`,
+    `We made the same clips again for you, on us: ${word(made)} ${made === 1 ? "is" : "are"} in your library, best first, ready for TikTok, Reels and Shorts. No credits were used, and the credits from the first try are back on your balance.`,
+  ];
+  if (p.outcome === "fewer" && asked > made) paragraphs.push(`You asked for ${n(asked)}; that part of the stream had ${word(made)} strong enough to post, so that is what we made.`);
+  paragraphs.push(find);
   return { subject: `Your ${word(made)} from "${title}" ${made === 1 ? "is" : "are"} ready`, heading: `Your ${word(made)} ${made === 1 ? "is" : "are"} ready`, paragraphs, button: { label: "See your clips", url }, footer };
 }
 

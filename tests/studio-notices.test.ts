@@ -144,3 +144,22 @@ test("one email per batch: it waits while more is rendering or a step just finis
   r = fakeResend(); sb = fakeSb({ ...base, jobs: [{ ...two[0], finished_at: "2026-10-28T23:40:00Z" }], live: true });
   assert.equal((await noticesTick(sb, { env: ENV, fetch: r.fetchFn, now: () => now })).jobs, 1);
 });
+
+test("a Clips run made again on us says what happened, that nothing was used, and where the clips are (Nov 25 2026)", () => {
+  const job = { id: "j", tool: "clips", status: "done", credits_reserved: 0, credits_charged: 0, finished_at: "2026-11-25T12:30:00Z",
+    options: { count: 7, source: { title: "Day In The Life With Cauzzi" }, collection_id: "8a9a8fa5-f416-4699-9d0c-cacc3efae640", house: { of: "c51b4945" } }, progress: { made_count: 7, asked: 7 } };
+  const m = jobsNotice([job], { DASHBOARD_URL: "https://app.clone8.io" }, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  assert.equal(m.subject, 'Your 7 clips from "Day In The Life With Cauzzi" are ready');
+  assert.match(m.text, /stopped before it made any clips\. That was a problem on our side, and it is fixed now/);
+  assert.match(m.text, /on us: 7 clips are in your library/); assert.match(m.text, /No credits were used/);
+  assert.match(m.text, /open Clone8, go to Library, then open "Day In The Life With Cauzzi"/);
+  assert.match(m.html, /#studio\/clips\?id=8a9a8fa5-f416-4699-9d0c-cacc3efae640/);
+  assert.doesNotMatch(m.text, /Charged:/);
+  assert.doesNotMatch(m.subject + m.text, /free|FREE|\$|!/, "nothing that reads like a promotion");
+  const fewer = jobsNotice([{ ...job, progress: { made_count: 3, asked: 7, outcome: "fewer" } }], {}, undefined);
+  assert.match(fewer.text, /You asked for 7; that part of the stream had 3 clips strong enough/);
+  const failed = jobsNotice([{ ...job, status: "failed", progress: {} }], {}, undefined);
+  assert.equal(failed.subject, 'About your clips from "Day In The Life With Cauzzi"'); assert.match(failed.text, /Nothing was used from your balance/);
+  const plain = jobsNotice([{ ...job, options: { ...job.options, house: undefined } }], {}, undefined);
+  assert.match(plain.text, /Charged: 0 credits/, "every other run keeps its email");
+});
