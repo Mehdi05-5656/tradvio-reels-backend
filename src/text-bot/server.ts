@@ -372,6 +372,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     try {
       if (!(await mayLink(req))) return res.status(403).json({ error: "text_not_open", detail: "Texting Clone8 opens soon" });
       if (!botName && tg) botName = (await tg.me()).username;
+      if (!botName || !/^[A-Za-z0-9_]{5,32}$/.test(botName)) return res.status(503).json({ error: "starting", detail: "Texting is starting up. Try again in a moment." });
       const sb = sbFn();
       // a few codes a day per person: each opens the bot for ten minutes and works once
       const since = new Date(Date.now() - 86400_000).toISOString();

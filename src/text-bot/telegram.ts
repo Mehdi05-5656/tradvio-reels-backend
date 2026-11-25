@@ -64,7 +64,7 @@ export function telegram(token: string, deps: { fetch?: typeof fetch; onGuard?: 
         await call(m.kind === "photo" ? "sendPhoto" : m.kind === "video" ? "sendVideo" : "sendAudio", form, 300_000);
       }
       // buttons go on their own line under an album (an album cannot carry them)
-      if (buttons?.length) await call("sendMessage", { chat_id: chat, text: "Tap one:", reply_markup: keyboard(buttons) });
+      { const kb = keyboard(buttons); if (kb) await call("sendMessage", { chat_id: chat, text: "Tap one:", reply_markup: kb }); }
     },
     async typing(chat) { await call("sendChatAction", { chat_id: chat, action: "typing" }, 10_000).catch(() => undefined); },
   };
