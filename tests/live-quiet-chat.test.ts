@@ -42,7 +42,7 @@ test("a part with no chat kept is clipped by listening to it, and the checker is
   assert.equal(out, "done", "the run of Nov 25 2026 would now make clips");
   assert.deepEqual(r.hourSecs, [3600, 3600], "both hours of the part heard whole");
   assert.ok(r.cuts.length >= 1 && r.cuts.every((m) => m.start >= 0 && m.end <= 7200), `clips from the part: ${r.cuts.map((m) => Math.round(m.start))}`);
-  assert.ok(r.heads.length && r.heads.every((h) => /kept no chat for this part/.test(h)), "the checker does not mark moments down for a silent chat");
+  assert.ok(r.heads.length && r.heads.every((h) => /No chat is available for this part/.test(h)), "the checker does not mark moments down for a silent chat");
   assert.ok(r.logs.some((l) => l.startsWith("[live] listening only")));
 });
 
@@ -67,10 +67,16 @@ test("what cannot be heard whole still stops, and says why and what will work", 
   const r = runDeps([], { hearHour: async () => { throw new Error("must not read"); } });
   assert.equal(await runStreamClipsJob(f.sb, r.deps, job({ from: 0, to: 36000, scope: "range" })), "chat_too_quiet", "10 hours is past what a run hears");
   const said = JSON.stringify(f.updates);
-  assert.match(said, /Kick kept no chat for that part of the stream/); assert.match(said, /Pick a part of up to 6 hours/);
+  assert.match(said, /Kick (has no chat saved|has not made the chat) for that part of the stream/); assert.match(said, /Pick a part of up to 6 hours/);
   // the whole 13-hour stream with chat only at its end: where the chat is
-  const words = quietChatWords({ platform: "kick", seconds: SECONDS }, null, [{ t: CHAT_FROM }, { t: 47800 }], 0.4, ENV);
-  assert.match(words, /Kick kept no chat for most of this stream \(its saved chat runs only from 10:00 to 13:16 into the stream\)/);
+  // the whole 13-hour stream with chat only at its end: where the chat is, and, an hour after it ended, that Kick has not
+  // filled the rest in yet (it did ~2 hours after the stream ended); a day later, that there is none
+  const ended = Date.parse(START) + SECONDS * 1000;
+  const soon = quietChatWords({ platform: "kick", seconds: SECONDS, started_at: START }, null, [{ t: CHAT_FROM }, { t: 47800 }], 0.4, ENV, ended + 3600_000);
+  assert.match(soon, /Kick has not made the chat for most of this stream available yet \(it can take a few hours after a stream ends\) \(its chat runs only from 10:00 to 13:16 into the stream so far\)/);
+  const later = quietChatWords({ platform: "kick", seconds: SECONDS, started_at: START }, null, [], 0, ENV, ended + 48 * 3600_000);
+  assert.match(later, /^Kick has no chat saved for this stream, and Live Clips follows the chat/);
+  assert.match(quietChatWords({ platform: "twitch", seconds: 3600, started_at: START }, null, [], 0, ENV, ended), /^Twitch has no chat saved/, "only Kick fills in late");
   // the hearing switched off: no promise of listening
   const off = fakeSb();
   assert.equal(await runStreamClipsJob(off.sb, { ...r.deps, env: { ...ENV, STUDIO_LIVE_HYBRID: "off" } }, job({ from: 0, to: 7200, scope: "range" })), "chat_too_quiet");
@@ -124,11 +130,12 @@ test("the quote says, before anyone pays, that a part has no chat kept and that 
   resetKickPace(); resetBrief();
   const k = kickFake();
   const url = "https://kick.com/cgeezy/videos/227bf0a5-dcbf-402f-a152-f98007b0bc2a";
-  const first2 = await quoteStreamClips({ env: ENV, ...k } as any, PLANS, { url, scope: "range", from: 0, to: 7200, count: 7, length: "short" });
-  assert.match(String(first2.options.warning), /Kick kept no chat for this part of the stream, so we'll find its moments by listening to every word/);
+  const soon = () => Date.parse(START) + SECONDS * 1000 + 3600_000; // an hour after the stream ended, as on Nov 25
+  const first2 = await quoteStreamClips({ env: ENV, now: soon, ...k } as any, PLANS, { url, scope: "range", from: 0, to: 7200, count: 7, length: "short" });
+  assert.match(String(first2.options.warning), /Kick has not made the chat for this part of the stream available yet \(it can take a few hours after a stream ends\), so we'll find its moments by listening to every word/);
   assert.equal(first2.options.chat_kept, false);
-  const ten = await quoteStreamClips({ env: ENV, ...k } as any, PLANS, { url, scope: "range", from: 0, to: 36000, count: 7, length: "short" });
-  assert.match(String(ten.options.warning), /Kick kept no chat for this part of the stream\. Pick a part of up to 6 hours/);
+  const ten = await quoteStreamClips({ env: ENV, now: () => Date.parse(START) + 72 * 3600_000, ...k } as any, PLANS, { url, scope: "range", from: 0, to: 36000, count: 7, length: "short" });
+  assert.match(String(ten.options.warning), /Kick has no chat saved for this part of the stream\. Pick a part of up to 6 hours/);
   const late = await quoteStreamClips({ env: ENV, ...k } as any, PLANS, { url, scope: "range", from: CHAT_FROM, to: CHAT_FROM + 7200, count: 3, length: "short" });
   assert.equal(late.options.chat_kept, true); assert.doesNotMatch(String(late.options.warning ?? ""), /chat/);
   const calls = k.paths.length;
