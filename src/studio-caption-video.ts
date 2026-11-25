@@ -8,7 +8,8 @@
 //   3. Price: 1 credit per 5 seconds of video, at least 5 a video (owner's call, Nov 1 2026). In Clips, captions add 3
 //      credits a clip (the words are already heard there). Charged per video made; the rest goes back.
 import { recordScribe } from "./studio-stt.js";
-import { withCostRun } from "./studio-costs.js";
+import { currentCostRun, recordCost, withCostRun } from "./studio-costs.js";
+import { BACKEND_USD_MONTH, backendUsdPerSecond } from "./cost-overheads.js";
 import { studioFail } from "./studio-fail.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -134,7 +135,9 @@ export async function wordsFor(sb: SupabaseClient, deps: ClipsDeps, u: string, a
     const mp3 = join(dir, "sound.mp3");
     await defaultExtractAudio(src, mp3);
     const heard = await transcribeWords({ env, fetch: deps.fetch }, { audio: await readFile(mp3) });
-    recordScribe({ userId: u, seconds, use: "captions" }); // the cost ledger (audit Nov 24 2026); the run (withCostRun) adds the job
+    // the cost ledger (audit Nov 24 2026): inside a run, the run adds its job and tool; heard for the editor (no run), it is
+    // still Captions' cost
+    recordScribe({ userId: u, seconds, use: "captions", ...(currentCostRun() ? {} : { tool: "captions" }) });
     const words = heard.words.map((w) => [w.text, round2(w.start), round2(w.end), w.speaker] as [string, number, number, string | null]);
     const keys = words.length ? await markKeywords(deps, heard.words, u) : [];
     const doc = { words, keys, language: heard.language, duration: seconds || null };
@@ -143,6 +146,17 @@ export async function wordsFor(sb: SupabaseClient, deps: ClipsDeps, u: string, a
   } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 const round2 = (x: number) => Math.round(x * 100) / 100;
+
+/** The cost ledger (owner, Nov 24 2026): a Captions render holds the backend server's two CPUs (ffmpeg with 2 threads,
+ *  one render at a time through the cutter), so its seconds are booked at that machine's rate. Waiting for the cutter is
+ *  not counted. The run (withCostRun) adds the job, the person and the tool; the day's server bill books only the rest. */
+export function recordRender(renderMs: number, videoSeconds: number) {
+  const s = Math.max(0, renderMs) / 1000;
+  if (!(s > 0)) return;
+  recordCost({ provider: "render", product: "web service tradvio-reels-backend (Pro 2 CPU / 4 GB), render time", source: "captions_render",
+    units: { seconds: Math.round(s * 10) / 10, video_seconds: Math.round(videoSeconds * 10) / 10 }, usd: s * backendUsdPerSecond(), basis: "estimated",
+    note: `the render holds the server's 2 CPUs: its seconds at the $${BACKEND_USD_MONTH} monthly plan's rate` });
+}
 
 /** Words sent back by the page (edited): clean, in order, inside the video. */
 export function cleanWords(raw: unknown, seconds: number): CapWord[] | null {
@@ -235,11 +249,14 @@ export async function runCaptionsJob(sb: SupabaseClient, deps: ClipsDeps, job: J
         const ass = join(dir, `${it.asset_id}.ass`), out = join(dir, `${it.asset_id}.mp4`), still = join(dir, `${it.asset_id}.jpg`);
         await writeFile(ass, captionAss(words, settings, fr, env));
         // through the server's cutter, shared with Clips: one render per CPU at a time
-        let waited = false;
-        await cutGate(env).run(async () => { if (waited) await renew({ message: items.length > 1 ? `Captioning ${made.length + 1} of ${items.length}` : 'Captioning' }); return ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", ...inputArgs(src, null, null), "-filter_threads", "1", "-vf", `scale=${fr.w}:${fr.h},setsar=1,${assFilter(ass, env)},format=yuv420p`,
-          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2", "-rc-lookahead", "20", "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", out], { timeoutMs: 20 * 60_000 }); }, () => { waited = true; return renew({ message: items.length > 1 ? `Video ${made.length + 1} of ${items.length} · next in line for the cutter` : 'Next in line for the cutter' }).then(() => undefined); });
+        let waited = false, renderMs = 0;
+        await cutGate(env).run(async () => { if (waited) await renew({ message: items.length > 1 ? `Captioning ${made.length + 1} of ${items.length}` : 'Captioning' }); const r0 = Date.now(); try { return await ffmpeg(["-v", "error", "-nostdin", "-y", "-threads", "2", ...inputArgs(src, null, null), "-filter_threads", "1", "-vf", `scale=${fr.w}:${fr.h},setsar=1,${assFilter(ass, env)},format=yuv420p`,
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2", "-rc-lookahead", "20", "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", out], { timeoutMs: 20 * 60_000 }); } finally { renderMs += Date.now() - r0; } }, () => { waited = true; return renew({ message: items.length > 1 ? `Video ${made.length + 1} of ${items.length} · next in line for the cutter` : 'Next in line for the cutter' }).then(() => undefined); });
         const seconds = Number(asset.probe?.duration) || 0;
+        const p0 = Date.now();
         await ffmpeg(["-v", "error", "-nostdin", "-y", "-ss", Math.min(1, seconds / 3 || 0).toFixed(2), "-i", out, "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", still], { timeoutMs: 60_000 });
+        renderMs += Date.now() - p0;
+        recordRender(renderMs, seconds);
         const bytes = (await stat(out)).size;
         const limit = await checkUpload(sb, u, bytes);
         if (limit) throw new ClipsError(limit.code, limit.message, limit.status);

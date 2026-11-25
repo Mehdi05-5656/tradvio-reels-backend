@@ -17,10 +17,10 @@ export type SttDeps = { env?: Record<string, string | undefined>; fetch?: typeof
 // check it against the ElevenLabs bill, audit Nov 24 2026)
 export const STT_RATES: Record<SttProvider, number> = { scribe: 0.22, groq: 0.04 };
 /** Record Scribe heard outside hearAudio (YouTube Clips, Captions, the caption writer): by the seconds of sound sent. */
-export function recordScribe(p: { userId: string | null; seconds: number; use: string; job?: string | null }) {
+export function recordScribe(p: { userId: string | null; seconds: number; use: string; job?: string | null; /** the tool, when heard outside a run */ tool?: string | null }) {
   const seconds = Number(p.seconds);
   if (!(seconds > 0)) return;
-  recordEvent({ user_id: p.userId ?? null, kind: "vendor", name: "elevenlabs_scribe", usd: (seconds / 3600) * STT_RATES.scribe, props: { use: p.use, seconds, ...(p.job ? { job: p.job } : {}) } });
+  recordEvent({ user_id: p.userId ?? null, kind: "vendor", name: "elevenlabs_scribe", usd: (seconds / 3600) * STT_RATES.scribe, props: { use: p.use, seconds, ...(p.job ? { job: p.job } : {}), ...(p.tool ? { tool: p.tool } : {}) } });
 }
 export const GROQ_MODEL = "whisper-large-v3-turbo";
 

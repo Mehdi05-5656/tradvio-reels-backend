@@ -17,13 +17,17 @@ type Env = Record<string, string | undefined>;
 const HOUR = 3600_000;
 const r6 = (v: number) => Math.round(v * 1e6) / 1e6;
 
+/** The backend web service's plan (Render Pro, 2 CPU / 4 GB). Runs that hold the machine (a Captions render) book their
+ *  seconds against it at this rate, and the day's bill row books only the rest (owner, Nov 24 2026: Captions in the ledger). */
+export const BACKEND_USD_MONTH = 85;
+export const backendUsdPerSecond = () => (BACKEND_USD_MONTH * 12) / 365 / 86400;
 /** A monthly bill. `minus`: cost rows that already book part of it (that provider, optionally that writer). */
 export type FixedBill = { id: string; provider: string; product: string; usd_month: number; basis: CostBasis; minus?: { providers: string[]; writer?: string }; note?: string };
 /** Render's list prices for the plans the services run on (checked against Render's service list, Nov 24 2026), and
  *  the ElevenLabs plan the owner gave (Nov 11 2026: Pro, $99 a month). Other bills (Vercel, Supabase, PostHog, Resend,
  *  the domain) wait for their amounts in STUDIO_FIXED_BILLS. Cron jobs bill by the minute and are left out. */
 export const DEFAULT_FIXED_BILLS: FixedBill[] = [
-  { id: "render-backend", provider: "render", product: "web service tradvio-reels-backend (Pro 2 CPU / 4 GB)", usd_month: 85, basis: "list" },
+  { id: "render-backend", provider: "render", product: "web service tradvio-reels-backend (Pro 2 CPU / 4 GB), time no job used", usd_month: BACKEND_USD_MONTH, basis: "list", minus: { providers: ["render"], writer: "backend" } },
   { id: "render-blueprint", provider: "render", product: "worker clone8-studio-blueprint (Standard)", usd_month: 25, basis: "list" },
   { id: "render-kage", provider: "render", product: "worker kage-motion (Pro Plus 4 CPU / 8 GB), time no job used", usd_month: 175, basis: "list", minus: { providers: ["render"], writer: "kage-motion" } },
   { id: "render-films", provider: "render", product: "worker clone8-longform (Pro Plus 4 CPU / 8 GB), time no job used", usd_month: 175, basis: "list", minus: { providers: ["render"], writer: "clone8-longform-worker" } },

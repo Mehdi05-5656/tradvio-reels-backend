@@ -75,3 +75,31 @@ test("Stripe: the real fee on each payment with its person, Stripe's own charges
   assert.deepEqual(rows.map((r) => [r.ref, r.usd, r.user_id ?? null, r.basis]), [["stripe:txn_1", 1.14, USER, "metered"], ["stripe:txn_2", 0.45, null, "metered"], ["stripe:txn_4", 1.32, null, "metered"]]);
   assert.equal(rows[1].product, "Billing - Usage Fee");
 });
+
+import { recordRender } from "../src/studio-caption-video.js";
+import { backendUsdPerSecond } from "../src/cost-overheads.js";
+test("Captions: a render's seconds on the backend server are booked to its run; the day's server bill books only the rest", async () => {
+  fresh();
+  await withCostRun({ job_id: JOB, user_id: USER, tool: "captions" }, async () => { recordRender(24_000, 23.4); recordRender(0, 10); });
+  const rows = bufferedCostsForTests().filter((r) => r.source === "captions_render");
+  assert.equal(rows.length, 1, "nothing booked for no render time");
+  const r = rows[0];
+  assert.equal(r.job_id, JOB); assert.equal(r.user_id, USER); assert.equal(r.tool, "captions"); assert.equal(r.provider, "render"); assert.equal(r.writer, "backend");
+  assert.deepEqual(r.units, { seconds: 24, video_seconds: 23.4 });
+  assert.equal(r.usd, Math.round(24 * backendUsdPerSecond() * 1e6) / 1e6);
+  assert.ok(r.usd > 0.0007 && r.usd < 0.0009, "about $0.0008 for 24 s of an $85-a-month machine");
+  // the bill subtracts what runs booked on this server (provider render, written by the backend)
+  const bill = DEFAULT_FIXED_BILLS.find((b) => b.id === "render-backend")!;
+  assert.deepEqual(bill.minus, { providers: ["render"], writer: "backend" });
+  const share = Math.round(((85 * 12) / 365) * 1e6) / 1e6;
+  const day = fixedBillRows("2026-11-24", [bill], () => 0.5)[0];
+  assert.equal(day.usd, Math.round((share - 0.5) * 1e6) / 1e6);
+});
+
+test("Captions: words heard for the editor (no run) still count as Captions", () => {
+  fresh();
+  recordScribe({ userId: USER, seconds: 36, use: "captions", tool: "captions" });
+  const r = bufferedCostsForTests().find((x) => x.provider === "elevenlabs_scribe")!;
+  assert.equal(r.tool, "captions"); assert.equal(r.job_id, null);
+  assert.equal(r.usd, Math.round((36 / 3600) * STT_RATES.scribe * 1e6) / 1e6);
+});
