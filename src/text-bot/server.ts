@@ -105,6 +105,16 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   const tg = env.TELEGRAM_BOT_TOKEN ? telegram(env.TELEGRAM_BOT_TOKEN, { fetch: deps.fetch, onGuard: (hit) => log(`[text] guard: ${hit}`) }) : null;
   const sbl = env.SENDBLUE_API_KEY_ID && env.SENDBLUE_API_SECRET && env.SENDBLUE_FROM_NUMBER ? sendblue({ keyId: env.SENDBLUE_API_KEY_ID, secret: env.SENDBLUE_API_SECRET, from: env.SENDBLUE_FROM_NUMBER, fetch: deps.fetch, onGuard: (hit) => log(`[text] guard: ${hit}`) }) : null;
   let card: string | null = null; // the contact card's upload, made once
+  const LOGO = `${APP}/brand/icon-512.png`, CARD_LOGO = `${APP}/brand/apple-touch-icon.png`;
+  /** chats the line's Name & Photo was shared into today (Sendblue ignores repeats for 24 h anyway) */
+  const sharedDay = new Map<string, string>();
+  const shareProfile = (chat: string) => {
+    if (!sbl || deps.imessageOut) return;
+    const day = new Date().toISOString().slice(0, 10);
+    if (sharedDay.get(chat) === day) return;
+    sharedDay.set(chat, day); if (sharedDay.size > 20_000) sharedDay.clear();
+    void sbl.share(chat).catch((e: any) => log(`[text] name & photo not shared: ${String(e?.message ?? e).slice(0, 120)}`));
+  };
   const channels: Record<ChannelName, Channel> = {
     telegram: { name: "telegram", label: "Telegram", enabled: () => textEnabled(env), open: () => textOpen(env), out: deps.out ?? tg?.out ?? null, parse: parseUpdate,
       startCode: (t) => { const g = classify(t); return g.kind === "start" && g.code ? g.code : null; } },
@@ -112,10 +122,15 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       startCode: (t) => LINK_RE.exec(t)?.[1] ?? null,
       onLinked: async (chat) => {
         if (!sbl || deps.imessageOut) return;
-        const make = async () => (card = await sbl.upload({ kind: "photo", bytes: Buffer.from(contactCard(String(env.SENDBLUE_FROM_NUMBER))), name: "Clone8.vcf" } as any));
+        const make = async () => {
+          let logo: Buffer | null = null;
+          try { const r = await (deps.fetch ?? fetch)(CARD_LOGO, { signal: AbortSignal.timeout(15_000) }); if (r.ok) logo = Buffer.from(await r.arrayBuffer()); } catch { /* a card without the logo still works */ }
+          return (card = await sbl.upload({ kind: "photo", bytes: Buffer.from(contactCard(String(env.SENDBLUE_FROM_NUMBER), logo)), name: "Clone8.vcf" } as any));
+        };
         if (!card) await make();
         // (an upload kept from earlier may have expired at Sendblue: made again once)
         try { await sbl.sendUrl(chat, card!); } catch { await make(); await sbl.sendUrl(chat, card!); }
+        shareProfile(chat);
       } },
   };
   const chOf = (name: unknown): Channel | null => (name === "telegram" || name === "imessage" ? channels[name] : null);
@@ -296,6 +311,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (link.chat_id !== u.chat) return; // a person's linked chat is the private chat with the bot; anything else is ignored
     if (!(await mayUse(sb, link.user_id, ch.name))) { if (!u.callback_id) await say.text(u.chat, `Texting Clone8 on ${ch.label} isn't open for your account yet. We'll let you know when it is.`); return; }
     if (ch.startCode(u.text)) { await say.text(u.chat, "This chat is already connected to your Clone8 account. To connect a different account, remove this one first in the app (Account → Text Clone8)."); return; }
+    if (ch.name === "imessage") shareProfile(u.chat);
     if (!(await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file })))) return "busy";
   }
 
@@ -382,7 +398,11 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
   if (anyEnabled(env) && !deps.out && !deps.imessageOut) {
     const a = setInterval(() => { void drain(); }, 1500); (a as any).unref?.();
     const b = setInterval(() => { void watchAll(); }, 20_000); (b as any).unref?.();
-    if (imessageEnabled(env)) log(`[text] imessage on (${imessageOpen(env) ? "open to everyone" : "owner only"})`);
+    if (imessageEnabled(env)) {
+      log(`[text] imessage on (${imessageOpen(env) ? "open to everyone" : "owner only"})`);
+      // the line's iMessage Name & Photo: Clone8 and its logo (written only if it differs)
+      setTimeout(() => { void sbl?.ensureProfile("Clone8", LOGO).then((r) => log(`[text] imessage name & photo ${r}`), (e: any) => log(`[text] imessage name & photo not set: ${String(e?.message ?? e).slice(0, 120)}`)); }, 8000);
+    }
   }
   if (textEnabled(env) && !deps.out) {
     // Telegram is told where to deliver (idempotent; done at every start so a changed address or secret takes effect)

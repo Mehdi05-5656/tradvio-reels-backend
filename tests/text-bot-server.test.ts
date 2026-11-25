@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { internalPass, verifyInternal, INTERNAL_HEADER } from "../src/text-bot/internal.js";
 import { registerTextBot, serverApi, botConfig, WEBHOOK_PATH } from "../src/text-bot/server.js";
 import { textAdminView, chatLines } from "../src/text-bot/admin.js";
-import { parseSendblue, verifySendblue, withButtons, handleId, mask } from "../src/text-bot/sendblue.js";
+import { parseSendblue, verifySendblue, withButtons, handleId, mask, contactCard, sendblue } from "../src/text-bot/sendblue.js";
 
 type Row = Record<string, any>;
 const OWNER = "11111111-1111-4111-8111-111111111111", OTHER = "22222222-2222-4222-8222-222222222222";
@@ -457,4 +457,26 @@ test("iMessage review fixes: no SMS, no reactions, only our line; exact codes; s
   assert.equal(sent.length, 0);
   await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", "LINK instagram"), line)!, "imessage");
   assert.match(sent.at(-1)!, /Connect your Clone8 account first/, "treated as hello, not as a bad code");
+});
+
+test("iMessage looks like Clone8: a contact card with the logo, and the line's Name & Photo set only when it differs", async () => {
+  const card = contactCard("+13105550123", Buffer.alloc(3000, 7));
+  const lines = card.split("\r\n");
+  assert.ok(lines.every((l) => l.length <= 75), "folded at 75 characters");
+  assert.ok(lines.some((l) => l.startsWith("PHOTO;ENCODING=b;TYPE=PNG:")));
+  assert.ok(lines.includes("FN:Clone8") && lines.includes("END:VCARD"));
+  assert.ok(!contactCard("+13105550123").includes("PHOTO"), "no logo, no photo line");
+  const calls: Array<{ url: string; body: any }> = [];
+  let state: any = { hasProfile: false };
+  const f = (async (url: string, init: any) => { calls.push({ url, body: init?.body ? JSON.parse(init.body) : null }); return new Response(JSON.stringify(url.includes("/state") ? { status: "OK", data: state } : { status: "OK", data: {} }), { status: 200 }); }) as any;
+  const sb = sendblue({ keyId: "k", secret: "s", from: "+13105550123", fetch: f });
+  assert.equal(await sb.ensureProfile("Clone8", "https://app.clone8.io/brand/icon-512.png"), "set");
+  assert.deepEqual(calls.at(-1)!.body, { fromNumber: "+13105550123", firstName: "Clone8", lastName: "", photoUrl: "https://app.clone8.io/brand/icon-512.png" });
+  state = { hasProfile: true, sharingEnabled: true, firstName: "Clone8", lastName: null, hasPhoto: true };
+  const before = calls.length;
+  assert.equal(await sb.ensureProfile("Clone8", "https://app.clone8.io/brand/icon-512.png"), "kept");
+  assert.equal(calls.length, before + 1, "only the state was read");
+  await sb.share("+15557654321");
+  assert.deepEqual(calls.at(-1)!.body, { fromNumber: "+13105550123", toNumber: "+15557654321" });
+  assert.match(calls.at(-1)!.url, /\/api\/v2\/contact-sharing\/share$/);
 });

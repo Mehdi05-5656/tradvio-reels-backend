@@ -114,10 +114,25 @@ export function sendblue(o: { keyId: string; secret: string; from: string; fetch
   };
   /** Sends a file that is already public (the Clone8 contact card). */
   const sendUrl = (chat: string, url: string) => queued(() => call("/api/send-message", { number: chat, from_number: o.from, media_url: url }));
-  return { out, upload, sendUrl };
+  // iMessage's own "Name & Photo" for the line (docs.sendblue.com/api-v2/contact-sharing): set once, then shared into
+  // each chat, so the chat's header shows Clone8 and its logo instead of a number
+  const get = async (path: string): Promise<any> => { const r = await f(`${BASE}${path}`, { headers: auth, signal: AbortSignal.timeout(20_000) }); const j: any = await r.json().catch(() => null); if (!r.ok) throw new Error(`sendblue_get_${r.status}`); return j; };
+  /** The line's profile is Clone8 with the logo; written only when something differs. Returns what it did. */
+  async function ensureProfile(name: string, photoUrl: string): Promise<"kept" | "set"> {
+    const st = (await get(`/api/v2/contact-sharing/state?fromNumber=${encodeURIComponent(o.from)}`))?.data ?? {};
+    if (st.hasProfile && st.sharingEnabled && st.firstName === name && !st.lastName && st.hasPhoto) return "kept";
+    await call("/api/v2/contact-sharing/profile", { fromNumber: o.from, firstName: name, lastName: "", photoUrl }, 30_000);
+    return "set";
+  }
+  /** Asks iMessage to show the profile in one chat (Sendblue ignores repeats within 24 hours; sends no text). */
+  const share = (to: string) => call("/api/v2/contact-sharing/share", { fromNumber: o.from, toNumber: to }, 20_000);
+  return { out, upload, sendUrl, ensureProfile, share };
 }
 
-/** Clone8's contact card: once saved, the chat shows "Clone8" instead of a number, and links preview. */
-export function contactCard(number: string): string {
-  return ["BEGIN:VCARD", "VERSION:3.0", "FN:Clone8", "ORG:Clone8", `TEL;TYPE=CELL:${number}`, "URL:https://clone8.io", "END:VCARD", ""].join("\r\n");
+/** Clone8's contact card: once saved, the chat shows "Clone8" and its logo instead of a number, and links preview.
+ *  The logo rides inside the card (vCard 3.0 PHOTO, base64), folded at 75 characters as the format asks. */
+export function contactCard(number: string, photoPng?: Buffer | null): string {
+  const fold = (line: string) => line.length <= 75 ? line : [line.slice(0, 75), ...(line.slice(75).match(/.{1,74}/g) ?? []).map((x) => ` ${x}`)].join("\r\n");
+  return ["BEGIN:VCARD", "VERSION:3.0", "N:;Clone8;;;", "FN:Clone8", "ORG:Clone8", `TEL;TYPE=CELL,VOICE,pref:${number}`, "URL:https://clone8.io",
+    ...(photoPng?.length ? [fold(`PHOTO;ENCODING=b;TYPE=PNG:${photoPng.toString("base64")}`)] : []), "END:VCARD", ""].join("\r\n");
 }
