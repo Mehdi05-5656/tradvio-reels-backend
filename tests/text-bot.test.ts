@@ -507,19 +507,22 @@ test("their own AI app: a short fixed message, the saving first, then the links 
   const URL_ = "https://mcp.clone8.io/api/studio/mcp";
   const first = appLink({ kind: "signature", request: "  \"why cats hate water\" ", connected: false, connectorUrl: URL_, beside: { here: 470, there: 130 } }) as any;
   assert.equal(first.prompt, "Use Clone8 to make a Signature story, written by you here in this chat, about: why cats hate water");
-  assert.deepEqual(first.buttons.map((b: any) => b.label), ["Add Clone8 to Claude", "Open in Claude"]);
+  assert.deepEqual(first.buttons.map((b: any) => b.label), ["Set it up"], "first time: one link, to Clone8's set-up page");
+  assert.equal(first.buttons[0].url, `https://app.clone8.io/#studio/home?ai=${encodeURIComponent(first.prompt)}`);
   assert.match(first.text, /^Or make it in Claude for 130 credits instead of 470\./);
-  assert.match(first.text, /First time only: the first link adds Clone8/);
+  assert.match(first.text, /First time only, it needs a one-minute set-up: the link below walks you through it/);
   assert.ok(first.text.includes(`reply ${YES_MARK}.`), "ends with how to make it here instead");
   assert.ok(!first.text.includes("“"), "no repeated quote of the request");
-  assert.equal(first.buttons[1].url, `https://claude.ai/new?q=${encodeURIComponent(first.prompt)}`);
+  assert.ok(!/claude/i.test(first.buttons[0].url), "the set-up link names nothing");
   const again = appLink({ kind: "film", request: "a true heist", connected: true, connectorUrl: URL_ }) as any;
   assert.deepEqual(again.buttons.map((b: any) => b.label), ["Open in Claude"], "no set-up once they used it");
   assert.match(again.text, /^You can make this in Claude with Clone8\. .*Tap the link below/);
   // iMessage: the text, then each link alone in its own message (a preview card), in order; all pass the guard
   const im = withButtons(first.text, first.buttons);
   assert.equal(im, first.text, "the long links are not glued under the text");
-  assert.deepEqual(apartLinks(first.buttons), [first.buttons[0].url, first.buttons[1].url]);
+  assert.deepEqual(apartLinks(first.buttons), [first.buttons[0].url]);
+  assert.deepEqual(apartLinks(again.buttons), [again.buttons[0].url]);
+  assert.equal(again.buttons[0].url, `https://claude.ai/new?q=${encodeURIComponent(again.prompt)}`);
   for (const u of apartLinks(first.buttons)) assert.deepEqual(guard(u, first.own), { text: u, hit: null });
   assert.deepEqual(guard(im, first.own), { text: im, hit: null });
   // ...but the word is still blanked anywhere the model writes it, and a model-made link to that host is removed
@@ -532,7 +535,7 @@ test("their own AI app: a short fixed message, the saving first, then the links 
   const calls: any[] = [];
   const tg = telegram("t", { fetch: (async (_u: string, init: any) => { calls.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true, result: {} })); }) as any });
   await tg.out.text("1", first.text, [...first.buttons, { label: "Elsewhere", url: "https://claude.ai/settings" }], first.own);
-  assert.deepEqual(calls[0].reply_markup.inline_keyboard.flat().map((b: any) => b.text), ["Add Clone8 to Claude", "Open in Claude"]);
+  assert.deepEqual(calls[0].reply_markup.inline_keyboard.flat().map((b: any) => b.text), ["Set it up"]);
   assert.ok(SYSTEM.includes("send_app_link") && !/claude/i.test(SYSTEM), "the instructions never name the app");
   assert.ok(TOOLS.some((t) => t.name === "send_app_link"));
 });

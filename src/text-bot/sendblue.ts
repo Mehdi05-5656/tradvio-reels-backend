@@ -67,7 +67,7 @@ export function pieces(text: string, max = MAX): string[] {
 /** A link button as the line iMessage shows ("Open the app: https://…"); only links the bot's own code may send. */
 export const linkLines = (buttons?: Button[]) => (buttons ?? []).filter((b): b is { label: string; url: string } => "url" in b && BUTTON_LINK(b.url) && !APART(b.url)).map((b) => `${b.label}: ${b.url}`);
 /** Links that go alone in their own message, in order, after the text (long links read as a preview card that way). */
-const APART = (url: string) => !/^https:\/\/app\.clone8\.io\//.test(url);
+const APART = (url: string) => !/^https:\/\/app\.clone8\.io\//.test(url) || /[?&]ai=/.test(url);
 export const apartLinks = (buttons?: Button[]) => (buttons ?? []).filter((b): b is { label: string; url: string } => "url" in b && BUTTON_LINK(b.url) && APART(b.url)).map((b) => b.url);
 /** Buttons as text: links to Clone8 become a line; taps and copies are already in the words. */
 export function withButtons(text: string, buttons?: Button[]): string {

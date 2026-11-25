@@ -40,17 +40,20 @@ export function appLink(o: { kind: string; request: string; connected: boolean; 
   if (!/^https:\/\/[a-z0-9.-]+\/\S*$/i.test(o.connectorUrl)) return { error: "not_available", detail: "The connector is not open for this account" };
   const prompt = `${LEAD[kind]} ${request}`;
   const open: Button = { label: "Open in Claude", url: `https://claude.ai/new?q=${enc(prompt)}` };
-  const add: Button = { label: "Add Clone8 to Claude", url: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Clone8&connectorUrl=${enc(o.connectorUrl)}` };
+  // first time: Clone8's own page (the app's "Clone8 in Claude" window, claude-button.tsx ClaudeLinkHost) walks the
+  // one-time set-up, sees when it is done, then opens the chat with this request; it also tells a phone what to do if
+  // Claude's app can't add a connector there yet
+  const setup: Button = { label: "Set it up", url: `https://app.clone8.io/#studio/home?ai=${enc(prompt)}` };
   const n = (x: number) => x.toLocaleString("en-US");
   const what = kind === "signature"
     ? "Claude writes the scene in your own chat (it takes 30 to 60 minutes there), then Clone8 voices and renders it."
     : "Claude asks Clone8 to make it and shows you the result in that chat.";
   const steps = o.connected
     ? "Tap the link below and send the message it opens with."
-    : "First time only: the first link adds Clone8 to Claude (sign in, tap Allow). Then the second link opens a chat with your request typed in: send it.";
+    : "First time only, it needs a one-minute set-up: the link below walks you through it, then opens the chat with your request ready to send.";
   const text = o.beside
     ? `Or make it in Claude for ${n(o.beside.there)} credits instead of ${n(o.beside.here)}. ${what} ${steps}\n\nTo make it here instead, reply ${YES_MARK}.`
     : `You can make this in Claude with Clone8. ${what} ${steps}`;
-  const buttons = o.connected ? [open] : [add, open];
+  const buttons = o.connected ? [open] : [setup];
   return { text, buttons, own: [text, prompt, ...linkLines(buttons), ...buttons.map((b) => b.label), ...buttons.map((b) => ("url" in b ? b.url : ""))], prompt };
 }
