@@ -480,3 +480,19 @@ test("iMessage looks like Clone8: a contact card with the logo, and the line's N
   assert.deepEqual(calls.at(-1)!.body, { fromNumber: "+13105550123", toNumber: "+15557654321" });
   assert.match(calls.at(-1)!.url, /\/api\/v2\/contact-sharing\/share$/);
 });
+
+test("retention the privacy policy promises: log 12 months, disconnected connections 30 days", async () => {
+  const s = setup(ENV, fakeNet());
+  const ago = (d: number) => new Date(Date.now() - d * 86400_000).toISOString();
+  s.tables.studio_text_events = [{ user_id: OWNER, event: "in", at: ago(400), data: {} }, { user_id: OWNER, event: "in", at: ago(10), data: {} }] as any;
+  s.tables.studio_text_links = [
+    { id: "a", user_id: OWNER, channel: "telegram", sender_id: "1", chat_id: "1", status: "removed", created_at: ago(40) },
+    { id: "b", user_id: OWNER, channel: "telegram", sender_id: "2", chat_id: "2", status: "removed", created_at: ago(5) },
+    { id: "c", user_id: OWNER, channel: "telegram", sender_id: "3", chat_id: "3", status: "linked", created_at: ago(90) },
+  ] as any;
+  s.tables.studio_text_chats = [];
+  await s.bot.watchAll();
+  assert.deepEqual(s.tables.studio_text_events.map((e: any) => e.at), [ago(10)].map((x) => s.tables.studio_text_events[0].at), "only the recent entry stays");
+  assert.equal(s.tables.studio_text_events.length, 1);
+  assert.deepEqual(s.tables.studio_text_links.map((l: any) => l.id).sort(), ["b", "c"], "a connection still in use is never deleted");
+});

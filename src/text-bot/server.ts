@@ -390,6 +390,10 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         swept = Date.now();
         await sb.from("studio_text_inbox").delete().in("channel", live()).lt("done_at", new Date(Date.now() - 7 * 86400_000).toISOString());
         await sb.from("studio_text_codes").delete().lt("expires_at", new Date(Date.now() - 86400_000).toISOString());
+        // what the privacy policy (section 2C) promises: the message log is kept 12 months; a disconnected or unfinished
+        // connection (with its phone number or Telegram id) is deleted after 30 days
+        await sb.from("studio_text_events").delete().lt("at", new Date(Date.now() - 365 * 86400_000).toISOString());
+        await sb.from("studio_text_links").delete().in("status", ["removed", "pending"]).lt("created_at", new Date(Date.now() - 30 * 86400_000).toISOString());
       }
     } catch (e: any) { log(`[text] watcher: ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { watching = false; }
