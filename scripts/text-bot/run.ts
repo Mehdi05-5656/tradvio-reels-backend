@@ -43,6 +43,13 @@ async function main() {
     tg = telegram(cfg.telegramToken, { onGuard: (hit) => log("guard", { hit }) });
     out = tg.out;
   }
+  // every message that leaves is logged as it was sent (after the wording check), so the whole chat can be read back
+  const raw = out;
+  out = {
+    async text(c, text, buttons, own) { await raw.text(c, text, buttons, own); log("out", { text: guard(text, own).text.slice(0, 4000), ...(buttons?.length ? { buttons: buttons.map((b) => b.label) } : {}) }); },
+    async media(c, items, caption, buttons, own) { await raw.media(c, items, caption, buttons, own); log("out", { ...(caption ? { text: guard(caption, own).text.slice(0, 1000) } : {}), media: items.map((m) => `${m.kind}: ${guard(m.caption ?? "", own).text.slice(0, 120)}`), ...(buttons?.length ? { buttons: buttons.map((b) => b.label) } : {}) }); },
+    typing: (c) => raw.typing(c),
+  };
   const brain: BrainDeps = { cfg, api, out, index, log };
   const bot = makeBot({ cfg, api, out, state, save, log, think: (st, text, o) => think(brain, st, text, o), forget: () => { index.current = null; } });
   console.error(`Text Clone8 test · model ${cfg.model} · ${mock ? "pretend account" : `Clone8 at ${cfg.apiBase}`} · by text today ${cfg.dailyCredits} credits, ${cfg.maxActionCredits} an action · time zone ${cfg.timezone}`);
