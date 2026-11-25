@@ -291,9 +291,13 @@ test("a chat another server is working on is left alone, and its message goes ba
   await new Promise((r) => setTimeout(r, 30));
   const row = s.tables.studio_text_inbox[0];
   assert.equal(row.done_at ?? null, null, "not marked done");
-  assert.equal(row.claimed_at, null, "back in the queue");
+  const back = Date.parse(row.claimed_at) + 5 * 60_000 - Date.now();
+  assert.ok(back > 5_000 && back <= 10_000, `back in the queue in about ten seconds (${back} ms)`);
+  await s.bot.drain(); await new Promise((r) => setTimeout(r, 30));
+  assert.equal(row.done_at ?? null, null, "not taken again on the next pass");
   // once the other server's hold runs out, this one takes the chat
   s.tables.studio_text_chats[0].lease_until = new Date(Date.now() - 1000).toISOString();
+  row.claimed_at = new Date(Date.now() - 6 * 60_000).toISOString();
   await s.bot.drain(); await new Promise((r) => setTimeout(r, 100));
   assert.ok(row.done_at);
   assert.equal(s.sent.at(-1)!.text, "Your balance is 120 credits.");
@@ -305,4 +309,18 @@ test("a deleted account's chat is not answered", async () => {
   s.tables.studio_text_links = [{ id: "66666666-6666-4666-8666-666666666666", user_id: "77777777-7777-4777-8777-777777777777", channel: "telegram", sender_id: "902", chat_id: "902", status: "linked", created_at: new Date().toISOString() }];
   await s.bot.handleUpdate(s.sb, s.tgMsg("902", "hi") as any);
   assert.equal((s.tables.studio_text_chats ?? []).length, 0, "no state made, no AI call");
+});
+
+test("the watcher: a failed account check changes nothing; a removed chat stops being watched", async () => {
+  const s = setup(ENV, fakeNet());
+  s.tables.studio_text_links = [{ id: "55555555-5555-4555-8555-555555555555", user_id: OWNER, channel: "telegram", sender_id: "900", chat_id: "900", status: "linked", created_at: new Date().toISOString() }];
+  s.tables.studio_text_chats = [{ channel: "telegram", chat_id: "900", user_id: OWNER, state: { watches: [] }, watching: true, updated_at: new Date().toISOString() }];
+  const real = s.sb.auth.admin.getUserById;
+  s.sb.auth.admin.getUserById = async () => { throw new Error("auth down"); };
+  await s.bot.watchAll();
+  assert.equal(s.tables.studio_text_chats[0].watching, true, "kept");
+  s.sb.auth.admin.getUserById = real;
+  s.tables.studio_text_links[0].status = "removed";
+  await s.bot.watchAll();
+  assert.equal(s.tables.studio_text_chats[0].watching, false);
 });
