@@ -63,9 +63,8 @@ export function makeBot(d: BotDeps) {
     d.log("confirmed", { id: p.id, by });
     // on disk as claimed BEFORE anything is sent: if this process stops mid-call, a second YES cannot run it again
     d.save();
-    await d.out.typing(st.chat);
     let out: Awaited<ReturnType<typeof execute>>;
-    try { out = await execute(d.api, p, { now: now(), timezone: d.cfg.timezone }); }
+    try { out = await busy(st, () => execute(d.api, p, { now: now(), timezone: d.cfg.timezone })); }
     catch (e: any) {
       // no answer is not a "no": it may have gone through. Say so, and never try it again on our own.
       p.status = "failed"; d.log("execute_unconfirmed", { id: p.id, detail: String(e?.message ?? e).slice(0, 200) });
@@ -151,10 +150,17 @@ export function makeBot(d: BotDeps) {
     } finally { d.save(); }
   }
 
+  /** Keeps "typing…" showing for as long as the work takes (Telegram drops it after a few seconds), so a slow answer
+   *  (a video being fetched and sent can take a minute) never looks like silence. */
+  async function busy<T>(st: ChatState, work: () => Promise<T>): Promise<T> {
+    void d.out.typing(st.chat).catch(() => undefined);
+    const beat = setInterval(() => { void d.out.typing(st.chat).catch(() => undefined); }, 4000);
+    try { return await work(); } finally { clearInterval(beat); }
+  }
+
   async function talk(st: ChatState, text: string, tap = false): Promise<void> {
     const t = now();
-    await d.out.typing(st.chat);
-    const r = await d.think(st, text, { tap });
+    const r = await busy(st, () => d.think(st, text, { tap }));
     st.history.push({ role: "user", text, at: t, ...(tap ? { tap: true } : {}) });
     d.log("turn", { usd: Math.round(r.usd * 1e4) / 1e4, rounds: r.rounds, pending: r.pending?.id ?? null });
     // what the person typed and what is on the table are theirs: quoting them back is not a leak
