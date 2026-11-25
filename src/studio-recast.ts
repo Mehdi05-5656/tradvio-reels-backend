@@ -687,7 +687,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
         const sub = await submitRecast(deps, { tool, model, videoUrl, imageUrls: images, prompt, presetId: tool === "restyle" ? String(job.options?.style_id ?? "") : undefined, idempotencyKey: job.attempts ? `${job.id}:${job.attempts}` : job.id, resolution: RECAST_RESOLUTION });
         requestId = sub.request_id;
         const sentSeconds = Math.ceil(Math.min(drivingUrl ? sourceSeconds || 15 : windowSeconds(job.options, MAX_SECONDS[model]), sourceSeconds || Infinity) - 1e-6);
-        await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue", ...holdSpend(requestId, sub.estimate_usd ?? sentSeconds * higgsfieldCostPerSecond(model, deps.env), sub.estimate_usd != null ? "estimate" : "table") });
+        await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In the renderer's queue", ...holdSpend(requestId, sub.estimate_usd ?? sentSeconds * higgsfieldCostPerSecond(model, deps.env), sub.estimate_usd != null ? "estimate" : "table") });
         log(`[recast] submitted ${JSON.stringify({ job: job.id, tool, model, request: requestId })}`);
       }
 
@@ -735,7 +735,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
           }
           throw new RecastError(code);
         }
-        await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In Higgsfield's queue" });
+        await renew(sb, job, { note: st.status === "in_progress" || st.status === "processing" ? ({ recast: "Rendering your recast", swap: "Rendering your swap", restyle: "Redrawing your video", trend: "Performing the trend" } as Record<string, string>)[tool] : "In the renderer's queue" });
         await sleep(POLL_MS);
       }
       if (!result?.videoUrl) throw new RecastError("recast_bad_output", "completed without a video url");

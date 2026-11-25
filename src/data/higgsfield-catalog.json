@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-10-29",
- "source": "docs.higgsfield.ai model pages (sitemap), complete JSON schema blocks",
+ "generated_at": "2026-11-25",
+ "source": "docs.higgsfield.ai model pages (Oct 29 2026) + open.higgsfield.ai api-reference input schemas (Nov 25 2026)",
  "models": [
   {
    "id": "alibaba/happy-horse/image-to-video",
@@ -7506,6 +7506,1592 @@
     "additionalProperties": false
    },
    "docs": "https://docs.higgsfield.ai/docs/models/z-image-turbo/generate"
+  },
+  {
+   "id": "kling-video/v4.0/text-to-video",
+   "title": "Kling 4.0 \u2014 Text to video",
+   "family": "Kling 4.0",
+   "provider": "Kling",
+   "kind": "text_to_video",
+   "output": "video",
+   "summary": "Cinematic clips of 3 to 30 seconds from a description, up to 4K.",
+   "notes": [
+    "Duration is 3 to 30 seconds.",
+    "Reference clips longer than 30 seconds are cut to their first 30."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p",
+       "4k"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": true
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0/image-to-video",
+   "title": "Kling 4.0 \u2014 Image to video",
+   "family": "Kling 4.0",
+   "provider": "Kling",
+   "kind": "image_to_video",
+   "output": "video",
+   "summary": "A picture starts moving, with optional middle and end frames; 3 to 30 seconds, up to 4K.",
+   "notes": [
+    "Duration is 3 to 30 seconds.",
+    "Reference clips longer than 30 seconds are cut to their first 30."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "image_urls": "image",
+    "end_image_url": "image"
+   },
+   "required": [
+    "image_url"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string"
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "First frame"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Middle frames",
+      "maxItems": 8,
+      "description": "Frames between the first and the end frame, in order. Up to 8."
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p",
+       "4k"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "End frame"
+     }
+    },
+    "additionalProperties": true
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0/reference-to-video",
+   "title": "Kling 4.0 \u2014 Reference to video",
+   "family": "Kling 4.0",
+   "provider": "Kling",
+   "kind": "reference_to_video",
+   "output": "video",
+   "summary": "New footage guided by up to 10 pictures and 5 clips; 3 to 30 seconds, up to 4K.",
+   "notes": [
+    "Duration is 3 to 30 seconds.",
+    "Reference clips longer than 30 seconds are cut to their first 30."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "image_urls": "image",
+    "video_urls": "video",
+    "end_image_url": "image"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "First frame"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10,
+      "title": "Reference pictures"
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p",
+       "4k"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5,
+      "title": "Reference clips"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "adaptive"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "End frame"
+     }
+    },
+    "additionalProperties": true
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0/video-edit",
+   "title": "Kling 4.0 \u2014 Video edit",
+   "family": "Kling 4.0",
+   "provider": "Kling",
+   "kind": "video_edit",
+   "output": "video",
+   "summary": "Change what is in a clip with words and references; 3 to 30 seconds, up to 4K.",
+   "notes": [
+    "Duration is 3 to 30 seconds.",
+    "Reference clips longer than 30 seconds are cut to their first 30."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "video_url": "video",
+    "image_urls": "image",
+    "video_urls": "video"
+   },
+   "required": [
+    "prompt",
+    "video_url"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "Reference picture"
+     },
+     "video_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "Clip to edit"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10,
+      "title": "Reference pictures"
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p",
+       "4k"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5,
+      "title": "Reference clips"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "adaptive"
+     }
+    },
+    "additionalProperties": true
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0-flash/text-to-video",
+   "title": "Kling 4.0 Flash \u2014 Text to video",
+   "family": "Kling 4.0 Flash",
+   "provider": "Kling",
+   "kind": "text_to_video",
+   "output": "video",
+   "summary": "Fast 720p clips of 3 to 20 seconds from a description, for less.",
+   "notes": [
+    "720p only; duration is 3 to 20 seconds."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0-flash/image-to-video",
+   "title": "Kling 4.0 Flash \u2014 Image to video",
+   "family": "Kling 4.0 Flash",
+   "provider": "Kling",
+   "kind": "image_to_video",
+   "output": "video",
+   "summary": "A picture starts moving: fast 720p clips of 3 to 20 seconds, for less.",
+   "notes": [
+    "720p only; duration is 3 to 20 seconds."
+   ],
+   "media_fields": {
+    "image_url": "image"
+   },
+   "required": [
+    "image_url"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "default": ""
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "First frame"
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0-flash/reference-to-video",
+   "title": "Kling 4.0 Flash \u2014 Reference to video",
+   "family": "Kling 4.0 Flash",
+   "provider": "Kling",
+   "kind": "reference_to_video",
+   "output": "video",
+   "summary": "Fast 720p footage guided by pictures and clips, 3 to 20 seconds.",
+   "notes": [
+    "720p only; duration is 3 to 20 seconds."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "image_urls": "image",
+    "video_urls": "video"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "First frame"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10,
+      "title": "Reference pictures"
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5,
+      "title": "Reference clips"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-video/v4.0-flash/video-edit",
+   "title": "Kling 4.0 Flash \u2014 Video edit",
+   "family": "Kling 4.0 Flash",
+   "provider": "Kling",
+   "kind": "video_edit",
+   "output": "video",
+   "summary": "Change what is in a clip with words and references: fast, 720p.",
+   "notes": [
+    "720p only; duration is 3 to 20 seconds."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "video_url": "video",
+    "image_urls": "image",
+    "video_urls": "video"
+   },
+   "required": [
+    "prompt",
+    "video_url"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "Reference picture"
+     },
+     "video_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "Clip to edit"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10,
+      "title": "Reference pictures"
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5,
+      "title": "Reference clips"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-image/v4.0/text-to-image",
+   "title": "Kling Image 4.0 \u2014 Text to image",
+   "family": "Kling Image 4.0",
+   "provider": "Kling",
+   "kind": "text_to_image",
+   "output": "image",
+   "summary": "Detailed pictures with clean, readable text, at 2K, 4K or native 8K.",
+   "notes": [
+    "One picture a request. Name reference pictures in the prompt as @image_1, @image_2 and so on."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50000
+     },
+     "resolution": {
+      "enum": [
+       "2k",
+       "4k",
+       "8k"
+      ],
+      "type": "string",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "16:9",
+       "9:16",
+       "1:1",
+       "4:3",
+       "3:4",
+       "3:2",
+       "2:3",
+       "21:9",
+       "auto"
+      ],
+      "type": "string",
+      "default": "auto"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "kling-image/v4.0/edit",
+   "title": "Kling Image 4.0 \u2014 Edit images",
+   "family": "Kling Image 4.0",
+   "provider": "Kling",
+   "kind": "image_edit",
+   "output": "image",
+   "summary": "Edit or combine up to 10 pictures with words, at up to native 8K.",
+   "notes": [
+    "One picture a request. Name reference pictures in the prompt as @image_1, @image_2 and so on."
+   ],
+   "media_fields": {
+    "image_urls": "image"
+   },
+   "required": [
+    "prompt",
+    "image_urls"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "image_urls"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50000
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Reference pictures",
+      "maxItems": 10,
+      "minItems": 1,
+      "description": "JPG or PNG, at least 300 px a side. Name them in the prompt as @image_1, @image_2 and so on."
+     },
+     "resolution": {
+      "enum": [
+       "2k",
+       "4k",
+       "8k"
+      ],
+      "type": "string",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "16:9",
+       "9:16",
+       "1:1",
+       "4:3",
+       "3:4",
+       "3:2",
+       "2:3",
+       "21:9",
+       "auto"
+      ],
+      "type": "string",
+      "default": "auto"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "clone8/halo/text-to-video",
+   "title": "Clone8 Halo \u2014 Text to video",
+   "family": "Clone8 Halo",
+   "provider": "Clone8",
+   "kind": "text_to_video",
+   "output": "video",
+   "summary": "1080p video with its own sound, 4 to 30 seconds, from a description. Only on Clone8.",
+   "notes": [
+    "1080p only; duration is 4 to 30 seconds.",
+    "Sound is generated with the picture unless you switch it off."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "maximum": 4294967295,
+      "minimum": 0
+     },
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "resolution": {
+      "enum": [
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "16:9"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "api_path": "sand/magi-2/text-to-video",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "clone8/halo/image-to-video",
+   "title": "Clone8 Halo \u2014 Image to video",
+   "family": "Clone8 Halo",
+   "provider": "Clone8",
+   "kind": "image_to_video",
+   "output": "video",
+   "summary": "A first frame (and a last one) comes alive in 1080p, with its own sound. Only on Clone8.",
+   "notes": [
+    "1080p only; duration is 4 to 30 seconds.",
+    "Sound is generated with the picture unless you switch it off."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "end_image_url": "image"
+   },
+   "required": [
+    "image_url"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "maximum": 4294967295,
+      "minimum": 0
+     },
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 8192,
+      "title": "First frame"
+     },
+     "resolution": {
+      "enum": [
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "16:9"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 8192,
+      "title": "Last frame"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "api_path": "sand/magi-2/image-to-video",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "clone8/halo/reference-to-video",
+   "title": "Clone8 Halo \u2014 Reference to video",
+   "family": "Clone8 Halo",
+   "provider": "Clone8",
+   "kind": "reference_to_video",
+   "output": "video",
+   "summary": "1080p footage with sound built from pictures and clips together. Only on Clone8.",
+   "notes": [
+    "1080p only; duration is 4 to 30 seconds.",
+    "Sound is generated with the picture unless you switch it off."
+   ],
+   "media_fields": {
+    "audio_urls": "audio",
+    "image_urls": "image",
+    "video_urls": "video"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "maximum": 4294967295,
+      "minimum": 0
+     },
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 8192
+      },
+      "maxItems": 5
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 8192
+      },
+      "maxItems": 10,
+      "title": "Reference pictures"
+     },
+     "resolution": {
+      "enum": [
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 8192
+      },
+      "maxItems": 5,
+      "title": "Reference clips"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "16:9"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "api_path": "sand/magi-2/reference-to-video",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "bytedance/seedream/v5.0/pro/text-to-image",
+   "title": "Seedream 5.0 Pro \u2014 Text to image",
+   "family": "Seedream 5.0 Pro",
+   "provider": "ByteDance",
+   "kind": "text_to_image",
+   "output": "image",
+   "summary": "Product visuals, posters and illustrations from words, up to 2K.",
+   "notes": [
+    "One picture a request."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "resolution": {
+      "enum": [
+       "1k",
+       "1.5k",
+       "2k"
+      ],
+      "type": "string",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "1:1",
+       "4:3",
+       "16:9",
+       "3:2",
+       "21:9",
+       "3:4",
+       "9:16",
+       "2:3"
+      ],
+      "type": "string",
+      "default": "1:1"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "bytedance/seedream/v5.0/pro/edit",
+   "title": "Seedream 5.0 Pro \u2014 Edit images",
+   "family": "Seedream 5.0 Pro",
+   "provider": "ByteDance",
+   "kind": "image_edit",
+   "output": "image",
+   "summary": "Change subjects, colours or layout using up to 10 pictures, up to 2K.",
+   "notes": [
+    "One picture a request."
+   ],
+   "media_fields": {
+    "image_urls": "image"
+   },
+   "required": [
+    "prompt",
+    "image_urls"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "image_urls"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Reference pictures",
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "1k",
+       "1.5k",
+       "2k"
+      ],
+      "type": "string",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "1:1",
+       "4:3",
+       "16:9",
+       "3:2",
+       "21:9",
+       "3:4",
+       "9:16",
+       "2:3"
+      ],
+      "type": "string",
+      "default": "1:1"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "minimax/h3-highspeed/text-to-video",
+   "title": "MiniMax H3 Highspeed \u2014 Text to video",
+   "family": "MiniMax H3 Highspeed",
+   "provider": "MiniMax",
+   "kind": "text_to_video",
+   "output": "video",
+   "summary": "Quick 4 to 15 second drafts at 768p: try an idea fast.",
+   "notes": [
+    "Duration is 4 to 15 seconds."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 7000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 4
+     },
+     "resolution": {
+      "enum": [
+       "480P",
+       "768P"
+      ],
+      "type": "string",
+      "default": "768P"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "auto"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "minimax/h3-highspeed/image-to-video",
+   "title": "MiniMax H3 Highspeed \u2014 Image to video",
+   "family": "MiniMax H3 Highspeed",
+   "provider": "MiniMax",
+   "kind": "image_to_video",
+   "output": "video",
+   "summary": "A first or last frame comes alive: quick 4 to 15 second drafts at 768p.",
+   "notes": [
+    "Duration is 4 to 15 seconds."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "end_image_url": "image"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 7000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 4
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "First frame"
+     },
+     "resolution": {
+      "enum": [
+       "480P",
+       "768P"
+      ],
+      "type": "string",
+      "default": "768P"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "auto"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "Last frame"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "minimax/h3-highspeed/reference-to-video",
+   "title": "MiniMax H3 Highspeed \u2014 Reference to video",
+   "family": "MiniMax H3 Highspeed",
+   "provider": "MiniMax",
+   "kind": "reference_to_video",
+   "output": "video",
+   "summary": "Quick 4 to 15 second footage guided by pictures and clips.",
+   "notes": [
+    "Duration is 4 to 15 seconds."
+   ],
+   "media_fields": {
+    "audio_urls": "audio",
+    "image_urls": "image",
+    "video_urls": "video"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 7000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 4
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 3
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Reference pictures",
+      "maxItems": 9
+     },
+     "resolution": {
+      "enum": [
+       "480P",
+       "768P"
+      ],
+      "type": "string",
+      "default": "768P"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Reference clips",
+      "maxItems": 3
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "auto"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "minimax/h3-lite/text-to-video",
+   "title": "MiniMax H3 Lite \u2014 Text to video",
+   "family": "MiniMax H3 Lite",
+   "provider": "MiniMax",
+   "kind": "text_to_video",
+   "output": "video",
+   "summary": "The cheapest way to try an idea: 4 to 15 seconds at 768p.",
+   "notes": [
+    "Duration is 4 to 15 seconds."
+   ],
+   "media_fields": {},
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 7000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 4
+     },
+     "resolution": {
+      "enum": [
+       "480P",
+       "768P"
+      ],
+      "type": "string",
+      "default": "768P"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "minimax/h3-lite/image-to-video",
+   "title": "MiniMax H3 Lite \u2014 Image to video",
+   "family": "MiniMax H3 Lite",
+   "provider": "MiniMax",
+   "kind": "image_to_video",
+   "output": "video",
+   "summary": "A first or last frame comes alive, for the least: 4 to 15 seconds.",
+   "notes": [
+    "Duration is 4 to 15 seconds."
+   ],
+   "media_fields": {
+    "image_url": "image",
+    "end_image_url": "image"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 7000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 4
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "First frame"
+     },
+     "resolution": {
+      "enum": [
+       "480P",
+       "768P"
+      ],
+      "type": "string",
+      "default": "768P"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "16:9"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "title": "Last frame"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
+  },
+  {
+   "id": "minimax/h3-lite/reference-to-video",
+   "title": "MiniMax H3 Lite \u2014 Reference to video",
+   "family": "MiniMax H3 Lite",
+   "provider": "MiniMax",
+   "kind": "reference_to_video",
+   "output": "video",
+   "summary": "Footage guided by pictures and clips, for the least: 4 to 15 seconds.",
+   "notes": [
+    "Duration is 4 to 15 seconds."
+   ],
+   "media_fields": {
+    "audio_urls": "audio",
+    "image_urls": "image",
+    "video_urls": "video"
+   },
+   "required": [
+    "prompt"
+   ],
+   "schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 7000
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 4
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 3
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Reference pictures",
+      "maxItems": 9
+     },
+     "resolution": {
+      "enum": [
+       "480P",
+       "768P"
+      ],
+      "type": "string",
+      "default": "768P"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Reference clips",
+      "maxItems": 3
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   },
+   "docs": "",
+   "preview": true,
+   "added": "2026-11-25"
   }
  ]
 }

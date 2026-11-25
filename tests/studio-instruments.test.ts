@@ -186,3 +186,27 @@ test("instrument loop: 4 at once every 15 s unless STUDIO_INSTRUMENT_PARALLEL ra
   assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "abc" }), { parallel: 4, tickMs: 15_000 });
   assert.deepEqual(instrumentLoopSettings({ STUDIO_INSTRUMENT_PARALLEL: "0" }), { parallel: 4, tickMs: 15_000 });
 });
+
+test("the Nov 25 2026 models are offered and priced: Kling 4.0 (+Flash, Image), Seedream 5.0 Pro, MiniMax H3 Highspeed/Lite, Clone8 Halo", () => {
+  const on = instrumentsEnabled(ENV, { preview: true });
+  for (const id of ["kling-video/v4.0/text-to-video", "kling-video/v4.0/video-edit", "kling-video/v4.0-flash/image-to-video", "kling-image/v4.0/edit", "bytedance/seedream/v5.0/pro/text-to-image", "minimax/h3-highspeed/text-to-video", "minimax/h3-lite/reference-to-video", "clone8/halo/text-to-video"])
+    assert.ok(on.some((m) => m.id === id), `${id} should be offered`);
+  const kling = instrumentById("kling-video/v4.0/text-to-video", ENV, { preview: true })!;
+  assert.equal(Math.round(tableUsd(kling, { duration: 10 }, null)! * 1e4) / 1e4, 1.879, "1080p is its default");
+  assert.equal(Math.round(tableUsd(kling, { duration: 10, resolution: "720p" }, null)! * 1e4) / 1e4, 1.257);
+  assert.equal(Math.round(tableUsd(instrumentById("kling-video/v4.0/video-edit", ENV, { preview: true })!, { duration: 5, resolution: "720p" }, 5)! * 1e4) / 1e4, 0.772, "edits bill at the with-a-clip rate");
+  assert.equal(tableUsd(instrumentById("kling-image/v4.0/text-to-image", ENV, { preview: true })!, { resolution: "8k" }, null), 0.157);
+  assert.equal(tableUsd(instrumentById("bytedance/seedream/v5.0/pro/edit", ENV, { preview: true })!, {}, null), 0.108, "2k by default");
+  assert.equal(Math.round(tableUsd(instrumentById("minimax/h3-lite/text-to-video", ENV, { preview: true })!, { duration: 10, resolution: "480P" }, null)! * 1e4) / 1e4, 0.25);
+  assert.equal(listPrice("minimax/h3/text-to-video")!.usd, 0.13, "the older H3 keeps its own price; the new lines are not caught by its prefix");
+  assert.throws(() => validateParams(kling, { prompt: "x", dynamic_range: "hdr" }), /not a setting/, "HDR is priced on top of the table, so it is not offered yet");
+  // Halo: a third party's exclusive, offered under a Clone8 name; calls go to the real path, nothing shown names it
+  const halo = instrumentById("clone8/halo/image-to-video", ENV, { preview: true })!;
+  assert.equal(apiPath(halo), "sand/magi-2/image-to-video");
+  assert.equal(halo.provider, "Clone8");
+  assert.equal(tableUsd(halo, { duration: 10 }, null), 0.8);
+  assert.deepEqual(halo.media_fields, { image_url: "image", end_image_url: "image" });
+  const shown = JSON.stringify(publicInstrument(halo, ENV, PLANS));
+  assert.ok(!/magi|sand/i.test(shown), `Halo leaks its source: ${shown.slice(0, 300)}`);
+  assert.equal(instrumentById("sand/magi-2/text-to-video", ENV, { preview: true })?.id, "clone8/halo/text-to-video", "the real path still resolves (jobs and admin)");
+});

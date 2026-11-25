@@ -24,6 +24,7 @@ import { HF_BASE, billedUsdOf, higgsfieldAuth, RecastError, makePoster, probeSec
 import { toJpeg } from "./studio-characters.js";
 import { creditValueFloor, creditsForCost, higgsfieldDiscount, marginForSecond, seedanceDiscount, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
 import { claimJob } from "./studio-leases.js";
+import { withRecipe } from "./studio-presets.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -36,6 +37,11 @@ export type Instrument = {
   pricing?: Pricing; minutes_from?: "source" | "length";
   /** the vendor's path for this model when our public id differs (vendor-named ids get a clone8/ alias) */
   api_path?: string;
+  /** a model added to the catalog but not yet run once: offered to admins only, until STUDIO_INSTRUMENTS_PREVIEW_OPEN=true
+   *  (owner, Nov 25 2026: the new models show to the owner first) */
+  preview?: boolean;
+  /** when the model joined the catalog (YYYY-MM-DD): the home's Models tab marks recent ones New */
+  added?: string;
 };
 type Catalog = { generated_at: string; source: string; models: Instrument[] };
 /** What each kind does, for models whose scraped summary is unusable. */
@@ -82,13 +88,14 @@ export function allInstruments(): Instrument[] {
 }
 /** The instruments on offer: the video models need HIGGSFIELD_API_KEY, the audio ones ELEVENLABS_API_KEY, all behind
  *  STUDIO_INSTRUMENTS_ENABLED=true, narrowed by an allow list or a hidden list. */
-export function instrumentsEnabled(env: Record<string, string | undefined> = process.env): Instrument[] {
+export function instrumentsEnabled(env: Record<string, string | undefined> = process.env, opts: { preview?: boolean } = {}): Instrument[] {
   if (env.STUDIO_INSTRUMENTS_ENABLED !== "true") return [];
   const allow = split(env.STUDIO_INSTRUMENTS_ALLOW), hide = new Set(split(env.STUDIO_INSTRUMENTS_HIDDEN));
-  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!allow.length || allow.includes(m.id) || allow.includes(apiPath(m))) && !hide.has(m.id) && !hide.has(apiPath(m)));
+  const previews = opts.preview || env.STUDIO_INSTRUMENTS_PREVIEW_OPEN === "true";
+  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!m.preview || previews) && (!allow.length || allow.includes(m.id) || allow.includes(apiPath(m))) && !hide.has(m.id) && !hide.has(apiPath(m)));
 }
 const split = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-export const instrumentById = (id: unknown, env?: Record<string, string | undefined>): Instrument | null => instrumentsEnabled(env).find((m) => m.id === id || apiPath(m) === id) ?? null;
+export const instrumentById = (id: unknown, env?: Record<string, string | undefined>, opts: { preview?: boolean } = {}): Instrument | null => instrumentsEnabled(env, opts).find((m) => m.id === id || apiPath(m) === id) ?? null;
 
 // ---------------------------------------------------------------------------------------------------
 // Parameters: a small JSON-schema check, enough for what the catalog uses (types, enums, ranges, arrays).
@@ -199,6 +206,19 @@ export const LIST_PRICES: Record<string, UnitPrice> = {
   "xai/grok-imagine-image-2.0": { per: "image", usd: 0.04 }, "marketing-studio/image": { per: "image", usd: 0.016 }, "higgsfield/ads-studio": { per: "image", usd: 0.084 },
   "higgsfield-ai/soul/standard": { per: "image", usd: 0.094 }, "higgsfield-ai/soul/v2/standard": { per: "image", usd: 0.094 }, "higgsfield-ai/soul/cinema": { per: "image", usd: 0.094 },
   "ideogram/v4.0": { per: "image", usd: 0.03 }, "recraft/v4.1": { per: "image", usd: 0.035 }, "alibaba/qwen-image-3": { per: "image", usd: 0.04 }, "z-image/turbo": { per: "image", usd: 0.015 },
+  // Added Nov 25 2026 from the platform's published self-serve rates (open.higgsfield.ai model pages). Modes that take a
+  // clip are billed on output plus input seconds; the table assumes an input as long as the output (the high side).
+  "kling-video/v4.0": { per: "second", usd: 0.1879, by_resolution: { "720p": 0.1257, "1080p": 0.1879, "4k": 0.549 } },
+  "kling-video/v4.0/reference-to-video": { per: "second", usd: 0.2336, by_resolution: { "720p": 0.1544, "1080p": 0.2336, "4k": 0.658 } },
+  "kling-video/v4.0/video-edit": { per: "second", usd: 0.2336, by_resolution: { "720p": 0.1544, "1080p": 0.2336, "4k": 0.658 } },
+  "kling-video/v4.0-flash": { per: "second", usd: 0.094 }, "kling-video/v4.0-flash/reference-to-video": { per: "second", usd: 0.126 }, "kling-video/v4.0-flash/video-edit": { per: "second", usd: 0.126 },
+  "kling-image/v4.0": { per: "image", usd: 0.063, by_resolution: { "2k": 0.063, "4k": 0.094, "8k": 0.157 } },
+  "sand/magi-2": { per: "second", usd: 0.08 },
+  "bytedance/seedream/v5.0/pro": { per: "image", usd: 0.108, by_resolution: { "1k": 0.054, "1.5k": 0.054, "2k": 0.108 } },
+  "minimax/h3-highspeed": { per: "second", usd: 0.06, by_resolution: { "480P": 0.04, "768P": 0.06 } },
+  "minimax/h3-highspeed/reference-to-video": { per: "second", usd: 0.12, by_resolution: { "480P": 0.08, "768P": 0.12 } },
+  "minimax/h3-lite": { per: "second", usd: 0.04, by_resolution: { "480P": 0.025, "768P": 0.04 } },
+  "minimax/h3-lite/reference-to-video": { per: "second", usd: 0.08, by_resolution: { "480P": 0.05, "768P": 0.08 } },
 };
 export function listPrice(id: string): UnitPrice | null {
   const key = Object.keys(LIST_PRICES).filter((k) => id === k || id.startsWith(k + "/")).sort((a, b) => b.length - a.length)[0];
@@ -281,12 +301,12 @@ export function instrumentCredits(usd: number, plans: PlanLike[], env: Record<st
   return Math.max(1, creditsForCost(cost, floor, perSecond != null ? marginForSecond(perSecond, plans) : MARGIN_TARGET));
 }
 
-export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; cost_usd?: number | null; priced_by: "estimate" | "table"; units: number; output: "video" | "image" | "audio" | "text" }; summary: string };
+export type InstrumentQuote = { tool: "instrument"; credits: number; options: { endpoint: string; params: Record<string, any>; inputs: Record<string, string | string[]>; usd: number; cost_usd?: number | null; priced_by: "estimate" | "table"; units: number; output: "video" | "image" | "audio" | "text"; /** a preset run: its id (the runner adds its recipe) and its name */ preset?: string; preset_title?: string }; summary: string };
 
 /** Validate, price and describe one instrument request. `signInputs` turns the person's assets into URLs for the estimate. */
-export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], raw: any, resolveAssets: (ids: string[]) => Promise<Map<string, { url: string; kind: string; seconds: number | null }>>): Promise<InstrumentQuote> {
+export async function quoteInstrument(deps: InstrumentDeps, plans: PlanLike[], raw: any, resolveAssets: (ids: string[]) => Promise<Map<string, { url: string; kind: string; seconds: number | null }>>, opts: { preview?: boolean } = {}): Promise<InstrumentQuote> {
   const env = deps.env ?? process.env;
-  const inst = instrumentById(raw?.endpoint, env);
+  const inst = instrumentById(raw?.endpoint, env, opts);
   if (!inst) throw new InstrumentError("instrument_unknown", "That model is not offered", 404);
   const params = validateParams(inst, raw?.params);
   const inputs = validateInputs(inst, raw?.inputs);
@@ -374,13 +394,14 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
           urls.set(id, s.data.signedUrl);
         }
       }
-      const body = buildBody(o.params ?? {}, o.inputs ?? {}, (id) => urls.get(id) ?? "");
+      // a preset's recipe is ours and stays on the server: the job keeps only what the person chose, the recipe joins here
+      const body = buildBody(withRecipe(o.preset, o.params ?? {}), o.inputs ?? {}, (id) => urls.get(id) ?? "");
       await renew(sb, job, { note: "Sending the request to the renderer" });
       const r = await hf(deps, `/${apiPath(inst)}`, { method: "POST", body: JSON.stringify(body), idempotency: job.id });
       if (r.status !== 200 && r.status !== 201 && r.status !== 202) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
       if (!r.body?.request_id) throw new RecastError("recast_rejected", "no request id in the reply");
       requestId = String(r.body.request_id);
-      await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In Higgsfield's queue" });
+      await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "In the renderer's queue" });
       log(`[instrument] submitted ${JSON.stringify({ job: job.id, endpoint: inst.id, request: requestId })}`);
     }
     const started = Date.parse(job.progress?.submitted_at ?? "") || now();
@@ -507,5 +528,6 @@ export function publicInstrument(inst: Instrument, env: Record<string, string | 
   const unitUsd = price ? ((price as any).by_resolution?.[String(inst.schema?.properties?.resolution?.default ?? "")] ?? price.usd) : 0;
   const hint = price && plans.length ? { per: price.per, credits: instrumentCredits(unitUsd, plans, env, { inst, seconds: inst.output === "video" && !inst.pricing ? 1 : null }), unit: unitLabel(inst) } : null;
   // the provider is ours to know; the person sees a Clone8 family
-  return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider === "elevenlabs" ? "Clone8" : inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: null, price_hint: hint };
+  return { id: inst.id, title: inst.title, family: inst.family, provider: inst.provider === "elevenlabs" ? "Clone8" : inst.provider, kind: inst.kind, kind_label: KIND_LABEL[inst.kind], output: inst.output, summary: inst.summary, notes: inst.notes.slice(0, 6), fields, media, docs: null, price_hint: hint,
+    added: inst.added ?? null, preview: !!inst.preview };
 }

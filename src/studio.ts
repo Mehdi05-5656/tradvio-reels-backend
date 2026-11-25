@@ -21,6 +21,7 @@ import { communityEnabled } from "./studio-community.js";
 import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
 import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
+import { presetById, presetChoices, presetRequest, presetsOffered, publicPreset, PresetError } from "./studio-presets.js";
 import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
 import { phCapture } from "./posthog.js";
@@ -618,7 +619,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
-    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError || e instanceof MotivationError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof PresetError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError || e instanceof MotivationError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     // the no-plan answer carries words too: build 12 of the iPhone app shows `detail` under the button as it is
@@ -1205,9 +1206,23 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   });
 
   // Instruments: the catalog the dashboard draws forms from. Public like /plans; nothing in it is per person.
-  app.get("/api/studio/instruments", (_req, res) => {
-    res.setHeader("Cache-Control", "public, max-age=300");
-    res.json({ instruments: instrumentsEnabled(env).map((m) => publicInstrument(m, env, PLANS)) });
+  // ?preview=1 from an admin also lists the models added but not yet run once (owner, Nov 25 2026); that answer is per person
+  app.get("/api/studio/instruments", async (req, res) => {
+    try {
+      const preview = req.query.preview === "1" && (await isStudioAdmin(req, sbFn(), env).catch(() => false));
+      res.setHeader("Cache-Control", preview ? "private, no-store" : "public, max-age=300");
+      res.json({ instruments: instrumentsEnabled(env, { preview }).map((m) => publicInstrument(m, env, PLANS)) });
+    } catch (e) { fail(res, e); }
+  });
+  // Presets (the home's Trending tab, src/studio-presets.ts): the recipe never leaves the server. Admins (?preview=1)
+  // also see presets that have no example yet, so the examples can be made.
+  app.get("/api/studio/presets", async (req, res) => {
+    try {
+      const admin = req.query.preview === "1" && (await isStudioAdmin(req, sbFn(), env).catch(() => false));
+      const models = new Map(instrumentsEnabled(env, { preview: admin }).map((m) => [m.id, m]));
+      res.setHeader("Cache-Control", admin ? "private, no-store" : "public, max-age=300");
+      res.json({ presets: presetsOffered(new Set(models.keys()), { admin }).map((p) => publicPreset(p, models.get(p.endpoint) ?? null)) });
+    } catch (e) { fail(res, e); }
   });
   /** The person's assets as signed URLs for an instrument quote or estimate (10 minutes is plenty for an estimate). */
   const resolveAssets = (sb: SupabaseClient, u: string) => async (ids: string[]) => {
@@ -1225,7 +1240,14 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   };
   const quoteFor = async (sb: SupabaseClient, u: string, body: any, o: { owner?: boolean } = {}): Promise<Quote> => {
     if (String(body?.tool ?? "") === "instrument") {
-      const q: InstrumentQuote = await quoteInstrument({ env, log }, PLANS, body?.options, resolveAssets(sb, u));
+      // a preset: its recipe fills the request; the job keeps the preset's id and only what the person chose
+      const preset = body?.options?.preset != null ? presetById(body.options.preset) : null;
+      if (body?.options?.preset != null && (!preset || (!preset.example && !o.owner))) throw new PresetError("preset_unknown", "That preset is not offered", 404);
+      if (!preset) return await quoteInstrument({ env, log }, PLANS, body?.options, resolveAssets(sb, u), { preview: o.owner });
+      const req = presetRequest(preset, body.options);
+      const q: InstrumentQuote = await quoteInstrument({ env, log }, PLANS, req, resolveAssets(sb, u), { preview: o.owner });
+      const { params: _full, ...rest } = q.options;
+      q.options = { ...rest, params: presetChoices(preset, body.options.params), preset: preset.id, preset_title: preset.title };
       return q;
     }
     if (String(body?.tool ?? "") === "captions") return quoteCaptions(sb, u, env, body?.options);
