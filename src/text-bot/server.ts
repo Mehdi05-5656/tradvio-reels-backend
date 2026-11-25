@@ -596,8 +596,11 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
       const emails: Record<string, string | null> = {}, plans: Record<string, string | null> = {};
       for (let i = 0; i < ids.length; i += 20) await Promise.all(ids.slice(i, i + 20).map(async (u) => { try { const r: any = await (sb as any).auth.admin.getUserById(u); emails[u] = r?.data?.user?.email ?? null; } catch { emails[u] = null; } }));
       for (let i = 0; i < ids.length; i += 200) { const c = await sb.from("studio_customers").select("user_id,plan_id,status").in("user_id", ids.slice(i, i + 200)); for (const r of (c.data ?? []) as any[]) plans[r.user_id] = r.plan_id && ["active", "trialing", "past_due"].includes(r.status) ? r.plan_id : null; }
-      const ctaRows = await pages<CtaRow>((f) => sb.from("studio_events").select("user_id,props,created_at").eq("kind", "feature").eq("name", "text_cta").gte("created_at", since).order("created_at").range(f, f + 999));
-      res.json({ ...textAdminView({ links, events, days, since, emails, plans }), ctas: ctaReport(ctaRows), open: textOpen(env), bot: botName, imessage: imessageEnabled(env) ? { open: imessageOpen(env), number: env.SENDBLUE_FROM_NUMBER } : null });
+      // the CTA table: newest first, at most 20k rows; if it fails the rest of the tab still loads
+      let ctas: ReturnType<typeof ctaReport> | null = null;
+      try { ctas = ctaReport(await pages<CtaRow>((f) => sb.from("studio_events").select("user_id,props,created_at").eq("kind", "feature").eq("name", "text_cta").gte("created_at", since).order("created_at", { ascending: false }).range(f, f + 999), 20_000)); }
+      catch (e) { console.error("[text] cta report", (e as Error)?.message ?? e); }
+      res.json({ ...textAdminView({ links, events, days, since, emails, plans }), ...(ctas ? { ctas } : {}), open: textOpen(env), bot: botName, imessage: imessageEnabled(env) ? { open: imessageOpen(env), number: env.SENDBLUE_FROM_NUMBER } : null });
     } catch (e) { fail(res, e); }
   });
   app.get("/api/studio/admin/text/chat", async (req, res) => {
