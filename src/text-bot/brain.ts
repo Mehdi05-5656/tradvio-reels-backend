@@ -10,6 +10,7 @@ import * as act from "./actions.js";
 import { shape } from "./shape.js";
 import { prepareEdit } from "./edit.js";
 import { APP_KINDS, appLink } from "./app-link.js";
+import { blanked } from "./guard.js";
 import type { Pending, PendingStore, Spend } from "./gate.js";
 
 export type Media = { kind: "photo" | "video" | "audio"; bytes: Buffer; name: string; caption?: string };
@@ -57,6 +58,7 @@ ${featureList()}
 THEIR OWN AI CHAT APP
 - Clone8 also works inside the person's own AI chat app, through the Clone8 connector: story videos, Signature stories written right there in their own chat (it often costs fewer credits), motivation videos and films. Nothing else (no clips, edits or posting).
 - Use send_app_link only when they ask whether they can, or say they want to, use their own AI app with Clone8. Nothing else is a reason (not price, not the engine, not the length). When you prepare a Signature story here, the system offers it by itself; do not add it.
+- If they ask about that message, call its buttons "the set-up button", "the open button" and "the copy button", never by the words on them.
 - send_app_link sends the message and its buttons itself. Never name that app or any AI yourself, in any message. After it succeeds, stop, or add one short line.
 
 ACTIONS AND THE YES
@@ -149,7 +151,8 @@ async function mediaFor(d: BrainDeps, it: { ref?: string; media?: string; label:
   return null;
 }
 
-export type TurnResult = { text: string; pending: Pending | null; usd: number; rounds: number; /** what was shown in the chat this turn, numbered, with refs */ sent?: string[] };
+export type TurnResult = { text: string; pending: Pending | null; usd: number; rounds: number; /** what was shown in the chat this turn, numbered, with refs */ sent?: string[];
+  /** messages to send after the YES question (only if it went out) */ after?: Array<{ text: string; buttons: Button[]; own: string[] }> };
 
 const wordsOf = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 3);
 const LIGHT_PER_DAY = { links: 5, copies: 12 };
@@ -157,7 +160,7 @@ const LIGHT_PER_DAY = { links: 5, copies: 12 };
 export async function think(d: BrainDeps, st: ChatState, userText: string, o: { tap?: boolean } = {}): Promise<TurnResult> {
   const now = (d.now ?? Date.now)(), f = d.fetch ?? fetch, log = d.log ?? (() => undefined);
   const marks: string[] = [];
-  const held: { pending: Pending | null } = { pending: null }; let spent = 0; const sent: string[] = [];
+  const held: { pending: Pending | null } = { pending: null }; let spent = 0; const sent: string[] = []; const after: NonNullable<TurnResult["after"]> = [];
   // only what the person typed: taps and system notes are not their words
   const recent = [...st.history.filter((t) => t.role === "user" && !t.tap).slice(-12).map((t) => t.text), ...(o.tap ? [] : [userText])];
   const titleOf = (v: { asset_id?: string; job_id?: string; output_key?: string }): string | null => {
@@ -172,14 +175,15 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     nameOf: (id) => d.index.current?.cards.find((c) => c.type === "file" && c.asset_id === id)?.title ?? null });
 
   /** The fixed "make it in your own AI app" message (app-link.ts): at most three a day in a chat. */
-  const offerApp = async (kind: string, request: string): Promise<any> => {
+  const offerApp = async (kind: string, request: string, beside = false): Promise<any> => {
     const l = light(); if ((l.app_links ?? 0) >= 3) return { error: "daily_limit", detail: "Already sent three of these today; point them to the earlier message." };
     const me = await d.api.call("GET", "/api/studio/me"), url = me.json?.connector?.url;
     if (!url) return { error: "not_available", detail: "Their AI app can't be used with Clone8 on this account; carry on here." };
     const ix = await index(d).catch(() => null);
-    const m = appLink({ kind, request, connected: !!ix?.connector_used, connectorUrl: String(url) });
+    const m = appLink({ kind, request, connected: !!ix?.connector_used, connectorUrl: String(url), instead: beside });
     if ("error" in m) return m;
-    await d.out.text(st.chat, m.text, m.buttons, m.own);
+    // beside a question: it follows the question (the bot sends it then, and only if the question went out)
+    if (beside) after.push({ text: m.text, buttons: m.buttons, own: m.own }); else await d.out.text(st.chat, m.text, m.buttons, m.own);
     l.app_links = (l.app_links ?? 0) + 1;
     log("app_link", { kind, setup: !ix?.connector_used });
     sent.push(`a message with a link to make "${m.prompt}" in their own AI app${ix?.connector_used ? "" : ", with the one-time set-up link"}`);
@@ -230,7 +234,9 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       for (const [i, it] of items.entries()) {
         // a thing from the account is named by the account's own title, whatever label came with it
         const card = it.ref ? cardBy(ix, String(it.ref)) : null;
-        const label = (card ? card.title : String(it.label ?? "")).replace(/\s+/g, " ").trim().slice(0, 80);
+        const raw = (card ? card.title : String(it.label ?? "")).replace(/\s+/g, " ").trim().slice(0, 80);
+        // only the account's own titles are exempt from the wording check; a label the model wrote is not
+        const label = card || !blanked(raw) ? raw : `Option ${i + 1}`;
         const m = await mediaFor(d, it, marks).catch(() => null);
         table.push({ n: i + 1, ref: String(card?.ref ?? it.media ?? ""), label });
         if (m) got.push({ ...m, caption: `${i + 1}. ${label}` });
@@ -259,10 +265,11 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     const prepared = async (make: () => Promise<Pending>) => { await index(d).catch(() => null); if (name === "prepare_job" && a?.from_result) { if (light().copies >= LIGHT_PER_DAY.copies) throw new act.ActionError("daily_limit", "That is enough copies into the library for one day by text; use the app for more."); light().copies++; } held.pending = await make(); return { ok: true, sent: "The system sent the person the question with its code. Do not repeat it, the price or the code. Stop here: reply with nothing, or one short line." }; };
     if (name === "prepare_job") {
       const r = await prepared(() => act.prepareJob(actx(), a ?? {}));
-      const o = a?.options ?? {};
-      if (a?.tool === "story" && o.engine === "premium" && o.style !== "blocky" && !(light().app_links ?? 0)) {
+      // what will really run (the checked request in the question), not what the model wrote
+      const body = held.pending?.steps.find((x) => x.body?.tool)?.body, o = body?.options ?? {};
+      if (body?.tool === "story" && o.engine === "premium" && o.style !== "blocky" && !(light().app_links ?? 0)) {
         const topic = String(o.topic ?? "").trim();
-        if (topic) await offerApp("signature", `${topic}${Number(o.seconds) ? `, ${Number(o.seconds)} seconds` : ""}`).catch(() => null);
+        if (topic) await offerApp("signature", `${topic}${Number(o.seconds) ? `, ${Number(o.seconds)} seconds` : ""}`, true).catch(() => null);
       }
       return r;
     }
@@ -333,5 +340,5 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     // once a question has gone out, anything the model says before it would only blur it
     if (held.pending) text = "";
   }
-  return { text, pending: held.pending, usd: spent, rounds: rounds + 1, sent };
+  return { text, pending: held.pending, usd: spent, rounds: rounds + 1, sent, after };
 }

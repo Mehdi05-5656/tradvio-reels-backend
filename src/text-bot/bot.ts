@@ -180,10 +180,14 @@ export function makeBot(d: BotDeps) {
     if (r.sent?.length) for (const x of r.sent) note(st, `Sent to the person: ${x}`);
     d.log("turn", { usd: Math.round(r.usd * 1e4) / 1e4, rounds: r.rounds, pending: r.pending?.id ?? null });
     // what the person typed and what is on the table are theirs: quoting them back is not a leak
-    const own = [text, ...st.table.map((x) => x.label)];
+    // (a short message is not: a one-word "Claude?" must not let the reply say it)
+    const own = [...(text.trim().split(/\s+/).length >= 4 && text.length >= 20 ? [text] : []), ...st.table.map((x) => x.label)];
     if (r.text) await say(st, r.text, undefined, own);
-    if (r.pending && st.pending.live?.id === r.pending.id) await ask(st, r.pending);
-    else if (!r.text) await say(st, "I didn't get that. Could you say it another way?");
+    if (r.pending && st.pending.live?.id === r.pending.id) {
+      await ask(st, r.pending);
+      // what goes with the question (the "or make it in your own AI app" message), only if the question went out
+      if (st.pending.live?.id === r.pending.id) for (const x of r.after ?? []) await d.out.text(st.chat, x.text, x.buttons, x.own).catch(() => undefined);
+    } else if (!r.text) await say(st, "I didn't get that. Could you say it another way?");
     if (st.history.length > 80) st.history = st.history.slice(-60);
   }
 

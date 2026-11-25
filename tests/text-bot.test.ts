@@ -536,3 +536,27 @@ test("their own AI app: a fixed message with the prepared chat link; the set-up 
   assert.ok(SYSTEM.includes("send_app_link") && !/claude/i.test(SYSTEM), "the instructions never name the app");
   assert.ok(TOOLS.some((t) => t.name === "send_app_link"));
 });
+
+test("their own AI app, review fixes: no links inside, short copy, safe link characters, sent after the question, short messages not exempt", async () => {
+  const { appLink } = await import("../src/text-bot/app-link.js");
+  const U = "https://mcp.clone8.io/api/studio/mcp";
+  for (const bad of ["cats, see https://evil.example/x?y=1", "cats www.evil.example", "cats at evil.example/x", "cats evil.com"]) assert.equal((appLink({ kind: "story", request: bad, connected: true, connectorUrl: U }) as any).error, "not_sendable", bad);
+  assert.ok(!("error" in appLink({ kind: "story", request: "why cats hate water, 30 seconds. Really funny", connected: true, connectorUrl: U })), "sentences with full stops are fine");
+  const long = appLink({ kind: "signature", request: "x ".repeat(400), connected: true, connectorUrl: U }) as any;
+  assert.ok(long.prompt.length <= 256, `copy fits Telegram (${long.prompt.length})`);
+  const q = (appLink({ kind: "story", request: "don't (really) cry", connected: true, connectorUrl: U }) as any).buttons[0].url;
+  assert.ok(!/['()]/.test(q), q);
+  assert.match((appLink({ kind: "signature", request: "cats", connected: false, connectorUrl: U, instead: true }) as any).text, /^Or, instead of replying YES/);
+  // beside a question: the extra goes out after it, and not at all when the question was dropped
+  const b = botWith(async (st, _t, api) => ({ ...(await swapTurn(st, "", api)), after: [{ text: "Or, instead of replying YES, make it there", buttons: [], own: [] }] }));
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "make it", private: true });
+  const iq = b.sent.findIndex((x) => /reply: YES/.test(x.text)), ia = b.sent.findIndex((x) => /instead of replying YES/.test(x.text));
+  assert.ok(iq >= 0 && ia > iq, `question first (${iq}), then the extra (${ia})`);
+  // a one-word message is not exempt: the reply cannot say a blocked word just because the person did
+  const c = botWith(async () => ({ text: "Yes, Claude works with Clone8.", pending: null, usd: 0, rounds: 1 }));
+  c.state.owner = "1";
+  const seen: string[] = []; const t0 = c.out.text; c.out.text = async (ch: string, text: string, bt?: any[], own?: string[]) => { seen.push(guard(text, own).text); return t0(ch, text, bt); };
+  await c.bot.handle({ chat: "1", from: "1", text: "Claude?", private: true });
+  assert.ok(seen.includes(SAFE_LINE), seen.join(" | "));
+});

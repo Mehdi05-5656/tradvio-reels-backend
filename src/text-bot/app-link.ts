@@ -23,20 +23,26 @@ const LEAD: Record<AppKind, string> = {
 
 export type AppLink = { text: string; buttons: Button[]; own: string[]; prompt: string };
 /** The message and its buttons. `connected`: they already made something through the connector (no setup step). */
-export function appLink(o: { kind: string; request: string; connected: boolean; connectorUrl: string }): AppLink | { error: string; detail: string } {
+/** Encodes everything but letters, digits and - _ . ~ (iMessage ends a link at a quote or a bracket). */
+const enc = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+/** `instead`: sent beside a waiting YES question for the same thing (so it says "instead of YES"). */
+export function appLink(o: { kind: string; request: string; connected: boolean; connectorUrl: string; instead?: boolean }): AppLink | { error: string; detail: string } {
   const kind = (APP_KINDS as readonly string[]).includes(o.kind) ? (o.kind as AppKind) : "other";
-  const request = String(o.request ?? "").replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().replace(/^["“”']+|["“”']+$/g, "").trim().slice(0, 400);
+  const request = String(o.request ?? "").replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().replace(/^["“”']+|["“”']+$/g, "").trim().slice(0, 180);
   if (request.length < 3) return { error: "missing", detail: "Pass what they want made, in their words" };
   // the request goes out inside an exempt message, so it must not carry a supplier's name itself
+  // nor a link or a web address (the message is exempt from the link check, so none may ride inside it)
+  if (/https?:|www\.|[a-z0-9-]+\.[a-z]{2,}(\/|\b)/i.test(request)) return { error: "not_sendable", detail: "The request can't carry a link or web address; write just what they want made" };
   if (blanked(request)) return { error: "not_sendable", detail: "The request can't name a supplier or service; write just what they want made" };
   if (!/^https:\/\/[a-z0-9.-]+\/\S*$/i.test(o.connectorUrl)) return { error: "not_available", detail: "The connector is not open for this account" };
   const prompt = `${LEAD[kind]} ${request}`;
-  const open: Button = { label: "Open in Claude", url: `https://claude.ai/new?q=${encodeURIComponent(prompt)}` };
-  const add: Button = { label: "Add Clone8 to Claude", url: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Clone8&connectorUrl=${encodeURIComponent(o.connectorUrl)}` };
+  const open: Button = { label: "Open in Claude", url: `https://claude.ai/new?q=${enc(prompt)}` };
+  const add: Button = { label: "Add Clone8 to Claude", url: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Clone8&connectorUrl=${enc(o.connectorUrl)}` };
   const copy: Button = { label: "Copy the request", copy: prompt };
+  const lead = o.instead ? "Or, instead of replying YES, make it in Claude with Clone8" : "Make it in Claude with Clone8";
   const text = o.connected
-    ? `Make it in Claude with Clone8: Open in Claude starts a new chat with this already typed in. Just send it.\n\n“${prompt}”`
-    : `You can make this in Claude with Clone8. First time only: Add Clone8 to Claude, sign in to Clone8 and tap Allow. Then Open in Claude starts a new chat with this already typed in. Just send it.\n\n“${prompt}”`;
+    ? `${lead}: Open in Claude starts a new chat with this already typed in. Just send it.\n\n“${prompt}”`
+    : `${o.instead ? "Or, instead of replying YES, you can make this in Claude with Clone8" : "You can make this in Claude with Clone8"}. First time only: Add Clone8 to Claude, sign in to Clone8 and tap Allow. Then Open in Claude starts a new chat with this already typed in. Just send it.\n\n“${prompt}”`;
   const buttons = o.connected ? [open, copy] : [add, open, copy];
   return { text, buttons, own: [text, prompt, ...linkLines(buttons), ...buttons.map((b) => b.label)], prompt };
 }
