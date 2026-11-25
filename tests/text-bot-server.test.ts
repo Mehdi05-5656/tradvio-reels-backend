@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { internalPass, verifyInternal, INTERNAL_HEADER } from "../src/text-bot/internal.js";
 import { registerTextBot, serverApi, botConfig, WEBHOOK_PATH } from "../src/text-bot/server.js";
 import { textAdminView, chatLines } from "../src/text-bot/admin.js";
+import { parseSendblue, verifySendblue, withButtons, handleId, mask } from "../src/text-bot/sendblue.js";
 
 type Row = Record<string, any>;
 const OWNER = "11111111-1111-4111-8111-111111111111", OTHER = "22222222-2222-4222-8222-222222222222";
@@ -358,4 +359,80 @@ test("the admin view: each person who connected, what they did, what it cost, wh
   s.tables.studio_text_links = links as any; s.tables.studio_text_events = events.map((e) => ({ ...e, at: new Date().toISOString() })) as any; s.tables.studio_customers = [];
   const ok = await s.call("GET /api/studio/admin/text", { user: OWNER, email: "boss@clone8.io" });
   assert.equal(ok.status, 200, JSON.stringify(ok.json)); assert.equal(ok.json.people.length, 2); assert.equal(ok.json.people.find((p: any) => p.user_id === OWNER).email, "boss@clone8.io");
+});
+
+// ------------------------------------------------------------------ iMessage (a Sendblue line)
+
+const IM_ENV = { ...ENV, STUDIO_TEXT_IMESSAGE_ENABLED: "true", SENDBLUE_API_KEY_ID: "kid", SENDBLUE_API_SECRET: "ksec", SENDBLUE_FROM_NUMBER: "+15550001111", SENDBLUE_WEBHOOK_SECRET: "whsec-0123456789abcdef" };
+const inbound = (from: string, content: string, handle = `h-${Math.random()}`) => ({ content, number: from, from_number: from, to_number: "+15550001111", is_outbound: false, status: "RECEIVED", message_handle: handle, service: "iMessage", group_id: "" });
+
+test("iMessage: what Sendblue posts is read right; only Sendblue (the secret) is heard; buttons become words", () => {
+  const m = parseSendblue(inbound("+15557654321", "what's my balance", "abc"))!;
+  assert.deepEqual([m.chat, m.from, m.text, m.private, m.name], ["+15557654321", "+15557654321", "what's my balance", true, "•••• 4321"]);
+  assert.equal(m.update_id, handleId("abc")); assert.ok(Number.isSafeInteger(m.update_id));
+  assert.equal(parseSendblue({ ...inbound("+15557654321", "x"), is_outbound: true, status: "SENT" }), null, "our own message echoed back");
+  assert.equal(parseSendblue({ ...inbound("+15557654321", "x"), group_id: "g1" }), null, "group chats are ignored");
+  assert.equal(parseSendblue({ ...inbound("+15557654321", "x"), status: "DELIVERED" }), null);
+  assert.equal(mask("+15557654321"), "•••• 4321");
+  assert.ok(verifySendblue({ "content-type": "application/json", "sb-signing-secret": "whsec-0123456789abcdef" }, "whsec-0123456789abcdef"));
+  assert.ok(verifySendblue({ authorization: "Bearer whsec-0123456789abcdef" }, "whsec-0123456789abcdef"));
+  assert.ok(!verifySendblue({ "sb-signing-secret": "whsec-0123456789abcdeX" }, "whsec-0123456789abcdef"));
+  assert.ok(!verifySendblue({ "sb-signing-secret": "" }, undefined), "no secret set: nothing is accepted");
+  assert.equal(withButtons("Your code: 4821", [{ label: "Copy 4821", copy: "4821" }, { label: "Back to Clone8", url: "https://app.clone8.io/#studio/account?text=1" }, { label: "Elsewhere", url: "https://evil.example/" }, { label: "Yes", data: "y:1" }]),
+    "Your code: 4821\n\nBack to Clone8: https://app.clone8.io/#studio/account?text=1");
+});
+
+test("iMessage: Connect makes a Messages link with the code; LINK code → 4 digits → confirmed → answered as that person", async () => {
+  const sent: Array<{ chat: string; text: string }> = [];
+  const imessageOut: any = { text: async (chat: string, text: string) => { sent.push({ chat, text }); }, media: async () => undefined, typing: async () => undefined };
+  const tables: Record<string, Row[]> = {};
+  const users = { [OWNER]: { id: OWNER, email: "boss@clone8.io", email_confirmed_at: "2026-01-01T00:00:00Z" }, [OTHER]: { id: OTHER, email: "someone@example.com" } };
+  const sb = fakeSb(tables, users);
+  const routes: Record<string, Function> = {};
+  const app: any = { get: (p: string, h: Function) => (routes[`GET ${p}`] = h), post: (p: string, h: Function) => (routes[`POST ${p}`] = h), delete: (p: string, h: Function) => (routes[`DELETE ${p}`] = h) };
+  const bot = registerTextBot(app, () => sb, { env: IM_ENV, out: { text: async () => undefined, media: async () => undefined, typing: async () => undefined } as any, imessageOut, log: () => undefined, port: 1, fetch: fakeNet() as any, think: fakeNet() as any });
+  const call = async (key: string, o: { user?: string; email?: string; body?: any; params?: Row; headers?: Record<string, string> } = {}) => {
+    let status = 200, json: any = null;
+    const res: any = { status: (x: number) => { status = x; return res; }, json: (j: any) => { json = j; return res; }, setHeader: () => undefined };
+    await routes[key]({ auth: o.user ? { user_id: o.user, email: o.email } : null, body: o.body ?? {}, params: o.params ?? {}, query: {}, headers: o.headers ?? {}, header: (k: string) => o.headers?.[k.toLowerCase()] }, res);
+    return { status, json };
+  };
+  // before it opens, the owner's account only; the card is told which channels it may offer
+  const other = await call("GET /api/studio/text/links", { user: OTHER, email: "someone@example.com" });
+  assert.equal(other.json.open, false);
+  const mine = await call("GET /api/studio/text/links", { user: OWNER, email: "boss@clone8.io" });
+  assert.deepEqual(mine.json.channels.imessage, { number: "+15550001111" });
+  assert.equal((await call("POST /api/studio/text/link", { user: OTHER, email: "someone@example.com", body: { channel: "imessage" } })).status, 403);
+  const made = await call("POST /api/studio/text/link", { user: OWNER, email: "boss@clone8.io", body: { channel: "imessage" } });
+  assert.equal(made.status, 200);
+  const code = /^LINK ([A-Za-z0-9_-]{24})$/.exec(made.json.text)![1];
+  assert.equal(made.json.url, `sms:+15550001111&body=${encodeURIComponent(`LINK ${code}`)}`);
+  assert.equal(made.json.qr, `SMSTO:+15550001111:LINK ${code}`);
+  // the webhook: wrong secret refused; our own echo ignored; the person's LINK message kept once
+  const hook = "POST /api/studio/text/imessage/webhook";
+  assert.equal((await call(hook, { body: inbound("+15557654321", `LINK ${code}`), headers: { "sb-signing-secret": "nope-nope-nope-nope" } })).status, 401);
+  await call(hook, { body: { ...inbound("+15557654321", "echo"), is_outbound: true, status: "SENT" }, headers: { "sb-signing-secret": IM_ENV.SENDBLUE_WEBHOOK_SECRET } });
+  assert.equal((tables.studio_text_inbox ?? []).length, 0);
+  // a Telegram code doesn't work on iMessage
+  const tgMade = await call("POST /api/studio/text/link", { user: OWNER, email: "boss@clone8.io", body: { channel: "telegram" } });
+  const tgCode = /start=(.+)$/.exec(tgMade.json.url)![1];
+  await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", `LINK ${tgCode}`))!, "imessage");
+  assert.match(sent.at(-1)!.text, /expired or was already used/);
+  // the real one
+  await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", `LINK ${code}`))!, "imessage");
+  const digits = /Your Clone8 code: (\d{4})/.exec(sent.at(-1)!.text)![1];
+  assert.equal(sent.at(-1)!.chat, "+15557654321");
+  const pend = (tables.studio_text_links ?? []).find((l) => l.channel === "imessage")!;
+  assert.deepEqual([pend.status, pend.handle], ["pending", "•••• 4321"]);
+  const ok = await call("POST /api/studio/text/links/:id/confirm", { user: OWNER, email: "boss@clone8.io", params: { id: pend.id }, body: { code: digits } });
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  assert.match(sent.at(-1)!.text, /Connected to your Clone8 account/);
+  // now a message is answered by the brain, as that person, into that chat
+  await bot.handleUpdate(sb, parseSendblue(inbound("+15557654321", "what's my balance"))!, "imessage");
+  assert.equal(sent.at(-1)!.text, "Your balance is 120 credits.");
+  assert.ok((tables.studio_text_chats ?? []).some((c) => c.channel === "imessage" && c.chat_id === "+15557654321" && c.user_id === OWNER));
+  await bot.flush();
+  assert.ok((tables.studio_text_events ?? []).some((e) => e.channel === "imessage" && e.event === "out"));
+  // the same number on Telegram is a different chat: not connected there
+  assert.equal((tables.studio_text_links ?? []).filter((l) => l.status === "linked").length, 1);
 });
