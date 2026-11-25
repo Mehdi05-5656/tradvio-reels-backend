@@ -24,6 +24,7 @@ import { think, type BrainDeps, type ChatState, type Transport } from "./brain.j
 import { telegram, parseUpdate, type Incoming } from "./telegram.js";
 import { classify } from "./gate.js";
 import type { Index } from "./account.js";
+import { chatLines, textAdminView, type TextEventRow, type TextLinkRow } from "./admin.js";
 
 type Env = Record<string, string | undefined>;
 export const textEnabled = (env: Env = process.env) => env.STUDIO_TEXT_ENABLED === "true" && !!env.TELEGRAM_BOT_TOKEN && !!env.TELEGRAM_WEBHOOK_SECRET && !!env.ANTHROPIC_API_KEY;
@@ -445,6 +446,39 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         }
       }
       res.json({ ok: true });
+    } catch (e) { fail(res, e); }
+  });
+
+  // ---- the admin panel's Text Clone8 tab: everyone who connected, and one person's chat (admins only) ----
+  const pages = async <T,>(q: (from: number) => PromiseLike<{ data: any; error: any }>, max = 50_000): Promise<T[]> => {
+    const out: T[] = [];
+    for (let from = 0; from < max; from += 1000) { const r = await q(from); if (r.error) throw r.error; out.push(...(r.data ?? [])); if ((r.data ?? []).length < 1000) break; }
+    return out;
+  };
+  app.get("/api/studio/admin/text", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    try {
+      const sb = sbFn();
+      if (!(await isStudioAdmin(req, sb, env))) return res.status(404).json({ error: "not_found" });
+      const days = Math.min(365, Math.max(1, Math.round(Number(req.query.days ?? 30)) || 30)), since = new Date(Date.now() - days * 86400_000).toISOString();
+      const links = await pages<TextLinkRow>((f) => sb.from("studio_text_links").select("id,user_id,channel,handle,status,created_at,confirmed_at,last_used_at").order("created_at").range(f, f + 999));
+      const events = await pages<TextEventRow>((f) => sb.from("studio_text_events").select("user_id,chat_id,event,at,data").in("event", ["in", "claude", "pending", "executed", "declined", "error", "claude_error", "send_failed", "watch_error", "execute_unconfirmed"]).gte("at", since).order("at").range(f, f + 999));
+      const ids = [...new Set([...links.map((l) => l.user_id), ...events.map((e) => e.user_id).filter((x): x is string => !!x)])].slice(0, 2000);
+      const emails: Record<string, string | null> = {}, plans: Record<string, string | null> = {};
+      for (let i = 0; i < ids.length; i += 20) await Promise.all(ids.slice(i, i + 20).map(async (u) => { try { const r: any = await (sb as any).auth.admin.getUserById(u); emails[u] = r?.data?.user?.email ?? null; } catch { emails[u] = null; } }));
+      for (let i = 0; i < ids.length; i += 200) { const c = await sb.from("studio_customers").select("user_id,plan_id,status").in("user_id", ids.slice(i, i + 200)); for (const r of (c.data ?? []) as any[]) plans[r.user_id] = r.plan_id && ["active", "trialing", "past_due"].includes(r.status) ? r.plan_id : null; }
+      res.json({ ...textAdminView({ links, events, days, since, emails, plans }), open: textOpen(env), bot: botName });
+    } catch (e) { fail(res, e); }
+  });
+  app.get("/api/studio/admin/text/chat", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    try {
+      const sb = sbFn();
+      if (!(await isStudioAdmin(req, sb, env))) return res.status(404).json({ error: "not_found" });
+      const u = String(req.query.user ?? ""); if (!UUID.test(u)) return res.status(400).json({ error: "user" });
+      const r = await sb.from("studio_text_events").select("user_id,chat_id,event,at,data").eq("user_id", u).in("event", ["in", "out", "executed", "declined", "linked", "unlinked", "error", "claude_error", "send_failed", "watch_error", "execute_unconfirmed"]).order("at", { ascending: false }).limit(300);
+      if (r.error) throw r.error;
+      res.json({ lines: chatLines(((r.data ?? []) as TextEventRow[]).reverse()) });
     } catch (e) { fail(res, e); }
   });
 

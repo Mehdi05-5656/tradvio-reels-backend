@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { internalPass, verifyInternal, INTERNAL_HEADER } from "../src/text-bot/internal.js";
 import { registerTextBot, serverApi, botConfig, WEBHOOK_PATH } from "../src/text-bot/server.js";
+import { textAdminView, chatLines } from "../src/text-bot/admin.js";
 
 type Row = Record<string, any>;
 const OWNER = "11111111-1111-4111-8111-111111111111", OTHER = "22222222-2222-4222-8222-222222222222";
@@ -103,7 +104,7 @@ function fakeSb(tables: Record<string, Row[]>, users: Record<string, Row>) {
       is: (k: string, v: any) => { filters.push((r) => (r[k] ?? null) === v); return q; }, in: (k: string, vs: any[]) => { filters.push((r) => vs.includes(r[k])); return q; },
       gte: (k: string, v: any) => { filters.push((r) => r[k] >= v); return q; }, lt: (k: string, v: any) => { filters.push((r) => r[k] < v); return q; },
       or: (expr: string) => { const any = orOf(expr); filters.push((r) => any.some((f) => f(r))); return q; },
-      order: () => q, limit: () => q,
+      order: () => q, limit: () => q, range: () => q,
       maybeSingle: () => done(true), then: (ok: any, bad: any) => done(false).then(ok, bad),
     };
     return q;
@@ -123,7 +124,7 @@ function setup(env: Record<string, string> = ENV, fetchFn?: any) {
   const call = async (key: string, o: { user?: string; email?: string; body?: any; params?: Row; headers?: Record<string, string> } = {}) => {
     let status = 200, json: any = null;
     const res: any = { status: (s: number) => { status = s; return res; }, json: (j: any) => { json = j; return res; }, setHeader: () => undefined };
-    const req: any = { auth: o.user ? { user_id: o.user, email: o.email } : null, body: o.body ?? {}, params: o.params ?? {}, header: (k: string) => o.headers?.[k.toLowerCase()] };
+    const req: any = { auth: o.user ? { user_id: o.user, email: o.email } : null, body: o.body ?? {}, params: o.params ?? {}, query: (o as any).query ?? {}, header: (k: string) => o.headers?.[k.toLowerCase()] };
     await routes[key](req, res);
     return { status, json };
   };
@@ -325,4 +326,36 @@ test("the watcher: a failed account check changes nothing; a removed chat stops 
   s.tables.studio_text_links[0].status = "removed";
   await s.bot.watchAll();
   assert.equal(s.tables.studio_text_chats[0].watching, false);
+});
+
+test("the admin view: each person who connected, what they did, what it cost, what broke; admins only", async () => {
+  const at = (m: number) => new Date(Date.parse("2026-11-24T20:00:00Z") + m * 60_000).toISOString();
+  const links = [
+    { id: "l1", user_id: OWNER, channel: "telegram", handle: "Mehdi", status: "linked", created_at: at(0), confirmed_at: at(1), last_used_at: at(30) },
+    { id: "l2", user_id: OTHER, channel: "telegram", handle: "sam", status: "removed", created_at: at(2), confirmed_at: at(3), last_used_at: null },
+  ];
+  const ev = (user: string, m: number, event: string, data: any = {}) => ({ user_id: user, chat_id: "c", event, at: at(m), data });
+  const events = [
+    ev(OWNER, 5, "in", { text: "what's my balance" }), ev(OWNER, 5, "claude", { usd: 0.001 }),
+    ev(OWNER, 6, "in", { text: "move the captions up 15%" }), ev(OWNER, 6, "claude", { usd: 0.0005 }), ev(OWNER, 6, "pending", {}),
+    ev(OWNER, 7, "in", { text: "y:abc", tap: true }), ev(OWNER, 7, "executed", { ok: true, credits: 0 }),
+    ev(OWNER, 8, "in", { text: "clip my stream" }), ev(OWNER, 8, "pending", {}), ev(OWNER, 9, "in", { text: "YES KM" }), ev(OWNER, 9, "executed", { ok: true, credits: 120 }),
+    ev(OTHER, 10, "in", { text: "hi" }), ev(OTHER, 10, "claude_error", { detail: "overloaded" }),
+  ];
+  const v = textAdminView({ links, events: events as any, days: 7, since: at(-60), emails: { [OWNER]: "boss@clone8.io", [OTHER]: "s@example.com" }, plans: { [OWNER]: "pro" } });
+  assert.equal(v.summary.connected, 1); assert.equal(v.summary.active, 2); assert.equal(v.summary.messages, 5, "taps are not messages");
+  assert.equal(v.summary.done, 2); assert.equal(v.summary.credits, 120); assert.equal(v.summary.errors, 1); assert.equal(v.summary.ai_usd, 0.0015);
+  const me = v.people.find((p) => p.user_id === OWNER)!;
+  assert.deepEqual([me.email, me.plan, me.status, me.messages, me.taps, me.asked, me.done, me.credits], ["boss@clone8.io", "pro", "connected", 4, 1, 2, 2, 120]);
+  assert.equal(me.last_text, "YES KM");
+  assert.equal(v.people[0].user_id, OTHER, "most recent first");
+  assert.equal(v.people[0].status, "removed");
+  assert.deepEqual(chatLines(events.filter((e) => e.user_id === OWNER) as any).map((l) => l.text).slice(0, 5), ["what's my balance", "move the captions up 15%", "(tapped Yes)", "Done after YES", "clip my stream"]);
+  // the routes: nothing for anyone but an admin (the owner's confirmed email)
+  const s = setup();
+  assert.equal((await s.call("GET /api/studio/admin/text", { user: OTHER, email: "someone@example.com" })).status, 404);
+  assert.equal((await s.call("GET /api/studio/admin/text/chat", { user: OTHER, email: "someone@example.com", })).status, 404);
+  s.tables.studio_text_links = links as any; s.tables.studio_text_events = events.map((e) => ({ ...e, at: new Date().toISOString() })) as any; s.tables.studio_customers = [];
+  const ok = await s.call("GET /api/studio/admin/text", { user: OWNER, email: "boss@clone8.io" });
+  assert.equal(ok.status, 200, JSON.stringify(ok.json)); assert.equal(ok.json.people.length, 2); assert.equal(ok.json.people.find((p: any) => p.user_id === OWNER).email, "boss@clone8.io");
 });
