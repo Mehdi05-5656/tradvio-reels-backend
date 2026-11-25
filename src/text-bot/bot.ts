@@ -3,8 +3,8 @@
 // Everything outside (Telegram, Clone8, Claude, the clock, the disk) is handed in, so the same code runs against the
 // real services, a typed-in chat on this Mac, and the tests.
 import { randomBytes } from "node:crypto";
-import type { Api } from "./clone8.js";
-import type { Config } from "./config.js";
+import type { Api } from "./routes.js";
+import type { BotConfig as Config } from "./routes.js";
 import { claim, classify, decline, dropUnshown, expire, markShown, addSpend, howToAnswer, withdraw, type Pending } from "./gate.js";
 import { execute, today } from "./actions.js";
 import { toolName } from "./account.js";

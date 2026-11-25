@@ -3,7 +3,7 @@
 // server said and from the account's own records; nothing in it is worded or named by the AI. The executor re-checks
 // what the action depends on right before it acts, and stops if anything changed.
 import { randomUUID } from "node:crypto";
-import type { Api, Reply } from "./clone8.js";
+import type { Api, Reply } from "./routes.js";
 import { setPending, howToAnswer, spendRoom, type Check, type Pending, type PendingStore, type Spend, type Step } from "./gate.js";
 import { toolName } from "./account.js";
 

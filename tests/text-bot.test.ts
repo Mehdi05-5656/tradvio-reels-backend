@@ -3,18 +3,18 @@
 // brain against a pretend account.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classify, claim, setPending, markShown, dropUnshown, decline, expire, newCode, spendRoom, addSpend, PENDING_TTL_MS, type Pending, type PendingStore } from "../scripts/text-bot/gate.js";
+import { classify, claim, setPending, markShown, dropUnshown, decline, expire, newCode, spendRoom, addSpend, PENDING_TTL_MS, type Pending, type PendingStore } from "../src/text-bot/gate.js";
 import { levelOf, makeApi } from "../scripts/text-bot/clone8.js";
-import { guard, blanked, SAFE_LINE } from "../scripts/text-bot/guard.js";
-import { buildCards, find, history, describeJob } from "../scripts/text-bot/account.js";
-import { RECIPES, recipeFor, recipeText, HELPERS, featureList } from "../scripts/text-bot/recipes.js";
-import { SYSTEM, TOOLS, markMedia } from "../scripts/text-bot/brain.js";
+import { guard, blanked, SAFE_LINE } from "../src/text-bot/guard.js";
+import { buildCards, find, history, describeJob } from "../src/text-bot/account.js";
+import { RECIPES, recipeFor, recipeText, HELPERS, featureList } from "../src/text-bot/recipes.js";
+import { SYSTEM, TOOLS, markMedia } from "../src/text-bot/brain.js";
 import { mockApi, IDS } from "../scripts/text-bot/mock.js";
-import { prepareJob, preparePost, preparePostChange, preparePostCancel, execute, saidByPerson, jobDetails, ActionError, CAPTION_MAX, type Ctx, type VideoRef } from "../scripts/text-bot/actions.js";
-import { makeBot, emptyState, pairCode, chatOf } from "../scripts/text-bot/bot.js";
-import { pieces, parseUpdate } from "../scripts/text-bot/telegram.js";
-import { prepareEdit } from "../scripts/text-bot/edit.js";
-import type { ChatState, TurnResult } from "../scripts/text-bot/brain.js";
+import { prepareJob, preparePost, preparePostChange, preparePostCancel, execute, saidByPerson, jobDetails, ActionError, CAPTION_MAX, type Ctx, type VideoRef } from "../src/text-bot/actions.js";
+import { makeBot, emptyState, pairCode, chatOf } from "../src/text-bot/bot.js";
+import { pieces, parseUpdate } from "../src/text-bot/telegram.js";
+import { prepareEdit } from "../src/text-bot/edit.js";
+import type { ChatState, TurnResult } from "../src/text-bot/brain.js";
 
 const store = (): PendingStore => ({ live: null, past: [] });
 const base = { id: "a1", kind: "job", question: "q", steps: [], checks: [], credits: 10, posts: 0, count: null };

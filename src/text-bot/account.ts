@@ -2,7 +2,7 @@
 // library file, each post, each collection, each character. A card says in plain words what it is and holds every
 // word it could be found by. In this local test the cards are built from the reading routes (the last 100 jobs, the
 // whole library, every post); the real index reads the database and covers the whole history.
-import type { Api } from "./clone8.js";
+import type { Api } from "./routes.js";
 
 export type Card = {
   /** how the bot refers to it: r:<job>[:n] a result, f:<asset> a library file, p:<post>, c:<collection> */

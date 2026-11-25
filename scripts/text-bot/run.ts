@@ -8,11 +8,11 @@ import { join } from "node:path";
 import { audit, loadConfig, readJson, writeJson } from "./config.js";
 import { makeApi } from "./clone8.js";
 import { mockApi } from "./mock.js";
-import { emptyState, makeBot, pairCode, type BotState } from "./bot.js";
-import { think, type BrainDeps, type Transport } from "./brain.js";
-import { telegram } from "./telegram.js";
-import { guard } from "./guard.js";
-import type { Index } from "./account.js";
+import { emptyState, makeBot, pairCode, type BotState } from "../../src/text-bot/bot.js";
+import { think, type BrainDeps, type Transport } from "../../src/text-bot/brain.js";
+import { telegram } from "../../src/text-bot/telegram.js";
+import { guard } from "../../src/text-bot/guard.js";
+import type { Index } from "../../src/text-bot/account.js";
 
 const args = process.argv.slice(2), has = (f: string) => args.includes(f);
 const says = args.flatMap((a, i) => (a === "--say" && args[i + 1] ? [args[i + 1]] : []));

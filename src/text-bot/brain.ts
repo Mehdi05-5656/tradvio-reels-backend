@@ -2,8 +2,8 @@
 // anything up, show pictures, and PREPARE actions. It cannot run one: the prepare tools store a pending action and the
 // gate releases it on the person's own YES. Raw HTTP to the Messages API, as the rest of this backend does
 // (src/studio-assistant.ts `claude`), so the test adds no dependency.
-import type { Api } from "./clone8.js";
-import type { Config } from "./config.js";
+import type { Api } from "./routes.js";
+import type { BotConfig as Config } from "./routes.js";
 import { find, history, loadIndex, view, type Card, type Filters, type Index } from "./account.js";
 import { HELPERS, featureList, recipeFor, recipeText } from "./recipes.js";
 import * as act from "./actions.js";

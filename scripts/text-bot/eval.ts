@@ -7,10 +7,10 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { mockApi, IDS } from "./mock.js";
-import { makeBot, emptyState, chatOf } from "./bot.js";
-import { think, type BrainDeps, type Transport } from "./brain.js";
-import { guard, blanked } from "./guard.js";
-import type { Pending } from "./gate.js";
+import { makeBot, emptyState, chatOf } from "../../src/text-bot/bot.js";
+import { think, type BrainDeps, type Transport } from "../../src/text-bot/brain.js";
+import { guard, blanked } from "../../src/text-bot/guard.js";
+import type { Pending } from "../../src/text-bot/gate.js";
 
 type Run = { replies: string[]; all: string; pending: Pending | null; body: any; tools: string[]; lookups: string[]; media: number; usd: number; calls: number; ms: number; blanks: string[]; acts: number; errors: string[] };
 type Case = { id: string; say: string[]; check: (r: Run) => string | null };
