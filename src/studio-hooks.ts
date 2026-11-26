@@ -21,6 +21,10 @@ import { recordCost } from "./studio-costs.js";
 import { CAST, castById, castFor, publicCast } from "./studio-cast.js";
 import { normalFacts, storeImage, ProductError } from "./studio-products.js";
 import { CATEGORY_LABEL } from "./studio-product-looks.js";
+import { command } from "./video-render.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 type Deps = { env?: Record<string, string | undefined>; log?: (line: string) => void; fetch?: typeof fetch };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -178,6 +182,52 @@ export async function addHookVoice(sb: SupabaseClient, deps: Deps & { tts?: type
   if (h.tier === "best") body.audio_urls = [s.data.signedUrl]; else body.audio_url = s.data.signedUrl;
   // ElevenLabs bills about one credit a character on our plan ($99 for 600k credits): estimated, not metered
   recordCost({ job_id: job.id, user_id: job.user_id ?? null, tool: "instrument", provider: "elevenlabs", product: "text-to-speech", source: "hook_voice", units: { characters: line.length }, usd: Math.round(line.length * 0.000165 * 10000) / 10000, basis: "estimated", note: "1 credit/character at the Pro plan rate" });
+}
+
+// ---------------------------------------------------------------------------------------------------
+// After a Best hook renders: our voice back on the clip. Seedance re-voices the line (test C, Nov 26 2026: same words,
+// its own voice, 0.36 s late; Wan plays ours through untouched), which would break "one character, one voice". The
+// lips follow Seedance's track, so our recording is laid on at the lag where the two tracks match best.
+// ---------------------------------------------------------------------------------------------------
+/** Loudness every 10 ms of 16 kHz mono 16-bit PCM. */
+export function envelope(pcm: Buffer): number[] {
+  const hop = 160, n = Math.floor(pcm.length / 2), out: number[] = [];
+  for (let i = 0; i + hop <= n; i += hop) { let s = 0; for (let k = i; k < i + hop; k++) { const v = pcm.readInt16LE(k * 2); s += v * v; } out.push(Math.sqrt(s / hop)); }
+  return out;
+}
+/** Where `voice` sits inside `clip` (in 10 ms steps, -50..+100) and how well it matches there (Pearson r). */
+export function bestLag(clip: number[], voice: number[]): { lag: number; r: number } {
+  const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / (a.length || 1);
+  const mc = mean(clip), mv = mean(voice), c = clip.map((x) => x - mc), v = voice.map((x) => x - mv);
+  let best = { lag: 0, r: -1 };
+  for (let lag = -50; lag <= 100; lag++) {
+    let sxy = 0, sx = 0, sy = 0;
+    for (let i = 0; i < v.length; i++) { const j = i + lag; if (j < 0 || j >= c.length) continue; sxy += c[j] * v[i]; sx += c[j] * c[j]; sy += v[i] * v[i]; }
+    const r = sx && sy ? sxy / Math.sqrt(sx * sy) : -1;
+    if (r > best.r) best = { lag, r };
+  }
+  return best;
+}
+const pcmOf = (file: string) => command("ffmpeg", ["-v", "error", "-nostdin", "-i", file, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"], undefined, 120_000);
+/** Lays the character's own recording on a Best hook clip (in place). Never throws: on any doubt the clip keeps its sound. */
+export async function restoreHookVoice(sb: SupabaseClient, deps: Deps, job: any, file: string): Promise<{ lag_ms: number; r: number } | null> {
+  const log = deps.log ?? (() => undefined), h = job.options?.hook ?? {};
+  if (h.tier !== "best") return null;
+  const dir = await mkdtemp(join(tmpdir(), "studio-hook-"));
+  try {
+    const dl = await sb.storage.from("studio-outputs").download(`${job.user_id}/${job.id}/work/voice.mp3`);
+    if (dl.error || !dl.data) return null;
+    const voiceFile = join(dir, "voice.mp3"), out = join(dir, "out.mp4");
+    await writeFile(voiceFile, Buffer.from(await dl.data.arrayBuffer()));
+    const m = bestLag(envelope(await pcmOf(file)), envelope(await pcmOf(voiceFile)));
+    if (m.r < 0.35) { log(`[hooks] voice kept as rendered ${JSON.stringify({ job: job.id, r: Math.round(m.r * 100) / 100 })}`); return { lag_ms: m.lag * 10, r: m.r }; }
+    const ms = Math.max(0, m.lag * 10), trim = Math.max(0, -m.lag * 10) / 1000;
+    await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", file, "-ss", trim.toFixed(2), "-i", voiceFile, "-filter_complex", `[1:a]adelay=${ms}|${ms},apad[a]`, "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", out], undefined, 120_000);
+    await writeFile(file, await readFile(out));
+    log(`[hooks] own voice laid on ${JSON.stringify({ job: job.id, lag_ms: m.lag * 10, r: Math.round(m.r * 100) / 100 })}`);
+    return { lag_ms: m.lag * 10, r: m.r };
+  } catch (e: any) { log(`[hooks] voice restore skipped ${JSON.stringify({ job: job.id, error: String(e?.message ?? e).slice(0, 160) })}`); return null; }
+  finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 
 // ---------------------------------------------------------------------------------------------------

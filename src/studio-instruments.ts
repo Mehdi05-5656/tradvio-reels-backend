@@ -27,7 +27,7 @@ import { claimJob } from "./studio-leases.js";
 import { withRecipe } from "./studio-presets.js";
 import { withLookRecipe } from "./studio-product-looks.js";
 import { finishLookVideo } from "./studio-products.js";
-import { addHookVoice, hookStillRecipe, withHookRecipe } from "./studio-hooks.js";
+import { addHookVoice, hookStillRecipe, restoreHookVoice, withHookRecipe } from "./studio-hooks.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -262,7 +262,8 @@ export type InstrumentDeps = { fetch?: typeof fetch; env?: Record<string, string
   toJpeg?: (bytes: Buffer) => Promise<Buffer>; poster?: (video: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number>;
   /** a product look's finishing step (sound + product check); tests replace it */
   finishLook?: (sb: any, deps: any, job: any, file: string, seconds: number) => Promise<{ ok: boolean | null; problem?: string | null; sound?: boolean }>;
-  hookVoice?: (sb: any, deps: any, job: any, body: Record<string, any>) => Promise<void> };
+  hookVoice?: (sb: any, deps: any, job: any, body: Record<string, any>) => Promise<void>;
+  restoreVoice?: (sb: any, deps: any, job: any, file: string) => Promise<unknown> };
 
 /** One platform API call (shared with Kage, which renders its shots on the same models): the status and parsed body. */
 export async function hf(deps: InstrumentDeps, path: string, init: RequestInit & { idempotency?: string } = {}): Promise<{ status: number; body: any }> {
@@ -458,6 +459,8 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
         // a product look: its sound under the clip, then the product check (studio-products.ts); a clip that changed
         // the product or its label is not charged
         if (o.look) { const check = await (deps.finishLook ?? finishLookVideo)(sb, deps, job, file, seconds); bytes = await readFile(file); lookChecks.push(check); }
+        // a Best hook: the character's own voice back on the clip, matched to the lips (studio-hooks.ts)
+        if (o.hook?.tier === "best") { await (deps.restoreVoice ?? restoreHookVoice)(sb, deps, job, file); bytes = await readFile(file); }
         let posterOk = true;
         try { await (deps.poster ?? makePoster)(file, still); } catch { posterOk = false; }
         const up = await sb.storage.from("studio-outputs").upload(`${base}.mp4`, bytes, { contentType: "video/mp4", upsert: false });

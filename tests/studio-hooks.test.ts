@@ -66,3 +66,14 @@ test("at run time the voice joins the request: Seedance takes a list, Wan one ur
   assert.deepEqual(uploads, ["u1/j1/work/voice.mp3", "u1/j2/work/voice.mp3"]);
   await assert.rejects(addHookVoice(sb, { env: {}, tts: async () => Buffer.from("") }, { id: "j3", user_id: "u1", options: { hook: { line: "x y z", voice: "not-a-voice" } } }, {}), (e: any) => e instanceof HookError);
 });
+
+test("a Best hook's own voice is laid where the rendered speech is: the lag is found from loudness", async () => {
+  const { bestLag, envelope } = await import("../src/studio-hooks.js");
+  // a voice with three bursts, and a clip carrying the same bursts 360 ms later plus a little noise
+  const voice = Array.from({ length: 300 }, (_, i) => (i % 100 < 30 ? 1000 : 50));
+  const clip = [...Array(36).fill(60), ...voice.map((v, i) => v * 0.8 + (i % 7) * 10), ...Array(40).fill(60)];
+  const m = bestLag(clip, voice);
+  assert.equal(m.lag, 36); assert.ok(m.r > 0.9);
+  const pcm = Buffer.alloc(16000 * 2); for (let i = 0; i < 8000; i++) pcm.writeInt16LE(i < 4000 ? 8000 : 0, i * 2);
+  const env = envelope(pcm); assert.equal(env.length, 100); assert.ok(env[0] > 7000 && env[30] === 0);
+});
