@@ -116,7 +116,7 @@ export async function planCustomMotion(deps: Deps, facts: ProductFacts, words: s
 // ---------------------------------------------------------------------------------------------------
 // The library side
 // ---------------------------------------------------------------------------------------------------
-async function loadImage(sb: SupabaseClient, u: string, id: string): Promise<{ row: any; bytes: Buffer; mediaType: string }> {
+export async function loadImage(sb: SupabaseClient, u: string, id: string): Promise<{ row: any; bytes: Buffer; mediaType: string }> {
   if (!UUID_RE.test(id)) throw new ProductError("product_not_found", "No such picture", 404);
   const a = await sb.from("studio_assets").select("id,kind,name,object_key,status,probe").eq("id", id).eq("user_id", u).maybeSingle();
   if (a.error) throw a.error;
@@ -184,7 +184,7 @@ export function readShopPage(html: string, base: string): { image: string | null
   return { image, title: title ? decode(title).trim() : null, text: text ? decode(text).trim() : null, price };
 }
 
-async function storeImage(sb: SupabaseClient, u: string, bytes: Buffer, name: string): Promise<string> {
+export async function storeImage(sb: SupabaseClient, u: string, bytes: Buffer, name: string): Promise<string> {
   const jpg = bytes[0] === 0xff && bytes[1] === 0xd8 ? bytes : await toJpeg(bytes);
   const limit = await checkUpload(sb, u, jpg.length);
   if (limit) throw new ProductError(limit.code, limit.message, limit.status);

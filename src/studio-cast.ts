@@ -1,0 +1,77 @@
+// Clone8 Studio: the Cast (docs/model-features/PRODUCT_ADS_PLAN.md, phase 2, owner Nov 26 2026). Preset AI characters
+// for hooks and ads: each one AI-made (never a real person's likeness), cast for a niche, with ONE fixed ElevenLabs voice
+// so the same face says every line in the same voice (the "consistent actor" competitors sell).
+//
+// A character's picture is made once by us (product content, quoted to the owner before spending) and kept in the
+// public demo store; until it exists the character is a draft that only admins see. When someone uses a character, its
+// picture is copied into their library once (probe.cast_id), so every tool takes it like any of their pictures.
+//
+// Voices: premade and professional voices on our ElevenLabs account (Nov 26 2026). Some voices serve two characters of
+// different looks; a niche never has two characters on the same voice.
+
+export type CastGender = "woman" | "man" | "neutral";
+export type CastMember = {
+  id: string; name: string; line: string; gender: CastGender; age: "20s" | "30s" | "40s" | "50s" | "60s+";
+  niches: string[];
+  /** where their videos are shot by default (a hook format may change it) */
+  setting: string;
+  /** how they look: the portrait recipe (ours, never sent to the page) */
+  look: string;
+  voice: { id: string; name: string };
+  /** the picture we made (public demo store) and a short talking loop for the card; none yet means admins only */
+  image?: string | null; clip?: string | null;
+};
+
+const V = {
+  sarah: { id: "EXAVITQu4vr4xnSDxMaL", name: "Sarah" }, laura: { id: "FGY2WhTYpPnrIDTdsKH5", name: "Laura" }, matilda: { id: "XrExE9yKIg1WjnnlVkGX", name: "Matilda" },
+  jessica: { id: "cgSgspJ2msm6clMCkdW9", name: "Jessica" }, katie: { id: "FuHjyyBBA6Uf3YpKGtL7", name: "Katie" }, thorn: { id: "JzB4cRKwI655namyRezF", name: "Thorn" },
+  alice: { id: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice" }, bella: { id: "hpp4J3VqNfWAUOO0d1Us", name: "Bella" }, lily: { id: "pFZP5JQG7iQjIQuC4Bku", name: "Lily" },
+  jab: { id: "lxYfHSkYm1EzQzGhdbfc", name: "Jessica Anne" }, naomi: { id: "JGDwW9z83vZudMiOzzS9", name: "Naomi" },
+  liam: { id: "TX3LPaxmHKxFdv7VOQHJ", name: "Liam" }, charlie: { id: "IKne3meq5aSn9XLyUdCD", name: "Charlie" }, will: { id: "bIHbv24MWmeRgasZH58o", name: "Will" },
+  eric: { id: "cjVigY5qzO86Huf0OWal", name: "Eric" }, chris: { id: "iP95p4xoKVk53GoZ742B", name: "Chris" }, roger: { id: "CwhRBWXzGAHq8TQ4Fs17", name: "Roger" },
+  george: { id: "JBFqnCBsd6RMkjVDRZzb", name: "George" }, jesse: { id: "4N8zjn9tVNuDEBFWVHAq", name: "Jesse" }, bill: { id: "pqHfZKP75CvOlQylNhV4", name: "Bill" },
+  brian: { id: "nPczCjzI2devNBz1zQrb", name: "Brian" }, henry: { id: "pVnrL6sighQX7hVz89cp", name: "Henry" }, callum: { id: "N2lVS1w4EtoT3dr4eOWO", name: "Callum" },
+  daniel: { id: "onwK4e9ZLuTAKqWW03F9", name: "Daniel" }, river: { id: "SAz9YHcvj6GT2YYXdXww", name: "River" },
+};
+const PORTRAIT = "Photorealistic vertical phone-camera photo, head and shoulders to waist, looking straight into the lens with a friendly natural expression, soft natural light, real skin texture, an ordinary everyday person (not a model or celebrity), adult.";
+
+export const CAST: CastMember[] = [
+  { id: "maya", name: "Maya", line: "Skincare, calm and honest. Late 20s.", gender: "woman", age: "20s", niches: ["beauty", "fragrance", "supplements"], setting: "a bright bathroom with a marble counter", look: "A woman in her late twenties with shoulder-length dark brown wavy hair, light freckles and a cream knit top.", voice: V.sarah },
+  { id: "jade", name: "Jade", line: "Gen Z bestie with opinions. Early 20s.", gender: "woman", age: "20s", niches: ["fashion", "beauty", "food", "accessories"], setting: "a cosy bedroom with fairy lights", look: "A woman in her early twenties with a high black ponytail, small gold hoops and an oversized lilac hoodie.", voice: V.laura },
+  { id: "priya", name: "Priya", line: "Tech reviewer who explains it simply. 30s.", gender: "woman", age: "30s", niches: ["tech", "app", "accessories"], setting: "a tidy desk with a monitor and a plant", look: "A South Asian woman in her thirties with long black hair tied back, thin glasses and a navy shirt.", voice: V.matilda },
+  { id: "lena", name: "Lena", line: "Fitness coach, high energy. 30s.", gender: "woman", age: "30s", niches: ["supplements", "beverage", "fashion", "footwear"], setting: "a sunny home gym", look: "An athletic woman in her early thirties with a blonde braid and a sage green sports top.", voice: V.jessica },
+  { id: "rosa", name: "Rosa", line: "Mum of three, no-nonsense. 40s.", gender: "woman", age: "40s", niches: ["home", "food", "toys", "pets"], setting: "a busy family kitchen", look: "A Latina woman in her forties with dark curly hair pinned up and a striped cotton shirt.", voice: V.katie },
+  { id: "hana", name: "Hana", line: "Home cook, warm and curious. 20s.", gender: "woman", age: "20s", niches: ["food", "beverage", "home"], setting: "a small sunny apartment kitchen", look: "An East Asian woman in her mid twenties with a short black bob and a mustard apron over a white tee.", voice: V.thorn },
+  { id: "claire", name: "Claire", line: "Founder, straight to the point. 30s, British.", gender: "woman", age: "30s", niches: ["app", "tech"], setting: "a bright modern office", look: "A woman in her late thirties with a sleek auburn bob and a camel blazer over a black top.", voice: V.alice },
+  { id: "amara", name: "Amara", line: "Hair and beauty, bright and warm. 30s.", gender: "woman", age: "30s", niches: ["beauty", "fragrance", "fashion"], setting: "a vanity with soft ring light", look: "A Black woman in her early thirties with natural curly hair, gold stud earrings and a coral top.", voice: V.bella },
+  { id: "sofia", name: "Sofia", line: "Fashion and jewellery, polished. Late 20s, British.", gender: "woman", age: "20s", niches: ["fashion", "jewellery", "accessories", "fragrance"], setting: "a stylish living room with a full-length mirror", look: "A woman in her late twenties with long glossy chestnut hair and a black slip top with a fine gold necklace.", voice: V.lily },
+  { id: "june", name: "June", line: "Wellness and home, gentle. 50s.", gender: "woman", age: "50s", niches: ["home", "supplements", "beauty", "pets"], setting: "a calm sunlit living room", look: "A woman in her fifties with silver-streaked shoulder-length hair and a soft blue linen shirt.", voice: V.jab },
+  { id: "nia", name: "Nia", line: "Gamer and gadget fan, dry humour. 20s.", gender: "woman", age: "20s", niches: ["tech", "toys", "beverage"], setting: "a gaming setup with soft purple light", look: "A Black woman in her mid twenties with box braids, over-ear headphones around her neck and a graphic tee.", voice: V.naomi },
+  { id: "grace", name: "Grace", line: "Grandma who tells it straight. 60s.", gender: "woman", age: "60s+", niches: ["home", "food", "pets", "supplements"], setting: "a cosy cottage kitchen", look: "A woman in her mid sixties with short white hair, reading glasses on a chain and a soft pink cardigan.", voice: V.jab },
+  { id: "zoe", name: "Zoe", line: "Pet person, bubbly. 20s.", gender: "woman", age: "20s", niches: ["pets", "toys", "food"], setting: "a sunny living room with a dog bed", look: "A woman in her early twenties with a messy blonde bun and a yellow sweatshirt.", voice: V.jessica },
+  { id: "elena", name: "Elena", line: "Luxury and gifting, refined. 40s.", gender: "woman", age: "40s", niches: ["jewellery", "fragrance", "accessories", "beauty"], setting: "an elegant hotel lounge", look: "A woman in her forties with dark hair in a low chignon and a black turtleneck with pearl earrings.", voice: V.lily },
+  { id: "theo", name: "Theo", line: "Gadget guy, quick and hyped. 20s.", gender: "man", age: "20s", niches: ["tech", "accessories", "toys"], setting: "a desk with LED strip lights", look: "A man in his mid twenties with short curly brown hair, a light stubble and a black hoodie.", voice: V.liam },
+  { id: "marcus", name: "Marcus", line: "Gym regular, all energy. 30s.", gender: "man", age: "30s", niches: ["supplements", "beverage", "footwear", "fashion"], setting: "a busy gym", look: "A muscular Black man in his early thirties with a shaved head and a grey training tank.", voice: V.charlie },
+  { id: "dev", name: "Dev", line: "Gamer, laid-back. 20s.", gender: "man", age: "20s", niches: ["tech", "beverage", "toys"], setting: "a gaming room with RGB lights", look: "A South Asian man in his early twenties with tousled black hair and a green flannel over a tee.", voice: V.will },
+  { id: "sam", name: "Sam", line: "SaaS founder, calm and credible. 30s.", gender: "man", age: "30s", niches: ["app", "tech"], setting: "a minimal home office", look: "A man in his thirties with neat light brown hair, a short beard and a grey crewneck sweater.", voice: V.eric },
+  { id: "jordan", name: "Jordan", line: "Dad of two, down to earth. 30s.", gender: "man", age: "30s", niches: ["home", "toys", "food", "pets"], setting: "a lived-in family living room", look: "A man in his late thirties with short dark hair, a friendly face and a blue denim shirt.", voice: V.chris },
+  { id: "ken", name: "Ken", line: "Chef, knows his stuff. 40s.", gender: "man", age: "40s", niches: ["food", "beverage", "home"], setting: "a professional kitchen", look: "An East Asian man in his forties with short black hair and a white chef's jacket.", voice: V.roger },
+  { id: "oliver", name: "Oliver", line: "Menswear, understated. 30s, British.", gender: "man", age: "30s", niches: ["fashion", "footwear", "accessories", "fragrance"], setting: "a bright city flat", look: "A man in his thirties with swept-back dark blond hair and a navy overshirt.", voice: V.george },
+  { id: "mateo", name: "Mateo", line: "Sneakers and streetwear. 20s.", gender: "man", age: "20s", niches: ["footwear", "fashion", "accessories"], setting: "a city street at golden hour", look: "A Latino man in his mid twenties with a fade haircut, a small chain and a cream varsity jacket.", voice: V.jesse },
+  { id: "alex", name: "Alex", line: "Men's skincare, no fuss. 30s.", gender: "man", age: "30s", niches: ["beauty", "fragrance", "supplements"], setting: "a clean bathroom", look: "A man in his early thirties with short black hair, clear skin and a white tee.", voice: V.brian },
+  { id: "nate", name: "Nate", line: "Outdoors and travel, easy-going. 20s.", gender: "man", age: "20s", niches: ["beverage", "footwear", "accessories", "food"], setting: "a campsite at sunset", look: "A man in his late twenties with wavy sandy hair, a sun tan and an olive field jacket.", voice: V.callum },
+  { id: "james", name: "James", line: "Business and money, measured. 40s.", gender: "man", age: "40s", niches: ["app", "tech", "accessories"], setting: "a glass-walled office", look: "A man in his forties with greying temples, a trimmed beard and a white shirt with sleeves rolled.", voice: V.henry },
+  { id: "frank", name: "Frank", line: "Grandpa, plain-spoken and warm. 60s.", gender: "man", age: "60s+", niches: ["home", "food", "pets", "supplements"], setting: "a garden shed workshop", look: "A man in his late sixties with thin white hair, a white moustache and a checked flannel shirt.", voice: V.bill },
+  { id: "daniel", name: "Daniel", line: "Explainer, steady and clear. 40s, British.", gender: "man", age: "40s", niches: ["app", "tech", "home"], setting: "a bookshelf study", look: "A Black man in his forties with short cropped hair, rimless glasses and a charcoal cardigan.", voice: V.daniel },
+  { id: "river", name: "River", line: "Wellness, relaxed. 20s.", gender: "neutral", age: "20s", niches: ["supplements", "beauty", "beverage", "home"], setting: "a plant-filled studio apartment", look: "A young adult in their mid twenties with a short platinum crop, small nose ring and a loose sage linen shirt.", voice: V.river },
+];
+
+const byId = new Map(CAST.map((c) => [c.id, c]));
+export const castById = (id: unknown): CastMember | null => (typeof id === "string" ? byId.get(id) ?? null : null);
+/** The portrait recipe we make a character's picture with (Seedream 5.0 Pro text-to-image, 9:16). */
+export const castPortraitPrompt = (c: CastMember) => `${c.look} ${PORTRAIT} Setting: ${c.setting}, softly blurred.`;
+/** What the page gets: never the look recipe. A character with no picture yet is a draft (admins only). */
+export function publicCast(c: CastMember) {
+  return { id: c.id, name: c.name, line: c.line, gender: c.gender, age: c.age, niches: c.niches, voice: c.voice.name, image: c.image ?? null, clip: c.clip ?? null, draft: !c.image };
+}
+export function castFor(opts: { admin?: boolean } = {}): CastMember[] { return CAST.filter((c) => opts.admin || !!c.image); }

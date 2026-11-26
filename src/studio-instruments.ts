@@ -27,6 +27,7 @@ import { claimJob } from "./studio-leases.js";
 import { withRecipe } from "./studio-presets.js";
 import { withLookRecipe } from "./studio-product-looks.js";
 import { finishLookVideo } from "./studio-products.js";
+import { addHookVoice, hookStillRecipe, withHookRecipe } from "./studio-hooks.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -260,7 +261,8 @@ export function unitLabel(inst: Instrument): string {
 export type InstrumentDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; now?: () => number;
   toJpeg?: (bytes: Buffer) => Promise<Buffer>; poster?: (video: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number>;
   /** a product look's finishing step (sound + product check); tests replace it */
-  finishLook?: (sb: any, deps: any, job: any, file: string, seconds: number) => Promise<{ ok: boolean | null; problem?: string | null; sound?: boolean }> };
+  finishLook?: (sb: any, deps: any, job: any, file: string, seconds: number) => Promise<{ ok: boolean | null; problem?: string | null; sound?: boolean }>;
+  hookVoice?: (sb: any, deps: any, job: any, body: Record<string, any>) => Promise<void> };
 
 /** One platform API call (shared with Kage, which renders its shots on the same models): the status and parsed body. */
 export async function hf(deps: InstrumentDeps, path: string, init: RequestInit & { idempotency?: string } = {}): Promise<{ status: number; body: any }> {
@@ -399,7 +401,9 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
         }
       }
       // a preset's recipe is ours and stays on the server: the job keeps only what the person chose, the recipe joins here
-      const body = buildBody(o.look ? withLookRecipe(o.look, o.params ?? {}) : withRecipe(o.preset, o.params ?? {}), o.inputs ?? {}, (id) => urls.get(id) ?? "");
+      const body = buildBody(o.look ? withLookRecipe(o.look, o.params ?? {}) : o.hook ? withHookRecipe(o.hook, o.params ?? {}) : o.hook_still ? hookStillRecipe(o.hook_still, o.params?.setting ?? "") : withRecipe(o.preset, o.params ?? {}), o.inputs ?? {}, (id) => urls.get(id) ?? "");
+      // a hook: the line in the character's voice joins the request (studio-hooks.ts)
+      if (o.hook) { await renew(sb, job, { note: "Recording the voice" }); await (deps.hookVoice ?? addHookVoice)(sb, deps, job, body); }
       await renew(sb, job, { note: "Sending the request to the renderer" });
       const r = await hf(deps, `/${apiPath(inst)}`, { method: "POST", body: JSON.stringify(body), idempotency: job.id });
       if (r.status !== 200 && r.status !== 201 && r.status !== 202) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
