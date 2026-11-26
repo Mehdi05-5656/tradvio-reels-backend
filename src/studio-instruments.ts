@@ -28,6 +28,7 @@ import { withRecipe } from "./studio-presets.js";
 import { withLookRecipe } from "./studio-product-looks.js";
 import { finishLookVideo } from "./studio-products.js";
 import { addHookVoice, hookStillRecipe, restoreHookVoice, withHookRecipe } from "./studio-hooks.js";
+import { runAdJob } from "./studio-ads.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -382,6 +383,8 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
   let dir: string | null = null;
   try {
     const o = job.options ?? {};
+    // a full ad (studio-ads.ts): cut together here, no model call
+    if (o.ad) return await runAdJob(sb, deps, job, { renew: (p) => renew(sb, job, p), fail });
     const inst = allInstruments().find((m) => m.id === o.endpoint || apiPath(m) === o.endpoint) ?? null;
     if (!inst) throw new RecastError("instrument_unknown");
     if (inst.provider === "elevenlabs") return await runElevenJob(sb, deps, job, inst);

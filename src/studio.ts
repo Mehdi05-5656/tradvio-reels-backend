@@ -27,6 +27,7 @@ import { registerConnectorsMe } from "./studio-mcp-social.js";
 import { presetById, presetChoices, presetRequest, presetsOffered, publicPreset, PresetError } from "./studio-presets.js";
 import { lookQuoteRequest, ProductError } from "./studio-products.js";
 import { hookQuoteRequest, HookError } from "./studio-hooks.js";
+import { quoteAd, AdError } from "./studio-ads.js";
 import { LookError } from "./studio-product-looks.js";
 import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
@@ -625,7 +626,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   if (deps.stripe === undefined && env.STRIPE_SECRET_KEY && env.STUDIO_AUTO_TOPUP !== "off") startAutoTopUpLoop(sbFn, stripeOrNull, log);
   const userId = (req: Request): string | null => (req.auth && "user_id" in req.auth ? req.auth.user_id : null);
   const fail = (res: Response, e: any) => {
-    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof PresetError || e instanceof LookError || e instanceof ProductError || e instanceof HookError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError || e instanceof MotivationError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof StudioError || e instanceof InstrumentError || e instanceof PresetError || e instanceof LookError || e instanceof ProductError || e instanceof HookError || e instanceof AdError || e instanceof ClipsError || e instanceof KageError || e instanceof KageMotionError || e instanceof StoryError || e instanceof LongformError || e instanceof MotivationError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const msg = String(e?.message ?? e);
     const named = msg.match(/\b(subscription_required|insufficient_credits|too_many_jobs|asset_not_ready|job_not_found|job_not_cancelable|promo_unknown|promo_expired|promo_exhausted|promo_already_used|invalid_credits)\b/);
     // the no-plan answer carries words too: build 12 of the iPhone app shows `detail` under the button as it is
@@ -1251,6 +1252,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   const quoteFor = async (sb: SupabaseClient, u: string, body: any, o: { owner?: boolean } = {}): Promise<Quote> => {
     if (String(body?.tool ?? "") === "instrument") {
       // a preset: its recipe fills the request; the job keeps the preset's id and only what the person chose
+      // a full ad (studio-ads.ts): the pieces already made, cut together on our side; only its music is priced
+      if (body?.options?.ad != null) return (await quoteAd(sb, u, body.options.ad, PLANS, { admin: !!o.owner })) as any;
       // a product look (studio-product-looks.ts) or a hook (studio-hooks.ts): the same path, the recipe joins at run time
       if (body?.options?.look != null || body?.options?.hook != null || body?.options?.hook_still != null) {
         const l = body.options.look != null ? await lookQuoteRequest(sb, u, body.options, { admin: !!o.owner }) : await hookQuoteRequest(sb, u, body.options, { admin: !!o.owner });
