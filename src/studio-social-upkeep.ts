@@ -18,6 +18,7 @@ import { getSocialProvider, providerNamed, type SocialDeps, type SocialProvider 
 import { hasPlanAccess } from "./studio-limits.js";
 import { recordEvent } from "./studio-events.js";
 import { recordCost } from "./studio-costs.js";
+import { takeOffGoneAccounts } from "./studio-social-unlink.js";
 
 // ---------------------------------------------------------------------------------------------------
 // What the service costs (ayrshare.com/pricing, read Nov 21 2026; the account page agrees for Launch)
@@ -183,6 +184,9 @@ export async function socialUpkeep(sb: SupabaseClient, deps: SocialDeps & { prov
   const rows = all.filter((x) => !x.provider || x.provider === p.name);
   out.profiles = all.length;
   const facts = await upkeepFacts(sb, rows.map((x) => x.user_id), s.idleDays, now);
+  // the people with posts still to go out: their posts are checked against the accounts still linked (takeOffGoneAccounts)
+  const waiting = await sb.from("studio_social_posts").select("user_id").in("status", ["scheduled", "queued"]).limit(5000);
+  const withWaiting = new Set<string>(waiting.error ? [] : ((waiting.data ?? []) as any[]).map((x) => x.user_id));
   for (const row of rows) {
     const f = facts.get(row.user_id)!;
     let linked = (row.accounts ?? []).length;
@@ -195,7 +199,15 @@ export async function socialUpkeep(sb: SupabaseClient, deps: SocialDeps & { prov
       } catch (e: any) { log(`[social] upkeep could not read ${row.user_id}'s accounts: ${String(e?.message ?? e).slice(0, 120)}`); out.kept++; continue; }
     }
     const reason = clearReason(row, { ...f, linked }, s, now);
-    if (!reason) { out.kept++; continue; }
+    if (!reason) {
+      out.kept++;
+      // waiting posts aimed at an account no longer linked are taken off it, as a removal in Clone8 does (Nov 26 2026)
+      if (s.mode === "on" && linked && withWaiting.has(row.user_id)) {
+        const t = await takeOffGoneAccounts(sb, p, row.profile_key, row.user_id, now).catch((e: any) => { log(`[social] upkeep could not check ${row.user_id}'s waiting posts: ${String(e?.message ?? e).slice(0, 120)}`); return null; });
+        if (t && t.gone.length) { log(`[social] upkeep took gone accounts off ${row.user_id}'s posts ${JSON.stringify(t)}`); recordEvent({ user_id: row.user_id, kind: "feature", name: "social_posts_off_gone_accounts", props: { gone: t.gone.length, changed: t.changed, canceled: t.canceled, left: t.left } }); }
+      }
+      continue;
+    }
     if (s.mode === "dry") { out.would_clear.push({ user_id: row.user_id, reason }); log(`[social] upkeep (dry) would clear ${row.user_id} (${reason})`); continue; }
     if (await clearProfile(sb, p, row, reason, log, { idle_days: Math.round((now - lastUse(row, f.lastPostAt)) / 86400_000) })) out.cleared.push({ user_id: row.user_id, reason });
     else out.kept++;

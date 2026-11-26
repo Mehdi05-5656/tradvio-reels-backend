@@ -83,3 +83,28 @@ export async function takeOffWaitingPosts(sb: SupabaseClient, p: SocialProvider,
   }
   return out;
 }
+
+/** Waiting posts aimed at accounts that are no longer linked at the posting service: taken off them as a removal in
+ *  Clone8 does (Nov 26 2026: a customer removed TikTok at 01:55 PT, before takeOffWaitingPosts existed, and 4 posts
+ *  scheduled for Nov 27-30 still aimed at it; an account removed on the network itself is the same case). Asks the
+ *  service for the live list and does nothing when it cannot be read or comes back empty: an empty answer is never
+ *  taken to mean every account is gone. Run from the hourly social upkeep. */
+export async function takeOffGoneAccounts(sb: SupabaseClient, p: SocialProvider, profileKey: string, u: string, now = Date.now()): Promise<TakenOff & { gone: string[] }> {
+  const out = { changed: 0, canceled: 0, left: 0, gone: [] as string[] };
+  const r = await sb.from("studio_social_posts").select("options").eq("user_id", u).in("status", ["scheduled", "queued"]).limit(2000);
+  if (r.error) throw r.error;
+  const named = new Map<string, string>(); // account id -> platform
+  for (const row of (r.data ?? []) as Array<Pick<SocialPostRow, "options">>) for (const a of (Array.isArray(row.options?.accounts) ? row.options.accounts : []) as Stored[]) if (a?.id && a.platform) named.set(a.id, a.platform);
+  if (!named.size) return out;
+  const live = await p.accounts(profileKey);
+  const liveIds = new Set(live.map((a) => a.id).filter(Boolean) as string[]);
+  if (!liveIds.size) return out;
+  const byPlatform = new Map<string, string[]>();
+  for (const [id, platform] of named) if (!liveIds.has(id)) byPlatform.set(platform, [...(byPlatform.get(platform) ?? []), id]);
+  for (const [platform, ids] of byPlatform) {
+    out.gone.push(...ids);
+    const t = await takeOffWaitingPosts(sb, p, profileKey, u, { platform, ids, leftOnNetwork: live.filter((a) => a.platform === platform).length }, now);
+    out.changed += t.changed; out.canceled += t.canceled; out.left += t.left;
+  }
+  return out;
+}

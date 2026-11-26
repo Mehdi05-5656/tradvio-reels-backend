@@ -3,7 +3,7 @@
 // kept both and came back "partial" with "Account … was disconnected".
 import test from "node:test";
 import assert from "node:assert/strict";
-import { removedSends, takeOffWaitingPosts } from "../src/studio-social-unlink.js";
+import { removedSends, takeOffGoneAccounts, takeOffWaitingPosts } from "../src/studio-social-unlink.js";
 
 const U = "11111111-1111-4111-8111-111111111111";
 const H = 3600_000;
@@ -111,4 +111,29 @@ test("a second account on the same network is untouched when the first is remove
   assert.deepEqual(r, { changed: 1, canceled: 0, left: 0 });
   assert.deepEqual(calls[0].change.targets.map((x: any) => x.accountId), ["tt2"]);
   assert.deepEqual(rows[0].platforms, ["tiktok"]);
+});
+
+test("the hourly upkeep takes accounts no longer linked off waiting posts (removed before the fix, or on the network)", async () => {
+  // the live case: TikTok removed at 01:55 PT Nov 26 before the fix; 4 TikTok+YouTube posts still scheduled for Nov 27-30
+  const sends = (h: number) => [{ id: "tt1", platform: "tiktok", at: new Date(Date.now() + h * H).toISOString() }, { id: "yt1", platform: "youtube", at: new Date(Date.now() + h * H).toISOString() }];
+  const rows = [24, 48, 72, 96].map((h, i) => post({ id: `p${i}`, platforms: ["tiktok", "youtube"], options: { accounts: sends(h) }, schedule_at: new Date(Date.now() + h * H).toISOString() }));
+  const sb = fakeSb(rows); const { p, calls } = fakeProvider();
+  p.accounts = async () => [{ id: "yt1", platform: "youtube" }];
+  const t = await takeOffGoneAccounts(sb, p, "pk", U);
+  assert.deepEqual([t.changed, t.canceled, t.left, t.gone], [4, 0, 0, ["tt1"]]);
+  for (const r of rows) { assert.deepEqual(r.platforms, ["youtube"]); assert.deepEqual(r.options.accounts.map((a: any) => a.id), ["yt1"]); }
+  assert.equal(calls.filter((c) => c.update).length, 4, "each post changed at the posting service too");
+  // nothing gone: nothing touched
+  const sb2 = fakeSb([post({ id: "q", platforms: ["youtube"], options: { accounts: sends(24).slice(1) } })]); const f2 = fakeProvider();
+  f2.p.accounts = async () => [{ id: "yt1", platform: "youtube" }];
+  assert.deepEqual((await takeOffGoneAccounts(sb2, f2.p, "pk", U)).gone, []); assert.equal(f2.calls.length, 0);
+  // the service answers an empty list (an outage or a lag): never taken to mean every account is gone
+  const rows3 = [post({ id: "e", platforms: ["tiktok", "youtube"], options: { accounts: sends(24) } })];
+  const f3 = fakeProvider(); f3.p.accounts = async () => [];
+  const t3 = await takeOffGoneAccounts(fakeSb(rows3), f3.p, "pk", U);
+  assert.equal(t3.gone.length, 0); assert.deepEqual(rows3[0].platforms, ["tiktok", "youtube"]); assert.equal(f3.calls.length, 0);
+  // a post only to the gone account is canceled
+  const rows4 = [post({ id: "o", platforms: ["tiktok"], options: { accounts: sends(24).slice(0, 1) } })];
+  const f4 = fakeProvider(); f4.p.accounts = async () => [{ id: "yt1", platform: "youtube" }];
+  assert.equal((await takeOffGoneAccounts(fakeSb(rows4), f4.p, "pk", U)).canceled, 1); assert.equal(rows4[0].status, "canceled");
 });
