@@ -15,7 +15,9 @@ export function lean(v: any, depth = 0): any {
 
 const who = (p: any): string => (Array.isArray(p?.options?.accounts) && p.options.accounts.length ? p.options.accounts.map((a: any) => `${a.platform}${a.username ? ` @${a.username}` : ""}`).join(", ") : (p?.platforms ?? []).join(", "));
 const post = (p: any) => lean({ id: p.id, when: day(p.schedule_at) ?? "now", status: p.status, to: who(p), caption: short(p.caption, 140), video: p.asset_id ? `f:${p.asset_id}` : p.job_id ? `r:${p.job_id}` : undefined, auto_reply: p.options?.autoreply?.keywords ?? p.options?.autoreply?.keyword, error: p.error ? short(p.error, 120) : undefined,
-  own_captions: (p.options?.accounts ?? []).some((a: any) => a?.own && a?.caption) || undefined, poster_url: p.poster_url });
+  own_captions: (p.options?.accounts ?? []).some((a: any) => a?.own && a?.caption) || undefined, poster_url: p.poster_url,
+  // where it went live, per network (a file removed after posting can still be shown through these)
+  links: (Array.isArray(p.results) ? p.results : []).map((r: any) => r?.url).filter((u: unknown) => typeof u === "string" && /^https:\/\//.test(u)) });
 
 export function shape(name: string, j: any, args: Record<string, any> = {}): any {
   if (!j || typeof j !== "object") return j;
@@ -27,7 +29,7 @@ export function shape(name: string, j: any, args: Record<string, any> = {}): any
     const w = waiting.filter(keep);
     return lean({ times_are: "UTC; convert to the person's time zone", waiting_total: waiting.length, waiting: w.slice(0, 40).map(post), ...(w.length > 40 ? { more_waiting: w.length - 40 } : {}), recent: rest.filter(keep).slice(0, args.recent === false ? 0 : 8).map(post) });
   }
-  if (name === "socials") return lean({ linked: (j.accounts ?? []).map((a: any) => ({ id: a.id, network: a.platform, handle: a.username, needs_relink: a.refresh_required || undefined, followers: a.followers })), groups: (j.groups ?? []).map((g: any) => ({ name: g.name, account_ids: g.account_ids, missing: g.missing || undefined })), posts_today: j.usage_today, per_account_daily: j.per_account_daily, allowance: j.allowance ? { accounts_in_plan: j.allowance.total } : undefined });
+  if (name === "socials") return lean({ linked: (j.accounts ?? []).map((a: any) => ({ id: a.id, network: a.platform, handle: a.username, needs_relink: a.refresh_required || undefined, followers: a.followers })), groups: (j.groups ?? []).map((g: any) => ({ name: g.name, account_ids: g.account_ids, missing: g.missing || undefined, times: g.defaults?.times, days: g.defaults?.days, time_zone: g.defaults?.timezone, per_day: g.defaults?.per_day })), posts_today: j.usage_today, per_account_daily: j.per_account_daily, allowance: j.allowance ? { accounts_in_plan: j.allowance.total } : undefined });
   if (name === "plans") return lean({ plans: (j.plans ?? []).map((p: any) => ({ id: p.id, name: p.name, monthly_usd: p.monthly_usd, annual_usd_per_month: p.annual_usd_per_month, credits: p.credits, runs_at_once: p.parallel, hd_clips: p.hd_clips || undefined, includes: (p.features ?? []).slice(0, 8).map((f: any) => short(f, 90)) })), open_features: Object.entries(j.tools ?? {}).filter(([, v]) => v === true).map(([k]) => k) });
   if (name === "instruments") {
     const list: any[] = j.instruments ?? j.models ?? (Array.isArray(j) ? j : []);

@@ -28,6 +28,7 @@ import { think, type BrainDeps, type ChatState, type Transport } from "./brain.j
 import { telegram, parseUpdate, type Incoming } from "./telegram.js";
 import { sendblue, parseSendblue, verifySendblue, handleId, contactCard, mask } from "./sendblue.js";
 import { classify } from "./gate.js";
+import { intake, whyText, type Intake } from "./intake.js";
 import type { Index } from "./account.js";
 import { CTA_ACTIONS, CTAS, chatLines, ctaReport, textAdminView, type CtaRow, type TextEventRow, type TextLinkRow } from "./admin.js";
 
@@ -40,6 +41,8 @@ export const textOpen = (env: Env = process.env) => textEnabled(env) && env.STUD
 export const imessageEnabled = (env: Env = process.env) => baseOn(env) && env.STUDIO_TEXT_IMESSAGE_ENABLED === "true" && !!env.SENDBLUE_API_KEY_ID && !!env.SENDBLUE_API_SECRET && /^\+\d{7,15}$/.test(String(env.SENDBLUE_FROM_NUMBER ?? "")) && String(env.SENDBLUE_WEBHOOK_SECRET ?? "").length >= 16;
 export const imessageOpen = (env: Env = process.env) => imessageEnabled(env) && env.STUDIO_TEXT_IMESSAGE_OPEN === "true";
 const anyEnabled = (env: Env) => textEnabled(env) || imessageEnabled(env);
+/** words saying files come with the message ("these are the posts", "attached", "here are the clips") */
+export const BATCH_HINT = /\b(attach(ed|ment|ments)?|these (are|videos|clips|posts|files|pics|photos|ones)|here (are|is)|here's|sending (you|these|the)|below)\b/i;
 export const WEBHOOK_PATH = "/api/studio/text/telegram/webhook";
 export const IMESSAGE_WEBHOOK_PATH = "/api/studio/text/imessage/webhook";
 /** "LINK <code>": what the Connect iMessage button types into Messages. */
@@ -97,7 +100,8 @@ type Channel = {
 export type TextDeps = { env?: Env; fetch?: typeof fetch; log?: (l: string) => void; port?: number;
   /** test seam: what sends into Telegram */ out?: Out;
   /** test seam: what sends into iMessage */ imessageOut?: Out;
-  /** test seam: the brain */ think?: BrainDeps["fetch"]; };
+  /** test seam: the brain */ think?: BrainDeps["fetch"];
+  /** how long a batch waits for its last part (tests: shorter) */ settleMs?: number; };
 
 export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: TextDeps = {}) {
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
@@ -312,10 +316,23 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (!(await mayUse(sb, link.user_id, ch.name))) { if (!u.callback_id) await say.text(u.chat, `Texting Clone8 on ${ch.label} isn't open for your account yet.`); return; }
     if (ch.startCode(u.text)) { await say.text(u.chat, "This chat is already connected to your Clone8 account. To connect a different account, remove this one first in the app (Account → Text Clone8)."); return; }
     if (ch.name === "imessage") shareProfile(u.chat);
-    if (!(await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file })))) return "busy";
+    // files sent with it go into the person's library first (as an upload from the website would), then the bot reads
+    // the message with them numbered in the order sent
+    let took: Intake | null = null;
+    if (u.files?.length) {
+      void say.typing(u.chat).catch(() => undefined);
+      took = await intake({ api: serverApi(link.user_id, { port, fetch: deps.fetch }), sb, files: u.files, telegramToken: ch.name === "telegram" ? env.TELEGRAM_BOT_TOKEN ?? null : null, fetch: deps.fetch, log: logFor(link.user_id, u.chat, ch.name) });
+    }
+    if (!(await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file,
+      ...(took ? { files: took.got, file_errors: took.failed.map((x) => `${x.name}: ${whyText(x.why)}`) } : {}) })))) return "busy";
   }
 
   // ---- the inbox: written by the webhook, worked on in order, one chat at a time ----
+  /** how long a batch (files, or a text saying files come with it) waits for its last part; and how close plain
+   *  messages must be to be read together */
+  const settleMs = deps.settleMs ?? 6000, MERGE_MS = 10_000;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  const settleSoon = (ms: number) => { if (settleTimer) return; settleTimer = setTimeout(() => { settleTimer = null; void drain(); }, Math.max(500, ms)); (settleTimer as any).unref?.(); };
   const chains = new Map<string, Promise<void>>();
   /** updates this process is working on: never taken twice, however long one takes */
   const inflight = new Set<string>();
@@ -325,39 +342,74 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     try {
       const sb = sbFn();
       const stale = Date.now() - 5 * 60_000;
-      const r = await sb.from("studio_text_inbox").select("channel,update_id,payload,claimed_at,attempts").in("channel", live()).is("done_at", null)
+      const r = await sb.from("studio_text_inbox").select("channel,update_id,payload,claimed_at,attempts,received_at").in("channel", live()).is("done_at", null)
         .or(`claimed_at.is.null,claimed_at.lt.${new Date(stale).toISOString()}`).order("received_at", { ascending: true }).order("update_id", { ascending: true }).limit(50);
       if (r.error) throw r.error;
+      // each chat's waiting messages, in order
+      type Got = { row: any; ch: Channel; u: Incoming | null; id: string; at: number };
+      const byChat = new Map<string, Got[]>();
       for (const row of (r.data ?? []) as any[]) {
         const ch = chOf(row.channel); if (!ch) continue;
         const id = `${ch.name}:${row.update_id}`;
         if (inflight.has(id)) continue;
         if (row.claimed_at && Date.parse(row.claimed_at) > stale) continue;
-        const attempts = Number(row.attempts) || 0;
-        const c = await sb.from("studio_text_inbox").update({ claimed_at: new Date().toISOString(), claimed_by: me, attempts: attempts + 1 }).eq("channel", ch.name).eq("update_id", row.update_id).is("done_at", null)
-          [row.claimed_at ? "eq" : "is"]("claimed_at", row.claimed_at ?? null).select("update_id");
-        if (!(c.data ?? []).length) continue; // another server took it (during a deploy two run for a minute)
         const u = ch.parse(row.payload);
-        // (a connect code is not kept once used)
-        const finish = (extra: Record<string, unknown> = {}) => sb.from("studio_text_inbox").update({ done_at: new Date().toISOString(), ...extra, ...(u && ch.startCode(u.text) ? { payload: { update_id: row.update_id, redacted: "start" } } : {}) }).eq("channel", ch.name).eq("update_id", row.update_id).then(() => undefined, () => undefined);
-        // a message that already failed three times (it crashed the server, say) is put aside, not tried forever
-        if (attempts >= 3) { log(`[text] update ${row.update_id} given up after ${attempts} tries`); await finish({ claimed_by: `gave_up:${me}` }); continue; }
-        inflight.add(id);
-        const chat = `${ch.name}:${u?.chat ?? "none"}`;
-        const next: Promise<void> = (chains.get(chat) ?? Promise.resolve()).then(async () => {
-          let busy = false;
-          try { if (u) busy = (await handleUpdate(sb, u, ch.name)) === "busy"; }
-          catch (e: any) { log(`[text] update ${row.update_id} failed: ${String(e?.message ?? e).slice(0, 200)}`); }
-          finally {
-            // another server is still on this chat (a deploy): the message goes back in the queue, untouched
-            // (it is looked at again in about ten seconds, not on every pass)
-            if (busy) await sb.from("studio_text_inbox").update({ claimed_at: new Date(Date.now() - 5 * 60_000 + 10_000).toISOString(), claimed_by: null, attempts }).eq("channel", ch.name).eq("update_id", row.update_id).then(() => undefined, () => undefined);
-            else await finish();
-            inflight.delete(id);
-            if (chains.get(chat) === next) chains.delete(chat);
+        const key = `${ch.name}:${u?.chat ?? "none"}`;
+        byChat.set(key, [...(byChat.get(key) ?? []), { row, ch, u, id, at: Date.parse(row.received_at) || Date.now() }]);
+      }
+      for (const [chat, got] of byChat) {
+        // a batch (files, or words saying files come with them) is read once the chat has been quiet a moment, as one
+        // message: iMessage sends a text and each of its attachments separately, seconds apart
+        const quiet = Date.now() - got[got.length - 1].at;
+        const batchy = got.some((g) => g.u && !g.u.callback_id && (g.u.files?.length || BATCH_HINT.test(g.u.text)));
+        if (settleMs > 0 && batchy && quiet < settleMs) { settleSoon(settleMs - quiet + 300); continue; }
+        // in a batch, messages a few seconds apart go together; otherwise each is its own, as is a tap on a button and
+        // anything the gate answers by itself (YES with its code, NO, STOP, HELP)
+        const own = (g: Got) => !g.u || !!g.u.callback_id || classify(g.u.text).kind !== "text";
+        const parts: Got[][] = [];
+        for (const g of got) {
+          const prev = parts[parts.length - 1], tail = prev?.[prev.length - 1];
+          if (batchy && prev && tail && !own(tail) && !own(g) && g.at - tail.at <= MERGE_MS) prev.push(g); else parts.push([g]);
+        }
+        for (const part of parts) {
+          const mine: Got[] = [];
+          for (const g of part) {
+            const attempts = Number(g.row.attempts) || 0;
+            const c = await sb.from("studio_text_inbox").update({ claimed_at: new Date().toISOString(), claimed_by: me, attempts: attempts + 1 }).eq("channel", g.ch.name).eq("update_id", g.row.update_id).is("done_at", null)
+              [g.row.claimed_at ? "eq" : "is"]("claimed_at", g.row.claimed_at ?? null).select("update_id");
+            if (!(c.data ?? []).length) continue; // another server took it (during a deploy two run for a minute)
+            mine.push(g);
           }
-        });
-        chains.set(chat, next);
+          if (!mine.length) continue;
+          const ch = mine[0].ch;
+          // (a connect code is not kept once used)
+          const finishOne = (g: Got, extra: Record<string, unknown> = {}) => sb.from("studio_text_inbox").update({ done_at: new Date().toISOString(), ...extra, ...(g.u && ch.startCode(g.u.text) ? { payload: { update_id: g.row.update_id, redacted: "start" } } : {}) }).eq("channel", ch.name).eq("update_id", g.row.update_id);
+          // a message that already failed three times (it crashed the server, say) is put aside, not tried forever
+          const tired = mine.filter((g) => (Number(g.row.attempts) || 0) >= 3);
+          for (const g of tired) { log(`[text] update ${g.row.update_id} given up after ${g.row.attempts} tries`); await finishOne(g, { claimed_by: `gave_up:${me}` }); }
+          const todo = mine.filter((g) => !tired.includes(g));
+          if (!todo.length) continue;
+          todo.forEach((g) => inflight.add(g.id));
+          // one message from the parts: their words in order, every file
+          const firstU = todo.find((g) => g.u)?.u ?? null;
+          const u: Incoming | null = firstU && todo.length > 1 ? { ...firstU, text: todo.map((g) => g.u?.text ?? "").filter((t) => t.trim()).join("\n"), files: todo.flatMap((g) => g.u?.files ?? []), has_file: todo.some((g) => g.u?.has_file) } : firstU;
+          const next: Promise<void> = (chains.get(chat) ?? Promise.resolve()).then(async () => {
+            let busy = false;
+            try { if (u) busy = (await handleUpdate(sb, u, ch.name)) === "busy"; }
+            catch (e: any) { log(`[text] update ${todo[0].row.update_id} failed: ${String(e?.message ?? e).slice(0, 200)}`); }
+            finally {
+              // another server is still on this chat (a deploy): the messages go back in the queue, untouched
+              // (looked at again in about ten seconds, not on every pass)
+              for (const g of todo) {
+                if (busy) await sb.from("studio_text_inbox").update({ claimed_at: new Date(Date.now() - 5 * 60_000 + 10_000).toISOString(), claimed_by: null, attempts: Number(g.row.attempts) || 0 }).eq("channel", ch.name).eq("update_id", g.row.update_id).then(() => undefined, () => undefined);
+                else await finishOne(g);
+                inflight.delete(g.id);
+              }
+              if (chains.get(chat) === next) chains.delete(chat);
+            }
+          });
+          chains.set(chat, next);
+        }
       }
     } catch (e: any) { log(`[text] inbox: ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { draining = false; }

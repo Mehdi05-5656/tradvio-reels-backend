@@ -36,7 +36,7 @@ export function mockApi(now: () => number = Date.now): MockApi {
   const route = (method: Method, path: string, body: any, claim: string | null): Reply => {
     const p = path.split("?")[0], S = "/api/studio";
     if (method === "GET" && p === `${S}/me`) return ok({ subscription: { plan: { name: "Creator" }, status: "active", parallel_jobs: 2 }, active: true, balance: data.balance, usage_30d: { jobs: 12, credits: 640 }, ledger: [], connector: { url: "https://mcp.clone8.io/api/studio/mcp" } });
-    if (method === "GET" && p === `${S}/social`) return ok({ enabled: true, connected: true, accounts: data.accounts, groups: [{ id: "g1", name: "Group A", account_ids: [IDS.tiktok, IDS.insta], missing: 0, networks: ["tiktok", "instagram"] }], usage_today: {}, per_account_daily: 15 });
+    if (method === "GET" && p === `${S}/social`) return ok({ enabled: true, connected: true, accounts: data.accounts, groups: [{ id: "g1", name: "Group A", account_ids: [IDS.tiktok, IDS.insta], missing: 0, networks: ["tiktok", "instagram"], defaults: { times: ["09:00", "12:30", "18:00"], timezone: "America/Los_Angeles", per_day: 3 } }], usage_today: {}, per_account_daily: 15 });
     if (method === "GET" && p === `${S}/social/posts`) return ok({ posts: data.posts });
     if (method === "GET" && p === `${S}/jobs`) return ok({ jobs: data.jobs });
     if (method === "GET" && /\/jobs\/[0-9a-f-]{36}$/.test(p)) { const j = data.jobs.find((x: any) => p.endsWith(x.id)); return j ? ok({ job: j }) : ok({ error: "job_not_found" }, 404); }

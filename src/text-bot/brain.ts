@@ -53,6 +53,7 @@ ${featureList()}
 - What you said earlier came from what you looked up then. Do not take it back unless a new lookup shows it was wrong.
 - Editing a clip (captions on, their style or place, a word in them, trimming, pauses, swearing) is prepare_edit, and it is free. For captions on a Clone8 clip, turn them on with prepare_edit rather than starting a paid Captions run: it can place them in the same step. A Captions run is for videos the editor can't open (uploads, imports).
 - Caption places: every edit question says where they were and where they go ("from 70% to 55% of the way down"), and those lines stay in this chat. For "back", "where they were", "the original" or "15% above the original", read the earlier spots from those lines and work it out yourself; ask only if no line has it. "Higher" means a smaller share of the way down. Talk about places only in percentages of the way down ("45% of the way down"), never in decimals like 0.45.
+- Files the person sends in the chat (videos, pictures) are put into their library the moment they arrive; a system note lists them and they are ON THE TABLE, numbered in the order sent. Use them directly (post, schedule, caption, clip, any tool). Never say files can't be taken.
 - Any result can go into any other feature. A finished result of one tool is used in another by passing from_result to prepare_job, or by to_library.
 - If something cannot be done by text yet (the recipe says so), say that in one line and give the page: https://app.clone8.io/#studio/<page>.
 
@@ -68,6 +69,9 @@ ACTIONS AND THE YES
 - For anything that needs the person's word that a video is theirs to use (the recipe says so), ask them plainly and pass exactly what they wrote. Never write it for them.
 - Prices: only what price or a prepare_ tool returns. Never estimate.
 - Times: the person's time zone and the time now are under RIGHT NOW. Pass times as full ISO 8601 with offset. "In 10 minutes" is minutes_from_yes.
+- Several videos at different times or with their own captions ("3 today at 5:30, 6:45 and 8 pm, 2 tomorrow"): ONE prepare_post, each video with its own when and caption. "Their normal schedule", "the usual times", "the morning slot": the posting times saved on their groups (account: groups[].times, in the group's time zone); use the next free ones in order. Ask only if no times are saved.
+- Captions "in the same format, different wording each time": write each one yourself in that format (no hashtags or extras unless asked) and put it on its video; the question shows every caption before anything is posted.
+- A posted video's file may have been removed after posting (the person's delete-after-posting choice): then say so plainly, and show the post itself (show with its p: ref sends its picture) or give its live link (posts lookup: links). Never call it "not ready".
 - Paying, changing or cancelling a plan, top-ups, linking or removing a social account, deleting the account: never by text. Give the page.
 
 WHAT YOU NEVER SAY
@@ -78,7 +82,7 @@ WHAT YOU NEVER SAY
 - Real people appear in videos only through a photo they agreed to; decline named celebrities and public figures, and sexual, hateful or violent content.`;
 
 const str = { type: "string" }, obj = (properties: Record<string, any>, required: string[] = []) => ({ type: "object", additionalProperties: false, properties, required });
-const video = obj({ asset_id: str, job_id: str, output_key: str, label: { type: "string", description: "its title, for the question" } });
+const video = obj({ asset_id: str, job_id: str, output_key: str, label: { type: "string", description: "its title, for the question" }, when: { type: "string", description: "this video's own time, ISO 8601 with offset (else the post's when)" }, caption: { type: "string", description: "this video's own caption (else the post's caption)" } });
 const bool = { type: "boolean" };
 export const TOOLS = [
   { name: "account", description: "The person's plan, credit balance, what the plan allows, recent charges, linked social accounts and posting groups. Free.", input_schema: obj({}) },
@@ -198,7 +202,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       return { plan: m.subscription?.plan?.name ?? null, plan_status: m.subscription?.status ?? null, active: !!m.active || !!m.owner_pass, balance: m.balance, credit_expiry: m.credit_expiry ?? null, runs_at_once: m.subscription?.parallel_jobs ?? null, used_30d: m.usage_30d ?? null,
         recent_charges: (m.ledger ?? []).slice(0, 12).map((l: any) => ({ credits: l.delta, what: l.job_label ?? l.reason, when: String(l.created_at).slice(0, 16) })),
         linked_accounts: (s.accounts ?? []).map((x: any) => ({ id: x.id, network: x.platform, handle: x.username, needs_relink: !!x.refresh_required, followers: x.followers ?? null })),
-        groups: (s.groups ?? []).map((g: any) => ({ name: g.name, accounts: g.account_ids, networks: g.networks })), posts_today: s.usage_today ?? null, per_account_daily: s.per_account_daily ?? null,
+        groups: (s.groups ?? []).map((g: any) => ({ name: g.name, accounts: g.account_ids, networks: g.networks, ...(g.defaults?.times?.length ? { times: g.defaults.times, days: g.defaults.days, time_zone: g.defaults.timezone ?? null, per_day: g.defaults.per_day ?? null } : {}) })), posts_today: s.usage_today ?? null, per_account_daily: s.per_account_daily ?? null,
         by_text_today: { ceiling: d.cfg.dailyCredits, left: act.today(now, d.cfg.timezone) === st.spend?.day ? Math.max(0, d.cfg.dailyCredits - st.spend!.credits) : d.cfg.dailyCredits } };
     }
     if (name === "recipe") { const r = recipeFor(String(a?.feature ?? "")); return r ? { recipe: recipeText(r) } : { error: "no_such_feature", features: featureList() }; }
@@ -292,6 +296,8 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     if (name === "prepare_caption_read") return prepared(() => act.prepareCaptionRead(actx(), a ?? {}));
     if (name === "prepare_automation_run") return prepared(() => act.prepareAutomationRun(actx(), a ?? {}));
     if (name === "prepare_edit") return prepared(() => prepareEdit(actx(), a ?? {}));
+    // a reading helper called by its own name ("posts") is the lookup it meant
+    if (HELPERS[name]) return run("lookup", { name, args: a?.args && typeof a.args === "object" ? a.args : typeof a?.args === "string" ? (() => { try { return JSON.parse(a.args); } catch { return {}; } })() : a ?? {} });
     return { error: "unknown_tool" };
   };
 
@@ -300,7 +306,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     try {
       const [me, so] = await Promise.all([d.api.call("GET", "/api/studio/me"), d.api.call("GET", "/api/studio/social")]);
       const m = me.json ?? {}, s2 = so.json ?? {};
-      d.basics = { at: now, text: `ACCOUNT: plan ${m.owner_pass ? "owner pass" : m.subscription?.plan?.name ?? "none"}${m.active || m.owner_pass ? "" : " (not active)"}; balance ${m.balance ?? "?"} credits. Linked: ${(s2.accounts ?? []).map((x: any) => `${x.platform}${x.username ? ` @${x.username}` : ""} (${x.id})${x.refresh_required ? " needs relink" : ""}`).join("; ") || "nothing"}. Groups: ${(s2.groups ?? []).map((g: any) => `"${g.name}"`).join(", ") || "none"}.` };
+      d.basics = { at: now, text: `ACCOUNT: plan ${m.owner_pass ? "owner pass" : m.subscription?.plan?.name ?? "none"}${m.active || m.owner_pass ? "" : " (not active)"}; balance ${m.balance ?? "?"} credits. Linked: ${(s2.accounts ?? []).map((x: any) => `${x.platform}${x.username ? ` @${x.username}` : ""} (${x.id})${x.refresh_required ? " needs relink" : ""}`).join("; ") || "nothing"}. Groups: ${(s2.groups ?? []).map((g: any) => `"${g.name}"${g.defaults?.times?.length ? ` (usual times ${g.defaults.times.join(", ")}${g.defaults.timezone ? ` ${g.defaults.timezone}` : ""})` : ""}`).join(", ") || "none"}.` };
     } catch { d.basics = d.basics ?? null; }
   }
   const local = new Intl.DateTimeFormat("en-US", { timeZone: d.cfg.timezone, weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(now));

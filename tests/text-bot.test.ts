@@ -312,7 +312,7 @@ test("a whole chat: nobody but the owner, nothing without the YES, nothing twice
   await b.bot.handle({ chat: "1", from: "1", text: "STOP", private: true });
   assert.equal(st.muted, true); assert.match(b.sent.at(-1)!.text, /won.t message you on my own/);
   await b.bot.handle({ chat: "1", from: "1", text: "", private: true });
-  assert.match(b.sent.at(-1)!.text, /text and links/);
+  assert.match(b.sent.at(-1)!.text, /text, links, videos and pictures/);
 });
 
 test("talking about something else withdraws the waiting question, so a later yes can't release it", async () => {
@@ -584,4 +584,51 @@ test("their own AI app: every request the bot builds is one the app's set-up pag
     assert.equal(decodeURIComponent(m.buttons[0].url.split("?ai=")[1]), m.prompt);
   }
   assert.equal((appLink({ kind: "other", request: "check my balance", connected: true, connectorUrl: "https://mcp.clone8.io/x" }) as any).error, "bad_kind");
+});
+
+test("files sent in the chat: both channels carry them; intake stores each as an upload would, and says why one can't", async () => {
+  const { intake, whyText, nameFor, TELEGRAM_MAX } = await import("../src/text-bot/intake.js");
+  const { parseSendblue } = await import("../src/text-bot/sendblue.js");
+  const { filesOf } = await import("../src/text-bot/telegram.js");
+  const im = parseSendblue({ content: "", number: "+15557654321", from_number: "+15557654321", to_number: "+15550001111", is_outbound: false, status: "RECEIVED", message_handle: "h1", service: "iMessage", group_id: "", media_url: "https://cdn.sendblue.co/files/IMG_4410.MOV" })!;
+  assert.deepEqual(im.files, [{ url: "https://cdn.sendblue.co/files/IMG_4410.MOV" }]);
+  assert.deepEqual(filesOf({ video: { file_id: "v1", file_size: 5000, mime_type: "video/mp4" } }), [{ file_id: "v1", name: undefined, mime: "video/mp4", size: 5000 }]);
+  assert.equal(filesOf({ photo: [{ file_id: "small" }, { file_id: "big" }] })[0].file_id, "big", "the largest size of a photo");
+  assert.deepEqual(filesOf({ voice: { file_id: "x" } }), [], "a voice note is not a video or picture");
+  assert.equal(nameFor({ url: "https://x/IMG_1.MOV" }, 1, "2026-11-26 10:00"), "IMG_1.MOV");
+  assert.equal(nameFor({ file_id: "a", mime: "video/mp4" }, 2, "2026-11-26 10:00"), "Texted 2026-11-26 10:00 #2.mp4");
+  // the upload: the website's route, the bucket, then complete
+  const calls: string[] = [];
+  const api: any = { call: async (m: string, p: string, body: any) => { calls.push(`${m} ${p}`); if (p.endsWith("/upload-url")) return body.name === "same.mp4" ? { status: 200, json: { asset_id: "a-same", existing: { name: "same.mp4" } } } : { status: 200, json: { asset_id: "a-new", path: "u/a-new.mov", token: "tok", bucket: "studio-uploads" } }; if (p.endsWith("/complete")) return { status: 200, json: { asset: { name: "IMG_4410.MOV" } } }; return { status: 404, json: {} }; } };
+  const stored: any[] = [];
+  const sb: any = { storage: { from: (b: string) => ({ uploadToSignedUrl: async (path: string, token: string, bytes: Buffer) => { stored.push({ b, path, token, n: bytes.length }); return { data: {}, error: null }; } }) } };
+  const f: any = async (url: string) => (String(url).includes("getFile") ? new Response(JSON.stringify({ ok: true, result: { file_path: "videos/clip.mp4" } })) : new Response(new Uint8Array(1234)));
+  const r = await intake({ api, sb, fetch: f, telegramToken: "tok", files: [{ url: "https://cdn.sendblue.co/files/IMG_4410.MOV" }, { url: "https://x/same.mp4" }, { file_id: "big", size: TELEGRAM_MAX + 1 }, { url: "https://x/notes.pdf" }, { file_id: "small", size: 900 }] });
+  assert.deepEqual(r.got.map((g) => g.asset_id), ["a-new", "a-same", "a-new"]);
+  assert.deepEqual(stored.map((x) => [x.b, x.path, x.n]), [["studio-uploads", "u/a-new.mov", 1234], ["studio-uploads", "u/a-new.mov", 1234]], "the same file again is not stored twice");
+  assert.deepEqual(r.failed.map((x) => x.why), ["telegram_too_big", "not_video_or_picture"]);
+  assert.match(whyText("telegram_too_big"), /20 MB/);
+  assert.ok(calls.filter((c) => c.endsWith("/complete")).length === 2);
+});
+
+test("one post question can carry each video's own time and caption (3 today at set times, 2 tomorrow)", async () => {
+  const api = mockApi();
+  const now = Date.parse("2026-11-25T23:00:00Z"); // 3 pm Pacific
+  const t = (h: number, m: number, d = 25) => new Date(Date.UTC(2026, 10, d, h + 8, m)).toISOString().replace(".000Z", "-08:00").replace(/T(\d\d)/, (_x, hh) => `T${String((Number(hh) + 16) % 24).padStart(2, "0")}`);
+  void t;
+  const at = (iso: string) => iso; // full ISO with offset
+  const p = await preparePost(ctxOf(api, { now, timezone: "America/Los_Angeles" }), { videos: [
+    { asset_id: IDS.clipA, when: at("2026-11-25T17:30:00-08:00"), caption: "One hand. 800 dollars." },
+    { asset_id: IDS.clipB, when: at("2026-11-25T18:45:00-08:00"), caption: "She really started singing." },
+    { asset_id: IDS.clipA, when: at("2026-11-25T20:00:00-08:00"), caption: "Watch the end." },
+    { asset_id: IDS.clipB, when: at("2026-11-26T09:00:00-08:00"), caption: "Morning one." },
+    { asset_id: IDS.clipA, when: at("2026-11-26T12:00:00-08:00"), caption: "Lunch one." },
+  ], account_ids: [IDS.tiktok] });
+  const items = p.steps[0].body.items;
+  assert.deepEqual(items.map((x: any) => x.schedule_at), ["2026-11-26T01:30:00.000Z", "2026-11-26T02:45:00.000Z", "2026-11-26T04:00:00.000Z", "2026-11-26T17:00:00.000Z", "2026-11-26T20:00:00.000Z"]);
+  assert.deepEqual(items.map((x: any) => x.caption), ["One hand. 800 dollars.", "She really started singing.", "Watch the end.", "Morning one.", "Lunch one."]);
+  assert.match(p.question, /1\. ".+", today 5:30 PM\n {3}Caption: "One hand\. 800 dollars\."/);
+  assert.match(p.question, /5\. ".+", tomorrow 12:00 PM\n {3}Caption: "Lunch one\."/);
+  assert.equal(p.posts, 5);
+  await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA, when: "2026-11-25T23:05:00Z" }], account_ids: [IDS.tiktok] }), /at least 12 minutes/);
 });

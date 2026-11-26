@@ -30,7 +30,9 @@ export const READ: Array<[Method, RegExp]> = [
   ["POST", rx("/splitscreen/frame")], ["POST", rx("/blueprints/read")], ["POST", rx("/social/caption")], ["POST", rx("/social/captions/quote")],
   ["POST", rx("/social/media-check")], ["POST", rx(`/automations/${ID}/quote`)],
 ];
-export const LIGHT: Array<[Method, RegExp]> = [["POST", rx("/links")], ["POST", rx(`/jobs/${ID}/asset`)]];
+// (files sent in the chat go into the library through the website's own upload: only the server's intake calls these,
+// the AI has no tool that can, src/text-bot/intake.ts)
+export const LIGHT: Array<[Method, RegExp]> = [["POST", rx("/links")], ["POST", rx(`/jobs/${ID}/asset`)], ["POST", rx("/assets/upload-url")], ["POST", rx(`/assets/${ID}/complete`)]];
 export const ACT: Array<[Method, RegExp]> = [
   ["POST", rx("/jobs")], ["POST", rx(`/jobs/${ID}/cancel`)],
   ["POST", rx("/social/posts")], ["PATCH", rx(`/social/posts/${ID}`)], ["DELETE", rx(`/social/posts/${ID}`)], ["POST", rx(`/social/posts/${ID}/retry`)],

@@ -14,7 +14,9 @@ import { YES_MARK } from "./app-link.js";
 
 export type BotState = { owner: string | null; pair_code: string | null; offset: number; chats: Record<string, ChatState>; strangers: Record<string, { day: string; n: number }>; rate: Record<string, number[]> };
 export const emptyState = (): BotState => ({ owner: null, pair_code: null, offset: 0, chats: {}, strangers: {}, rate: {} });
-export type Msg = { chat: string; from: string; text: string; private: boolean; tap?: boolean; has_file?: boolean };
+export type Msg = { chat: string; from: string; text: string; private: boolean; tap?: boolean; has_file?: boolean;
+  /** files sent with it, already in the library (src/text-bot/intake.ts), in the order sent; and those that could not be */
+  files?: Array<{ asset_id: string; name: string; kind: string }>; file_errors?: string[] };
 export type BotDeps = {
   cfg: Config; api: Api; out: Transport; state: BotState; /** may be async (the backend writes to its database); awaited where it matters */ save: () => void | Promise<void>; now?: () => number;
   think: (st: ChatState, text: string, o?: { tap?: boolean }) => Promise<TurnResult>;
@@ -128,7 +130,17 @@ export function makeBot(d: BotDeps) {
         return;
       }
       if (m.tap) return; // a tap that is none of ours
-      if (!m.text.trim()) { await d.out.text(m.chat, m.has_file ? "I can't take files sent in the chat yet. Send me a link to the video, or tell me which one in your library." : "I can read text and links for now."); return; }
+      // files sent in the chat are in the library now: they are what "these", "the first one" mean
+      if (m.files?.length || m.file_errors?.length) {
+        if (m.files?.length) {
+          st.table = m.files.map((f, i) => ({ n: i + 1, ref: `f:${f.asset_id}`, label: f.name }));
+          d.forget?.();
+        }
+        note(st, [m.files?.length ? `The person sent ${m.files.length} file${m.files.length === 1 ? "" : "s"} in the chat; ${m.files.length === 1 ? "it is" : "they are"} now in their library, numbered in the order sent: ${m.files.map((f, i) => `${i + 1}. ${JSON.stringify(f.name)} (${f.kind}) [f:${f.asset_id}]`).join("; ")}.` : "",
+          m.file_errors?.length ? `Files that could not be taken in: ${m.file_errors.join("; ")}.` : ""].filter(Boolean).join(" "));
+        if (!m.text.trim()) return await talk(st, m.files?.length ? `(sent ${m.files.length} file${m.files.length === 1 ? "" : "s"})` : "(sent a file)");
+      }
+      if (!m.text.trim()) { await d.out.text(m.chat, m.has_file ? "That file didn't come through. Send it again, or a link to it." : "I can read text, links, videos and pictures."); return; }
       if (gate.kind === "start" || gate.kind === "help") { await say(st, HELP); return; }
       if (gate.kind === "stop" || gate.kind === "pause") { st.muted = true; d.log("muted", { from: m.from }); await d.out.text(m.chat, gate.kind === "stop" ? "Okay. I won't message you on my own (results, updates) until you say RESUME. If you text me, I'll still answer that message. Nothing that is running was cancelled." : "Quiet until you say RESUME: I'll only answer what you text me. Your runs keep going."); return; }
       if (gate.kind === "resume") { st.muted = false; const missed = st.missed ?? []; st.missed = []; await say(st, missed.length ? `I'm back. While I was quiet:\n${missed.join("\n")}` : "I'm back. What do you need?"); return; }
@@ -153,7 +165,7 @@ export function makeBot(d: BotDeps) {
         const p = decline(st.pending)!; d.log("declined", { id: p.id }); note(st, `The person said no to: ${p.question.split("\n")[0]}`);
         await say(st, "Okay, left as it was."); return;
       }
-      return await talk(st, m.has_file ? `${m.text}\n(the person attached a file; files sent in the chat cannot be taken in yet, only links)` : m.text);
+      return await talk(st, m.text);
     } catch (e: any) {
       d.log("error", { detail: String(e?.message ?? e).slice(0, 300) });
       // whatever the broken turn prepared was never shown, so it must not stay answerable

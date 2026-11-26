@@ -8,7 +8,7 @@ import { setPending, howToAnswer, spendRoom, type Check, type Pending, type Pend
 import { toolName } from "./account.js";
 
 export class ActionError extends Error { constructor(public code: string, message: string) { super(message); } }
-export type VideoRef = { asset_id?: string; job_id?: string; output_key?: string };
+export type VideoRef = { asset_id?: string; job_id?: string; output_key?: string; /** this video's own time and caption (else the post's) */ when?: string | null; caption?: string | null };
 export type Ctx = { api: Api; store: PendingStore; spend: Spend | undefined; now: number; timezone: string; dailyCredits: number; maxActionCredits: number; rand?: () => number;
   /** what the person TYPED lately (taps and system notes left out), so "this is mine to use" can be checked against their own words */
   recentUserText: string[];
@@ -183,14 +183,34 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
   if (a.minutes_from_yes != null) rel = Math.max(6, Math.round(Number(a.minutes_from_yes)) || 6);
   else if (a.when && a.when !== "now") { at = Date.parse(a.when); if (!Number.isFinite(at)) throw new ActionError("bad_time", "Give the time as a full date and time with its offset (ISO 8601)"); if (at - ctx.now < 12 * 60_000) throw new ActionError("too_soon", "That time is under 12 minutes away. Post it now, or use minutes_from_yes (6 or more)."); }
   const gap = Math.min(Math.max(Math.round(Number(a.spacing_minutes ?? 0)) || 0, 0), 10080);
+  // each video may carry its own time and caption ("3 today at 5:30, 6:45 and 8 pm, 2 tomorrow, each worded its own way")
+  const own = videos.map((v) => {
+    let t: number | null = null;
+    if (v.when) { t = Date.parse(String(v.when)); if (!Number.isFinite(t)) throw new ActionError("bad_time", "Give each video's time as a full date and time with its offset (ISO 8601)"); if (t - ctx.now < 12 * 60_000) throw new ActionError("too_soon", "Each scheduled time must be at least 12 minutes from now; a video meant for now goes without a time"); }
+    const c = typeof v.caption === "string" ? v.caption : null;
+    if (c && c.length > CAPTION_MAX) throw new ActionError("caption_too_long", `A caption over ${CAPTION_MAX} characters cannot be shown in full here; post that one from the app.`);
+    return { at: t, caption: c };
+  });
+  const each = own.some((x) => x.at != null || x.caption != null);
   const hasYouTube = accounts.some((x) => x.platform === "youtube");
   const ytTitle = hasYouTube && a.youtube_title ? short(a.youtube_title, 100) : null, ytSee = hasYouTube && ["public", "unlisted", "private"].includes(String(a.youtube_visibility)) ? String(a.youtube_visibility) : null;
-  const body: Record<string, any> = { items: videos.map((v) => (v.asset_id ? { asset_id: v.asset_id } : { job_id: v.job_id, output_key: v.output_key })), accounts: accounts.map((x) => x.id), caption, via: "text-test",
+  const body: Record<string, any> = { items: videos.map((v, i) => ({ ...(v.asset_id ? { asset_id: v.asset_id } : { job_id: v.job_id, output_key: v.output_key }), ...(own[i].at != null ? { schedule_at: new Date(own[i].at!).toISOString() } : {}), ...(own[i].caption != null ? { caption: own[i].caption } : {}) })), accounts: accounts.map((x) => x.id), caption, via: "text-test",
     ...(perAccount.length ? { captions_by_account: Object.fromEntries(perAccount) } : {}), ...(gap ? { spacing_minutes: gap } : {}),
     ...(ytTitle || ytSee ? { options: { youtube: { ...(ytTitle ? { title: ytTitle } : {}), ...(ytSee ? { visibility: ytSee } : {}) } } } : {}),
     ...(at ? { schedule_at: new Date(at).toISOString() } : {}) };
   const whenWords = rel ? `${rel} minutes after your YES` : at ? when(at, ctx.timezone, ctx.now) : "now";
-  const names = titles.map((t) => short(t, 60)), own = [...names, caption, ...perAccount.map(([, c]) => c), ...(ytTitle ? [ytTitle] : [])].filter(Boolean);
+  const names = titles.map((t) => short(t, 60)), mine = [...names, caption, ...own.map((x) => x.caption ?? ""), ...perAccount.map(([, c]) => c), ...(ytTitle ? [ytTitle] : [])].filter(Boolean);
+  // with a time or caption of its own, every video is listed: what goes out when, with which words
+  if (each) {
+    const list = videos.map((_, i) => `${i + 1}. "${names[i]}", ${own[i].at != null ? when(own[i].at!, ctx.timezone, ctx.now) : at ? when(at, ctx.timezone, ctx.now) : rel ? `${rel} minutes after your YES` : "now"}${(own[i].caption ?? caption) ? `\n   Caption: "${own[i].caption ?? caption}"` : "\n   No caption."}`);
+    const lines2 = [`Post ${videos.length === 1 ? "this video" : `these ${videos.length} videos`} to ${accounts.map(handle).join(", ")}:`, ...list,
+      ...perAccount.map(([id, c]) => `${handle(accounts.find((x) => x.id === id)!)} gets its own caption on every one: "${c}"`),
+      ...(hasYouTube ? [`YouTube: ${ytTitle ? `title "${ytTitle}", ` : ""}${ytSee ?? "public"}.`] : []),
+      ...(viaGroup ? ["The group's own sign-off and spacing are not added by text yet."] : []),
+      "A time can shift a little later to keep 30 minutes between posts on one account."];
+    return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: mine, steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
+      checks: [{ kind: "accounts_linked", account_ids: accounts.map((x) => x.id!) }], meta: { minutes_from_yes: rel }, body: lines2.join("\n") });
+  }
   const lines = [
     `${at || rel ? "Schedule" : "Post"} ${videos.length === 1 ? `"${names[0]}"` : `${videos.length} videos: ${names.slice(0, 6).map((n) => `"${n}"`).join(", ")}${names.length > 6 ? `, and ${names.length - 6} more` : ""}`}`,
     `to ${accounts.map(handle).join(", ")}`, `${at || rel ? "for " : ""}${whenWords}${videos.length > 1 && gap ? `, ${gap} minutes apart` : ""}.`,
@@ -200,7 +220,7 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
     ...(viaGroup ? ["The group's own sign-off and spacing are not added by text yet."] : []),
     at || rel ? "A time can shift a little later to keep 30 minutes between posts on one account." : "It can't be pulled back once it is out.",
   ];
-  return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own, steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
+  return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: mine, steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
     checks: [{ kind: "accounts_linked", account_ids: accounts.map((x) => x.id!) }], meta: { minutes_from_yes: rel }, body: lines.join("\n") });
 }
 

@@ -37,7 +37,8 @@ export function parseSendblue(p: any, line?: string): Incoming | null {
   if (!/^\+\d{7,15}$/.test(from)) return null;
   if (line && (from === line || (p.to_number && String(p.to_number) !== line))) return null;
   if (REACTION.test(String(p.content ?? ""))) return null;
-  return { update_id: handleId(p.message_handle), chat: from, from, name: mask(from), text: String(p.content ?? ""), message_id: null, private: true, has_file: !!p.media_url };
+  const media = typeof p.media_url === "string" && /^https:\/\//.test(p.media_url) ? p.media_url : null;
+  return { update_id: handleId(p.message_handle), chat: from, from, name: mask(from), text: String(p.content ?? ""), message_id: null, private: true, has_file: !!p.media_url, ...(media ? { files: [{ url: media }] } : {}) };
 }
 
 /** "•••• 4567": how a number is shown in the app and the logs' handle column. */

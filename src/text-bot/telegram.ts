@@ -3,8 +3,10 @@
 // Files are uploaded as bytes, never passed as links, so no storage address ever reaches the chat.
 import type { Button, Media, Transport } from "./brain.js";
 import { BUTTON_LINK, guard } from "./guard.js";
+import type { InFile } from "./intake.js";
 
-export type Incoming = { update_id: number; chat: string; from: string; name: string; text: string; message_id: number | null; callback_id?: string; private: boolean; has_file?: boolean };
+export type Incoming = { update_id: number; chat: string; from: string; name: string; text: string; message_id: number | null; callback_id?: string; private: boolean; has_file?: boolean;
+  /** files that came with it (src/text-bot/intake.ts takes them into the library) */ files?: InFile[] };
 type Btn = Button;
 // (links only to Clone8's own app and the fixed AI-app links; a copy button puts its text on the person's clipboard)
 const button = (b: Btn) => "copy" in b ? { text: b.label.slice(0, 40), copy_text: { text: b.copy.slice(0, 256) } }
@@ -23,7 +25,16 @@ export function pieces(text: string, max = 3900): string[] {
 export function parseUpdate(u: any): Incoming | null {
   if (u?.callback_query) { const c = u.callback_query, m = c.message; return { update_id: u.update_id, chat: String(m?.chat?.id ?? c.from?.id), from: String(c.from?.id), name: String(c.from?.username ?? c.from?.first_name ?? ""), text: String(c.data ?? ""), message_id: m?.message_id ?? null, callback_id: String(c.id), private: (m?.chat?.type ?? "private") === "private" }; }
   const m = u?.message; if (!m) return null;
-  return { update_id: u.update_id, chat: String(m.chat?.id), from: String(m.from?.id), name: String(m.from?.username ?? m.from?.first_name ?? ""), text: String(m.text ?? m.caption ?? ""), message_id: m.message_id ?? null, private: m.chat?.type === "private", has_file: !!(m.video || m.document || m.photo || m.voice || m.audio) };
+  return { update_id: u.update_id, chat: String(m.chat?.id), from: String(m.from?.id), name: String(m.from?.username ?? m.from?.first_name ?? ""), text: String(m.text ?? m.caption ?? ""), message_id: m.message_id ?? null, private: m.chat?.type === "private", has_file: !!(m.video || m.document || m.photo || m.voice || m.audio || m.animation), ...(filesOf(m).length ? { files: filesOf(m) } : {}) };
+}
+/** A message's video or picture as a file to take in (the largest size of a photo); voice notes and audio are not. */
+export function filesOf(m: any): InFile[] {
+  const one = (x: any, mime?: string) => (x?.file_id ? [{ file_id: String(x.file_id), name: x.file_name ? String(x.file_name) : undefined, mime: String(x.mime_type ?? mime ?? ""), size: Number(x.file_size) || undefined }] : []);
+  if (m?.video) return one(m.video, "video/mp4");
+  if (m?.animation) return one(m.animation, "video/mp4");
+  if (Array.isArray(m?.photo) && m.photo.length) return one(m.photo[m.photo.length - 1], "image/jpeg");
+  if (m?.document && /^(video|image)\//.test(String(m.document.mime_type ?? ""))) return one(m.document);
+  return [];
 }
 
 /** the file's bytes without another copy (a Blob makes its own) */

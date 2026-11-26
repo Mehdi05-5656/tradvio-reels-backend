@@ -522,3 +522,38 @@ test("calls to action: the app reports what each did; only known CTAs and action
   assert.equal(rep.lines.length, 2, "unknown CTAs are left out");
   assert.deepEqual(rep.tools.find((t) => t.tool === "clips"), { tool: "clips", shown: 2, opened: 1, connected: 0 });
 });
+
+test("iMessage batch: a text and its attachments, seconds apart, are read once, as one message with every file in the library", async () => {
+  const sent: Array<{ chat: string; text: string }> = [];
+  const imessageOut: any = { text: async (chat: string, text: string) => { sent.push({ chat, text }); }, media: async () => undefined, typing: async () => undefined };
+  const tables: Record<string, Row[]> = {};
+  const sb: any = fakeSb(tables, { [OWNER]: { id: OWNER, email: "boss@clone8.io" } });
+  const stored: string[] = [];
+  sb.storage = { from: () => ({ uploadToSignedUrl: async (path: string) => { stored.push(path); return { data: {}, error: null }; } }) };
+  const asks: string[] = []; let n = 0;
+  const net: any = async (url: string, init: any) => {
+    const u = String(url);
+    if (u.startsWith("https://api.anthropic.com")) { asks.push(String(init.body)); return new Response(JSON.stringify({ model: "claude-haiku-5-5", stop_reason: "end_turn", content: [{ type: "text", text: "Got all 3. Which account?" }], usage: { input_tokens: 9, output_tokens: 5 } }), { status: 200 }); }
+    if (u.startsWith("https://cdn.sendblue")) return new Response(new Uint8Array(2048));
+    if (u.endsWith("/assets/upload-url")) { n++; return new Response(JSON.stringify({ asset_id: `0000000${n}-0000-4000-8000-000000000000`, path: `${OWNER}/v${n}.mov`, token: "t", bucket: "studio-uploads" }), { status: 200 }); }
+    if (u.includes("/complete")) return new Response(JSON.stringify({ asset: { name: "IMG.MOV" } }), { status: 200 });
+    return new Response(JSON.stringify({ assets: [], jobs: [], posts: [], accounts: [], collections: [] }), { status: 200 });
+  };
+  const routes: Record<string, Function> = {};
+  const app: any = { get: (p: string, h: Function) => (routes[`GET ${p}`] = h), post: (p: string, h: Function) => (routes[`POST ${p}`] = h), delete: (p: string, h: Function) => (routes[`DELETE ${p}`] = h) };
+  const bot = registerTextBot(app, () => sb, { env: { ...IM_ENV, STUDIO_TEXT_OPEN: "true", STUDIO_TEXT_IMESSAGE_OPEN: "true" }, out: { text: async () => undefined, media: async () => undefined, typing: async () => undefined } as any, imessageOut, log: () => undefined, port: 1, fetch: net, think: net, settleMs: 150 });
+  tables.studio_text_links = [{ id: "66666666-6666-4666-8666-666666666666", user_id: OWNER, channel: "imessage", sender_id: "+15557654321", chat_id: "+15557654321", status: "linked", created_at: new Date().toISOString() }];
+  const hook = async (body: any) => routes["POST /api/studio/text/imessage/webhook"]({ body, headers: { "sb-signing-secret": IM_ENV.SENDBLUE_WEBHOOK_SECRET }, header: (k: string) => (k.toLowerCase() === "sb-signing-secret" ? IM_ENV.SENDBLUE_WEBHOOK_SECRET : undefined) }, { status() { return this; }, json() { return this; }, setHeader() {} });
+  await hook(inbound("+15557654321", "These are the posts. Schedule 3 for today"));
+  for (let i = 1; i <= 3; i++) await hook({ ...inbound("+15557654321", ""), media_url: `https://cdn.sendblue.co/files/IMG_${i}.MOV` });
+  await bot.drain(); await new Promise((r) => setTimeout(r, 40));
+  assert.equal(asks.length, 0, "nothing answered while the batch may still be coming");
+  await new Promise((r) => setTimeout(r, 400)); await bot.drain(); await new Promise((r) => setTimeout(r, 200));
+  assert.equal(asks.length, 1, "one answer for the text and its three files");
+  assert.equal(stored.length, 3, "every file went into the library");
+  assert.match(asks[0], /The person sent 3 files in the chat/);
+  assert.match(asks[0], /These are the posts\. Schedule 3 for today/);
+  assert.ok(!sent.some((m) => /can't take files/.test(m.text)), "never 'can't take files'");
+  assert.equal(sent.at(-1)!.text, "Got all 3. Which account?");
+  assert.ok((tables.studio_text_inbox ?? []).every((r) => r.done_at), "all four marked done");
+});
