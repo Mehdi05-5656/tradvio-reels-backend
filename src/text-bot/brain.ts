@@ -303,7 +303,9 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     if (name === "prepare_autoreply_switch") {
       // several in one turn become one question (a second call never drops the first)
       const ids: string[] = [...(Array.isArray(a?.rule_ids) ? a.rule_ids : []), ...(a?.rule_id ? [a.rule_id] : [])].map(String);
-      const cand = { on: !!a?.on, ids: ids.length > 1 || switchThisTurn.on !== !!a?.on ? ids : [...new Set([...switchThisTurn.ids, ...ids])] };
+      // pausing and turning on are two questions: the second direction in a turn would replace the first without a word
+      if (switchThisTurn.ids.length && switchThisTurn.on !== !!a?.on) return { error: "one_direction", detail: `A question to ${switchThisTurn.on ? "turn on" : "pause"} auto-replies was already prepared this turn. Pausing and turning on can't go in one question: tell the person the other part comes after they answer this one.` };
+      const cand = { on: !!a?.on, ids: ids.length > 1 ? ids : [...new Set([...switchThisTurn.ids, ...ids])] };
       const res = await prepared(() => act.prepareAutoReplySwitch(actx(), { rule_ids: cand.ids, on: cand.on }));
       switchThisTurn = cand;
       return res;

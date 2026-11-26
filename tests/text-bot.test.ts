@@ -903,3 +903,31 @@ test("changing an auto-reply replaces the old ones (paused after the new one is 
   assert.match(off.question, /^Pause these 2 auto-replies:\n· "CLONE8" on instagram @clone8test \(every post\)[^\n]+\n· "CLONE8" on instagram @clone8test \(one post "My best clip"\)/);
   assert.equal((await execute(api as any, off, { now, timezone: "America/Los_Angeles" })).text, "Paused all 2.");
 });
+
+test("auto-reply replace, review fixes: what it replaces is exact; a failed pause is named; a full plan pauses first and undoes on failure", async () => {
+  const { prepareAutoReply } = await import("../src/text-bot/actions.js");
+  const api = mockApi(), now = Date.parse("2026-11-26T22:00:00Z");
+  const rule = (id: string, extra: any) => ({ id, name: "Keyword CLONE8", account_id: IDS.insta, platform: "instagram", keywords: ["CLONE8"], active: true, post: null, dm_message: "Hey there", comment_reply: "Sent you a DM", ...extra });
+  api.data.autoreplies.splice(0, api.data.autoreplies.length, rule("every", {}), rule("onepost", { post: { id: "p9", title: "Clip" } }), rule("more-kw", { keywords: ["CLONE8", "FREE"] }), rule("story", { trigger: "story_reply" }));
+  const c = await prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["clone8"], reply: "website is called: Clone8.io", dm: false });
+  assert.deepEqual(c.steps.slice(1).map((s) => s.path.split("/").pop()), ["every", "onepost"], "same keywords, comments, any post for a new every-post rule; not the FREE one, not the story one");
+  const named = await prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["CLONE8"], reply: "x", dm: false, replace_rule_ids: ["every"] });
+  assert.deepEqual(named.steps.slice(1).map((s) => s.path.split("/").pop()), ["every", "onepost"], "naming one never leaves a same-keyword rule answering too");
+  const more = await prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["CLONE8"], reply: "x", dm: false, replace_rule_ids: ["more-kw"] });
+  assert.deepEqual(more.steps.slice(1).map((s) => s.path.split("/").pop()), ["every", "onepost", "more-kw"], "a named one is added");
+  // a pause that fails after the new rule is set: every pause is tried, the one that failed is named
+  api.data.patchFails = ["every"];
+  const out = await execute(api as any, c, { now, timezone: "America/Los_Angeles" });
+  assert.equal(out.ok, false); assert.match(out.text, /^The new auto-reply is on, but this old one could not be paused, so it still answers too:\n· "CLONE8" on instagram @clone8test \(every post\)/);
+  assert.equal(api.data.autoreplies.find((r: any) => r.id === "onepost").active, false, "the other pause still went through");
+  // the plan is full: the old ones are paused first, then the new one is set
+  api.data.patchFails = []; api.data.autoreplies.forEach((r: any) => (r.active = true)); api.data.autoreplies.splice(api.data.autoreplies.findIndex((r: any) => r.id.startsWith("own-")), 1); api.data.autoreplyLimit = 4;
+  const full = await prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["CLONE8"], reply: "y", dm: false });
+  const out2 = await execute(api as any, full, { now, timezone: "America/Los_Angeles" });
+  assert.equal(out2.text, "The auto-reply is on. The old 2 are paused.");
+  // ... and if the new one still can't be set, the old ones are turned back on
+  api.data.autoreplies.forEach((r: any) => (r.active = true)); api.data.autoreplies.splice(api.data.autoreplies.findIndex((r: any) => r.id.startsWith("own-")), 1); api.data.autoreplyLimit = 1;
+  const out3 = await execute(api as any, full, { now, timezone: "America/Los_Angeles" });
+  assert.equal(out3.ok, false); assert.match(out3.text, /as they were/);
+  assert.ok(api.data.autoreplies.filter((r: any) => ["every", "onepost"].includes(r.id)).every((r: any) => r.active), "turned back on");
+});

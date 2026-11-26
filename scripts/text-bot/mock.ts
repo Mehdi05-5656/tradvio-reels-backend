@@ -41,6 +41,8 @@ export function mockApi(now: () => number = Date.now): MockApi {
     if (method === "GET" && p === `${S}/social/posts`) return ok({ posts: data.posts });
     if (method === "GET" && p === `${S}/autoreply`) return ok({ enabled: true, reply_only: true, limit: 10, used: data.autoreplies.filter((r: any) => r.active).length, rules: data.autoreplies,
       accounts: data.accounts.map((x: any) => ({ id: x.id, platform: x.platform, username: x.username, dm: x.platform === "instagram", can_reply: !(data.cannotReply ?? []).includes(x.id), can_dm: x.platform === "instagram" && !(data.cannotReply ?? []).includes(x.id) })) });
+    if (method === "POST" && p === `${S}/autoreply` && data.autoreplies.filter((r: any) => r.active).length >= (data.autoreplyLimit ?? 10)) return ok({ error: "autoreply_limit", detail: "Your plan runs 3 auto-replies at once." }, 409);
+    if (method === "PATCH" && /\/autoreply\/[A-Za-z0-9_-]+$/.test(p) && (data.patchFails ?? []).some((id: string) => p.endsWith(`/${id}`))) return ok({ error: "autoreply_failed", detail: "Could not save the change" }, 502);
     if (method === "POST" && p === `${S}/autoreply`) { const r = { id: `own-${data.autoreplies.length + 1}`, name: body?.name, keywords: body?.keywords, active: true }; data.autoreplies.push(r); return ok({ rule: r }, 201); }
     if (method === "PATCH" && /\/autoreply\/[A-Za-z0-9_-]+$/.test(p)) { const r = data.autoreplies.find((x: any) => p.endsWith(`/${x.id}`)); if (!r) return ok({ error: "not_found" }, 404); r.active = body?.active !== false; return ok({ rule: r }); }
     if (method === "GET" && p === `${S}/jobs`) return ok({ jobs: data.jobs });

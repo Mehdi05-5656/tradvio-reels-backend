@@ -292,7 +292,7 @@ async function autoReplyRoom(ctx: Ctx, accounts: Account[], c: { keywords: strin
     else if (same && o.withPosts && same.active) notes.push(`${handle(acc)} already has a ${c.keywords.map((k) => `"${k}"`).join("/")} auto-reply ${same.dm_message ? "that sends a DM" : "that replies only"}; it stays on too (ask me to pause it).`);
   }
   const limit = Number(r.json.limit ?? 0), room = limit - Number(r.json.used ?? 0);
-  if (limit && room + (o.freed ?? 0) < accounts.length - reused.length) throw new ActionError("autoreply_limit", `Your plan runs ${limit} auto-replies at once and ${Math.max(0, room)} ${room === 1 ? "is" : "are"} free. Pause one first (or upgrade).`);
+  if (limit && room + (o.freed ?? 0) < accounts.length - reused.length) throw new ActionError("autoreply_limit", `Your plan runs ${limit} auto-replies at once and ${Math.max(0, room + (o.freed ?? 0))} ${room + (o.freed ?? 0) === 1 ? "is" : "are"} free. Pause one first (or upgrade).`);
   return { notes };
 }
 async function autoReplyFor(ctx: Ctx, a: AutoReplyIn, accounts: Account[], videos: number) {
@@ -326,9 +326,6 @@ export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: 
   const rules: any[] = ar.json?.rules ?? [], arAccounts: any[] = ar.json?.accounts ?? [];
   const named = [...new Set((a.replace_rule_ids ?? []).map(String))];
   for (const id of named) if (!rules.some((r) => String(r.id) === id)) throw new ActionError("rule_not_found", "One of the auto-replies to replace isn't there; use ids from the autoreplies lookup");
-  const kw = new Set(c.keywords.map((k) => k.toLowerCase()));
-  const replaced = rules.filter((r) => r.active && /^[A-Za-z0-9_-]{1,64}$/.test(String(r.id)) && (named.includes(String(r.id)) || (String(r.account_id) === String(acc.id) && (r.keywords ?? []).some((k: string) => kw.has(String(k).toLowerCase())))));
-  await autoReplyRoom(ctx, [acc], c, { withPosts: false, freed: replaced.length });
   // one post: named by the account's own record of it, never by words the AI made up
   let post: { id: string; title: string | null } | null = null;
   if (a.post_id) {
@@ -337,6 +334,15 @@ export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: 
     if (!hit) throw new ActionError("post_not_found", "That post isn't among the account's recent posts; use an id from them (lookup autoreply_posts)");
     post = { id: String(hit.id), title: hit.title ? short(hit.title, 120) : null };
   }
+  // the rules it replaces: the ones named, and the ones on this account that answer the same thing in the
+  // same place (same keywords, comments; a new every-post rule covers one-post ones too, a new one-post rule replaces
+  // only that post's); a rule with other keywords as well is left alone
+  const keyset = (ks: string[]) => [...new Set(ks.map((k) => String(k).trim().toLowerCase()))].sort().join("|");
+  const mine = keyset(c.keywords);
+  const live = rules.filter((r) => r.active && /^[A-Za-z0-9_-]{1,64}$/.test(String(r.id)));
+  // (a rule that would answer the very same comments is always replaced: leaving it on means two answers)
+  const replaced = live.filter((r) => named.includes(String(r.id)) || (String(r.account_id) === String(acc.id) && keyset(r.keywords ?? []) === mine && (r.trigger ?? "comment") === "comment" && (post ? String(r.post?.id ?? "") === post.id : true)));
+  await autoReplyRoom(ctx, [acc], c, { withPosts: false, freed: replaced.length });
   const words = c.keywords.map((k) => `"${k}"`).join(" or ");
   const body = { account_id: acc.id, platform: acc.platform, name: `Keyword ${c.keywords[0]}`.slice(0, 60), keywords: c.keywords, match: "word", active: true,
     ...(c.reply ? { comment_reply: c.reply } : {}), ...(DM_NETS.includes(acc.platform) ? (c.dm ? { dm_message: c.dmMessage } : { dm: false }) : {}), ...(post ? { post_id: post.id, ...(post.title ? { post_title: post.title } : {}) } : {}) };
@@ -344,7 +350,7 @@ export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: 
   return put(ctx, { kind: "autoreply", credits: 0, posts: 0, own: [...c.own, ...(post?.title ? [short(post.title, 60)] : []), ...replaced.flatMap((r) => [...(r.keywords ?? []), r.dm_message, r.comment_reply, r.post?.title].filter(Boolean).map((x: string) => short(x, 60)))],
     // the new one first: if it can't be set, the old ones stay on
     steps: [{ method: "POST", path: "/api/studio/autoreply", body, label: "autoreply" }, ...replaced.map((r) => ({ method: "PATCH" as const, path: `/api/studio/autoreply/${r.id}`, body: { active: false }, label: "pause" }))], checks: [],
-    meta: { paused: replaced.length },
+    meta: { paused: replaced.length, pause_names: replaced.map((r) => ruleWords(r, arAccounts)) },
     body: replaced.length ? [set, `It replaces ${replaced.length === 1 ? "this one, which is paused" : `these ${replaced.length}, which are paused`} (they can be turned back on):`, ...replaced.map((r) => `· ${ruleWords(r, arAccounts)}`)].join("\n") : set });
 }
 
@@ -358,6 +364,8 @@ export async function prepareAutoReplySwitch(ctx: Ctx, a: { rule_id?: string; ru
   if (rules.some((x) => !x || !/^[A-Za-z0-9_-]{1,64}$/.test(String(x.id)))) throw new ActionError("rule_not_found", "No such auto-reply; use its id from the autoreplies lookup");
   const accounts: any[] = r.json?.accounts ?? [];
   const lines = rules.map((x) => `· ${ruleWords(x, accounts)}`);
+  const limit = Number(r.json?.limit ?? 0), adding = a.on ? rules.filter((x) => !x.active).length : 0;
+  if (limit && adding && Number(r.json?.used ?? 0) + adding > limit) throw new ActionError("autoreply_limit", `Your plan runs ${limit} auto-replies at once; turning on ${adding} would go over. Pause others first (or upgrade).`);
   return put(ctx, { kind: "autoreply_switch", credits: 0, posts: 0, own: rules.flatMap((x) => [x.name, ...(x.keywords ?? []), x.dm_message, x.comment_reply, x.post?.title].filter(Boolean).map((y: string) => short(y, 60))),
     steps: rules.map((x) => ({ method: "PATCH" as const, path: `/api/studio/autoreply/${x.id}`, body: { active: !!a.on }, label: "autoreply" })), checks: [],
     meta: { on: !!a.on, n: rules.length }, body: [`${a.on ? "Turn back on" : "Pause"} ${rules.length === 1 ? "this auto-reply" : `these ${rules.length} auto-replies`}:`, ...lines].join("\n") });
@@ -492,6 +500,25 @@ export async function prepareAutomationRun(ctx: Ctx, a: { automation_id: string;
 // ---------------------------------------------------------------------------------------------------
 export type Outcome = { ok: boolean; text: string; job_id?: string; collection_id?: string; credits?: number; post_ids?: string[]; project?: { id: string; asset_id: string | null; job_id: string | null; rev: number; name: string }; calls: Array<{ method: string; path: string; status: number }> };
 
+/** A new auto-reply that replaces old ones: set it, then pause each old one (every pause is tried; any that could not be
+ *  paused is named, since it still answers too). With the plan full, the old ones are paused first and turned back on
+ *  if the new one can't be set. */
+async function replaceAutoReply(api: Api, p: Pending, out: Outcome): Promise<Outcome> {
+  const [make, ...pauses] = p.steps, names: string[] = p.meta?.pause_names ?? [];
+  const call = async (s: Step, body = s.body) => { const r = await api.act(p.id, s.method, s.path, body, { timeoutMs: 60_000 }).catch((e: any) => ({ status: 599, json: { error: String(e?.code ?? "failed"), detail: String(e?.message ?? e).slice(0, 160) } })); out.calls.push({ method: s.method, path: s.path, status: r.status }); return r; };
+  let r = await call(make), pausedFirst: Step[] = [];
+  if (r.status === 409 && /limit/i.test(String(r.json?.error ?? ""))) {
+    for (const s of pauses) if ((await call(s)).status < 300) pausedFirst.push(s);
+    r = await call(make);
+    if (r.status >= 300) { for (const s of pausedFirst) await call(s, { active: true }); return { ...out, ok: false, text: `It did not go through: ${refusal(r)} Your old auto-replies are as they were.` }; }
+  } else if (r.status >= 300) return { ...out, ok: false, text: `It did not go through: ${refusal(r)} Your old auto-replies are as they were.` };
+  const failed: string[] = [];
+  for (const [i, s] of pauses.entries()) { if (pausedFirst.includes(s)) continue; if ((await call(s)).status >= 300) failed.push(names[i] ?? "one old auto-reply"); }
+  if (failed.length) return { ...out, ok: false, text: `The new auto-reply is on, but ${failed.length === 1 ? "this old one" : `these ${failed.length} old ones`} could not be paused, so ${failed.length === 1 ? "it still answers" : "they still answer"} too:\n${failed.map((x) => `· ${x}`).join("\n")}\nAsk me to pause ${failed.length === 1 ? "it" : "them"}, or switch ${failed.length === 1 ? "it" : "them"} off on the Auto-replies page.` };
+  out.text = `The auto-reply is on. The old ${pauses.length === 1 ? "one is" : `${pauses.length} are`} paused.`;
+  return out;
+}
+
 export async function execute(api: Api, p: Pending, o: { now: number; timezone: string }): Promise<Outcome> {
   const calls: Outcome["calls"] = [], moved: string[] = [];
   let postsNow: any[] | null = null; // read once for every post's check
@@ -513,6 +540,7 @@ export async function execute(api: Api, p: Pending, o: { now: number; timezone: 
     }
   }
   const out: Outcome = { ok: true, text: "", calls };
+  if (p.kind === "autoreply" && p.steps.length > 1) return replaceAutoReply(api, p, out);
   for (const s of p.steps) {
     let body = s.body;
     // "N minutes after the YES" becomes a clock time only now
