@@ -72,3 +72,12 @@ test("Characters: each attempt asks Higgsfield for a new request (a repeated key
   assert.equal(attemptKey({ id: "j", attempts: 2 }), "j:2");
   assert.equal(attemptKey({ id: "j" }), "j");
 });
+
+test("a run on a part hears only hours that overlap the part, even when the part itself is too muted to hear whole", async () => {
+  const { hoursToRead, QUIET } = await import("../src/studio-live-clips.js");
+  const part = { from: 42835, to: 44635 }; // 11:53-12:23 into a 12.4-hour stream, as on Nov 26 2026
+  const cands = [{ t_event: 43607, score: 47 }, { t_event: 500, score: 30 }, { t_event: 9000, score: 20 }];
+  assert.ok(hoursToRead(cands, 44640, () => 0, QUIET.max_hours, true).some((h) => h < 11), "without the part: hours from anywhere in the stream");
+  assert.deepEqual(hoursToRead(cands, 44640, () => 0, QUIET.max_hours, true, part), [11, 12], "with the part: only the two clock hours it touches");
+  assert.deepEqual(hoursToRead(cands, 44640, (a) => (a >= 39600 ? 1 : 0), QUIET.max_hours, true, part), [], "both of the part's hours muted: nothing is heard, nothing wasted");
+});

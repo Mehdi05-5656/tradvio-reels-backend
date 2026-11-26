@@ -555,12 +555,14 @@ export async function chatKept(deps: LiveDeps, b: Broadcast, part: { from: numbe
   const late = new Promise<null>((ok) => { const t = setTimeout(() => ok(null), 4000); (t as any).unref?.(); });
   return Promise.race([probe, late]).catch(() => null);
 }
-export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours, everyHour = false): number[] {
+export function hoursToRead(cands: Array<Pick<Candidate, "t_event" | "score">>, seconds: number, mutedShare: (a: number, b: number) => number, max = HYBRID.hours, everyHour = false, within?: { from: number; to: number } | null): number[] {
   const score = new Map<number, number>();
   // every hour is a choice when the chat is quiet; the ones it reacted to still come first
   if (everyHour) for (let h = 0; h * 3600 < seconds; h++) score.set(h, 0);
   for (const c of cands) { const h = Math.floor(c.t_event / 3600); score.set(h, (score.get(h) ?? 0) + c.score); }
-  return [...score.entries()].filter(([h]) => Math.min(3600, seconds - h * 3600) >= HYBRID.min_heard_s && mutedShare(h * 3600, Math.min(seconds, (h + 1) * 3600)) <= 0.4)
+  // a run on a part hears only hours that overlap it (Nov 26 2026: a 30-min part mostly muted by Twitch fell back to the
+  // whole stream and heard 6 hours, every moment of which was then dropped as outside the part)
+  return [...score.entries()].filter(([h]) => !within || (h * 3600 < within.to && (h + 1) * 3600 > within.from)).filter(([h]) => Math.min(3600, seconds - h * 3600) >= HYBRID.min_heard_s && mutedShare(h * 3600, Math.min(seconds, (h + 1) * 3600)) <= 0.4)
     .sort((a, b) => b[1] - a[1]).slice(0, max).map(([h]) => h).sort((a, b) => a - b);
 }
 /** One hour heard whole and read by Clips' picker: its words (seconds from the hour's start) and the moments (absolute). */
@@ -854,7 +856,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
         for (let z = listenPart.to; z - listenPart.from >= HYBRID.min_heard_s && stretches.length < maxHours; z -= 3600) { const a = Math.max(listenPart.from, z - 3600); if (mutedShare(a, z) <= 0.4) stretches.push({ start: a, seconds: z - a }); }
         stretches.reverse();
       }
-      const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours, quiet);
+      const hours = stretches.length ? stretches.map((x) => Math.floor(x.start / 3600)) : hoursToRead(cands, b.seconds, mutedShare, maxHours, quiet, listenPart);
       if (quiet) log(`[live] quiet ${JSON.stringify({ job: job.id, per_minute: Math.round(signals.perMinute), candidates: cands.length, asked: count, hearing: hours.length })}`);
       if (hours.length) {
         await renew(sb, job, { stage: "transcribing", message: stretches.length ? (part ? `Listening to the ${part.scope === "since" ? "new part" : part.scope === "range" ? "part you picked" : "latest part"} of the stream, every word` : "Listening to the whole stream, every word") : `Listening to the ${hours.length === 1 ? "hour" : `${hours.length} hours`} the chat reacted to most` });
