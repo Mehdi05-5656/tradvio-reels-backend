@@ -149,6 +149,8 @@ test("making a skill: admins only until it opens; public ones are checked first,
   try {
     const h = await held.call("creator", "POST", "/api/studio/skills", SKILL); assert.equal(h.json.skill.state, "held"); assert.equal(h.json.skill.note, "asks to send emails");
     assert.equal((await held.call("other", "GET", "/api/studio/skills")).json.skills.filter((x: any) => x.by === "community").length, 0);
+    const priv = await held.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { visibility: "private" }); assert.equal(priv.json.skill.state, "live", "made private, a check's hold no longer applies");
+    const pub = await held.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { visibility: "public" }); assert.equal(pub.json.skill.state, "held", "going public again is checked again");
   } finally { held.close(); }
   const down = await server({ open: true, verdict: "down" });
   try {
@@ -173,8 +175,9 @@ test("editing: changed words are checked again; delete takes it down for everyon
   try {
     await s.call("creator", "POST", "/api/studio/skills", SKILL); const c0 = s.checks();
     assert.equal((await s.call("other", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { title: "Hijack" })).status, 404, "only its maker edits it");
-    await s.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { author_name: "Maya" }); assert.equal(s.checks(), c0, "a shown-name change needs no check");
-    const e = await s.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { line: "Now with four shots." }); assert.equal(s.checks(), c0 + 1); assert.equal(e.json.skill.line, "Now with four shots.");
+    await s.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { category: "video" }); assert.equal(s.checks(), c0, "a category change needs no check");
+    await s.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { author_name: "Maya" }); assert.equal(s.checks(), c0 + 1, "the shown name is checked too");
+    const e = await s.call("creator", "PATCH", "/api/studio/skills/sneaker-drop-teaser", { line: "Now with four shots." }); assert.equal(s.checks(), c0 + 2); assert.equal(e.json.skill.line, "Now with four shots.");
     const sv = await s.call("other", "POST", "/api/studio/skills/sneaker-drop-teaser/save", {}); assert.deepEqual(sv.json, { saved: true, saves: 1 });
     assert.equal((await s.call("other", "POST", "/api/studio/skills/sneaker-drop-teaser/save", {})).json.saves, 1, "saving twice counts once");
     assert.ok((await s.call("other", "GET", "/api/studio/skills?tab=mine")).json.skills.some((x: any) => x.slug === "sneaker-drop-teaser" && x.saved));
