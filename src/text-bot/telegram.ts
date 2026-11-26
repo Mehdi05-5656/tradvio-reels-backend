@@ -29,7 +29,7 @@ export function parseUpdate(u: any): Incoming | null {
 }
 /** A message's video or picture as a file to take in (the largest size of a photo); voice notes and audio are not. */
 export function filesOf(m: any): InFile[] {
-  const one = (x: any, mime?: string) => (x?.file_id ? [{ file_id: String(x.file_id), name: x.file_name ? String(x.file_name) : undefined, mime: String(x.mime_type ?? mime ?? ""), size: Number(x.file_size) || undefined }] : []);
+  const one = (x: any, mime?: string) => (x?.file_id ? [{ file_id: String(x.file_id), name: x.file_name ? String(x.file_name) : undefined, mime: String(x.mime_type ?? mime ?? ""), size: Number(x.file_size) || undefined, ...(Number.isSafeInteger(m?.message_id) ? { message_id: Number(m.message_id) } : {}) }] : []);
   if (m?.video) return one(m.video, "video/mp4");
   if (m?.animation) return one(m.animation, "video/mp4");
   if (Array.isArray(m?.photo) && m.photo.length) return one(m.photo[m.photo.length - 1], "image/jpeg");

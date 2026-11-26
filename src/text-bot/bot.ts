@@ -16,7 +16,9 @@ export type BotState = { owner: string | null; pair_code: string | null; offset:
 export const emptyState = (): BotState => ({ owner: null, pair_code: null, offset: 0, chats: {}, strangers: {}, rate: {} });
 export type Msg = { chat: string; from: string; text: string; private: boolean; tap?: boolean; has_file?: boolean;
   /** files sent with it, already in the library (src/text-bot/intake.ts), in the order sent; and those that could not be */
-  files?: Array<{ asset_id: string; name: string; kind: string }>; file_errors?: string[] };
+  files?: Array<{ asset_id: string; name: string; kind: string }>; file_errors?: string[];
+  /** how many files were too big for the chat (the person is sent to the upload page, and their uploads picked up) */ too_big?: number;
+  /** what the server already said in the chat about these files ("Saving them…"), so the bot knows it was said */ said_first?: string };
 export type BotDeps = {
   cfg: Config; api: Api; out: Transport; state: BotState; /** may be async (the backend writes to its database); awaited where it matters */ save: () => void | Promise<void>; now?: () => number;
   think: (st: ChatState, text: string, o?: { tap?: boolean }) => Promise<TurnResult>;
@@ -34,6 +36,10 @@ export const HELP = [
 ].join("\n");
 const PRIVATE_LINE = "This is a private Clone8 test. Connect your own account in the app: https://app.clone8.io";
 const PER_5_MIN = 20, PER_DAY = 200;
+/** marks on a library file Clone8 made itself (a person's own upload has none of them) */
+const MADE_BY_US = ["clip", "captions", "derived_from_job", "character", "source_url", "source", "cuts", "prompt"];
+/** where files too big for the chat are uploaded, and how long after the bot looks for them */
+export const LIBRARY = "https://app.clone8.io/#studio/library", UPLOAD_WAIT_MS = 2 * 60 * 60_000;
 /** A name or title from the account inside a system note: quoted, on one line, so it reads as material. */
 const q = (v: unknown) => JSON.stringify(String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 80));
 
@@ -45,6 +51,16 @@ export function pairCode(state: BotState): string { return (state.pair_code ??= 
 export function makeBot(d: BotDeps) {
   const now = () => (d.now ?? Date.now)();
   const say = async (st: ChatState, text: string, buttons?: Array<{ label: string; data: string }>, own?: string[]) => { if (!text.trim()) return; st.history.push({ role: "assistant", text, at: now() }); await d.out.text(st.chat, text, buttons, own); };
+  /** files the person uploaded themselves on the website since `since` (a minute's slack for clocks), oldest first; and
+   *  how many are still uploading (started in the last 30 minutes: an abandoned one isn't waited for). Library files
+   *  Clone8 made (clips, captioned videos, link imports, characters, results) are not theirs to pick up here. */
+  const uploadsSince = async (since: number, skip: string[]): Promise<{ ready: Array<{ asset_id: string; name: string; kind: string }>; uploading: number }> => {
+    const r = await d.api.call("GET", "/api/studio/assets?limit=100").catch(() => null);
+    const rows: any[] = r?.status === 200 ? (r.json?.assets ?? []) : [];
+    const fresh = rows.filter((a) => Date.parse(String(a?.created_at)) >= since - 60_000 && (a?.kind === "video" || a?.kind === "image") && !MADE_BY_US.some((k) => a?.probe?.[k] != null) && !skip.includes(String(a?.id)));
+    return { ready: fresh.filter((a) => a.status === "ready").reverse().map((a) => ({ asset_id: String(a.id), name: String(a.name ?? "upload"), kind: String(a.kind) })),
+      uploading: fresh.filter((a) => a.status === "uploading" && now() - Date.parse(String(a.created_at)) < 30 * 60_000).length };
+  };
   const note = (st: ChatState, text: string) => { st.history.push({ role: "event", text, at: now() }); if (st.history.length > 80) st.history = st.history.slice(-60); };
   /** Something the person should hear about: sent now, or kept for when they say RESUME. */
   const tell = async (st: ChatState, text: string, own?: string[]) => { if (st.muted) { st.missed = [...(st.missed ?? []), text].slice(-10); return; } await d.out.text(st.chat, text, undefined, own); };
@@ -130,8 +146,26 @@ export function makeBot(d: BotDeps) {
         return;
       }
       if (m.tap) return; // a tap that is none of ours
+      // files too big for the chat were uploaded on the website: the next message picks them up, as if texted
+      if (st.awaitUploads && !m.files?.length) {
+        if (t - st.awaitUploads > UPLOAD_WAIT_MS) st.awaitUploads = undefined;
+        else {
+          const up = await uploadsSince(st.awaitUploads, st.pickedUploads ?? []);
+          // the ones already on the table (texted just before) stay first; uploads join them
+          const keep = st.table.length > 0 && st.table.every((x) => x.ref.startsWith("f:")) && !!st.filesAt && st.filesAt >= st.awaitUploads ? st.table : [];
+          const ready = up.ready.filter((f) => !keep.some((x) => x.ref === `f:${f.asset_id}`));
+          if (ready.length) {
+            st.awaitUploads = up.uploading ? st.awaitUploads : undefined;
+            st.table = [...keep, ...ready.map((f, i) => ({ n: keep.length + i + 1, ref: `f:${f.asset_id}`, label: f.name }))];
+            st.pickedUploads = [...(st.pickedUploads ?? []), ...ready.map((f) => f.asset_id)].slice(-50);
+            st.filesAt = t; d.forget?.();
+            note(st, `Uploaded on the website since the upload link was given, now in their library: ${ready.map((f, i) => `${keep.length + i + 1}. ${JSON.stringify(f.name)} (${f.kind}) [f:${f.asset_id}]`).join("; ")}.${keep.length ? ` With the ${keep.length} texted before, ${st.table.length} in all (on the table).` : ""}${up.uploading ? ` ${up.uploading} more still uploading.` : ""}`);
+          } else if (up.uploading) note(st, `${up.uploading} file${up.uploading === 1 ? " is" : "s are"} still uploading on the website; nothing finished yet. Say so if the person asks about them.`);
+        }
+      }
       // files sent in the chat are in the library now: they are what "these", "the first one" mean
       if (m.files?.length || m.file_errors?.length) {
+        if (m.said_first) st.history.push({ role: "assistant", text: m.said_first, at: t });
         // a file that comes a little after the others (iMessage sends each on its own) joins them: "these" stays all of them
         const late = !!m.files?.length && !m.text.trim() && !!st.filesAt && t - st.filesAt < 3 * 60_000 && st.table.length > 0 && st.table.every((x) => x.ref.startsWith("f:"));
         if (m.files?.length) {
@@ -147,7 +181,11 @@ export function makeBot(d: BotDeps) {
           return;
         }
         note(st, [m.files?.length ? `The person sent ${m.files.length} file${m.files.length === 1 ? "" : "s"} in the chat; ${m.files.length === 1 ? "it is" : "they are"} now in their library, numbered in the order sent: ${m.files.map((f, i) => `${i + 1}. ${JSON.stringify(f.name)} (${f.kind}) [f:${f.asset_id}]`).join("; ")}.` : "",
-          m.file_errors?.length ? `Files that could not be taken in: ${m.file_errors.join("; ")}.` : ""].filter(Boolean).join(" "));
+          m.file_errors?.length ? `Files that could not be taken in: ${m.file_errors.join("; ")}.` : "",
+          m.too_big ? `For the ${m.too_big === 1 ? "one" : m.too_big} too big for the chat: give the upload page ${LIBRARY} and say to text "done" once uploaded; you will then see them here, numbered, without them sending anything again.` : ""].filter(Boolean).join(" "));
+        // the files texted are not looked for again among the uploads
+        if (m.too_big) { st.awaitUploads = t; st.pickedUploads = []; }
+        if (st.awaitUploads && m.files?.length) st.pickedUploads = [...(st.pickedUploads ?? []), ...m.files.map((f) => f.asset_id)].slice(-50);
         if (!m.text.trim()) return await talk(st, m.files?.length ? `(sent ${m.files.length} file${m.files.length === 1 ? "" : "s"})` : "(sent a file)");
       }
       if (!m.text.trim()) { await d.out.text(m.chat, m.has_file ? "I can take videos and pictures. Voice notes and audio files can't be used here." : "I can read text, links, videos and pictures."); return; }

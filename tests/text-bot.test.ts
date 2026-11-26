@@ -603,11 +603,11 @@ test("files sent in the chat: both channels carry them; intake stores each as an
   const stored: any[] = [];
   const sb: any = { storage: { from: (b: string) => ({ uploadToSignedUrl: async (path: string, token: string, bytes: Buffer) => { stored.push({ b, path, token, n: bytes.length }); return { data: {}, error: null }; } }) } };
   const f: any = async (url: string) => (String(url).includes("getFile") ? new Response(JSON.stringify({ ok: true, result: { file_path: "videos/clip.mp4" } })) : new Response(new Uint8Array(1234)));
-  const r = await intake({ api, sb, fetch: f, telegramToken: "tok", files: [{ url: "https://cdn.sendblue.co/files/IMG_4410.MOV" }, { url: "https://cdn.example.com/same.mp4" }, { file_id: "big", size: TELEGRAM_MAX + 1 }, { url: "https://cdn.example.com/notes.pdf" }, { file_id: "small", size: 900 }] });
+  const r = await intake({ api, sb, fetch: f, telegramToken: "tok", files: [{ url: "https://cdn.sendblue.co/files/IMG_4410.MOV" }, { url: "https://cdn.example.com/same.mp4" }, { file_id: "big", size: TELEGRAM_MAX + 1, mime: "video/mp4" }, { url: "https://cdn.example.com/notes.pdf" }, { file_id: "small", size: 900 }] });
   assert.deepEqual(r.got.map((g) => g.asset_id), ["a-new", "a-same", "a-new"]);
   assert.deepEqual(stored.map((x) => [x.b, x.path, x.n]), [["studio-uploads", "u/a-new.mov", 1234], ["studio-uploads", "u/a-new.mov", 1234]], "the same file again is not stored twice");
   assert.deepEqual(r.failed.map((x) => x.why), ["telegram_too_big", "not_video_or_picture"]);
-  assert.match(whyText("telegram_too_big"), /20 MB/);
+  assert.match(whyText("telegram_too_big"), /upload it on the Library page/);
   // only https names on the public internet are fetched, redirects included
   const { safeUrl } = await import("../src/text-bot/intake.js");
   for (const bad of ["http://cdn.example.com/a.mov", "https://127.0.0.1/a.mov", "https://[::1]/a.mov", "https://localhost/a.mov", "https://metadata.google.internal/x", "https://intranet/a.mov", "https://user:pw@cdn.example.com/a.mov"]) assert.equal(safeUrl(bad), false, bad);
@@ -661,4 +661,84 @@ test("files, review fixes: a late file joins the batch and never withdraws the w
   assert.ok(mine.own.includes("I asked ChatGPT for this one"));
   const ai = await preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.tiktok], caption: "Made with ChatGPT" });
   assert.ok(!ai.own.includes("Made with ChatGPT"), "not exempt: the question would be refused rather than shown");
+});
+
+test("big files: Telegram over 20 MB comes over Telegram's own protocol; too big for the chat gets the upload page, picked up after", async () => {
+  const { intake, TELEGRAM_MAX, CHAT_MAX } = await import("../src/text-bot/intake.js");
+  const { telegramBig, mediaSize } = await import("../src/text-bot/telegram-big.js");
+  const { savingText } = await import("../src/text-bot/server.js");
+  const { filesOf } = await import("../src/text-bot/telegram.js");
+  // the message id rides with each Telegram file
+  assert.equal(filesOf({ message_id: 77, video: { file_id: "v", file_size: 60_000_000, mime_type: "video/mp4" } })[0].message_id, 77);
+  // the downloader: signs in once (never asking for updates), size read first, over the cap nothing fetched, every
+  // connection destroyed after its file, a hang cut off at the deadline
+  let signIns = 0, downloads = 0, destroyed = 0, made = 0, hang = false, connects = true;
+  const msgs: Record<number, any> = { 5: { id: 5, media: { document: { size: 45_000_000 } } }, 6: { id: 6, media: { document: { size: 400_000_000 } } }, 7: { id: 7 } };
+  const sessions: string[] = [];
+  const tl = { quiet: (q: any) => ({ quiet: q }), signIn: () => ({ signIn: true }), getMessage: (id: number) => ({ id }) };
+  const fake = (session: string): any => ({ session: { save: () => "S1" }, connect: async () => connects, destroy: async () => { destroyed++; },
+    invoke: async (q: any) => { assert.ok(q.quiet, "every request goes without updates"); if (q.quiet.signIn) { signIns++; return {}; } if (hang) return new Promise(() => undefined); return { messages: [msgs[q.quiet.id]].filter(Boolean) }; },
+    downloadMedia: async () => { downloads++; return Buffer.alloc(4096); }, _s: sessions.push(session) });
+  const dl = telegramBig({ apiId: 1, apiHash: "h", botToken: "t", tl, deadlineMs: 80, client: async (session) => { made++; return fake(session); } });
+  assert.equal(((await dl(5, CHAT_MAX)) as Buffer).length, 4096);
+  assert.equal(await dl(6, CHAT_MAX), "too_big"); assert.equal(downloads, 1, "a file over the cap is never downloaded");
+  assert.equal(await dl(7, CHAT_MAX), null, "a message with no file");
+  assert.equal(await dl(-1, CHAT_MAX), null);
+  assert.equal(signIns, 1, "signed in once"); assert.deepEqual(sessions, ["", "S1", "S1"], "later files reuse the sign-in");
+  assert.equal(destroyed, made, "every connection destroyed");
+  hang = true; const t0 = Date.now();
+  assert.equal(await dl(5, CHAT_MAX), null, "a hang ends at the deadline"); assert.ok(Date.now() - t0 < 2000); assert.equal(destroyed, made);
+  hang = false; connects = false;
+  assert.equal(await dl(5, CHAT_MAX), null, "no connection: nothing");
+  connects = true;
+  assert.equal(mediaSize({ photo: { sizes: [{ size: 10 }, { sizes: [5, 900] }] } }), 900);
+  // intake: a 45 MB Telegram video goes through it and is stored like any upload; without it, the upload page
+  const api: any = { call: async (_m: string, p: string) => (p.endsWith("/upload-url") ? { status: 200, json: { asset_id: "a-big", path: "u/a.mp4", token: "t", bucket: "studio-uploads" } } : { status: 200, json: { asset: { name: "big.mp4" } } }) };
+  const stored: number[] = [];
+  const sb: any = { storage: { from: () => ({ uploadToSignedUrl: async (_p: string, _t: string, b: Buffer) => { stored.push(b.length); return { data: {}, error: null }; } }) } };
+  const noNet: any = async () => { throw new Error("the Bot API is not used for a big file"); };
+  const big = { file_id: "b", size: TELEGRAM_MAX * 2, mime: "video/mp4", message_id: 5 };
+  const r1 = await intake({ api, sb, fetch: noNet, telegramToken: "tok", telegramBig: dl, files: [big] });
+  assert.deepEqual(r1.got.map((g) => g.asset_id), ["a-big"]); assert.deepEqual(stored, [4096]);
+  const r2 = await intake({ api, sb, fetch: noNet, telegramToken: "tok", telegramBig: null, files: [big, { ...big, size: CHAT_MAX + 1 }] });
+  assert.deepEqual(r2.failed.map((x) => x.why), ["telegram_too_big", "too_big"]);
+  const r3 = await intake({ api, sb, fetch: noNet, telegramToken: "tok", telegramBig: dl, files: [{ ...big, message_id: 6, size: TELEGRAM_MAX + 5 }] });
+  assert.deepEqual(r3.failed.map((x) => x.why), ["too_big"], "the size Telegram reports at download wins over the one in the update");
+  // refused before a long download: what can't go in the library; a download that fails sends the person to the upload page
+  const before = downloads;
+  const r4 = await intake({ api, sb, fetch: noNet, telegramToken: "tok", telegramBig: dl, files: [{ ...big, name: "IMG_1.HEIC", mime: "image/heic" }, { ...big, name: "talk.webm", mime: "video/webm" }, { ...big, message_id: 7 }] });
+  assert.deepEqual(r4.failed.map((x) => x.why), ["heic", "not_video_or_picture", "telegram_too_big"]); assert.equal(downloads, before);
+  // the first reply to files
+  assert.equal(savingText([{ mime: "video/mp4" }, { mime: "video/quicktime" }, { mime: "image/jpeg" }]), "Got your 2 videos and a picture. Saving them to your library, one moment…");
+  assert.equal(savingText([{ url: "https://cdn.sendblue.co/files/IMG_1.MOV" }]), "Got your video. Saving it to your library, one moment…");
+  assert.equal(savingText([{ url: "https://cdn.sendblue.co/files/IMG_2.HEIC" }, { name: "a.webm", mime: "video/webm" }]), null, "never 'saving' for files that can't go in");
+  // the bot: told to give the upload page; the next message picks the uploads up, after the files texted before
+  const seen: string[] = [];
+  const b = botWith(async (st, text) => { seen.push(st.history.filter((h) => h.role === "event").map((h) => h.text).join(" | ") + " || " + text); return { text: "ok", usd: 0, rounds: 1 }; });
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "post these", private: true, files: [{ asset_id: IDS.clipA, name: "a.mov", kind: "video" }], file_errors: ["big.mov: it's too big to come through this chat; upload it on the Library page"], too_big: 1 } as any);
+  assert.match(seen.at(-1)!, /give the upload page https:\/\/app\.clone8\.io\/#studio\/library and say to text "done"/);
+  const st = b.state.chats["1"]; assert.ok(st.awaitUploads);
+  const orig = b.api.call.bind(b.api); let uploading = true;
+  (b.api as any).call = async (m: string, p: string, ...rest: any[]) => p === "/api/studio/assets?limit=100"
+    ? { status: 200, json: { assets: [{ id: "clip-1", kind: "video", name: "clip.mp4", status: "ready", created_at: new Date(Date.now() + 2000).toISOString(), probe: { clip: { start: 1 }, source: "clips" } },
+        { id: "up-1", kind: "video", name: "big.mov", status: uploading ? "uploading" : "ready", created_at: new Date(Date.now() + 1000).toISOString(), probe: { duration: 30 } },
+        { id: IDS.clipA, kind: "video", name: "a.mov", status: "ready", created_at: new Date(Date.now() - 500).toISOString(), probe: {} },
+        { id: "old", kind: "video", name: "old.mov", status: "ready", created_at: new Date(Date.now() - 86_400_000).toISOString() }] } }
+    : orig(m, p, ...rest);
+  b.tick(60_000);
+  await b.bot.handle({ chat: "1", from: "1", text: "uploading now", private: true } as any);
+  assert.match(seen.at(-1)!, /1 file is still uploading/); assert.ok(st.awaitUploads, "still looking");
+  uploading = false; b.tick(60_000);
+  await b.bot.handle({ chat: "1", from: "1", text: "done", private: true } as any);
+  assert.deepEqual(st.table.map((x) => x.ref), [`f:${IDS.clipA}`, "f:up-1"], "the texted one first, then the upload; nothing older, nothing Clone8 made");
+  // the saving reply is in the history, so it is not said twice
+  const b2 = botWith(async () => ({ text: "ok", usd: 0, rounds: 1 })); b2.state.owner = "1";
+  await b2.bot.handle({ chat: "1", from: "1", text: "", private: true, files: [{ asset_id: IDS.clipA, name: "a.mov", kind: "video" }], said_first: "Got your video. Saving it to your library, one moment…" } as any);
+  assert.ok(b2.state.chats["1"].history.some((h) => h.role === "assistant" && /Saving it/.test(h.text)));
+  assert.match(seen.at(-1)!, /2 in all/); assert.equal(st.awaitUploads, undefined, "picked up once");
+  // after two hours it stops looking
+  st.awaitUploads = Date.now(); b.tick(3 * 60 * 60_000);
+  await b.bot.handle({ chat: "1", from: "1", text: "hi", private: true } as any);
+  assert.equal(st.awaitUploads, undefined);
 });

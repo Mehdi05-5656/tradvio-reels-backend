@@ -555,5 +555,7 @@ test("iMessage batch: a text and its attachments, seconds apart, are read once, 
   assert.match(asks[0], /These are the posts\. Schedule 3 for today/);
   assert.ok(!sent.some((m) => /can't take files/.test(m.text)), "never 'can't take files'");
   assert.equal(sent.at(-1)!.text, "Got all 3. Which account?");
+  assert.equal(sent.filter((m) => /^Got your 3 videos\. Saving them to your library/.test(m.text)).length, 1, "one 'saving' reply, at once, before the answer");
+  assert.ok(sent.findIndex((m) => /^Got your 3 videos/.test(m.text)) < sent.length - 1);
   assert.ok((tables.studio_text_inbox ?? []).every((r) => r.done_at), "all four marked done");
 });

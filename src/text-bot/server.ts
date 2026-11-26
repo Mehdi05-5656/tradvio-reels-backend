@@ -28,7 +28,8 @@ import { think, type BrainDeps, type ChatState, type Transport } from "./brain.j
 import { telegram, parseUpdate, type Incoming } from "./telegram.js";
 import { sendblue, parseSendblue, verifySendblue, handleId, contactCard, mask } from "./sendblue.js";
 import { classify } from "./gate.js";
-import { intake, whyText, type Intake } from "./intake.js";
+import { intake, whyText, nameFor, type Intake, type InFile } from "./intake.js";
+import { telegramBig, type BigDownload } from "./telegram-big.js";
 import type { Index } from "./account.js";
 import { CTA_ACTIONS, CTAS, chatLines, ctaReport, textAdminView, type CtaRow, type TextEventRow, type TextLinkRow } from "./admin.js";
 
@@ -101,12 +102,27 @@ export type TextDeps = { env?: Env; fetch?: typeof fetch; log?: (l: string) => v
   /** test seam: what sends into Telegram */ out?: Out;
   /** test seam: what sends into iMessage */ imessageOut?: Out;
   /** test seam: the brain */ think?: BrainDeps["fetch"];
-  /** how long a batch waits for its last part (tests: shorter) */ settleMs?: number; };
+  /** how long a batch waits for its last part (tests: shorter) */ settleMs?: number;
+  /** test seam: Telegram files over 20 MB */ telegramBig?: BigDownload | null; };
+
+/** The first reply to files: what came, and that it is being stored. Null when none of them can go in the library
+ *  (the bot's answer says why), so "saving" is never said for nothing. */
+export function savingText(all: InFile[]): string | null {
+  const files = all.filter((f) => !/\.(heic|heif)(\?|$)/i.test(String(f.name ?? f.url ?? "")) && !/^image\/hei[cf]/i.test(f.mime ?? "") && !!nameFor(f, 1, "x"));
+  if (!files.length) return null;
+  const pic = (f: InFile) => /^image\//i.test(f.mime ?? "") || /\.(jpe?g|png)(\?|$)/i.test(String(f.name ?? f.url ?? ""));
+  const p = files.filter(pic).length, v = files.length - p;
+  const what = [v ? `${v === 1 ? "your video" : `your ${v} videos`}` : "", p ? `${p === 1 ? "a picture" : `${p} pictures`}` : ""].filter(Boolean).join(" and ");
+  return `Got ${what}. Saving ${files.length === 1 ? "it" : "them"} to your library, one moment…`;
+}
 
 export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: TextDeps = {}) {
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
   const port = deps.port ?? Number(env.PORT || 10000);
   const tg = env.TELEGRAM_BOT_TOKEN ? telegram(env.TELEGRAM_BOT_TOKEN, { fetch: deps.fetch, onGuard: (hit) => log(`[text] guard: ${hit}`) }) : null;
+  // Telegram files over 20 MB come over Telegram's own protocol, only when the app id and hash are set
+  const big: BigDownload | null = deps.telegramBig !== undefined ? deps.telegramBig
+    : env.TELEGRAM_BOT_TOKEN && Number(env.TELEGRAM_API_ID) > 0 && env.TELEGRAM_API_HASH ? telegramBig({ apiId: Number(env.TELEGRAM_API_ID), apiHash: env.TELEGRAM_API_HASH, botToken: env.TELEGRAM_BOT_TOKEN, log }) : null;
   const sbl = env.SENDBLUE_API_KEY_ID && env.SENDBLUE_API_SECRET && env.SENDBLUE_FROM_NUMBER ? sendblue({ keyId: env.SENDBLUE_API_KEY_ID, secret: env.SENDBLUE_API_SECRET, from: env.SENDBLUE_FROM_NUMBER, fetch: deps.fetch, onGuard: (hit) => log(`[text] guard: ${hit}`) }) : null;
   let card: string | null = null; // the contact card's upload, made once
   const LOGO = `${APP}/brand/icon-512.png`, CARD_LOGO = `${APP}/brand/apple-touch-icon.png`;
@@ -320,13 +336,16 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     // the message with them numbered in the order sent. Only once this server holds the chat (a busy chat is tried again
     // later, and must not download twice), and one turn at a time moves files (the server's file lock)
     if (!(await withBot(sb, link, u.chat, async (bot) => {
-      let took: Intake | null = null;
+      let took: Intake | null = null, saidFirst: string | null = null;
       if (u.files?.length) {
+        // said at once, so a person sending several videos knows they arrived while they are stored (big ones take a while)
+        const log3 = logFor(link.user_id, u.chat, ch.name), ack = savingText(u.files);
+        if (ack) await say.text(u.chat, ack).then(() => { log3("out", { text: ack }); saidFirst = ack; }, () => undefined);
         void say.typing(u.chat).catch(() => undefined);
-        took = await intake({ api: serverApi(link.user_id, { port, fetch: deps.fetch }), sb, files: u.files, telegramToken: ch.name === "telegram" ? env.TELEGRAM_BOT_TOKEN ?? null : null, fetch: deps.fetch, log: logFor(link.user_id, u.chat, ch.name), lock: takeFileLock });
+        took = await intake({ api: serverApi(link.user_id, { port, fetch: deps.fetch }), sb, files: u.files, telegramToken: ch.name === "telegram" ? env.TELEGRAM_BOT_TOKEN ?? null : null, telegramBig: ch.name === "telegram" ? big : null, fetch: deps.fetch, log: log3, lock: takeFileLock });
       }
-      await bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file,
-        ...(took ? { files: took.got, file_errors: took.failed.map((x) => `${x.name}: ${whyText(x.why)}`) } : {}) });
+      await bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file, ...(saidFirst ? { said_first: saidFirst } : {}),
+        ...(took ? { files: took.got, file_errors: took.failed.map((x) => `${x.name}: ${whyText(x.why)}`), too_big: took.failed.filter((x) => x.why === "too_big" || x.why === "telegram_too_big").length } : {}) });
     }))) return "busy";
   }
 

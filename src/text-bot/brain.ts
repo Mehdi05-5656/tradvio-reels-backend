@@ -24,7 +24,7 @@ export type Transport = {
   typing(chat: string): Promise<void>;
 };
 export type Turn = { role: "user" | "assistant" | "event"; text: string; at: number; /** a button tap, not typed words */ tap?: boolean };
-export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; /** when files last came in the chat */ filesAt?: number; light?: { day: string; links: number; copies: number; app_links?: number } };
+export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; /** when files last came in the chat */ filesAt?: number; /** when the person was sent to the upload page for files too big for the chat (their uploads are picked up after) */ awaitUploads?: number; /** uploads already picked up from the website (never announced twice) */ pickedUploads?: string[]; light?: { day: string; links: number; copies: number; app_links?: number } };
 export type BrainDeps = { cfg: Config; api: Api; out: Transport; fetch?: typeof fetch; now?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; index: { current: Index | null };
   /** the few facts nearly every answer needs (plan, balance, linked accounts), read once and kept a few minutes */
   basics?: { at: number; text: string } | null };

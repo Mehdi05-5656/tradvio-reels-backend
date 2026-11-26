@@ -14,7 +14,8 @@ import type { Pending } from "../../src/text-bot/gate.js";
 
 type Run = { replies: string[]; all: string; pending: Pending | null; body: any; tools: string[]; lookups: string[]; media: number; usd: number; calls: number; ms: number; blanks: string[]; acts: number; errors: string[] };
 type Case = { id: string; say: string[]; check: (r: Run) => string | null; setup?: (api: ReturnType<typeof mockApi>) => void; /** may offer the AI-app link (no other case may) */ appLink?: boolean;
-  /** files sent with the first message (already in the library, as the server's intake leaves them) */ files?: Array<{ asset_id: string; name: string; kind: string }> };
+  /** files sent with the first message (already in the library, as the server's intake leaves them) */ files?: Array<{ asset_id: string; name: string; kind: string }>;
+  /** more of the first message, as the server sends it (file_errors, too_big) */ extra?: Record<string, unknown> };
 const has = (s: string, ...words: Array<string | RegExp>) => words.every((w) => (typeof w === "string" ? s.toLowerCase().includes(w.toLowerCase()) : w.test(s)));
 /** a post's caption and time, on the post or on its (first) video: the route takes either */
 const capOf = (r: Run): string => String((r.body?.items ?? [])[0]?.caption ?? r.body?.caption ?? "");
@@ -64,6 +65,8 @@ export const CASES: Case[] = [
   { id: "files sent", files: [{ asset_id: IDS.clipA, name: "clip-01.mp4", kind: "video" }, { asset_id: IDS.clipB, name: "clip-02.mp4", kind: "video" }],
     say: ["these are the posts. schedule them on tiktok: the first today at 5:30pm, the second tomorrow at 9am. captions: same short style, different wording each time, no hashtags"],
     check: (r) => want(r, "post") ?? ((r.body.items ?? []).length !== 2 ? `${(r.body.items ?? []).length} videos, not 2` : JSON.stringify((r.body.items ?? []).map((x: any) => x.asset_id)) !== JSON.stringify([IDS.clipA, IDS.clipB]) ? "not the two files sent, in order" : (r.body.items ?? []).some((x: any) => !x.schedule_at) ? "a video without its own time" : (r.body.items ?? []).some((x: any) => /#/.test(String(x.caption ?? r.body.caption ?? ""))) ? "hashtags in a caption" : new Set((r.body.items ?? []).map((x: any) => x.caption)).size < 2 ? "the captions are not worded differently" : /can't take|cannot take/i.test(r.all) ? "said it can't take files" : null) },
+  { id: "too big", files: [{ asset_id: IDS.clipA, name: "clip-01.mp4", kind: "video" }], extra: { file_errors: ["clip-02.mov: it's too big to come through this chat; upload it on the Library page"], too_big: 1 },
+    say: ["here are both videos for tomorrow"], check: (r) => noAction(r) ?? (!/app\.clone8\.io\/#studio\/library/.test(r.all) ? "did not give the upload page" : !/\bdone\b/i.test(r.all) ? "did not say to text done" : /can't take files|cannot take files/i.test(r.all) ? "said it can't take files" : null) },
   { id: "normal schedule", say: ["schedule the cashier singing clip on tiktok tomorrow on my normal schedule, the morning slot, caption: she really sang"],
     check: (r) => want(r, "post") ?? (() => { const it = (r.body.items ?? [])[0] ?? {}; const iso = it.schedule_at ?? r.body.schedule_at; if (!iso) return "no time"; const h = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", hour12: false }).format(new Date(iso)); return h === "9" || h === "09" ? null : `the morning slot is 9 am, got ${h}`; })() },
   { id: "two steps", say: ["what clips came out of the friday stream?", "post the second one to tiktok now, no caption"], check: (r) => want(r, "post") ?? ((r.body.items ?? [])[0]?.asset_id !== IDS.clipB ? "not the second clip" : JSON.stringify(r.body.accounts) !== JSON.stringify([IDS.tiktok]) ? "wrong account" : r.body.caption ? "added a caption nobody asked for" : null) },
@@ -82,7 +85,7 @@ async function runCase(c: Case, model: string, effort: string): Promise<Run & { 
   const brain: BrainDeps = { cfg, api, out, index: { current: null }, log };
   const bot = makeBot({ cfg, api, out, state, save() { /* */ }, log, think: (st, text, o) => think(brain, st, text, o), forget: () => { brain.index.current = null; brain.basics = null; } });
   const t0 = Date.now();
-  for (const [i, line] of c.say.entries()) await bot.handle({ chat: "e", from: "e", text: line, private: true, ...(i === 0 && c.files ? { files: c.files } : {}) });
+  for (const [i, line] of c.say.entries()) await bot.handle({ chat: "e", from: "e", text: line, private: true, ...(i === 0 && c.files ? { files: c.files } : {}), ...(i === 0 && c.extra ? c.extra : {}) });
   const pending = chatOf(state, "e").pending.live;
   const run: Run = { replies, all: replies.join("\n"), pending, body: pending?.steps.find((s) => s.method !== "DELETE")?.body ?? pending?.steps[0]?.body ?? null, tools, lookups, media, usd, calls, ms: Date.now() - t0, blanks, acts: api.acts.length, errors };
   let fail: string | null = null;

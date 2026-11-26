@@ -28,6 +28,7 @@
     "opentype.js": "^1.3.4",
     "pdf-parse": "^1.1.1",
     "stripe": "^23.0.1",
+    "telegram": "2.26.22",
     "ws": "^8.18.0"
   },
   "devDependencies": {
