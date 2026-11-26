@@ -92,7 +92,7 @@ export function withHookRecipe(hook: any, params: Record<string, any>): Record<s
 const WRITE_SCHEMA = {
   type: "object", additionalProperties: false, required: ["hooks"],
   properties: { hooks: { type: "array", items: { type: "object", additionalProperties: false, required: ["line", "angle"], properties: {
-    line: { type: "string", description: "The words the character says, 6 to 22 words, spoken English, one or two short sentences." },
+    line: { type: "string", description: "The words the character says: 6 to 14 words (3-6 seconds spoken), plain spoken English, one or two short sentences." },
     angle: { type: "string", description: "2-4 words naming the angle, e.g. 'curiosity gap', 'relatable problem'." },
   } } } },
 };
@@ -169,7 +169,7 @@ export async function addHookVoice(sb: SupabaseClient, deps: Deps & { tts?: type
   const env = deps.env ?? process.env, h = job.options?.hook ?? {};
   if (!voiceIds.has(String(h.voice))) throw new HookError("hook_voice_required", "No voice for this hook");
   const line = clean(h.line, 200);
-  const mp3 = await (deps.tts ?? textToSpeech)({ env, log: deps.log, fetch: deps.fetch } as any, { voice_id: String(h.voice), text: line, model: "natural" });
+  const mp3 = await (deps.tts ?? textToSpeech)({ env, log: deps.log, fetch: deps.fetch } as any, { voice_id: String(h.voice), text: line, model: "expressive" });
   const key = `${job.user_id}/${job.id}/work/voice.mp3`;
   const up = await sb.storage.from("studio-outputs").upload(key, mp3, { contentType: "audio/mpeg", upsert: true });
   if (up.error) throw up.error;
