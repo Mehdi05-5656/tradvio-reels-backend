@@ -241,6 +241,8 @@ export type Summary = {
     signups_stated: number; signups_link: number; signups_unknown: number; paid: number; paid_prev: number | null; paid_attributed: number;
     conversion: number | null; conversion_attributed: number | null; net_usd: number; engagement: number | null;
     cost_usd: number | null; cpm_usd: number | null; cost_per_signup: number | null; cost_per_paid: number | null;
+    /** followers across the accounts now, and the change over the range (from the daily account rows) */
+    followers: number | null; followers_delta: number | null;
     /** what reading the accounts cost in the range (ScrapeCreators calls booked with use=content) */
     pull_calls?: number; pull_usd?: number;
   };
@@ -417,6 +419,8 @@ export function summarize(input: { accounts: AccountRow[]; videos: VideoRow[]; s
     signups_stated: stated, signups_link: link, signups_unknown: S.length - attributed, paid: paidAll.length, paid_prev: Sprev.filter((s) => s.paid).length, paid_attributed: paidAttr.length,
     conversion: S.length ? paidAll.length / S.length : null, conversion_attributed: attributed >= MIN_SIGNUPS ? paidAttr.length / attributed : null,
     net_usd: paidAttr.reduce((s, x) => s + x.net_usd, 0), engagement: rate(eng, totalGain.views),
+    followers: accs.some((a) => a.followers != null) ? accs.reduce((s, a) => s + (a.followers ?? 0), 0) : null,
+    followers_delta: accs.some((a) => a.followers_delta != null) ? accs.reduce((s, a) => s + (a.followers_delta ?? 0), 0) : null,
     cost_usd: cost, cpm_usd: cost != null && totalGain.views > 0 ? (cost / totalGain.views) * 1000 : null, cost_per_signup: cost != null && attributed > 0 ? cost / attributed : null, cost_per_paid: cost != null && paidAttr.length > 0 ? cost / paidAttr.length : null,
     ...(input.pulls ? (() => { const xs = input.pulls.filter((p) => inRange(p.at, since, until)); return { pull_calls: xs.length, pull_usd: Math.round(xs.reduce((s, p) => s + p.usd, 0) * 1e4) / 1e4 }; })() : {}),
   };
@@ -497,6 +501,16 @@ export async function loadContent(sb: SupabaseClient, opts: { since: number; isI
 }
 
 /** The range from the page's "days" and the viewer's time zone: whole local days back from now ("all" = since tracking). */
+/** A custom range: whole local days from `from` to `to` (YYYY-MM-DD, inclusive), capped at now. Null when the dates make no sense. */
+export function rangeBetween(from: string, to: string, tz_offset_min: number, now = Date.now()): Range | null {
+  const day = (s: string) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s ?? "")); return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - tz_offset_min * 60_000 : NaN; };
+  const a = day(from), b = day(to);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a || b - a > 400 * DAY) return null;
+  const since = a, until = Math.min(b + DAY, now);
+  if (until <= since) return null;
+  return { days: Math.round((b - a) / DAY) + 1, since, until, tz_offset_min };
+}
+
 export function rangeFor(days: number | null, tz_offset_min: number, now = Date.now(), trackingSince: string | null = null, earliestPost: string | null = null): Range {
   const until = now;
   if (days == null) {

@@ -4,7 +4,7 @@
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isInternalEmail, isStudioAdmin } from "./studio-admin-auth.js";
-import { accountForSignup, loadContent, parseProfileLink, pullContent, rangeFor, sanitizeAccountInput, summarize, thinSnapshots, FEATURE_IDS, FEATURES, DAY, type Deps, type Loaded } from "./studio-content-perf.js";
+import { accountForSignup, loadContent, parseProfileLink, pullContent, rangeBetween, rangeFor, sanitizeAccountInput, summarize, thinSnapshots, FEATURE_IDS, FEATURES, DAY, type Deps, type Loaded } from "./studio-content-perf.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PULL_GAP_MS = 10 * 60_000, SIGN_TTL_S = 3600, MAX_VIDEOS = 600;
@@ -44,7 +44,8 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
     return pulling;
   };
 
-  /** GET /api/studio/admin/content?days=7|30|90|all&tz=-480&hide_pre=1&internal=1: the page's numbers. */
+  /** GET /api/studio/admin/content?days=7|30|90|all&tz=-480&hide_pre=1&internal=1: the page's numbers.
+   *  from=YYYY-MM-DD&to=YYYY-MM-DD (the viewer's local days, inclusive) picks any day or span instead of days=. */
   app.get("/api/studio/admin/content", async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     try {
@@ -59,7 +60,9 @@ export function registerContentPerf(app: Express, sbFn: () => SupabaseClient, de
       // "all time" reaches back to the oldest post of an account that counts its history
       const history = new Set(cache.data.accounts.filter((a) => a.count_history).map((a) => a.id));
       const earliest = cache.data.videos.filter((v) => history.has(v.account_id) && v.posted_at).map((v) => v.posted_at!).sort()[0] ?? null;
-      const summary = summarize({ ...cache.data, range: rangeFor(days, tz, now, tracking, earliest), hide_pre: req.query.hide_pre === "1", include_internal: req.query.internal === "1" });
+      const custom = typeof req.query.from === "string" && typeof req.query.to === "string" ? rangeBetween(req.query.from, req.query.to, tz, now) : null;
+      if (typeof req.query.from === "string" && !custom) return res.status(400).json({ error: "invalid_range", detail: "from and to are days (YYYY-MM-DD), from first, at most 400 days apart" });
+      const summary = summarize({ ...cache.data, range: custom ?? rangeFor(days, tz, now, tracking, earliest), hide_pre: req.query.hide_pre === "1", include_internal: req.query.internal === "1" });
       // the page lists at most MAX_VIDEOS videos (the biggest gains first, every one that brought a sign-up kept): the
       // stress test put 12,000 videos at 9 MB a response, which no page needs
       const videos_total = summary.videos.length;

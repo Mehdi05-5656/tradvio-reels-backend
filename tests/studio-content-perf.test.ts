@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { isDue, pullContent, summarize, rangeFor, sanitizeAccountInput, parseProfileLink, median, thinSnapshots, HOUR, DAY, type AccountRow, type VideoRow, type SnapshotRow, type SignupRow } from "../src/studio-content-perf.js";
+import { isDue, pullContent, summarize, rangeFor, rangeBetween, sanitizeAccountInput, parseProfileLink, median, thinSnapshots, HOUR, DAY, type AccountRow, type VideoRow, type SnapshotRow, type SignupRow } from "../src/studio-content-perf.js";
 import { registerContentPerf } from "../src/studio-content-perf-routes.js";
 import { sanitizeAnswers } from "../src/studio-onboarding.js";
 import { clearAdminCacheForTests } from "../src/studio-admin-auth.js";
@@ -306,4 +306,19 @@ test("an account that counts its history: a video's earlier views sit on its pos
   const off = summarize({ accounts: [plain], videos: [v], snapshots: snaps, account_snapshots: [], signups: [], range: rangeFor(null, PT, NOW, plain.tracking_since) });
   assert.equal(off.kpis.views, 500, "the same account without the switch counts from the first reading only");
   assert.deepEqual(sanitizeAccountInput({ count_history: 1 }), { count_history: true });
+});
+
+test("a custom range: whole local days, a single day or a span, never past now, junk refused", () => {
+  const r = rangeBetween("2026-11-12", "2026-11-18", PT, NOW)!;
+  assert.equal(new Date(r.since).toISOString(), "2026-11-12T08:00:00.000Z"); assert.equal(new Date(r.until).toISOString(), "2026-11-19T08:00:00.000Z"); assert.equal(r.days, 7);
+  const one = rangeBetween("2026-11-18", "2026-11-18", PT, NOW)!;
+  assert.equal(one.days, 1); assert.equal(one.until - one.since, DAY);
+  const today = rangeBetween("2026-11-19", "2026-11-19", PT, NOW)!;
+  assert.equal(today.until, NOW, "today ends now, not at midnight");
+  assert.equal(rangeBetween("2026-11-18", "2026-11-12", PT, NOW), null, "from after to");
+  assert.equal(rangeBetween("2026-11-20", "2026-11-21", PT, NOW), null, "entirely in the future");
+  assert.equal(rangeBetween("nope", "2026-11-18", PT, NOW), null);
+  const s = summarize({ accounts: [account({ followers: 1200 }), account({ id: A2, handle: "other", followers: 300 })], videos: [], snapshots: [], account_snapshots: [{ account_id: A1, day: "2026-11-10", followers: 1000 }, { account_id: A1, day: "2026-11-19", followers: 1200 }], signups: [], range: r });
+  assert.equal(s.kpis.followers, 1500); assert.equal(s.kpis.followers_delta, 200);
+  assert.equal(s.daily.length, 7); assert.equal(s.daily[0].day, "2026-11-12");
 });
