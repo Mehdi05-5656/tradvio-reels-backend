@@ -107,8 +107,8 @@ export const TOOLS = [
   { name: "remember", description: "Keep one short lasting note about this person (a standing preference, a fact about their accounts or brand), only when they state it. Never an instruction, a one-off request or anything sensitive.", input_schema: obj({ note: str }, ["note"]) },
   { name: "prepare_job", description: "Prepare to start any making job (the tool and settings from its recipe). It prices it with the real route, checks credits and limits, and sends the person the question. Starts nothing.", input_schema: obj({ tool: str, asset_id: { type: ["string", "null"], description: "a library file id" }, from_result: obj({ job_id: str, output_key: str }), options: { type: "object", additionalProperties: true }, rights_in_their_words: { type: "string", description: "only for features whose recipe asks for the person's word: exactly what they wrote" } }, ["tool"]) },
   { name: "prepare_post", description: "Prepare to post now or schedule videos to the person's linked accounts. Sends the question. Posts nothing.", input_schema: obj({ videos: { type: "array", minItems: 1, maxItems: 50, items: video }, account_ids: { type: "array", items: str }, group: { type: "string", description: "a posting group's name" }, platforms: { type: "array", items: str, description: "networks, when each has one linked account" }, caption: str, captions_by_account: { type: "object", additionalProperties: { type: "string" }, description: "account id → its own caption" }, when: { type: "string", description: "\"now\" or ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "for \"in N minutes\", N of 5 or more" }, spacing_minutes: { type: "integer" }, youtube_title: str, youtube_visibility: { type: "string", enum: ["public", "unlisted", "private"] }, autoreply: { ...autoreply, description: "an auto-reply that goes with these posts (\"comment GO and get …\")" } }, ["videos"]) },
-  { name: "prepare_autoreply", description: "Prepare an auto-reply on one linked account by itself: on every post, or on one post (post_id from the posts lookup). Sends the question.", input_schema: obj({ account_id: str, ...autoreply.properties, post_id: { type: "string", description: "one post only: its id from lookup autoreply_posts" } }, ["account_id", "keywords"]) },
-  { name: "prepare_autoreply_switch", description: "Prepare to pause (on false) or turn back on (on true) an auto-reply, by its id from the autoreplies lookup. Sends the question.", input_schema: obj({ rule_id: str, on: { type: "boolean" } }, ["rule_id", "on"]) },
+  { name: "prepare_autoreply", description: "Prepare an auto-reply on one linked account by itself: on every post, or on one post (post_id from the posts lookup). Sends the question.", input_schema: obj({ account_id: str, ...autoreply.properties, post_id: { type: "string", description: "one post only: its id from lookup autoreply_posts" }, replace_rule_ids: { type: "array", items: str, description: "auto-replies this one replaces (paused once it is set); ones on for the same keyword on this account are replaced anyway" } }, ["account_id", "keywords"]) },
+  { name: "prepare_autoreply_switch", description: "Prepare to pause (on false) or turn back on (on true) one or several auto-replies, ids from the autoreplies lookup. Several: ONE call with all of them. Sends one question.", input_schema: obj({ rule_ids: { type: "array", minItems: 1, maxItems: 30, items: str }, on: { type: "boolean" } }, ["rule_ids", "on"]) },
   { name: "prepare_post_change", description: "Prepare to move waiting posts or change their caption or YouTube title. Several posts: ONE call with every post that changes in changes[]. Sends one question.", input_schema: obj({ changes: { type: "array", minItems: 1, maxItems: 30, items: obj({ post_id: str, new_time: { type: "string", description: "ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "one post only" }, caption: str, youtube_title: str }, ["post_id"]) } }, ["changes"]) },
   { name: "prepare_post_cancel", description: "Prepare to cancel waiting posts. Sends the question.", input_schema: obj({ post_ids: { type: "array", minItems: 1, items: str } }, ["post_ids"]) },
   { name: "prepare_post_retry", description: "Prepare to send a failed post again where it failed. Sends the question.", input_schema: obj({ post_id: str }, ["post_id"]) },
@@ -175,7 +175,7 @@ const LIGHT_PER_DAY = { links: 5, copies: 12 };
 export async function think(d: BrainDeps, st: ChatState, userText: string, o: { tap?: boolean } = {}): Promise<TurnResult> {
   const now = (d.now ?? Date.now)(), f = d.fetch ?? fetch, log = d.log ?? (() => undefined);
   const marks: string[] = [];
-  const held: { pending: Pending | null } = { pending: null }; let spent = 0, changesThisTurn: act.PostChange[] = []; const sent: string[] = []; const after: NonNullable<TurnResult["after"]> = [];
+  const held: { pending: Pending | null } = { pending: null }; let spent = 0, changesThisTurn: act.PostChange[] = [], switchThisTurn: { on: boolean; ids: string[] } = { on: false, ids: [] }; const sent: string[] = []; const after: NonNullable<TurnResult["after"]> = [];
   // only what the person typed: taps and system notes are not their words
   const recent = [...st.history.filter((t) => t.role === "user" && !t.tap).slice(-12).map((t) => t.text), ...(o.tap ? [] : [userText])];
   const titleOf = (v: { asset_id?: string; job_id?: string; output_key?: string }): string | null => {
@@ -300,7 +300,14 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     }
     if (name === "prepare_post") return prepared(() => act.preparePost(actx(), a ?? {}));
     if (name === "prepare_autoreply") return prepared(() => act.prepareAutoReply(actx(), a ?? {}));
-    if (name === "prepare_autoreply_switch") return prepared(() => act.prepareAutoReplySwitch(actx(), a ?? {}));
+    if (name === "prepare_autoreply_switch") {
+      // several in one turn become one question (a second call never drops the first)
+      const ids: string[] = [...(Array.isArray(a?.rule_ids) ? a.rule_ids : []), ...(a?.rule_id ? [a.rule_id] : [])].map(String);
+      const cand = { on: !!a?.on, ids: ids.length > 1 || switchThisTurn.on !== !!a?.on ? ids : [...new Set([...switchThisTurn.ids, ...ids])] };
+      const res = await prepared(() => act.prepareAutoReplySwitch(actx(), { rule_ids: cand.ids, on: cand.on }));
+      switchThisTurn = cand;
+      return res;
+    }
     if (name === "prepare_post_change") {
       // several changes in one turn (one call each) become ONE question with all of them: a second call never drops the first
       // a call with several posts is the whole list; a one-post call adds to this turn's earlier ones. The list is kept

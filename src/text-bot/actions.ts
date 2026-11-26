@@ -268,7 +268,7 @@ const what = (c: { reply: string; dmMessage: string; dm: boolean }, net: string)
   : `gets the public reply "${c.reply}"${DM_NETS.includes(net) ? " (no DM)" : ""}`;
 /** Whether each account can take it: the network has comment replies, Clone8 has been allowed to answer there, and
  *  the plan has room (a rule with the same keywords already on the account is reused, as the server does). */
-async function autoReplyRoom(ctx: Ctx, accounts: Account[], c: { keywords: string[]; reply: string; dmMessage: string; dm: boolean }, o: { withPosts: boolean }) {
+async function autoReplyRoom(ctx: Ctx, accounts: Account[], c: { keywords: string[]; reply: string; dmMessage: string; dm: boolean }, o: { withPosts: boolean; freed?: number }) {
   const r = await ctx.api.call("GET", "/api/studio/autoreply");
   if (r.status !== 200 || !r.json?.enabled) throw new ActionError("autoreply_off", "Auto-replies are not available right now");
   const rows: any[] = r.json.accounts ?? [], rules: any[] = r.json.rules ?? [];
@@ -287,10 +287,12 @@ async function autoReplyRoom(ctx: Ctx, accounts: Account[], c: { keywords: strin
       notes.push(`${handle(acc)} hasn't allowed Clone8 to answer comments yet: the auto-reply starts by itself once you allow it on the Post page (https://app.clone8.io/#studio/publish?accounts).`);
     }
     const same = rules.find((x) => String(x.account_id) === String(acc.id) && !x.post && (x.keywords ?? []).map((k: string) => String(k).toLowerCase()).sort().join("|") === keys);
-    if (same && o.withPosts) { reused.push(acc); notes.push(`${handle(acc)} already has a ${c.keywords.map((k) => `"${k}"`).join("/")} auto-reply: it gets these words instead.`); }
+    const sameKind = same && (!!same.dm_message === (DM_NETS.includes(acc.platform) && c.dm));
+    if (same && o.withPosts && sameKind) { reused.push(acc); notes.push(`${handle(acc)} already has a ${c.keywords.map((k) => `"${k}"`).join("/")} auto-reply: it gets these words instead.`); }
+    else if (same && o.withPosts && same.active) notes.push(`${handle(acc)} already has a ${c.keywords.map((k) => `"${k}"`).join("/")} auto-reply ${same.dm_message ? "that sends a DM" : "that replies only"}; it stays on too (ask me to pause it).`);
   }
   const limit = Number(r.json.limit ?? 0), room = limit - Number(r.json.used ?? 0);
-  if (limit && room < accounts.length - reused.length) throw new ActionError("autoreply_limit", `Your plan runs ${limit} auto-replies at once and ${Math.max(0, room)} ${room === 1 ? "is" : "are"} free. Pause one first (or upgrade).`);
+  if (limit && room + (o.freed ?? 0) < accounts.length - reused.length) throw new ActionError("autoreply_limit", `Your plan runs ${limit} auto-replies at once and ${Math.max(0, room)} ${room === 1 ? "is" : "are"} free. Pause one first (or upgrade).`);
   return { notes };
 }
 async function autoReplyFor(ctx: Ctx, a: AutoReplyIn, accounts: Account[], videos: number) {
@@ -302,13 +304,31 @@ async function autoReplyFor(ctx: Ctx, a: AutoReplyIn, accounts: Account[], video
   return { spec: { keywords: c.keywords, ...(c.reply ? { comment_reply: c.reply } : {}), ...(c.dm && c.dmMessage ? { dm_message: c.dmMessage } : { dm: false }) }, lines, own: c.own };
 }
 
-/** An auto-reply on an account by itself (every post, or one post by its id from the account's recent posts). */
-export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: string; post_id?: string | null }): Promise<Pending> {
+/** One rule in words that tell it apart from others with the same keyword: account, which posts, what it sends. */
+function ruleWords(r: any, accounts: any[]): string {
+  const a = accounts.find((x) => String(x.id) === String(r.account_id));
+  const who = a ? `${a.platform} @${a.username ?? "?"}` : String(r.platform ?? "an account");
+  const where = r.post ? `one post${r.post.title ? ` "${short(r.post.title, 40)}"` : ""}` : "every post";
+  const sends = [r.dm_message ? `DM "${short(r.dm_message, 60)}"` : "", r.comment_reply ? `reply "${short(r.comment_reply, 60)}"` : ""].filter(Boolean).join(" + ") || "no message";
+  return `${(r.keywords ?? []).map((k: string) => `"${k}"`).join("/") || "a keyword"} on ${who} (${where}): ${sends}`;
+}
+
+/** An auto-reply on an account by itself (every post, or one post by its id from the account's recent posts). A change
+ *  of what an auto-reply says is a new rule that REPLACES the old ones: rules already on for the same keyword on that
+ *  account (and any named in replace_rule_ids) are paused once the new one is set, so a comment never gets two answers. */
+export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: string; post_id?: string | null; replace_rule_ids?: string[] | null }): Promise<Pending> {
   const s = await ctx.api.call("GET", "/api/studio/social");
   const acc = ((s.json?.accounts ?? []) as Account[]).find((x) => x.id === a.account_id);
   if (!acc) throw new ActionError("which_account", `Say which account. Linked: ${((s.json?.accounts ?? []) as Account[]).map((x) => `${handle(x)} (${x.id})`).join(", ") || "none"}`);
   const c = cleanAutoReply(ctx, a);
-  await autoReplyRoom(ctx, [acc], c, { withPosts: false });
+  // what it replaces: named rules, and every rule already on for one of these keywords on this account
+  const ar = await ctx.api.call("GET", "/api/studio/autoreply");
+  const rules: any[] = ar.json?.rules ?? [], arAccounts: any[] = ar.json?.accounts ?? [];
+  const named = [...new Set((a.replace_rule_ids ?? []).map(String))];
+  for (const id of named) if (!rules.some((r) => String(r.id) === id)) throw new ActionError("rule_not_found", "One of the auto-replies to replace isn't there; use ids from the autoreplies lookup");
+  const kw = new Set(c.keywords.map((k) => k.toLowerCase()));
+  const replaced = rules.filter((r) => r.active && /^[A-Za-z0-9_-]{1,64}$/.test(String(r.id)) && (named.includes(String(r.id)) || (String(r.account_id) === String(acc.id) && (r.keywords ?? []).some((k: string) => kw.has(String(k).toLowerCase())))));
+  await autoReplyRoom(ctx, [acc], c, { withPosts: false, freed: replaced.length });
   // one post: named by the account's own record of it, never by words the AI made up
   let post: { id: string; title: string | null } | null = null;
   if (a.post_id) {
@@ -320,18 +340,27 @@ export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: 
   const words = c.keywords.map((k) => `"${k}"`).join(" or ");
   const body = { account_id: acc.id, platform: acc.platform, name: `Keyword ${c.keywords[0]}`.slice(0, 60), keywords: c.keywords, match: "word", active: true,
     ...(c.reply ? { comment_reply: c.reply } : {}), ...(DM_NETS.includes(acc.platform) ? (c.dm ? { dm_message: c.dmMessage } : { dm: false }) : {}), ...(post ? { post_id: post.id, ...(post.title ? { post_title: post.title } : {}) } : {}) };
-  return put(ctx, { kind: "autoreply", credits: 0, posts: 0, own: [...c.own, ...(post?.title ? [short(post.title, 60)] : [])], steps: [{ method: "POST", path: "/api/studio/autoreply", body, label: "autoreply" }], checks: [],
-    body: `Set an auto-reply on ${handle(acc)}, ${post ? `on the post${post.title ? ` "${short(post.title, 60)}"` : ""}` : "on every post, old and new"}: anyone who comments ${words} ${what(c, acc.platform)}.` });
+  const set = `${replaced.length ? "New" : "Set an"} auto-reply on ${handle(acc)}, ${post ? `on the post${post.title ? ` "${short(post.title, 60)}"` : ""}` : "on every post, old and new"}: anyone who comments ${words} ${what(c, acc.platform)}.`;
+  return put(ctx, { kind: "autoreply", credits: 0, posts: 0, own: [...c.own, ...(post?.title ? [short(post.title, 60)] : []), ...replaced.flatMap((r) => [...(r.keywords ?? []), r.dm_message, r.comment_reply, r.post?.title].filter(Boolean).map((x: string) => short(x, 60)))],
+    // the new one first: if it can't be set, the old ones stay on
+    steps: [{ method: "POST", path: "/api/studio/autoreply", body, label: "autoreply" }, ...replaced.map((r) => ({ method: "PATCH" as const, path: `/api/studio/autoreply/${r.id}`, body: { active: false }, label: "pause" }))], checks: [],
+    meta: { paused: replaced.length },
+    body: replaced.length ? [set, `It replaces ${replaced.length === 1 ? "this one, which is paused" : `these ${replaced.length}, which are paused`} (they can be turned back on):`, ...replaced.map((r) => `· ${ruleWords(r, arAccounts)}`)].join("\n") : set });
 }
 
-/** Pause or turn back on an auto-reply (its id from the autoreplies lookup). */
-export async function prepareAutoReplySwitch(ctx: Ctx, a: { rule_id: string; on: boolean }): Promise<Pending> {
+/** Pause or turn back on one or several auto-replies (ids from the autoreplies lookup), in ONE question, each told apart
+ *  by its account, posts and words. */
+export async function prepareAutoReplySwitch(ctx: Ctx, a: { rule_id?: string; rule_ids?: string[] | null; on: boolean }): Promise<Pending> {
+  const ids = [...new Set([...(a.rule_ids ?? []), ...(a.rule_id ? [a.rule_id] : [])].map(String))];
+  if (!ids.length) throw new ActionError("rule_not_found", "Say which auto-replies (ids from the autoreplies lookup)");
   const r = await ctx.api.call("GET", "/api/studio/autoreply");
-  const rule = ((r.json?.rules ?? []) as any[]).find((x) => String(x.id) === String(a.rule_id));
-  if (!rule || !/^[A-Za-z0-9_-]{1,64}$/.test(String(rule.id))) throw new ActionError("rule_not_found", "No such auto-reply; use its id from the autoreplies lookup");
-  const name = short(rule.name ?? (rule.keywords ?? []).join(", "), 60);
-  return put(ctx, { kind: "autoreply_switch", credits: 0, posts: 0, own: [name, ...((rule.keywords ?? []) as string[])], steps: [{ method: "PATCH", path: `/api/studio/autoreply/${rule.id}`, body: { active: !!a.on }, label: "autoreply" }], checks: [],
-    meta: { on: !!a.on }, body: `${a.on ? "Turn back on" : "Pause"} the auto-reply "${name}"${rule.keywords?.length ? ` (keyword ${(rule.keywords as string[]).map((k) => `"${k}"`).join(", ")})` : ""}?` });
+  const rules = ids.map((id) => ((r.json?.rules ?? []) as any[]).find((x) => String(x.id) === id));
+  if (rules.some((x) => !x || !/^[A-Za-z0-9_-]{1,64}$/.test(String(x.id)))) throw new ActionError("rule_not_found", "No such auto-reply; use its id from the autoreplies lookup");
+  const accounts: any[] = r.json?.accounts ?? [];
+  const lines = rules.map((x) => `· ${ruleWords(x, accounts)}`);
+  return put(ctx, { kind: "autoreply_switch", credits: 0, posts: 0, own: rules.flatMap((x) => [x.name, ...(x.keywords ?? []), x.dm_message, x.comment_reply, x.post?.title].filter(Boolean).map((y: string) => short(y, 60))),
+    steps: rules.map((x) => ({ method: "PATCH" as const, path: `/api/studio/autoreply/${x.id}`, body: { active: !!a.on }, label: "autoreply" })), checks: [],
+    meta: { on: !!a.on, n: rules.length }, body: [`${a.on ? "Turn back on" : "Pause"} ${rules.length === 1 ? "this auto-reply" : `these ${rules.length} auto-replies`}:`, ...lines].join("\n") });
 }
 
 /** After the YES: where the auto-reply went with the posts, and where it didn't (and why), in plain words. */
@@ -509,6 +538,6 @@ export async function execute(api: Api, p: Pending, o: { now: number; timezone: 
     if (p.kind === "edit" && s.method === "POST") out.project = { id: p.meta?.project_id, asset_id: p.meta?.asset_id ?? null, job_id: p.meta?.job_id ?? null, rev: Number(p.meta?.rev) || 0, name: String(p.meta?.name ?? "your clip") };
     if (p.kind === "post_change") { const at = r.json?.post?.schedule_at; if (at) moved.push(when(at, o.timezone, o.now)); out.text = p.steps.length === 1 ? `Changed.${at ? ` It now goes out ${moved[0]}.` : ""}` : `Changed all ${p.steps.length}.${moved.length ? ` New times: ${moved.join(", ")}.` : ""}`; }
   }
-  if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "edit" ? "Saved. Making the edited clip now; I'll send it here when it's ready (usually under a minute)." : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : p.kind === "autoreply" ? "The auto-reply is on." : p.kind === "autoreply_switch" ? (p.meta?.on ? "It's back on." : "Paused.") : "Done.";
+  if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "edit" ? "Saved. Making the edited clip now; I'll send it here when it's ready (usually under a minute)." : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : p.kind === "autoreply" ? `The auto-reply is on.${p.meta?.paused ? ` The old ${p.meta.paused === 1 ? "one is" : `${p.meta.paused} are`} paused.` : ""}` : p.kind === "autoreply_switch" ? (Number(p.meta?.n) > 1 ? `${p.meta?.on ? "All back on" : "Paused all"} ${p.meta?.n}.` : p.meta?.on ? "It's back on." : "Paused.") : "Done.";
   return out;
 }

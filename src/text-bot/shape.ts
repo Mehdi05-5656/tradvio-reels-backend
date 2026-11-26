@@ -49,7 +49,11 @@ export function shape(name: string, j: any, args: Record<string, any> = {}): any
   if (name === "voices") return lean({ voices: (j.voices ?? []).slice(0, 12).map((v: any) => ({ id: v.id, name: v.name, labels: v.labels, preview_url: v.preview_url })) });
   if (name === "splitscreen_loops") return lean({ price_credits: j.price?.credits, limits: j.limits, loops: (j.loops ?? []).map((l: any) => ({ id: l.id, kind: l.kind, name: l.name, poster: l.poster, video: l.video })) });
   if (name === "automations") return lean({ automations: (j.automations ?? []).slice(0, 30).map((a: any) => ({ id: a.id, name: a.name, runs: a.runs, inputs: (a.inputs ?? []).filter((i: any) => i.each_run).map((i: any) => ({ key: i.key, what: i.label, kind: i.kind })) })) });
-  if (name === "autoreplies") return lean({ limit: j.limit, used: j.used, rules: (j.rules ?? []).slice(0, 30).map((r: any) => ({ id: r.id, name: r.name, account: r.account ?? r.platform, keywords: r.keywords, active: r.active, dm: r.dm_message ? short(r.dm_message, 100) : undefined, reply: r.comment_reply ? short(r.comment_reply, 80) : undefined })) });
+  if (name === "autoreplies") {
+    const acc = (id: unknown) => (j.accounts ?? []).find((a: any) => String(a.id) === String(id));
+    return lean({ limit: j.limit, used: j.used, rules: (j.rules ?? []).slice(0, 30).map((r: any) => { const a = acc(r.account_id); return { id: r.id, account: a ? `${a.platform} @${a.username ?? "?"}` : r.platform, account_id: r.account_id, on: r.active, keywords: r.keywords,
+      where: r.post ? `one post${r.post.title ? `: "${short(r.post.title, 50)}"` : ""}` : "every post", dm: r.dm_message ? short(r.dm_message, 100) : undefined, reply: r.comment_reply ? short(r.comment_reply, 80) : undefined }; }) });
+  }
   if (name === "live_lookup") return lean({ platform: j.platform, channel: j.channel ? { name: j.channel.channel, login: j.channel.login, url: j.channel.url, live: j.channel.live, viewers: j.channel.viewers, title: j.channel.title ? short(j.channel.title, 100) : undefined, permission: j.channel.permission } : undefined, broadcasts: (j.broadcasts ?? []).slice(0, 8).map((b: any) => ({ url: b.url, title: short(b.title, 80), live: b.live || undefined, minutes: Math.round(Number(b.seconds) / 60) || undefined, started: day(b.started_at) })) });
   if (name === "live_now") return lean({ streams: (j.streams ?? []).slice(0, 15).map((s: any) => ({ channel: s.channel ?? s.login, platform: s.platform, url: s.url, viewers: s.viewers, title: short(s.title, 70), category: s.category })) });
   return lean(j);

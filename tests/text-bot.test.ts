@@ -881,3 +881,25 @@ test("post changes, review fixes: an arrow in a caption stays as written; AI cap
   assert.equal(out.ok, false); assert.match(out.text, /1 of 2 went through.*Done: "Clip 1" \(now today 6:45 PM\)\. Not done: "Clip 2"/);
   await assert.rejects(preparePostChange(ctxOf(api, { now }), { post_id: "", changes: Array.from({ length: 31 }, (_, i) => ({ post_id: `00000000-0000-4000-8000-0000000002${String(i).padStart(2, "0")}`, caption: "x" })) } as any), /Up to 30/);
 });
+
+test("changing an auto-reply replaces the old ones (paused after the new one is set); several pause in ONE question, each told apart", async () => {
+  const { prepareAutoReply, prepareAutoReplySwitch } = await import("../src/text-bot/actions.js");
+  const api = mockApi(), now = Date.parse("2026-11-26T22:00:00Z");
+  api.data.autoreplies.splice(0, api.data.autoreplies.length,
+    { id: "dm-every", name: "Keyword CLONE8 (every post)", account_id: IDS.insta, platform: "instagram", keywords: ["CLONE8"], active: true, post: null, dm_message: "Hey {{first_name}}!! Here it is [Clone8.io]", comment_reply: "Sent you a DM" },
+    { id: "dm-one", name: "Keyword CLONE8", account_id: IDS.insta, platform: "instagram", keywords: ["CLONE8"], active: true, post: { id: "p9", title: "My best clip" }, dm_message: "Hey {{first_name}}!! Here it is [Clone8]", comment_reply: "Sent you a DM" },
+    { id: "tt-other", name: "Keyword CLONE8", account_id: IDS.tiktok, platform: "tiktok", keywords: ["CLONE8"], active: true, post: null, comment_reply: "link in bio" });
+  // "change what we auto reply on @clone8test to reply only": one question, the new rule first, then the two old ones paused
+  const c = await prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["CLONE8"], reply: "website is called: Clone8.io", dm: false });
+  assert.deepEqual(c.steps.map((s) => `${s.method} ${s.path}`), ["POST /api/studio/autoreply", "PATCH /api/studio/autoreply/dm-every", "PATCH /api/studio/autoreply/dm-one"], "the TikTok one is left alone");
+  assert.match(c.question, /^New auto-reply on instagram @clone8test, on every post, old and new: anyone who comments "CLONE8" gets the public reply "website is called: Clone8\.io" \(no DM\)\.\nIt replaces these 2, which are paused \(they can be turned back on\):\n· "CLONE8" on instagram @clone8test \(every post\): DM "Hey \{\{first_name\}\}!! Here it is \[Clone8\.io\]" \+ reply "Sent you a DM"\n· "CLONE8" on instagram @clone8test \(one post "My best clip"\): DM/);
+  const out = await execute(api as any, c, { now, timezone: "America/Los_Angeles" });
+  assert.equal(out.text, "The auto-reply is on. The old 2 are paused.");
+  assert.deepEqual(api.data.autoreplies.filter((r: any) => r.id.startsWith("dm-")).map((r: any) => r.active), [false, false]);
+  // "turn off the other two": one question with both, each named by its account, posts and words
+  api.data.autoreplies.forEach((r: any) => (r.active = true));
+  const off = await prepareAutoReplySwitch(ctxOf(api, { now }), { rule_ids: ["dm-every", "dm-one"], on: false });
+  assert.equal(off.steps.length, 2);
+  assert.match(off.question, /^Pause these 2 auto-replies:\n· "CLONE8" on instagram @clone8test \(every post\)[^\n]+\n· "CLONE8" on instagram @clone8test \(one post "My best clip"\)/);
+  assert.equal((await execute(api as any, off, { now, timezone: "America/Los_Angeles" })).text, "Paused all 2.");
+});
