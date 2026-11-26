@@ -134,6 +134,10 @@ export function makeBot(d: BotDeps) {
       // a question that never reached the chat (the turn that made it broke) is gone before anything can answer it
       const lost = dropUnshown(st.pending); if (lost) d.log("pending_never_shown", { id: lost.id });
       const gone = expire(st.pending, t); if (gone) d.log("pending_expired", { id: gone.id });
+      // the AI is told a question ran out (else it says it "is still waiting"), and old notes lose the letter codes the
+      // questions used to carry (a remembered "YES DS" would be repeated back)
+      if (gone) note(st, `The question "${gone.question.split("\n")[0].slice(0, 160)}" ran out of time (10 minutes) and nothing was done. Nothing is waiting for a YES now; prepare it again if they still want it.`);
+      for (const h of st.history) if (/\bYES [BCDFGHJKMNPQRSTVWXZ]{2}\b|is this question's code/.test(h.text)) h.text = h.text.replace(/To go ahead, reply: YES [A-Z]{2}( \d+)?/g, "Reply YES or NO").replace(/\bYES [BCDFGHJKMNPQRSTVWXZ]{2}( \d+)?\b/g, "YES").replace(/\(?[A-Z]{2} is this question's code[^)]*\)?\.?/g, "");
 
       // taps on buttons
       const tap = m.tap ? m.text.match(/^(y|n|pick):(.+)$/) : null;

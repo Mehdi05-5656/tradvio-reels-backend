@@ -833,3 +833,16 @@ test("review fixes: auto-replies check the network, the plan's room and the perm
   const out = await execute(api as any, posted, { now, timezone: "America/Los_Angeles" } as any);
   assert.match(out.text, /Auto-reply not set on instagram @clone8test: your plan's auto-replies are all in use\./);
 });
+
+test("a question that ran out is told to the AI, and old notes lose their letter codes", async () => {
+  const seen: string[] = [];
+  const b = botWith(async (st, t, api) => { seen.push(st.history.map((h) => h.text).join(" | ")); return t === "swap it" ? swapTurn(st, t, api) : { text: "ok", usd: 0, rounds: 1 }; });
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "swap it", private: true });
+  const st = chatOf(b.state, "1");
+  st.history.push({ role: "event", text: "The system asked the person to confirm: Post these / To go ahead, reply: YES DS / (DS is this question's code.)", at: Date.now() });
+  b.tick(PENDING_TTL_MS + 1000);
+  await b.bot.handle({ chat: "1", from: "1", text: "also set up the auto reply first", private: true });
+  assert.match(seen.at(-1)!, /ran out of time \(10 minutes\) and nothing was done/);
+  assert.ok(!/YES DS|question's code/.test(seen.at(-1)!), seen.at(-1));
+});
