@@ -92,7 +92,7 @@ const LANG = new Map(HOOK_LANGUAGES.map((l) => [l.id, l.name]));
 export const languageName = (id: unknown) => (typeof id === "string" ? LANG.get(id) ?? null : null);
 const CJK = new Set(["ja", "ko", "zh"]);
 /** How long a line is to say: words for most languages, characters for Japanese, Korean and Chinese. */
-export const spokenUnits = (line: string, language?: string | null) => CJK.has(String(language)) ? clean(line, 400).replace(/\s+/g, "").length / 2.4 : clean(line, 400).split(" ").filter(Boolean).length;
+export const spokenUnits = (line: string, language?: string | null) => CJK.has(String(language)) ? clean(line, 400).replace(/\s+/g, "").length / 3 : clean(line, 400).split(" ").filter(Boolean).length;
 export type HookTier = "standard" | "best";
 export const HOOK_ENGINE: Record<HookTier, string> = { best: "bytedance/seedance-2.5/reference-to-video", standard: "wan/v2.7/image-to-video" };
 /** Seconds of video a line needs: about 2.6 spoken words a second, a beat either side; inside each engine's range. */
