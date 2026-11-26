@@ -98,6 +98,168 @@ export const CLONE8_SKILLS: OfficialSkill[] = [
 4. Price the three shots with clone8_generate (no confirm), show the total, and make them on the person's yes. Follow each with clone8_job.
 5. Give the links in order. The person can cut them together in the Clone8 editor at app.clone8.io.`,
   },
+
+  // ---- added Nov 26 2026 (docs/catalog/FILL_PLAN.md, wave 1): only tools Claude can reach; models named by family
+  {
+    slug: "food-menu-reel", title: "Food menu reel", line: "Every dish on your menu as a mouth-watering three-second hero shot.", category: "ads", kind: "use_case", minutes: 10,
+    example: "@Clone8 /food-menu-reel for my ramen shop: <links to three dish photos>", cover: clip("can-splash"), related: ["product-ad", "marketplace-set", "post-a-week"],
+    instructions: `1. ${GET_PHOTO("a photo of each dish (up to six), one plate per photo, from above or at the table's angle")}
+2. For each dish, make a 3-second vertical video with Kling 4.0's "Video from a picture" mode (find the id with clone8_models): a slow push-in, steam rising, a sauce or garnish landing, warm side light. Keep the plate, the food and the colours exactly as in the photo.
+3. Price all the dishes together, show the total, and make them on the person's yes. Follow each with clone8_job.
+4. Give the links in menu order and suggest one short line per dish for the caption (free).`,
+  },
+  {
+    slug: "fashion-drop", title: "Fashion drop", line: "One garment photo in: an on-model look, a flat-lay and a runway clip.", category: "ads", kind: "use_case", minutes: 8,
+    example: "@Clone8 /fashion-drop for this jacket: <link>", cover: clip("main-character"), related: ["try-on-haul", "product-ad", "beauty-launch"],
+    instructions: `1. ${GET_PHOTO("a clear photo of the garment on its own")}
+2. Make three pictures with Kling Image 4.0's "Edit a picture" mode (clone8_models for the id), each keeping the garment's colour, cut and logo exactly: (a) worn by an AI-made model in a clean studio, full body; (b) a styled flat-lay with two matching accessories on linen; (c) worn on a city street at golden hour. Never put the garment on a real person's photo unless it is the person themselves.
+3. Price the three together, make them on the person's yes, and follow each with clone8_job.
+4. Offer a 5-second runway walk from picture (a) with Kling 4.0's "Video from a picture" mode, priced first.`,
+  },
+  {
+    slug: "beauty-launch", title: "Beauty launch", line: "A skincare or makeup product in splash, mist and texture shots.", category: "ads", kind: "skill", minutes: 6,
+    example: "@Clone8 /beauty-launch for my serum: <link>", cover: pic("sneaker-ad"), related: ["product-ad", "before-after-ad"],
+    instructions: `1. ${GET_PHOTO("a sharp photo of the bottle or jar on its own")}
+2. Make three pictures with Seedream 5.0 Pro's "Edit a picture" mode, keeping the packaging and its words exactly: (a) the product in a crown of water splash on a soft pastel background; (b) in a cloud of fine mist with morning light; (c) beside a swatch of its texture on glass, macro.
+3. Price them together and make them on the person's yes; follow each with clone8_job.
+4. Offer to turn the favourite into a 5-second video (Kling 4.0 "Video from a picture": the splash or mist moving slowly), priced first.`,
+  },
+  {
+    slug: "before-after-ad", title: "Before-and-after ad", line: "A clean before / after pair and a reveal clip for any transformation.", category: "ads", kind: "skill", minutes: 6,
+    example: "@Clone8 /before-after-ad for my cleaning spray: here is the dirty oven <link>", cover: clip("earth-zoom"), related: ["beauty-launch", "ad-hooks"],
+    instructions: `1. ${GET_PHOTO("the BEFORE photo (the person's own: a room, a car, a garden, a product in use)")}
+2. Make the AFTER with Kling Image 4.0's "Edit a picture" mode: the same place, framing and light, only the change the person describes (clean, renovated, repaired). Never invent results the product cannot give, and never edit a real person's body or face.
+3. Price it, make it on the person's yes, then offer a 5-second reveal with Kling 4.0 "Video from a picture" from the BEFORE photo, described as a wipe or a slow transformation into the AFTER. Price that first too.
+4. Suggest an honest caption, e.g. "Before / after: 10 minutes".`,
+  },
+  {
+    slug: "marketplace-set", title: "Marketplace listing set", line: "Clean white-background, lifestyle and detail photos for a shop listing.", category: "ads", kind: "skill", minutes: 5,
+    example: "@Clone8 /marketplace-set for this backpack: <link>", cover: pic("billboard"), related: ["product-ad", "fashion-drop"],
+    instructions: `1. ${GET_PHOTO("a photo of the product")}
+2. Make four pictures with Kling Image 4.0's "Edit a picture" mode, keeping the product exactly (shape, colour, logo, text): (a) on pure white, centred, soft shadow, square; (b) in use in a fitting real setting; (c) a close detail of its best feature; (d) next to a common object for scale.
+3. Price the four together and make them on the person's yes; follow each with clone8_job and give them in listing order.`,
+  },
+  {
+    slug: "try-on-haul", title: "Try-on haul", line: "Three outfits on the same AI model, ready for a haul video.", category: "ugc", kind: "use_case", minutes: 8,
+    example: "@Clone8 /try-on-haul with these three tops: <links>", cover: clip("paparazzi"), related: ["fashion-drop", "ugc-unboxing"],
+    instructions: `1. ${GET_PHOTO("a photo of each garment (up to three)")}
+2. First make one AI-made model with a picture model (Soul 2 or Seedream 5.0 Pro, "Picture from words"): a friendly creator in a bright bedroom, mirror selfie framing. Show it and ask the person to keep it or try again (priced first).
+3. For each garment, use Kling Image 4.0 "Edit a picture" with the model's picture and the garment to dress the same model, same room and pose. Price all together; make them on the person's yes.
+4. Offer a 5-second clip per outfit (Kling 4.0 "Video from a picture": a turn and a smile), priced first.`,
+  },
+  {
+    slug: "product-reaction", title: "Product reaction", line: "An AI creator reacting to your product, as a 5-second UGC clip.", category: "ugc", kind: "skill", minutes: 5,
+    example: "@Clone8 /product-reaction for my protein bar: <link>", cover: clip("hero-landing"), related: ["ugc-unboxing", "ugc-hook-test"],
+    instructions: `1. ${GET_PHOTO("a photo of the product")}
+2. Make the opening frame with Kling Image 4.0 "Edit a picture": an AI-made creator holding the product up to the camera in a kitchen, surprised and smiling, phone-camera look. Keep the product's packaging exactly.
+3. Turn it into a 5-second vertical clip with Kling 4.0 "Video from a picture": they take a bite or try it and react with a big positive face.
+4. Price both steps together, make them on the person's yes, follow with clone8_job.`,
+  },
+  {
+    slug: "ugc-hook-test", title: "Three-hook UGC test", line: "The same product with three different opening hooks, to test which stops the scroll.", category: "ugc", kind: "use_case", minutes: 10,
+    example: "@Clone8 /ugc-hook-test for my water bottle that keeps ice for 24 hours", cover: clip("unboxing"), related: ["ad-hooks", "product-reaction"],
+    instructions: `1. Ask for the product photo (clone8_add_media or clone8_library) and who it is for.
+2. Write three hooks in different styles (a surprising claim, a problem, a challenge), one line each. Free.
+3. For each hook, make a 5-second vertical opening shot with Kling 4.0 (from the product photo, "Video from a picture") that shows the hook happening. Price the three together and make them on the person's yes.
+4. Give the three links with their hook lines, and offer to schedule them on different days with clone8_post so they can compare (show each post first).`,
+  },
+  {
+    slug: "daily-facts-series", title: "Daily facts series", line: "Seven narrated 3D explainers on one theme, one for every day of the week.", category: "explainers", kind: "use_case", minutes: 60,
+    example: "@Clone8 /daily-facts-series about the ocean", cover: { poster: "/motion/story-pool.jpg", clip: `${DEMO}/motion/loops/story-pool.mp4`, aspect: "9:16" }, related: ["faceless-explainer", "post-a-week"],
+    instructions: `1. Agree the theme and write seven topics, each phrased the way a viewer would ask it ("Why is the ocean salty?"). Show them; let the person change any.
+2. Call clone8_catalog for styles, then clone8_quote for one story and multiply by seven. Show the total and wait for the person's yes.
+3. Start the seven with clone8_make_story (confirm: true), one after another, and follow them with clone8_job. They take 15 to 30 minutes each: tell the person they can come back.
+4. When they are done, offer to schedule one a day with clone8_post (show every post first).`,
+  },
+  {
+    slug: "history-mystery", title: "History mystery film", line: "A researched, narrated mystery from history, told like a thriller.", category: "explainers", kind: "use_case", minutes: 40,
+    example: "@Clone8 /history-mystery: the Dyatlov Pass incident", cover: { poster: "/explore/kling-4.jpg", aspect: "16:9" }, related: ["mini-documentary", "faceless-explainer"],
+    instructions: `1. Agree the case. If it involves real people who died, keep it respectful and factual; no gore.
+2. Price a 5-minute film with clone8_quote (film kind) and show it; offer 2 or 10 minutes as alternatives.
+3. Start it with clone8_make_film (confirm: true), asking for a mystery tone: the question first, the evidence in order, the theories, what is still unknown. Follow it with clone8_job.`,
+  },
+  {
+    slug: "how-its-made", title: "How it's made", line: "A narrated 3D story that builds any object or place from the ground up.", category: "explainers", kind: "skill", minutes: 25,
+    example: "@Clone8 /how-its-made: a skyscraper", cover: { poster: "/motion/story-pool.jpg", clip: `${DEMO}/motion/loops/story-pool.mp4`, aspect: "9:16" }, related: ["faceless-explainer", "daily-facts-series"],
+    instructions: `1. Agree the object or place and phrase the topic as a question ("How is a skyscraper built?").
+2. Call clone8_catalog and offer the story styles; price it with clone8_quote and wait for the person's yes.
+3. Start it with clone8_make_story (confirm: true) and follow it with clone8_job.`,
+  },
+  {
+    slug: "motivation-week", title: "Motivation week", line: "Seven motivation shorts on one message, scheduled one a day.", category: "explainers", kind: "use_case", minutes: 45,
+    example: "@Clone8 /motivation-week on discipline, posted at 8 am", cover: { poster: "/explore/seedance.jpg", aspect: "16:9" }, related: ["motivation-short", "post-a-week"],
+    instructions: `1. Agree the theme and write seven different angles on it, one line each. Show them.
+2. Price one with clone8_quote (motivation kind), multiply by seven, show the total, and wait for the person's yes.
+3. Make the seven with clone8_make_motivation (confirm: true) and follow them with clone8_job.
+4. Offer to schedule one a day with clone8_post at the time the person picks (call clone8_accounts first; show every post before sending).`,
+  },
+  {
+    slug: "thumbnail-ab", title: "Thumbnail A/B set", line: "Two very different thumbnails for one video, to test which gets the click.", category: "social", kind: "skill", minutes: 4,
+    example: "@Clone8 /thumbnail-ab for my video \"I lived in a tent for 30 days\" with my photo: <link>", cover: pic("thumbnail", "16:9"), related: ["thumbnail-set", "podcast-cover"],
+    instructions: `1. ${GET_PHOTO("a clear photo of the person (their own)")}
+2. Ask for the video's title; write two thumbnail texts of up to four words, one curious and one bold.
+3. Run the "thumbnail" preset twice with each text, and make a second, different version with Kling Image 4.0 "Edit a picture": the person's face large on one side, one striking object from the video on the other, high contrast, 16:9. Price all together, make them on the person's yes.
+4. Put the two best side by side and say which reads better at a phone's size.`,
+  },
+  {
+    slug: "podcast-cover", title: "Podcast cover and banner", line: "A square show cover and a matching wide banner from the host's photo.", category: "social", kind: "skill", minutes: 5,
+    example: "@Clone8 /podcast-cover for \"Late Shift\" with my photo: <link>", cover: pic("album-cover", "1:1"), related: ["thumbnail-ab", "quote-cards"],
+    instructions: `1. ${GET_PHOTO("a photo of the host (their own)")}
+2. Ask for the show's name and its mood. Run the "album-cover" preset with the show's name as its text for the square cover.
+3. Make the wide banner (16:9) with Kling Image 4.0 "Edit a picture" from the cover: the same colours, type and host, laid out wide with space on the right for text.
+4. Price both together; make them on the person's yes.`,
+  },
+  {
+    slug: "quote-cards", title: "Quote cards from a script", line: "The five strongest lines from a script or episode as shareable picture cards.", category: "social", kind: "skill", minutes: 4,
+    example: "@Clone8 /quote-cards from this episode transcript: <paste>", cover: pic("magazine-cover"), related: ["podcast-cover", "post-a-week"],
+    instructions: `1. Ask for the script or transcript (pasted text). Pick the five lines that stand alone best, under 20 words each. Show them; let the person change any. Free.
+2. For each line make a square picture card with a picture model that writes clean text (Kling Image 4.0 "Picture from words"): the quote in large type, a simple matching background, the speaker's name small at the bottom.
+3. Price the five together; make them on the person's yes. Check every card's words against the quote and remake any with a typo (priced again).`,
+  },
+  {
+    slug: "post-a-week", title: "Post a week", line: "Take videos already made and schedule a week of posts across accounts.", category: "social", kind: "skill", minutes: 5,
+    example: "@Clone8 /post-a-week: my last seven videos, TikTok and Instagram, 6 pm", cover: clip("neon-rain"), related: ["daily-facts-series", "motivation-week"],
+    instructions: `1. Call clone8_recent to list the person's finished videos, and clone8_accounts for their linked accounts. If nothing is linked, send them to link one first.
+2. Agree which videos, which accounts and the time of day. Write a short caption for each (free).
+3. Show the whole week as a list (day, time, video, accounts, caption) and wait for the person's yes.
+4. Schedule each with clone8_post: call it without confirm first, then with confirm: true for each one in the agreed list. Finish with clone8_posts to show the week.`,
+  },
+  {
+    slug: "brand-mascot", title: "Brand mascot", line: "A friendly mascot for your brand, in a character sheet and an intro clip.", category: "characters", kind: "use_case", minutes: 8,
+    example: "@Clone8 /brand-mascot for a coffee shop called Bean There", cover: pic("cartoon-3d"), related: ["character-pack", "one-character-five-looks"],
+    instructions: `1. Agree the mascot: what it is (an animal, an object, a creature), its personality and the brand's colours. Free.
+2. Make the mascot with a picture model ("Picture from words"; Seedream 5.0 Pro or Soul 2): front view, friendly, simple shapes, on white. Offer two tries priced together; let the person pick.
+3. From the picked one, make a character sheet with Kling Image 4.0 "Edit a picture" (front, side, back, three expressions) and a 5-second intro clip with Kling 4.0 "Video from a picture" (a wave and a bounce). Price both together; make them on the person's yes.`,
+  },
+  {
+    slug: "pet-star", title: "Pet star", line: "Your pet as a royal portrait, a plush toy and a happy-run clip.", category: "characters", kind: "skill", minutes: 6,
+    example: "@Clone8 /pet-star with my dog Biscuit: <link>", cover: pic("royal-pet"), related: ["character-pack", "brand-mascot"],
+    instructions: `1. ${GET_PHOTO("a clear photo of the pet, face visible")}
+2. Run the "royal-pet" and "plush" presets on it, and the "pet-run" preset for a video. Price the three together; make them on the person's yes.
+3. Show them as a set with a caption idea using the pet's name.`,
+  },
+  {
+    slug: "one-character-five-looks", title: "One character, five looks", line: "The same person in five styles: anime, 3D cartoon, comic, plush and action figure.", category: "characters", kind: "skill", minutes: 6,
+    example: "@Clone8 /one-character-five-looks from my photo: <link>", cover: pic("anime-still"), related: ["character-pack", "pet-star"],
+    instructions: `1. ${GET_PHOTO("a photo of the person (their own), face clearly visible")}
+2. Run five presets on it: "anime-still", "cartoon-3d", "comic-panel", "plush" and "action-figure" (it asks for a name on the box). Price all five together; make them on the person's yes.
+3. Show them as a grid and offer to make the favourite move with Kling 4.0 "Video from a picture", priced first.`,
+  },
+  {
+    slug: "product-teaser", title: "Product teaser in three shots", line: "A dark, dramatic three-shot teaser that reveals a product at the end.", category: "video", kind: "use_case", minutes: 10,
+    example: "@Clone8 /product-teaser for my new headphones: <link>", cover: clip("sneaker-float"), related: ["shot-list", "product-ad"],
+    instructions: `1. ${GET_PHOTO("a sharp photo of the product")}
+2. Plan three 5-second shots: (1) darkness with a rim of light tracing the product's edge, (2) a close detail turning slowly, (3) the full product lit in its colour with space for the launch date. Keep the product exact in every shot.
+3. Make each with Kling 4.0 "Video from a picture" from the product photo, 16:9 or 9:16 as the person wants. Price the three together; make them on the person's yes.
+4. Give them in order; the person can cut them together in the Clone8 editor.`,
+  },
+  {
+    slug: "music-video-look", title: "Music-video look", line: "One photo of an artist into three cinematic music-video shots.", category: "video", kind: "skill", minutes: 8,
+    example: "@Clone8 /music-video-look with my photo, moody neon: <link>", cover: clip("neon-rain"), related: ["shot-list", "one-character-five-looks"],
+    instructions: `1. ${GET_PHOTO("a photo of the artist (the person themselves), face clearly visible")}
+2. Agree the mood (neon night, desert dawn, rain, stage lights). Run the "neon-rain" preset when it fits, and make two more 5-second shots with Kling 4.0 "Video from a picture" in the same mood: a slow orbit around the artist, and a wide shot walking toward the camera.
+3. Price the three together; make them on the person's yes and give the links in order.`,
+  },
 ];
 
 export const officialSkill = (slug: string) => CLONE8_SKILLS.find((s) => s.slug === slug) ?? null;

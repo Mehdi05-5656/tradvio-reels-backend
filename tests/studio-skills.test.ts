@@ -8,6 +8,7 @@ import { PRESETS } from "../src/studio-presets.ts";
 import { MCP_TOOLS } from "../src/studio-mcp.ts";
 import { MODEL_TOOLS } from "../src/studio-mcp-models.ts";
 import { SKILL_TOOLS, runSkillTool } from "../src/studio-mcp-skills.ts";
+import { SOCIAL_TOOLS } from "../src/studio-mcp-social.ts";
 
 type Row = Record<string, any>;
 /** Just enough of Supabase for the skills routes: filters, counts, inserts with a unique slug, updates, deletes. */
@@ -99,11 +100,12 @@ test("who sees a skill: everyone when public and live, its maker unless removed,
 
 test("the skills by Clone8 have unique commands, related skills that exist, and use only tools and presets that exist", () => {
   const slugs = CLONE8_SKILLS.map((s) => s.slug); assert.equal(new Set(slugs).size, slugs.length);
-  const tools = new Set([...MCP_TOOLS, ...MODEL_TOOLS, ...SKILL_TOOLS].map((t) => t.name)), presets = new Set(PRESETS.map((p) => p.id));
+  const tools = new Set([...MCP_TOOLS, ...MODEL_TOOLS, ...SKILL_TOOLS, ...SOCIAL_TOOLS].map((t) => t.name)), presets = new Set(PRESETS.map((p) => p.id));
   for (const s of CLONE8_SKILLS) {
     for (const r of s.related) assert.ok(slugs.includes(r), `${s.slug} → ${r}`);
     for (const t of s.instructions.match(/clone8_[a-z_]+/g) ?? []) assert.ok(tools.has(t), `${s.slug} names ${t}`);
-    for (const m of s.instructions.matchAll(/(?:preset|presets:?) "([a-z0-9-]+)"|"([a-z0-9-]+)" \(/g)) { const id = m[1] ?? m[2]; assert.ok(presets.has(id), `${s.slug} names preset ${id}`); }
+    // every quoted lower-case name in the steps is a preset that exists ("thumbnail", "royal-pet")
+    for (const m of s.instructions.matchAll(/"([a-z0-9]+(?:-[a-z0-9]+)*)"/g)) assert.ok(presets.has(m[1]), `${s.slug} names preset ${m[1]}`);
     assert.ok(s.cover.poster.startsWith("/"), `${s.slug} has a cover`);
     assert.match(s.example, new RegExp(`/${s.slug}\\b`), `${s.slug}'s example runs it`);
   }
