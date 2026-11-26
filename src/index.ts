@@ -61,6 +61,7 @@ import { registerScheduleAi } from "./studio-schedule-ai.js";
 import { registerAutoReplies } from "./studio-autoreply.js";
 import { registerPerformance, startPerformanceLoop } from "./studio-performance-routes.js";
 import { registerOutputAsset } from "./studio-output-asset.js";
+import { registerProducts } from "./studio-products.js";
 import { registerPeople } from "./studio-people.js";
 import { registerCharacters } from "./studio-character-library.js";
 import { registerCreators, startCreatorLoop } from "./studio-creators.js";
@@ -161,6 +162,7 @@ async function main() {
   registerAutoReplies(app, getSb); // keyword comments and DMs answered on the person's own accounts (posting service rules)
   registerPerformance(app, getSb); // performance dashboard of the person's linked accounts, the AI overview, chat suggestions
   registerOutputAsset(app, getSb); // a finished video into the library, so any other tool can take it
+  registerProducts(app, getSb); // Products: a product picture, read by Claude, and its shots and animations (owner-only until STUDIO_PRODUCTS_OPEN)
   registerPeople(app, getSb); // who is in a clip: faces for the chat card and the Swap page
   registerCharacters(app, getSb); // the pictures a person uses as characters, most used first
   registerCreators(app, getSb); // the Creator Program: paid views on creators' own TikTok / Instagram; off until STUDIO_CREATORS_ENABLED=true

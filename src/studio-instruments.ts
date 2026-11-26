@@ -25,6 +25,8 @@ import { toJpeg } from "./studio-characters.js";
 import { creditValueFloor, creditsForCost, higgsfieldDiscount, marginForSecond, seedanceDiscount, MARGIN_TARGET, type PlanLike } from "./studio-pricing.js";
 import { claimJob } from "./studio-leases.js";
 import { withRecipe } from "./studio-presets.js";
+import { withLookRecipe } from "./studio-product-looks.js";
+import { finishLookVideo } from "./studio-products.js";
 
 export type InstrumentKind = "text_to_video" | "image_to_video" | "reference_to_video" | "video_edit" | "video_extend" | "motion_control" | "text_to_image" | "image_edit" | "text_to_audio" | "audio_edit" | "transcribe";
 /** How an audio instrument is priced: per thousand characters of text, per minute of sound or clip, per generation, per hour. */
@@ -256,7 +258,9 @@ export function unitLabel(inst: Instrument): string {
 }
 
 export type InstrumentDeps = { fetch?: typeof fetch; env?: Record<string, string | undefined>; log?: (line: string) => void; sleep?: (ms: number) => Promise<void>; now?: () => number;
-  toJpeg?: (bytes: Buffer) => Promise<Buffer>; poster?: (video: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number> };
+  toJpeg?: (bytes: Buffer) => Promise<Buffer>; poster?: (video: string, target: string) => Promise<void>; probeSeconds?: (path: string) => Promise<number>;
+  /** a product look's finishing step (sound + product check); tests replace it */
+  finishLook?: (sb: any, deps: any, job: any, file: string, seconds: number) => Promise<{ ok: boolean | null; problem?: string | null; sound?: boolean }> };
 
 /** One platform API call (shared with Kage, which renders its shots on the same models): the status and parsed body. */
 export async function hf(deps: InstrumentDeps, path: string, init: RequestInit & { idempotency?: string } = {}): Promise<{ status: number; body: any }> {
@@ -395,7 +399,7 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
         }
       }
       // a preset's recipe is ours and stays on the server: the job keeps only what the person chose, the recipe joins here
-      const body = buildBody(withRecipe(o.preset, o.params ?? {}), o.inputs ?? {}, (id) => urls.get(id) ?? "");
+      const body = buildBody(o.look ? withLookRecipe(o.look, o.params ?? {}) : withRecipe(o.preset, o.params ?? {}), o.inputs ?? {}, (id) => urls.get(id) ?? "");
       await renew(sb, job, { note: "Sending the request to the renderer" });
       const r = await hf(deps, `/${apiPath(inst)}`, { method: "POST", body: JSON.stringify(body), idempotency: job.id });
       if (r.status !== 200 && r.status !== 201 && r.status !== 202) throw new RecastError("recast_rejected", `Higgsfield ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
@@ -435,6 +439,7 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
     await renew(sb, job, { note: "Fetching the result", total: urls.length });
     dir = await mkdtemp(join(tmpdir(), "studio-instrument-"));
     const outputs: any[] = [];
+    const lookChecks: Array<{ ok: boolean | null; problem?: string | null; sound?: boolean }> = [];
     for (let i = 0; i < urls.length; i++) {
       const dl = await (deps.fetch ?? fetch)(urls[i], { signal: AbortSignal.timeout(300_000) });
       if (!dl.ok) throw new RecastError("recast_bad_output", `download ${dl.status}`, true);
@@ -446,12 +451,16 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
         const file = join(dir, `${n}.mp4`), still = join(dir, `${n}.jpg`);
         await writeFile(file, bytes);
         const seconds = await (deps.probeSeconds ?? probeSeconds)(file).catch(() => 0);
+        // a product look: its sound under the clip, then the product check (studio-products.ts); a clip that changed
+        // the product or its label is not charged
+        if (o.look) { const check = await (deps.finishLook ?? finishLookVideo)(sb, deps, job, file, seconds); bytes = await readFile(file); lookChecks.push(check); }
         let posterOk = true;
         try { await (deps.poster ?? makePoster)(file, still); } catch { posterOk = false; }
         const up = await sb.storage.from("studio-outputs").upload(`${base}.mp4`, bytes, { contentType: "video/mp4", upsert: false });
         if (up.error) throw up.error;
         if (posterOk) { const p = await sb.storage.from("studio-outputs").upload(`${base}.jpg`, await readFile(still), { contentType: "image/jpeg", upsert: false }); if (p.error) posterOk = false; }
-        outputs.push({ index: n, key: `${base}.mp4`, poster_key: posterOk ? `${base}.jpg` : undefined, kind: "video", bytes: bytes.length, duration: Math.round(seconds * 1000) / 1000, request_id: requestId, tool: "instrument", endpoint: inst.id });
+        outputs.push({ index: n, key: `${base}.mp4`, poster_key: posterOk ? `${base}.jpg` : undefined, kind: "video", bytes: bytes.length, duration: Math.round(seconds * 1000) / 1000, request_id: requestId, tool: "instrument", endpoint: inst.id,
+          ...(o.look && lookChecks.length ? { check: lookChecks[lookChecks.length - 1] } : {}) });
       } else {
         const ct = String(dl.headers.get("content-type") ?? "");
         if (/png|webp/.test(ct) || bytes[0] === 0x89) bytes = await (deps.toJpeg ?? toJpeg)(bytes);
@@ -462,7 +471,9 @@ export async function runInstrumentJob(sb: SupabaseClient, deps: InstrumentDeps,
       await renew(sb, job, { done: n, total: urls.length, note: "Storing the result" });
     }
     // What was reserved is what the estimate priced; Higgsfield bills that request, so it is what we charge.
-    const charged = Math.min(job.credits_reserved, Math.max(1, Number(job.credits_reserved)));
+    // A product look whose clip changed the product or its label is on us (studio-products.ts).
+    const onUs = !!o.look && lookChecks.some((c) => c.ok === false);
+    const charged = onUs ? 0 : Math.min(job.credits_reserved, Math.max(1, Number(job.credits_reserved)));
     try {
       const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: outputs, p_credits_charged: charged });
       if (done.error) throw done.error;
