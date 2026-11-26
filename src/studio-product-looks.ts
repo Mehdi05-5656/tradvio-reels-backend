@@ -35,7 +35,7 @@ export type Look = {
   inputs: LookInput[];
   /** a matched sound effect laid under a motion clip (ElevenLabs), in words */
   sfx?: string;
-  /** passes TikTok Shop's US rules (no AI-exaggerated effects, no animated static product): for the Shop-safe mode */
+  /** fits TikTok Shop's US rules (no AI-exaggerated effects, no animated static product); Shop mode shows the rule, never hides the look */
   shop_safe: boolean;
   /** a finished example we made; none means admins only */
   example?: { poster: string; clip?: string; aspect?: string } | null;
@@ -188,6 +188,6 @@ export function publicLook(l: Look) {
     needs: l.inputs.some((i) => i.from === "exploded") ? "exploded" : null, example: l.example ?? null, draft: !l.example, added: l.added };
 }
 /** The looks a person can see for a category: those with a real example (admins also see drafts). */
-export function looksFor(category: ProductCategory | null, opts: { admin?: boolean; shopSafe?: boolean } = {}): Look[] {
-  return LOOKS.filter((l) => (category ? fitsCategory(l, category) : true) && (opts.admin || !!l.example) && (!opts.shopSafe || l.shop_safe));
+export function looksFor(category: ProductCategory | null, opts: { admin?: boolean } = {}): Look[] {
+  return LOOKS.filter((l) => (category ? fitsCategory(l, category) : true) && (opts.admin || !!l.example));
 }

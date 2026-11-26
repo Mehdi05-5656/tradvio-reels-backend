@@ -34,7 +34,6 @@ test("looks follow the product's category: no pour for a sneaker, nothing physic
   assert.ok(app.every((l) => l.fits !== "all" ? (l.fits as string[]).includes("app") : false), "an app only gets looks made for apps");
   for (const c of PRODUCT_CATEGORIES.filter((x) => x !== "app")) assert.ok(looksFor(c, { admin: true }).some((l) => l.kind === "shot"), `${c} has no shot looks`);
   assert.equal(looksFor("beverage").length, 0, "drafts (no example yet) are admins only");
-  assert.ok(looksFor("beverage", { admin: true, shopSafe: true }).every((l) => l.shop_safe));
 });
 
 test("the page never gets the recipe, the prompt or the sound words", () => {

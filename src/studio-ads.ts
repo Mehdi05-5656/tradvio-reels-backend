@@ -27,7 +27,8 @@ export class AdError extends Error { constructor(public code: string, message = 
 const clean = (v: unknown, max: number) => String(v ?? "").replace(/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩{}\\]/g, "").replace(/\s+/g, " ").trim().slice(0, max);
 
 export type AdPart = { job: string; kind: "hook" | "clip" | "shot" };
-export type AdRequest = { product: string; parts: AdPart[]; end: { line: string | null; offer: string | null } | null; music: boolean };
+export type AdRequest = { product: string; parts: AdPart[]; end: { line: string | null; offer: string | null } | null; music: boolean;
+  /** an "AI-generated" line on the end card: the person's choice (Shop mode turns it on by default on the page) */ disclose?: boolean };
 
 /** The person's request, cleaned: at most one hook (first), clips and shots after it, an optional end card and music. */
 export function cleanAdRequest(raw: any): AdRequest {
@@ -44,7 +45,7 @@ export function cleanAdRequest(raw: any): AdRequest {
   const ordered = [...hooks, ...parts.filter((p) => p.kind !== "hook")].slice(0, AD_LIMITS.parts);
   if (!ordered.some((p) => p.kind !== "shot")) throw new AdError("ad_needs_video", "Add a hook or a product clip");
   const line = clean(raw?.end?.line, 40) || null, offer = clean(raw?.end?.offer, 40) || null;
-  return { product, parts: ordered, end: raw?.end === null ? null : { line, offer }, music: raw?.music === true };
+  return { product, parts: ordered, end: raw?.end === null ? null : { line, offer }, music: raw?.music === true, ...(typeof raw?.disclose === "boolean" ? { disclose: raw.disclose } : {}) };
 }
 
 /** The parts' finished files, checked: done, this person's, made for this product, the right kind. */
@@ -79,12 +80,10 @@ export async function quoteAd(sb: SupabaseClient, u: string, raw: any, plans: Pl
   if (a.error) throw a.error;
   if (!a.data?.probe?.product) throw new AdError("product_not_found", "That product is not in your library", 404);
   const parts = await loadParts(sb, u, req);
-  // Shop-safe mode (studio-shop.ts): what TikTok Shop would refuse stops it here, the rest is said beside the button
+  // Shop mode (studio-shop.ts): what TikTok Shop's rules say is shown beside the button; nothing is refused
   const shop = a.data.probe.product?.shop === true;
   const issues: ShopIssue[] = shop ? shopIssues(parts, req.end) : [];
-  const stop = issues.find((i) => i.blocking);
-  if (stop) throw new AdError(stop.code, stop.text, 422);
-  const seconds = adSeconds(parts, !!req.end || shop);
+  const seconds = adSeconds(parts, !!req.end || (req.disclose ?? shop));
   if (seconds > AD_LIMITS.seconds) throw new AdError("ad_too_long", `Keep the ad under ${AD_LIMITS.seconds} seconds`);
   const musicUsd = req.music ? Math.round((seconds / 60) * AD_LIMITS.music_usd_per_minute * 10000) / 10000 : 0;
   const credits = req.music ? creditsForCost(musicUsd, creditValueFloor(plans)) : 0;
@@ -151,9 +150,8 @@ export async function runAdJob(sb: SupabaseClient, deps: Deps, job: any, h: { re
     // the end card: the product picture on its own blurred copy, the person's words on it
     const prod = await sb.from("studio_assets").select("probe").eq("id", req.product).eq("user_id", job.user_id).maybeSingle();
     const shop = prod.data?.probe?.product?.shop === true;
-    const stop = shop ? shopIssues(parts, req.end).find((i) => i.blocking) : null;
-    if (stop) throw new AdError(stop.code, stop.text);
-    if (req.end || shop) {
+    const disclose = req.disclose ?? shop;
+    if (req.end || disclose) {
       const a = await sb.from("studio_assets").select("object_key").eq("id", req.product).eq("user_id", job.user_id).maybeSingle();
       if (a.error || !a.data) throw new AdError("product_not_found", "The product picture is gone");
       const dl = await sb.storage.from("studio-uploads").download(a.data.object_key);
@@ -162,7 +160,7 @@ export async function runAdJob(sb: SupabaseClient, deps: Deps, job: any, h: { re
       await writeFile(pic, Buffer.from(await dl.data.arrayBuffer()));
       const base = join(dir, "card-base.mp4");
       await run(partArgs(pic, base, { still: true, seconds: AD_LIMITS.end_seconds, audio: false }));
-      const line = req.end?.line ?? null, offer = req.end?.offer ?? null, note = shop ? SHOP_DISCLOSURE : null;
+      const line = req.end?.line ?? null, offer = req.end?.offer ?? null, note = disclose ? SHOP_DISCLOSURE : null;
       if (line || offer || note) {
         await writeFile(ass, endCardAss(line, offer, AD_LIMITS.end_seconds, note));
         await run(["-v", "error", "-nostdin", "-y", "-i", base, "-vf", assFilter(ass, env), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", card]);

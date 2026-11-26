@@ -9,8 +9,9 @@
 //      - no animating a static product photo, no AI-changed size, quantity or effects, no time-compressing before/after;
 //      - a shoppable video needs at least 3 s of real motion and a face or the physical product on screen;
 //      - no fabricated endorsements (our presenters already never claim to be customers).
-//    So in Shop-safe mode: only realistic shots and presenter hooks are offered, product animations are refused in an ad,
-//    an ad must open with a hook (a person on screen, moving), and its end card carries "AI-generated".
+//    Owner's rule (Nov 26 2026): inform, never block. We are the tool; people choose how to use it. In Shop mode every
+//    look and every piece stays available; what TikTok Shop's rules say about each is shown beside it, and the end card
+//    offers an "AI-generated" line (on by default, the person can switch it off).
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { recordCost } from "./studio-costs.js";
 import { safeUrl } from "./text-bot/intake.js";
@@ -74,14 +75,14 @@ export async function fetchTikTokShopProduct(deps: Deps, url: string, userId?: s
 // ---------------------------------------------------------------------------------------------------
 // Shop-safe checks for an ad (called by the ad quote)
 // ---------------------------------------------------------------------------------------------------
-export type ShopIssue = { code: string; text: string; blocking: boolean };
-/** What would break TikTok Shop's rules in this ad, in plain words; blocking ones stop it being made in Shop-safe mode. */
+export type ShopIssue = { code: string; text: string };
+/** What TikTok Shop's rules say about this ad, in plain words. Information only: nothing is ever refused. */
 export function shopIssues(parts: Array<{ kind: "hook" | "clip" | "shot"; shop_safe: boolean }>, end: { line: string | null; offer: string | null } | null): ShopIssue[] {
   const out: ShopIssue[] = [];
-  if (parts.some((p) => p.kind === "clip" && !p.shop_safe)) out.push({ code: "shop_animated_product", text: "TikTok Shop doesn't allow an AI-animated product. Take the product clips out; keep the hook and real-looking shots.", blocking: true });
-  if (!parts.some((p) => p.kind === "hook")) out.push({ code: "shop_needs_person", text: "A shoppable video needs a person or the real product moving on screen. Open the ad with a hook.", blocking: true });
-  if (parts.some((p) => p.kind === "shot" && !p.shop_safe)) out.push({ code: "shop_surreal_shot", text: "Surreal shots (floating, splashing, exploded) can read as exaggerated effects on TikTok Shop. Prefer studio and lifestyle shots.", blocking: false });
-  if (end?.offer && /\b(free|guarantee|cure|best|#1|number one)\b/i.test(end.offer)) out.push({ code: "shop_claim", text: "Offers with words like free, best or guaranteed need to be true and allowed for your product.", blocking: false });
+  if (parts.some((p) => p.kind === "clip" && !p.shop_safe)) out.push({ code: "shop_animated_product", text: "TikTok Shop's rules don't allow an AI-animated product in shoppable videos; the product clips may get the video limited there." });
+  if (!parts.some((p) => p.kind === "hook")) out.push({ code: "shop_needs_person", text: "TikTok Shop asks for a person or the real product moving on screen for at least 3 seconds; a hook covers that." });
+  if (parts.some((p) => p.kind === "shot" && !p.shop_safe)) out.push({ code: "shop_surreal_shot", text: "Surreal shots (floating, splashing, exploded) can read as exaggerated effects on TikTok Shop. Prefer studio and lifestyle shots." });
+  if (end?.offer && /\b(free|guarantee|cure|best|#1|number one)\b/i.test(end.offer)) out.push({ code: "shop_claim", text: "Offers with words like free, best or guaranteed need to be true and allowed for your product." });
   return out;
 }
 /** The words TikTok asks for, on the end card and in the caption suggestion. */

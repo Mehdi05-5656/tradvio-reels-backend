@@ -213,8 +213,6 @@ export async function lookQuoteRequest(sb: SupabaseClient, u: string, options: a
   if (!a.data?.probe?.product) throw new LookError("product_not_found", "That product is not in your library", 404);
   const facts = normalFacts(a.data.probe.product);
   if (!fitsCategory(look, facts.category) && look.fits !== "all") throw new LookError("look_not_for_product", `${look.title} is not made for ${CATEGORY_LABEL[facts.category].toLowerCase()}`);
-  // Shop-safe mode: TikTok Shop refuses AI-animated products and exaggerated effects (studio-shop.ts)
-  if (facts.shop && !look.shop_safe) throw new LookError("look_not_shop_safe", `${look.title} isn't allowed for TikTok Shop videos. Turn off "For TikTok Shop" to make it for elsewhere.`);
   const start = options?.start && UUID_RE.test(String(options.start)) ? String(options.start) : productId;
   const exploded = options?.exploded && UUID_RE.test(String(options.exploded)) ? String(options.exploded) : null;
   const choices = lookChoices(look, facts, options?.params);
@@ -404,7 +402,7 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
     try {
       const admin = await isStudioAdmin(req, sbFn(), env);
       const c = isCategory(req.query.category) ? req.query.category : null;
-      res.json({ looks: looksFor(c, { admin, shopSafe: req.query.shop === "1" }).map(publicLook) });
+      res.json({ looks: looksFor(c, { admin }).map(publicLook) }); // every look, always: Shop mode only informs (owner, Nov 26 2026)
     } catch (e) { fail(res, e); }
   });
 

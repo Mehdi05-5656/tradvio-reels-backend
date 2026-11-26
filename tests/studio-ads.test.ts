@@ -16,6 +16,9 @@ test("the ad opens with its one hook, keeps the person's order after it, drops r
   const many = cleanAdRequest({ product: P, parts: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({ job: J(n), kind: "clip" })) });
   assert.equal(many.parts.length, AD_LIMITS.parts);
   assert.equal(cleanAdRequest({ product: P, parts: [{ job: J(1), kind: "clip" }], end: null }).end, null);
+  // the AI-generated line is the person's choice, kept only when they made one
+  assert.equal(cleanAdRequest({ product: P, parts: [{ job: J(1), kind: "clip" }], disclose: false }).disclose, false);
+  assert.equal(cleanAdRequest({ product: P, parts: [{ job: J(1), kind: "clip" }] }).disclose, undefined);
 });
 
 test("its length: clips as they are, shots at their fixed beat, plus the end card", () => {

@@ -23,13 +23,13 @@ test("a shop product read: title, pictures, price and words found wherever the r
   assert.equal(readTikTokProduct({}).title, null);
 });
 
-test("Shop-safe checks: animated product clips and an ad with no person are stopped; surreal shots and risky offers are warned", () => {
-  const block = (p: any, e: any = null) => shopIssues(p, e).filter((i) => i.blocking).map((i) => i.code);
-  assert.deepEqual(block([{ kind: "hook", shop_safe: true }, { kind: "shot", shop_safe: true }]), []);
-  assert.deepEqual(block([{ kind: "hook", shop_safe: true }, { kind: "clip", shop_safe: false }]), ["shop_animated_product"]);
-  assert.deepEqual(block([{ kind: "shot", shop_safe: true }]), ["shop_needs_person"]);
-  const warn = shopIssues([{ kind: "hook", shop_safe: true }, { kind: "shot", shop_safe: false }], { line: null, offer: "Best price, guaranteed" }).filter((i) => !i.blocking).map((i) => i.code);
-  assert.deepEqual(warn, ["shop_surreal_shot", "shop_claim"]);
+test("Shop mode informs, never blocks: the rules are notes beside the button for each thing TikTok Shop limits", () => {
+  const codes = (p: any, e: any = null) => shopIssues(p, e).map((i) => i.code);
+  assert.deepEqual(codes([{ kind: "hook", shop_safe: true }, { kind: "shot", shop_safe: true }]), []);
+  assert.deepEqual(codes([{ kind: "hook", shop_safe: true }, { kind: "clip", shop_safe: false }]), ["shop_animated_product"]);
+  assert.deepEqual(codes([{ kind: "shot", shop_safe: true }]), ["shop_needs_person"]);
+  assert.deepEqual(codes([{ kind: "hook", shop_safe: true }, { kind: "shot", shop_safe: false }], { line: null, offer: "Best price, guaranteed" }), ["shop_surreal_shot", "shop_claim"]);
+  assert.ok(shopIssues([{ kind: "clip", shop_safe: false }], null).every((i: any) => i.blocking === undefined), "nothing is a block");
 });
 
 test("in Shop-safe mode the end card discloses AI, small and apart from the person's words", () => {
