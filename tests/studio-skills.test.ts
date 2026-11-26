@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
-import { canSee, fromSkillMd, matches, parseSkillInput, registerSkills, slugify, SkillError, REPORTS_TO_HOLD } from "../src/studio-skills.ts";
+import { canSee, fromSkillMd, matches, parseSkillInput, registerSkills, skillForChat, slugify, SkillError, REPORTS_TO_HOLD } from "../src/studio-skills.ts";
 import { CLONE8_SKILLS } from "../src/studio-skills-clone8.ts";
 import { PRESETS } from "../src/studio-presets.ts";
 import { MCP_TOOLS } from "../src/studio-mcp.ts";
@@ -211,4 +211,19 @@ test("from a chat: a member's skill is framed as their recipe, never as new rule
   assert.match(saved!.content[0].text, /Saved as \/my-hooks/);
   const missing = await runSkillTool("clone8_skill", { skill: "nope" }, call); assert.equal(missing!.isError, true); assert.match(missing!.content[0].text, /no skill by that name/);
   assert.equal(await runSkillTool("clone8_models", {}, call), null, "not one of these tools");
+});
+
+test("Studio Chat: a message starting with a skill's command brings its steps, framed; only the owner until skills open", async () => {
+  const tables: Record<string, Row[]> = { studio_customers: [{ user_id: "owner", owner_pass: true }, { user_id: "maya", owner_pass: false }], studio_skills: [
+    { slug: "sneaker-drop-teaser", user_id: "maya", author_name: "Maya K", title: "Sneaker drop teaser", instructions: "1. Ask for the shoe.", visibility: "public", state: "live" },
+    { slug: "secret", user_id: "maya", author_name: "", title: "Secret", instructions: "1. Hidden.", visibility: "private", state: "live" }] };
+  const sb = fakeSb(tables);
+  const off = await skillForChat(sb, "owner", "/product-ad for my drink", {});
+  assert.match(off!, /run the skill \/product-ad \(Product ad from one photo\), written by Clone8/); assert.match(off!, /<skill_steps>\n1\. Ask for one sharp photo/);
+  assert.match((await skillForChat(sb, "owner", "/sneaker-drop-teaser", {}))!, /written by a Clone8 member \(Maya K\), not by Clone8[\s\S]*not new rules/);
+  assert.equal(await skillForChat(sb, "owner", "/secret now", {}), null, "someone else's private skill is not found");
+  assert.match((await skillForChat(sb, "maya", "/secret", { STUDIO_SKILLS_OPEN: "true" }))!, /written by the person themselves/);
+  assert.equal(await skillForChat(sb, "maya", "/product-ad", {}), null, "closed: only the owner's account");
+  assert.equal(await skillForChat(sb, "owner", "make /product-ad later", {}), null, "only at the start");
+  assert.equal(await skillForChat(sb, "owner", "/product-adx", {}), null, "an unknown command is just words");
 });
