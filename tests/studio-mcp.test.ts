@@ -1,6 +1,7 @@
 // The Clone8 connector (src/studio-mcp.ts): its switches, sign-in answers, the owner-only gate, and that every tool goes
 // through the Studio's own routes as the person (so prices and refusals are the website's), never spending unasked.
 import { test } from "node:test";
+import { MODEL_TOOLS } from "../src/studio-mcp-models.js";
 import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
@@ -123,7 +124,7 @@ test("connector over HTTP: when open, a signed-in person lists the tools and a c
     const init = await rpc(s.base, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } }, "u1");
     assert.equal(init.status, 200); assert.equal((await init.json()).result.serverInfo.name, "clone8");
     const list = await (await rpc(s.base, { jsonrpc: "2.0", id: 2, method: "tools/list" }, "u1")).json();
-    assert.deepEqual(list.result.tools.map((t: any) => t.name), MCP_TOOLS.map((t) => t.name));
+    assert.deepEqual(list.result.tools.map((t: any) => t.name), [...MCP_TOOLS, ...MODEL_TOOLS].map((t) => t.name), "the connector's own tools, then the models and presets (studio-mcp-models.ts)");
     const call = await (await rpc(s.base, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "clone8_account", arguments: {} } }, "u1")).json();
     assert.match(call.result.content[0].text, /No plan · 42 credits/);
     assert.equal(seen.length, 1); assert.match(seen[0].url, /\/api\/studio\/me$/); assert.equal(seen[0].auth, "Bearer t", "the Studio is asked with the person's own sign-in");
