@@ -20,6 +20,7 @@ import { checkUpload } from "./studio-limits.js";
 import { toJpeg } from "./studio-characters.js";
 import { safeUrl } from "./text-bot/intake.js";
 import { fetchTikTokShopProduct, isTikTokShopUrl, ShopError } from "./studio-shop.js";
+import { productResults } from "./studio-product-results.js";
 import { command } from "./video-render.js";
 import { soundEffect, replaceAudio } from "./studio-eleven.js";
 import { recordCost } from "./studio-costs.js";
@@ -403,6 +404,16 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
       const admin = await isStudioAdmin(req, sbFn(), env);
       const c = isCategory(req.query.category) ? req.query.category : null;
       res.json({ looks: looksFor(c, { admin }).map(publicLook) }); // every look, always: Shop mode only informs (owner, Nov 26 2026)
+    } catch (e) { fail(res, e); }
+  });
+
+  // how the product's hooks and ads did once posted (read from the person's linked accounts), best first
+  app.get("/api/studio/products/:id/results", async (req, res) => {
+    const u = await gate(req, res); if (!u) return;
+    res.setHeader("Cache-Control", "private, no-store");
+    try {
+      if (!UUID_RE.test(req.params.id)) throw new ProductError("product_not_found", "No such product", 404);
+      res.json({ results: await productResults(sbFn(), u, req.params.id) });
     } catch (e) { fail(res, e); }
   });
 
