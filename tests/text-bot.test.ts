@@ -846,3 +846,38 @@ test("a question that ran out is told to the AI, and old notes lose their letter
   assert.match(seen.at(-1)!, /ran out of time \(10 minutes\) and nothing was done/);
   assert.ok(!/YES DS|question's code/.test(seen.at(-1)!), seen.at(-1));
 });
+
+test("several scheduled posts move in ONE question (\"put all 5 today\"), each shown from → to", async () => {
+  const api = mockApi(), now = Date.parse("2026-11-26T14:00:00Z");
+  const mk = (n: number, at: string) => ({ ...api.data.posts[0], id: `00000000-0000-4000-8000-00000000009${n}`, caption: `Comment GO ${n}`, schedule_at: at, updated_at: "2026-11-26T14:00:00Z", options: { accounts: [{ id: IDS.insta, platform: "instagram", username: "justintryz" }] } });
+  api.data.posts.push(mk(1, "2026-11-27T18:45:00.000Z"), mk(2, "2026-11-27T22:15:00.000Z"));
+  const c = await preparePostChange(ctxOf(api, { now, timezone: "America/Los_Angeles" }), { post_id: "", changes: [{ post_id: mk(1, "").id, new_time: "2026-11-26T18:45:00-08:00" }, { post_id: mk(2, "").id, new_time: "2026-11-26T20:00:00-08:00" }] } as any);
+  assert.equal(c.steps.length, 2); assert.equal(c.posts, 2);
+  assert.match(c.question, /^Change 2 posts:\n1\. "Comment GO 1" \(instagram @justintryz\)\n {3}tomorrow 10:45 AM → today 6:45 PM\n2\. "Comment GO 2" \(instagram @justintryz\)\n {3}tomorrow 2:15 PM → today 8:00 PM\nReply YES to go ahead, or NO\.$/);
+  const out = await execute(api as any, c, { now, timezone: "America/Los_Angeles" });
+  assert.equal(out.text, "Changed all 2. New times: today 6:45 PM, today 8:00 PM.");
+  // the same post twice: once, the last one said
+  const d = await preparePostChange(ctxOf(api, { now, timezone: "America/Los_Angeles" }), { post_id: "", changes: [{ post_id: mk(1, "").id, new_time: "2026-11-26T19:00:00-08:00" }, { post_id: mk(1, "").id, new_time: "2026-11-26T21:00:00-08:00" }] } as any);
+  assert.equal(d.steps.length, 1); assert.match(d.question, /to today 9:00 PM\./);
+});
+
+test("post changes, review fixes: an arrow in a caption stays as written; AI captions are checked; a half-done change says which went through", async () => {
+  const api = mockApi(), now = Date.parse("2026-11-26T14:00:00Z");
+  const one = await preparePostChange(ctxOf(api, { now, timezone: "America/Los_Angeles", recentUserText: ["caption: before → after"] }), { post_id: IDS.post, caption: "before → after" });
+  assert.match(one.question, /New caption: "before → after"/); assert.ok(!/Move it from New caption/.test(one.question));
+  assert.ok(one.own!.includes("before → after"), "typed by the person: theirs");
+  const ai = await preparePostChange(ctxOf(api, { now }), { post_id: IDS.post, caption: "Made with ChatGPT" });
+  assert.ok(!ai.own!.includes("Made with ChatGPT"), "written by the AI: checked like any words");
+  // the same post twice: the last one replaces the first (a time after minutes_from_yes wins)
+  const last = await preparePostChange(ctxOf(api, { now, timezone: "America/Los_Angeles" }), { post_id: "", changes: [{ post_id: IDS.post, minutes_from_yes: 10 }, { post_id: IDS.post, new_time: "2026-11-26T21:00:00-08:00" }] } as any);
+  assert.match(last.question, /to today 9:00 PM\./); assert.equal(last.meta?.minutes_from_yes, null);
+  // two posts, the second refused by the server: the first is named as done
+  const mk = (n: number) => ({ ...api.data.posts[0], id: `00000000-0000-4000-8000-00000000008${n}`, caption: `Clip ${n}`, schedule_at: "2026-11-27T18:45:00.000Z", updated_at: "u" });
+  api.data.posts.push(mk(1), mk(2));
+  const two = await preparePostChange(ctxOf(api, { now, timezone: "America/Los_Angeles" }), { post_id: "", changes: [{ post_id: mk(1).id, new_time: "2026-11-26T18:45:00-08:00" }, { post_id: mk(2).id, new_time: "2026-11-26T20:00:00-08:00" }] } as any);
+  const act0 = api.act.bind(api);
+  (api as any).act = async (c: string, m: any, p: string, b: any) => (p.endsWith(mk(2).id) ? { status: 409, json: { error: "already_sent", detail: "It is already going out" } } : act0(c, m, p, b));
+  const out = await execute(api as any, two, { now, timezone: "America/Los_Angeles" });
+  assert.equal(out.ok, false); assert.match(out.text, /1 of 2 went through.*Done: "Clip 1" \(now today 6:45 PM\)\. Not done: "Clip 2"/);
+  await assert.rejects(preparePostChange(ctxOf(api, { now }), { post_id: "", changes: Array.from({ length: 31 }, (_, i) => ({ post_id: `00000000-0000-4000-8000-0000000002${String(i).padStart(2, "0")}`, caption: "x" })) } as any), /Up to 30/);
+});

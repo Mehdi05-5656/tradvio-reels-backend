@@ -353,24 +353,52 @@ async function waitingPost(ctx: Ctx, id: string): Promise<any> {
 }
 const postWho = (p: any): string => (Array.isArray(p.options?.accounts) && p.options.accounts.length ? p.options.accounts.map((x: any) => `${x.platform}${x.username ? ` @${x.username}` : ""}`).join(", ") : (p.platforms ?? []).join(", "));
 
-export async function preparePostChange(ctx: Ctx, a: { post_id: string; new_time?: string | null; minutes_from_yes?: number | null; caption?: string | null; youtube_title?: string | null }): Promise<Pending> {
-  const p = await waitingPost(ctx, a.post_id);
-  if (p.status !== "scheduled" && p.status !== "queued") throw new ActionError("not_editable", "Only a post that has not gone out can be changed");
-  const ownCaptions = (Array.isArray(p.options?.accounts) ? p.options.accounts : []).filter((x: any) => x?.own && x?.caption);
-  const lines: string[] = [], body: Record<string, any> = {}, own: string[] = [short(p.caption, 60)]; let rel: number | null = null;
-  if (a.minutes_from_yes != null) { rel = Math.max(6, Math.round(Number(a.minutes_from_yes)) || 6); lines.push(`Move it from ${p.schedule_at ? when(p.schedule_at, ctx.timezone, ctx.now) : "its time"} to ${rel} minutes after your YES.`); }
-  else if (a.new_time) { const at = Date.parse(a.new_time); if (!Number.isFinite(at)) throw new ActionError("bad_time", "Give the new time as a full date and time with its offset (ISO 8601)"); if (at - ctx.now < 12 * 60_000) throw new ActionError("too_soon", "That time is under 12 minutes away; use minutes_from_yes (6 or more) instead."); body.schedule_at = new Date(at).toISOString(); lines.push(`Move it from ${p.schedule_at ? when(p.schedule_at, ctx.timezone, ctx.now) : "its time"} to ${when(at, ctx.timezone, ctx.now)}.`); }
-  if (typeof a.caption === "string") {
-    if (a.caption.length > CAPTION_MAX) throw new ActionError("caption_too_long", `A caption over ${CAPTION_MAX} characters cannot be shown in full here; change that one in the app.`);
-    body.caption = a.caption; own.push(a.caption);
-    lines.push(`New caption: "${a.caption}"`);
-    if (ownCaptions.length) lines.push(`${ownCaptions.map((x: any) => `${x.platform}${x.username ? ` @${x.username}` : ""}`).join(", ")} ${ownCaptions.length === 1 ? "has its" : "have their"} own caption, which stays as it is (that cannot be changed after scheduling yet).`);
+export type PostChange = { post_id: string; new_time?: string | null; minutes_from_yes?: number | null; caption?: string | null; youtube_title?: string | null };
+/** Change one or several waiting posts in ONE question ("put all 5 today": every post that moves, each from → to). */
+export async function preparePostChange(ctx: Ctx, a: PostChange & { changes?: PostChange[] | null }): Promise<Pending> {
+  const list: PostChange[] = Array.isArray(a.changes) && a.changes.length ? a.changes : a.post_id ? [a] : [];
+  // one change per post: the last one said replaces any earlier one for that post
+  const byPost = new Map<string, PostChange>(); for (const c of list) if (c?.post_id) { byPost.delete(String(c.post_id)); byPost.set(String(c.post_id), c); }
+  const changes = [...byPost.values()];
+  if (!changes.length) throw new ActionError("post_not_found", "Say which post (its id from find or the posts lookup)");
+  if (changes.length > 30) throw new ActionError("too_many", "Up to 30 posts can be changed in one go; do the rest after");
+  if (changes.length > 1 && changes.some((c) => c.minutes_from_yes != null)) throw new ActionError("bad_time", "With several posts, give each a full date and time (ISO 8601 with offset)");
+  const typed = (c: string) => !!c && (ctx.recentUserText ?? []).some((t) => t.replace(/\s+/g, " ").toLowerCase().includes(c.replace(/\s+/g, " ").toLowerCase()));
+  const r = await ctx.api.call("GET", "/api/studio/social/posts");
+  const all: any[] = r.json?.posts ?? [];
+  const steps: Step[] = [], checks: Check[] = [], own: string[] = [];
+  const blocks: Array<{ name: string; who: string; from: string; to: string | null; rest: string[] }> = []; let rel: number | null = null;
+  for (const c of changes) {
+    if (!UUID.test(String(c.post_id))) throw new ActionError("post_not_found", "Use the post's id from find (p:<id>) or the posts lookup");
+    const p = all.find((x) => x.id === c.post_id);
+    if (!p) throw new ActionError("post_not_found", "No such post");
+    if (p.status !== "scheduled" && p.status !== "queued") throw new ActionError("not_editable", `"${short(p.caption, 40)}" has already gone out; only posts that have not gone out can be changed`);
+    const ownCaptions = (Array.isArray(p.options?.accounts) ? p.options.accounts : []).filter((x: any) => x?.own && x?.caption);
+    const rest: string[] = [], body: Record<string, any> = {}; own.push(short(p.caption, 60));
+    const from = p.schedule_at ? when(p.schedule_at, ctx.timezone, ctx.now) : "its time"; let to: string | null = null;
+    if (c.minutes_from_yes != null) { rel = Math.max(6, Math.round(Number(c.minutes_from_yes)) || 6); to = `${rel} minutes after your YES`; }
+    else if (c.new_time) {
+      const at = Date.parse(c.new_time);
+      if (!Number.isFinite(at)) throw new ActionError("bad_time", "Give each new time as a full date and time with its offset (ISO 8601)");
+      if (at - ctx.now < 12 * 60_000) throw new ActionError("too_soon", "A new time must be at least 12 minutes away (one post: minutes_from_yes)");
+      body.schedule_at = new Date(at).toISOString(); to = when(at, ctx.timezone, ctx.now);
+    }
+    // the wording check leaves alone only words the person typed themselves (an AI-written caption is checked)
+    if (typeof c.caption === "string") {
+      if (c.caption.length > CAPTION_MAX) throw new ActionError("caption_too_long", `A caption over ${CAPTION_MAX} characters cannot be shown in full here; change that one in the app.`);
+      body.caption = c.caption; if (typed(c.caption)) own.push(c.caption); rest.push(`New caption: "${c.caption}"`);
+      if (ownCaptions.length) rest.push(`${ownCaptions.map((x: any) => `${x.platform}${x.username ? ` @${x.username}` : ""}`).join(", ")} ${ownCaptions.length === 1 ? "has its" : "have their"} own caption, which stays as it is (that cannot be changed after scheduling yet).`);
+    }
+    if (c.youtube_title) { const t = short(c.youtube_title, 100); body.youtube_title = t; if (typed(t)) own.push(t); rest.push(`New YouTube title: "${t}"`); }
+    if (!to && !rest.length) throw new ActionError("nothing_to_change", "Say what to change: the time, the caption or the YouTube title");
+    steps.push({ method: "PATCH", path: `/api/studio/social/posts/${p.id}`, body, save: "post", label: short(p.caption, 40) });
+    checks.push({ kind: "post_unchanged", post_id: p.id, updated_at: p.updated_at });
+    blocks.push({ name: short(p.caption, 60), who: postWho(p), from, to, rest });
   }
-  if (a.youtube_title) { const t = short(a.youtube_title, 100); body.youtube_title = t; own.push(t); lines.push(`New YouTube title: "${t}"`); }
-  if (!lines.length) throw new ActionError("nothing_to_change", "Say what to change: the time, the caption or the YouTube title");
-  return put(ctx, { kind: "post_change", credits: 0, posts: 1, meta: { minutes_from_yes: rel }, own,
-    steps: [{ method: "PATCH", path: `/api/studio/social/posts/${p.id}`, body, save: "post", label: "change" }], checks: [{ kind: "post_unchanged", post_id: p.id, updated_at: p.updated_at }],
-    body: [`Change the post to ${postWho(p)} ("${short(p.caption, 60)}"):`, ...lines].join("\n") });
+  const text = blocks.length === 1
+    ? [`Change the post to ${blocks[0].who} ("${blocks[0].name}"):`, ...(blocks[0].to ? [`Move it from ${blocks[0].from} to ${blocks[0].to}.`] : []), ...blocks[0].rest]
+    : [`Change ${blocks.length} posts:`, ...blocks.map((b, i) => [`${i + 1}. "${b.name}" (${b.who})`, ...(b.to ? [`${b.from} → ${b.to}`] : []), ...b.rest].join("\n   "))];
+  return put(ctx, { kind: "post_change", credits: 0, posts: blocks.length, meta: { minutes_from_yes: rel, changes }, own, steps, checks, body: text.join("\n") });
 }
 
 export async function preparePostCancel(ctx: Ctx, a: { post_ids: string[] }): Promise<Pending> {
@@ -436,11 +464,12 @@ export async function prepareAutomationRun(ctx: Ctx, a: { automation_id: string;
 export type Outcome = { ok: boolean; text: string; job_id?: string; collection_id?: string; credits?: number; post_ids?: string[]; project?: { id: string; asset_id: string | null; job_id: string | null; rev: number; name: string }; calls: Array<{ method: string; path: string; status: number }> };
 
 export async function execute(api: Api, p: Pending, o: { now: number; timezone: string }): Promise<Outcome> {
-  const calls: Outcome["calls"] = [];
+  const calls: Outcome["calls"] = [], moved: string[] = [];
+  let postsNow: any[] | null = null; // read once for every post's check
   for (const c of p.checks) {
     if (c.kind === "post_unchanged") {
-      const r = await api.call("GET", "/api/studio/social/posts");
-      const row = (r.json?.posts ?? []).find((x: any) => x.id === c.post_id);
+      postsNow ??= ((await api.call("GET", "/api/studio/social/posts")).json?.posts ?? []) as any[];
+      const row = postsNow.find((x: any) => x.id === c.post_id);
       if (!row) return { ok: false, text: "That post is no longer there, so nothing was changed.", calls };
       if (row.updated_at !== c.updated_at) return { ok: false, text: "That post was changed somewhere else since I asked, so I left it alone. Ask me again and I'll show it as it is now.", calls };
     } else if (c.kind === "price_at_most") {
@@ -463,7 +492,9 @@ export async function execute(api: Api, p: Pending, o: { now: number; timezone: 
     calls.push({ method: s.method, path: s.path, status: r.status });
     if (r.status >= 400) {
       const done = calls.length - 1;
-      return { ...out, ok: false, text: `${done ? `${done} of ${p.steps.length} went through, then it stopped` : "It did not go through"}: ${refusal(r)}${p.credits && !done ? " Nothing was spent." : ""}` };
+      // which ones went through (by name, with their new times), so nothing is asked again for them
+      const through = p.kind === "post_change" && done ? ` Done: ${p.steps.slice(0, done).map((x, i) => `"${x.label ?? "a post"}"${moved[i] ? ` (now ${moved[i]})` : ""}`).join(", ")}. Not done: "${s.label ?? "the next one"}" and any after it.` : "";
+      return { ...out, ok: false, text: `${done ? `${done} of ${p.steps.length} went through, then it stopped` : "It did not go through"}: ${refusal(r)}${p.credits && !done ? " Nothing was spent." : ""}${through}` };
     }
     if (p.kind === "job") { out.job_id = r.json?.job?.id; out.collection_id = r.json?.collection_id; out.credits = Number(r.json?.quote?.credits ?? p.credits); }
     if (p.kind === "post") {
@@ -476,7 +507,7 @@ export async function execute(api: Api, p: Pending, o: { now: number; timezone: 
         r.json?.queued ? `${num(r.json.queued)} more are being sent in the background.` : "", failed.length ? `${failed.length} did not go out: ${short(failed[0].error, 120)}` : "", skipped.length ? `Left out: ${skipped.map((x) => `${short(x.platform ?? x.group ?? "an account", 30)} (${short(x.reason, 30)})`).join(", ")}.` : "", autoReplyLine(r.json?.autoreply, !!s.body?.autoreply, !!r.json?.queued)].filter(Boolean).join(" ");
     }
     if (p.kind === "edit" && s.method === "POST") out.project = { id: p.meta?.project_id, asset_id: p.meta?.asset_id ?? null, job_id: p.meta?.job_id ?? null, rev: Number(p.meta?.rev) || 0, name: String(p.meta?.name ?? "your clip") };
-    if (p.kind === "post_change") { const at = r.json?.post?.schedule_at; out.text = `Changed.${at ? ` It now goes out ${when(at, o.timezone, o.now)}.` : ""}`; }
+    if (p.kind === "post_change") { const at = r.json?.post?.schedule_at; if (at) moved.push(when(at, o.timezone, o.now)); out.text = p.steps.length === 1 ? `Changed.${at ? ` It now goes out ${moved[0]}.` : ""}` : `Changed all ${p.steps.length}.${moved.length ? ` New times: ${moved.join(", ")}.` : ""}`; }
   }
   if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "edit" ? "Saved. Making the edited clip now; I'll send it here when it's ready (usually under a minute)." : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : p.kind === "autoreply" ? "The auto-reply is on." : p.kind === "autoreply_switch" ? (p.meta?.on ? "It's back on." : "Paused.") : "Done.";
   return out;

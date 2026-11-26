@@ -70,6 +70,8 @@ ACTIONS AND THE YES
 - Prices: only what price or a prepare_ tool returns. Never estimate.
 - Times: the person's time zone and the time now are under RIGHT NOW. Pass times as full ISO 8601 with offset. "In 10 minutes" is minutes_from_yes.
 - Several videos at different times or with their own captions ("3 today at 5:30, 6:45 and 8 pm, 2 tomorrow"): ONE prepare_post, each video with its own when and caption. "Their normal schedule", "the usual times", "the morning slot": the posting times saved on their groups (account: groups[].times, in the group's time zone); use the next free ones in order. Ask only if no times are saved.
+- A change question that their next message replaced is gone: if they add to it ("also move #5"), prepare ONE prepare_post_change again with every post from before plus the new one.
+- Changing posts already scheduled ("put all 5 today", "move tomorrow's ones to tonight"): look them up first (posts), change ONLY the ones not already where they asked (never move one that is already right), all of them in ONE prepare_post_change (changes: [...]). New times: the account's saved times still free that day first, then later slots at least 30 minutes after the account's last post that day, and before the day ends. If the question is about posts you just scheduled, those are the ones (their ids are in the posts lookup).
 - Captions "in the same format, different wording each time": write each one yourself in that format (no hashtags or extras unless asked) and put it on its video; the question shows every caption before anything is posted.
 - A posted video's file may have been removed after posting (the person's delete-after-posting choice): then say so plainly, and show the post itself (show with its p: ref sends its picture) or give its live link (posts lookup: links). Never call it "not ready".
 - Paying, changing or cancelling a plan, top-ups, linking or removing a social account, deleting the account: never by text. Give the page.
@@ -107,7 +109,7 @@ export const TOOLS = [
   { name: "prepare_post", description: "Prepare to post now or schedule videos to the person's linked accounts. Sends the question. Posts nothing.", input_schema: obj({ videos: { type: "array", minItems: 1, maxItems: 50, items: video }, account_ids: { type: "array", items: str }, group: { type: "string", description: "a posting group's name" }, platforms: { type: "array", items: str, description: "networks, when each has one linked account" }, caption: str, captions_by_account: { type: "object", additionalProperties: { type: "string" }, description: "account id → its own caption" }, when: { type: "string", description: "\"now\" or ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "for \"in N minutes\", N of 5 or more" }, spacing_minutes: { type: "integer" }, youtube_title: str, youtube_visibility: { type: "string", enum: ["public", "unlisted", "private"] }, autoreply: { ...autoreply, description: "an auto-reply that goes with these posts (\"comment GO and get …\")" } }, ["videos"]) },
   { name: "prepare_autoreply", description: "Prepare an auto-reply on one linked account by itself: on every post, or on one post (post_id from the posts lookup). Sends the question.", input_schema: obj({ account_id: str, ...autoreply.properties, post_id: { type: "string", description: "one post only: its id from lookup autoreply_posts" } }, ["account_id", "keywords"]) },
   { name: "prepare_autoreply_switch", description: "Prepare to pause (on false) or turn back on (on true) an auto-reply, by its id from the autoreplies lookup. Sends the question.", input_schema: obj({ rule_id: str, on: { type: "boolean" } }, ["rule_id", "on"]) },
-  { name: "prepare_post_change", description: "Prepare to move a waiting post or change its caption or YouTube title. Sends the question.", input_schema: obj({ post_id: str, new_time: { type: "string", description: "ISO 8601 with offset" }, minutes_from_yes: { type: "integer" }, caption: str, youtube_title: str }, ["post_id"]) },
+  { name: "prepare_post_change", description: "Prepare to move waiting posts or change their caption or YouTube title. Several posts: ONE call with every post that changes in changes[]. Sends one question.", input_schema: obj({ changes: { type: "array", minItems: 1, maxItems: 30, items: obj({ post_id: str, new_time: { type: "string", description: "ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "one post only" }, caption: str, youtube_title: str }, ["post_id"]) } }, ["changes"]) },
   { name: "prepare_post_cancel", description: "Prepare to cancel waiting posts. Sends the question.", input_schema: obj({ post_ids: { type: "array", minItems: 1, items: str } }, ["post_ids"]) },
   { name: "prepare_post_retry", description: "Prepare to send a failed post again where it failed. Sends the question.", input_schema: obj({ post_id: str }, ["post_id"]) },
   { name: "prepare_job_cancel", description: "Prepare to cancel a job that is still waiting to start. Sends the question.", input_schema: obj({ job_id: str }, ["job_id"]) },
@@ -173,7 +175,7 @@ const LIGHT_PER_DAY = { links: 5, copies: 12 };
 export async function think(d: BrainDeps, st: ChatState, userText: string, o: { tap?: boolean } = {}): Promise<TurnResult> {
   const now = (d.now ?? Date.now)(), f = d.fetch ?? fetch, log = d.log ?? (() => undefined);
   const marks: string[] = [];
-  const held: { pending: Pending | null } = { pending: null }; let spent = 0; const sent: string[] = []; const after: NonNullable<TurnResult["after"]> = [];
+  const held: { pending: Pending | null } = { pending: null }; let spent = 0, changesThisTurn: act.PostChange[] = []; const sent: string[] = []; const after: NonNullable<TurnResult["after"]> = [];
   // only what the person typed: taps and system notes are not their words
   const recent = [...st.history.filter((t) => t.role === "user" && !t.tap).slice(-12).map((t) => t.text), ...(o.tap ? [] : [userText])];
   const titleOf = (v: { asset_id?: string; job_id?: string; output_key?: string }): string | null => {
@@ -299,7 +301,16 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     if (name === "prepare_post") return prepared(() => act.preparePost(actx(), a ?? {}));
     if (name === "prepare_autoreply") return prepared(() => act.prepareAutoReply(actx(), a ?? {}));
     if (name === "prepare_autoreply_switch") return prepared(() => act.prepareAutoReplySwitch(actx(), a ?? {}));
-    if (name === "prepare_post_change") return prepared(() => act.preparePostChange(actx(), a ?? {}));
+    if (name === "prepare_post_change") {
+      // several changes in one turn (one call each) become ONE question with all of them: a second call never drops the first
+      // a call with several posts is the whole list; a one-post call adds to this turn's earlier ones. The list is kept
+      // only once a question was made from it (a failed or corrected call never sticks)
+      const now2: act.PostChange[] = Array.isArray(a?.changes) && a.changes.length ? a.changes : a?.post_id ? [a] : [];
+      const cand = now2.length > 1 ? now2 : [...changesThisTurn.filter((c) => !now2.some((x) => x.post_id === c.post_id)), ...now2];
+      const res = await prepared(() => act.preparePostChange(actx(), { post_id: "", changes: cand }));
+      changesThisTurn = cand;
+      return res;
+    }
     if (name === "prepare_post_cancel") return prepared(() => act.preparePostCancel(actx(), a ?? {}));
     if (name === "prepare_post_retry") return prepared(() => act.preparePostRetry(actx(), a ?? {}));
     if (name === "prepare_job_cancel") return prepared(() => act.prepareJobCancel(actx(), a ?? {}));
