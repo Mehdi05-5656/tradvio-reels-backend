@@ -22,6 +22,7 @@ import { checkUpload, checkJobRate, hasPlanAccess } from "./studio-limits.js";
 import { STUDIO_TRENDS, trendById, trendClipUrl, trendPosterUrl } from "./studio-trends.js";
 import { instrumentsEnabled, publicInstrument, quoteInstrument, InstrumentError, type InstrumentQuote } from "./studio-instruments.js";
 import { registerMediaLink } from "./studio-media-link.js";
+import { registerSkills } from "./studio-skills.js";
 import { presetById, presetChoices, presetRequest, presetsOffered, publicPreset, PresetError } from "./studio-presets.js";
 import { randomUUID } from "node:crypto";
 import { receiptFromEvent, sendReceipt } from "./studio-receipts.js";
@@ -645,6 +646,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
   registerLibrary(app, { sbFn, env, plans: PLANS, requireUser, fail, log, withPosterUrls });
   // a picture or clip from a public link, for the connector (studio-media-link.ts)
   registerMediaLink(app, { sbFn, requireUser, fail, posterKey: (u, id) => assetPosterKey(u, id) });
+  registerSkills(app, { sbFn, env, log, requireUser, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
   registerCaptions(app, { sbFn, env, requireUser, fail, log });
   registerStunts(app, { sbFn, env, plans: PLANS, requireUser, fail, log, isOwner: (req, sb) => isStudioAdmin(req, sb, env) });
   registerBusy(app, { sbFn, plans: PLANS, requireUser, fail });
