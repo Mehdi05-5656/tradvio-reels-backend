@@ -10,6 +10,7 @@ import { SOCIAL_ACCOUNTS, SOCIAL_SEAT_USD, MAX_SOCIAL_EXTRA } from "./studio-pri
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftCaption, type CaptionDraft } from "./studio-captions.js";
+import { takeOffWaitingPosts } from "./studio-social-unlink.js";
 import { getSocialProvider, providerNamed, isSocialPlatform, SocialError, statusOf, trialBlock, type SocialAccount, type SocialDeps, type SocialEvent, type SocialProvider, type SocialResult, type PostTarget } from "./social-provider.js";
 import { groupsOf, publicGroup, staggerTimes, varyCaptions } from "./studio-post-groups.js";
 import { hasPlanAccess } from "./studio-limits.js";
@@ -263,12 +264,19 @@ export function registerSocial(app: Express, sbFn: () => SupabaseClient, deps: S
       const prof = await profileOf(sb, u);
       if (!prof) throw new SocialError("not_connected", "Nothing is linked yet", 404);
       const account = typeof req.query.account === "string" && req.query.account ? String(req.query.account) : undefined;
+      // the accounts this removes (a whole network names every account it has), read before they are gone
+      const before = account ? [] : await p.accounts(prof.profile_key).catch(() => prof.accounts ?? []);
+      const removedIds = account ? [account] : before.filter((a) => a.platform === platform && a.id).map((a) => a.id!);
       await p.disconnect(prof.profile_key, platform, account);
       const accounts = await p.accounts(prof.profile_key).catch(() => (prof.accounts ?? []).filter((a) => (account ? a.id !== account : a.platform !== platform)));
       await sb.from("studio_social_profiles").update({ accounts, updated_at: new Date().toISOString() }).eq("user_id", u);
       await touchSocial(sb, u);
-      recordEvent({ user_id: u, kind: "feature", name: "social_network_changed", props: { platform, change: "unlinked", by: "person_in_clone8", one_account: !!account, left_on_network: accounts.filter((a) => a.platform === platform).length } });
-      res.json({ accounts });
+      // posts still waiting for it are taken off it (canceled if it was their only account); never blocks the removal
+      const posts = await takeOffWaitingPosts(sb, p, prof.profile_key, u, { platform, ids: removedIds, leftOnNetwork: accounts.filter((a) => a.platform === platform).length })
+        .catch((e) => { console.warn(`[social] taking removed accounts off posts failed for ${u}: ${e instanceof Error ? e.message : String(e)}`); return null; });
+      if (posts && (posts.changed || posts.canceled || posts.left)) console.log(`[social] ${platform} removed for ${u}: posts changed ${posts.changed}, canceled ${posts.canceled}, left ${posts.left}`);
+      recordEvent({ user_id: u, kind: "feature", name: "social_network_changed", props: { platform, change: "unlinked", by: "person_in_clone8", one_account: !!account, left_on_network: accounts.filter((a) => a.platform === platform).length, posts_changed: posts?.changed ?? 0, posts_canceled: posts?.canceled ?? 0, posts_left: posts?.left ?? 0 } });
+      res.json({ accounts, posts });
     } catch (e) { fail(res, e); }
   });
 
