@@ -1,5 +1,5 @@
 // The gate: plain code that reads each incoming text before any AI does (PLAN.md sections 1 and 4). The words that
-// must always work (STOP, HELP, CANCEL) and the words that release an action (YES with its code) are decided here.
+// must always work (STOP, HELP, CANCEL) and the word that releases an action (a plain YES, for the one question waiting) are decided here.
 // The AI can prepare an action; only this file can release one, and only for the person's own reply.
 
 export type Inbound =
@@ -18,7 +18,8 @@ export function classify(raw: string): Inbound {
   // "yes 47", "YES47", "y 47", "yes 47 24" (the code, then the count for a large action). A bare "yes" carries no code.
   // the code is two letters (never a number, so it can't be read as a price); a large action adds its count
   const yes = low.match(/^\/?(?:yes|y|yep|yeah|confirm)(?:[\s,:-]*([bcdfghjkmnpqrstvwxz]{2}))?(?:[\s,:-]+(\d{1,4}))?$/);
-  if (yes) return { kind: "yes", code: yes[1] ? yes[1].toUpperCase() : null, count: yes[2] != null ? Number(yes[2]) : null };
+  // ("yes 3" means something else, three of them say: read as words, never as a YES to the whole question)
+  if (yes && yes[2] == null) return { kind: "yes", code: yes[1] ? yes[1].toUpperCase() : null, count: null };
   if (/^\/?(?:no|n|nope|don'?t|not now|never ?mind)$/.test(low)) return { kind: "no" };
   // leaving: any reasonable wording ends all texts (the SMS rule; the same words work everywhere so nobody has to learn two)
   // every usual way of saying "stop texting me" (a phone line must honour any reasonable wording)
@@ -44,6 +45,8 @@ export type Pending = {
   status: "live" | "claimed" | "done" | "failed" | "expired" | "replaced" | "declined";
   /** true once the question has actually reached the person's chat; until then no reply can release it */
   shown?: boolean;
+  /** when it reached the chat: a YES sent before this was meant for something else */
+  shown_at?: number;
   /** the person's own words quoted in the question (captions, titles): exempt from the supplier-word check */
   own?: string[];
   /** times stored as "minutes after the YES" are worked out when it is released, so they cannot go stale while the person reads */
@@ -90,27 +93,18 @@ export function claim(store: PendingStore, by: { code?: string | null; count?: n
   // a question that never reached the chat (a send failed, the turn broke) cannot be answered
   if (!p.shown) { retire(store, "failed"); return { ok: false, why: "nothing" }; }
   if (now > p.expires_at) { retire(store, "expired"); return { ok: false, why: "expired", pending: p }; }
-  if (by.id != null) { if (by.id !== p.id) return { ok: false, why: "wrong_code", pending: p }; }
-  else {
-    if (!by.code) return { ok: false, why: "no_code", pending: p };
-    if (by.code !== p.code) {
-      (p as any).misses = Number((p as any).misses ?? 0) + 1;
-      if ((p as any).misses >= MAX_WRONG) { retire(store, "failed"); return { ok: false, why: "too_many", pending: p }; }
-      return { ok: false, why: "wrong_code", pending: p };
-    }
-  }
-  // a large action: the count must come with it, typed (a button alone is not enough)
-  if (p.count != null) {
-    if (by.count == null) return { ok: false, why: "need_count", pending: p };
-    if (by.count !== p.count) return { ok: false, why: "wrong_count", pending: p };
-  }
+  // a plain YES answers the one question waiting (owner, Nov 26 2026: "simple YES or NO", no codes). It stays safe
+  // because only one question waits at a time, only once it is in the chat, for 10 minutes, and anything else the person
+  // writes withdraws it (bot.ts), so a "yes" can only ever mean the question right above it. A tapped button must still
+  // be this question's own.
+  if (by.id != null && by.id !== p.id) return { ok: false, why: "wrong_code", pending: p };
   p.status = "claimed";
   store.past = [p, ...store.past].slice(0, 50);
   store.live = null;
   return { ok: true, pending: p };
 }
 /** The question is in the person's chat: from now on their reply can release it. */
-export function markShown(store: PendingStore, id: string): void { if (store.live?.id === id) store.live.shown = true; }
+export function markShown(store: PendingStore, id: string, at?: number): void { if (store.live?.id === id) { store.live.shown = true; if (at != null) store.live.shown_at = at; } }
 /** Drops a live action whose question was never shown (the turn that made it failed). */
 export function dropUnshown(store: PendingStore): Pending | null { const p = store.live; if (p && !p.shown) { retire(store, "failed"); return p; } return null; }
 /** The person wrote about something else while a question waited: the question is withdrawn, so a later "yes" (meant
@@ -120,8 +114,8 @@ export function decline(store: PendingStore): Pending | null { const p = store.l
 export function expire(store: PendingStore, now: number): Pending | null { const p = store.live; if (p && now > p.expires_at) { retire(store, "expired"); return p; } return null; }
 
 /** The line under every question: how to answer it. */
-export function howToAnswer(p: Pending): string {
-  return p.count != null ? `To go ahead, reply: YES ${p.code} ${p.count}\n(${p.code} is this question's code; ${p.count} is how many, so a stray yes can't send them all.) Or reply NO.` : `To go ahead, reply: YES ${p.code}\n(${p.code} is this question's code.) Or reply NO.`;
+export function howToAnswer(_p?: Pending): string {
+  return "Reply YES to go ahead, or NO.";
 }
 
 /** Credits spent by text per day, against the person's ceiling. */

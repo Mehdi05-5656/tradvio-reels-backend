@@ -3,7 +3,7 @@
 // brain against a pretend account.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_WRONG, classify, claim, setPending, markShown, dropUnshown, decline, expire, newCode, spendRoom, addSpend, PENDING_TTL_MS, type Pending, type PendingStore } from "../src/text-bot/gate.js";
+import { MAX_WRONG, classify, claim, howToAnswer, setPending, markShown, dropUnshown, decline, expire, newCode, spendRoom, addSpend, PENDING_TTL_MS, type Pending, type PendingStore } from "../src/text-bot/gate.js";
 import { levelOf, makeApi } from "../scripts/text-bot/clone8.js";
 import { guard, blanked, SAFE_LINE } from "../src/text-bot/guard.js";
 import { buildCards, find, history, describeJob } from "../src/text-bot/account.js";
@@ -25,9 +25,10 @@ test("the gate reads the words that must always work", () => {
   assert.deepEqual(classify("YES KM"), { kind: "yes", code: "KM", count: null });
   assert.deepEqual(classify("yeskm"), { kind: "yes", code: "KM", count: null });
   assert.deepEqual(classify(" y km. "), { kind: "yes", code: "KM", count: null });
-  assert.deepEqual(classify("Yes KM 24"), { kind: "yes", code: "KM", count: 24 });
-  // a number after YES is never a code (codes are letters, so a price can't be taken for one): the bot asks for the code
-  assert.deepEqual(classify("YES 47"), { kind: "yes", code: null, count: 47 });
+  assert.deepEqual(classify("Yes KM 24"), { kind: "text", text: "Yes KM 24" }, "a yes with a number means something else");
+  assert.equal(classify("yes 3").kind, "text");
+  // a number after YES is read as words ("yes 47" might mean 47 of them), never as a YES to the whole question
+  assert.deepEqual(classify("YES 47"), { kind: "text", text: "YES 47" });
   assert.deepEqual(classify("yes"), { kind: "yes", code: null, count: null });
   assert.equal(classify("no").kind, "no");
   assert.equal(classify("STOP").kind, "stop");
@@ -42,34 +43,29 @@ test("the gate reads the words that must always work", () => {
   for (const t of ["END", "quit", "Revoke", "stop all", "STOPALL", "unsubscribe", "opt out"]) assert.equal(classify(t).kind, "stop", t);
 });
 
-test("a YES releases only the live action, with its code, once, in time, and only if its question was shown", () => {
+test("a plain YES releases only the live action, once, in time, and only if its question was shown", () => {
   const s = store(), t0 = 1_000_000;
   // a question that never reached the chat cannot be answered by anything
-  const ghost = setPending(s, { ...base, id: "ghost" }, t0, () => 0.5);
-  assert.equal(claim(s, { code: ghost.code }, t0 + 1).ok, false); assert.equal(s.live, null, "and it is gone, not waiting");
+  setPending(s, { ...base, id: "ghost" }, t0, () => 0.5);
+  assert.equal(claim(s, {}, t0 + 1).ok, false); assert.equal(s.live, null, "and it is gone, not waiting");
   setPending(s, { ...base, id: "ghost2" }, t0, () => 0.5);
   assert.equal(dropUnshown(s)?.id, "ghost2"); assert.equal(dropUnshown(s), null);
 
-  const a = shownPending(s, { ...base, id: "a" }, t0, () => 0.5);
-  assert.equal(claim(s, { code: null }, t0 + 1).ok, false);
-  assert.deepEqual((claim(s, { code: "00" }, t0 + 1) as any).why, "wrong_code");
-  assert.equal((s.live as Pending | null)?.id, "a", "a wrong code does not use the action up");
-  assert.equal(claim(s, { code: a.code }, t0 + 5).ok, true);
-  assert.equal(claim(s, { code: a.code }, t0 + 6).ok, false, "the same YES twice does nothing the second time");
-  // a new request replaces the one before; the old code and the old button are dead
-  const b = shownPending(s, { ...base, id: "b" }, t0 + 10, () => 0.1), c = shownPending(s, { ...base, id: "c" }, t0 + 20, () => 0.9);
-  assert.notEqual(b.code, c.code);
-  assert.equal(claim(s, { code: b.code }, t0 + 21).ok, false);
+  shownPending(s, { ...base, id: "a" }, t0, () => 0.5);
+  assert.equal(claim(s, { code: null }, t0 + 5).ok, true, "a plain YES, no code");
+  assert.equal(claim(s, {}, t0 + 6).ok, false, "the same YES twice does nothing the second time");
+  // a new request replaces the one before; the old button is dead
+  shownPending(s, { ...base, id: "b" }, t0 + 10, () => 0.1); const c = shownPending(s, { ...base, id: "c" }, t0 + 20, () => 0.9);
   assert.equal(claim(s, { id: "b" }, t0 + 21).ok, false);
   assert.equal(s.past.find((p) => p.id === "b")?.status, "replaced");
+  assert.equal(s.live?.id, c.id);
   // ten minutes, then it is gone
-  assert.deepEqual((claim(s, { code: c.code }, t0 + 20 + PENDING_TTL_MS + 1) as any).why, "expired");
+  assert.deepEqual((claim(s, {}, t0 + 20 + PENDING_TTL_MS + 1) as any).why, "expired");
   assert.equal(s.live, null);
-  // a large action needs its count typed; a tap alone is not enough
-  const big = shownPending(s, { ...base, id: "d", count: 24 }, t0, () => 0.3);
-  assert.deepEqual((claim(s, { id: "d" }, t0 + 1) as any).why, "need_count");
-  assert.deepEqual((claim(s, { code: big.code, count: 23 }, t0 + 1) as any).why, "wrong_count");
-  assert.equal(claim(s, { code: big.code, count: 24 }, t0 + 1).ok, true);
+  // a large one is a plain YES too (its size is in the question), and its button works
+  shownPending(s, { ...base, id: "d", count: 24 }, t0, () => 0.3);
+  assert.equal(claim(s, { id: "d" }, t0 + 1).ok, true);
+  assert.equal(howToAnswer(), "Reply YES to go ahead, or NO.");
   shownPending(s, { ...base, id: "e" }, t0, () => 0.3);
   assert.equal(decline(s)?.id, "e"); assert.equal(expire(s, t0), null);
   assert.notEqual(newCode({ live: null, past: [], last_code: "PP" }, () => 0.5), "PP");
@@ -88,7 +84,7 @@ test("only listed routes can be called, and actions only by the executor", async
   assert.equal(levelOf("POST", `${S}/jobs`), "act");
   assert.equal(levelOf("PATCH", `${S}/social/posts/${id}`), "act");
   for (const [m, p] of [["POST", `${S}/checkout`], ["POST", `${S}/topup`], ["POST", `${S}/topup/auto`], ["POST", `${S}/portal`], ["POST", `${S}/billing/change`], ["POST", `${S}/account/delete`], ["POST", `${S}/assets/delete`], ["DELETE", `${S}/assets/${id}`], ["DELETE", `${S}/collections/${id}`], ["POST", `${S}/storage/delete`],
-    ["GET", `${S}/admin/costs`], ["POST", `${S}/admin/creators/x/notify`], ["POST", `${S}/social/connect`], ["DELETE", `${S}/social/accounts/tiktok`], ["POST", `${S}/autoreply`], ["POST", `${S}/promo`], ["GET", "/api/ops/studio/overview"], ["GET", "/api/v2/accounts"], ["POST", `${S}/jobs/../admin/costs`], ["GET", `${S}/me/../admin/costs`], ["GET", `${S}/me%2F..%2Fadmin`], ["POST", `${S}/social/schedule/ai`]] as const)
+    ["GET", `${S}/admin/costs`], ["POST", `${S}/admin/creators/x/notify`], ["POST", `${S}/social/connect`], ["DELETE", `${S}/social/accounts/tiktok`], ["POST", `${S}/promo`], ["GET", "/api/ops/studio/overview"], ["GET", "/api/v2/accounts"], ["POST", `${S}/jobs/../admin/costs`], ["GET", `${S}/me/../admin/costs`], ["GET", `${S}/me%2F..%2Fadmin`], ["POST", `${S}/social/schedule/ai`]] as const)
     assert.equal(levelOf(m as any, p), null, `${m} ${p} must not be reachable`);
   // the real client, with a network that records what leaves the Mac: a refused call never leaves
   const sent: string[] = [];
@@ -177,7 +173,7 @@ test("a job question names the tool and what will run; it is held for the YES an
   const p = await prepareJob(ctx, { tool: "swap", asset_id: IDS.podcast, options: { model: "light", character_asset_id: IDS.cat } });
   assert.equal(api.acts.length, 0, "preparing starts nothing");
   assert.match(p.question, /^Start Swap \(43 s × 2\)\.\nVideo: "Podcast clip 3"\nPlayed by: your character "tabby cat"\n/, "the tool, the video and the character, from the account's records");
-  assert.match(p.question, /\nCost: 86 credits\. Balance 1,840 → 1,754\.\n/); assert.match(p.question, new RegExp(`reply: YES ${p.code}\n\\(${p.code} is this question's code\\.\\)`));
+  assert.match(p.question, /\nCost: 86 credits\. Balance 1,840 → 1,754\.\n/); assert.ok(p.question.endsWith("\nReply YES to go ahead, or NO."), "a plain YES or NO, no code");
   assert.ok(!/YES \d/.test(p.question), "nothing next to YES can be read as a price");
   // a library picture passed where a preset's name belongs is put in the right place before anything is priced
   const slip = await prepareJob(ctxOf(api), { tool: "swap", asset_id: IDS.podcast, options: { model: "light", character: IDS.cat } });
@@ -249,9 +245,9 @@ test("a post is named by the account's own title, shows everything sent, and is 
   assert.equal(left.ok, false); assert.match(left.text, /changed somewhere else/);
   const k = await preparePostCancel(ctxOf(api), { post_ids: [IDS.post] });
   assert.match(k.question, /Cancel this scheduled post/); assert.equal(k.steps[0].method, "DELETE");
-  // more than ten posts: the count goes in the reply
+  // more than ten posts: a plain YES too; the question lists them
   const many = await preparePost(ctxOf(api), { videos: Array.from({ length: 12 }, () => ({ asset_id: IDS.clipA })), account_ids: [IDS.tiktok], when: "now" });
-  assert.equal(many.count, 12); assert.match(many.question, new RegExp(`reply: YES ${many.code} 12\n`)); assert.match(many.question, /12 is how many/);
+  assert.equal(many.posts, 12); assert.ok(many.question.endsWith("Reply YES to go ahead, or NO."));
 });
 
 // A brain that does what the test tells it, so whole chats can be checked without an AI.
@@ -286,10 +282,6 @@ test("a whole chat: nobody but the owner, nothing without the YES, nothing twice
   await b.bot.handle({ chat: "1", from: "9", text: `y:${p.id}`, private: true, tap: true });
   assert.equal(b.api.acts.length, 0); assert.equal(st.pending.live?.id, p.id);
   await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true });
-  assert.match(b.sent.at(-1)!.text, /include the code/); assert.equal(b.api.acts.length, 0);
-  await b.bot.handle({ chat: "1", from: "1", text: `YES ${p.code === "KM" ? "KP" : "KM"}`, private: true });
-  assert.match(b.sent.at(-1)!.text, /doesn't match/); assert.equal(b.api.acts.length, 0);
-  await b.bot.handle({ chat: "1", from: "1", text: `yes ${p.code}`, private: true });
   assert.equal(b.api.acts.length, 1); assert.match(b.sent.at(-1)!.text, /^Started: Swap/);
   assert.equal(st.spend?.credits, 86); assert.equal(st.watches.length, 1);
   await b.bot.handle({ chat: "1", from: "1", text: `yes ${p.code}`, private: true });
@@ -336,7 +328,7 @@ test("talking about something else withdraws the waiting question, so a later ye
 test("a question that never reached the chat cannot be answered", async () => {
   // Telegram fails exactly when the question is sent: the person only ever sees "something went wrong"
   let fail = true;
-  const b = botWith(swapTurn, { failSend: (text) => fail && /reply: YES/.test(text) });
+  const b = botWith(swapTurn, { failSend: (text) => fail && /Reply YES to go ahead/.test(text) });
   b.state.owner = "1";
   await b.bot.handle({ chat: "1", from: "1", text: "swap the podcast clip", private: true });
   const st = chatOf(b.state, "1");
@@ -490,15 +482,11 @@ test("every caption move says where they were, so the chat remembers earlier spo
   assert.match((await prepareEdit(ctxOf(api), { asset_id: IDS.clipA, changes: { caption_y: 0.5 } })).question, /from 70% to 50% of the way down/);
 });
 
-test("a question is withdrawn after three wrong codes: guessing the 2-letter code doesn't pay", () => {
-  const s = store(), p = shownPending(s, { ...base, id: "g1" }, 1000);
-  const wrong = p.code === "BC" ? "BD" : "BC";
-  assert.equal(claim(s, { code: wrong }, 1001).why, "wrong_code");
-  assert.equal(claim(s, { code: wrong }, 1002).why, "wrong_code");
-  assert.equal(claim(s, { code: wrong }, 1003).why, "too_many");
+test("a YES with old-style letters still answers the one question waiting", () => {
+  const s = store(); shownPending(s, { ...base, id: "g1" }, 1000);
+  assert.equal(classify("yes km").kind, "yes");
+  assert.equal(claim(s, { code: "KM" }, 1001).ok, true);
   assert.equal(MAX_WRONG, 3);
-  assert.equal(s.live, null, "withdrawn");
-  assert.equal(claim(s, { code: p.code }, 1004).why, "nothing", "even the right code is too late");
 });
 
 test("their own AI app: a short fixed message, the saving first, then the links alone; the word stays blocked elsewhere", async () => {
@@ -552,10 +540,9 @@ test("their own AI app, review fixes: no links inside, short copy, safe link cha
   const b = botWith(async (st, _t, api) => ({ ...(await swapTurn(st, "", api)), after: [{ text: `Or make it there. To make it here instead, reply ${YES_MARK}.`, buttons: [], own: [] }] }));
   b.state.owner = "1";
   await b.bot.handle({ chat: "1", from: "1", text: "make it", private: true });
-  const iq = b.sent.findIndex((x) => /reply: YES/.test(x.text)), ia = b.sent.findIndex((x) => /Or make it there/.test(x.text));
+  const iq = b.sent.findIndex((x) => /Reply YES to go ahead/.test(x.text)), ia = b.sent.findIndex((x) => /Or make it there/.test(x.text));
   assert.ok(iq >= 0 && ia > iq, `question first (${iq}), then the extra (${ia})`);
-  const code = b.state.chats["1"].pending.live!.code;
-  assert.ok(b.sent[ia].text.endsWith(`reply YES ${code}.`), b.sent[ia].text);
+  assert.ok(b.sent[ia].text.endsWith("reply YES."), b.sent[ia].text);
   // a one-word message is not exempt: the reply cannot say a blocked word just because the person did
   const c = botWith(async () => ({ text: "Yes, Claude works with Clone8.", pending: null, usd: 0, rounds: 1 }));
   c.state.owner = "1";
@@ -564,13 +551,13 @@ test("their own AI app, review fixes: no links inside, short copy, safe link cha
   assert.ok(seen.includes(SAFE_LINE), seen.join(" | "));
 });
 
-test("their own AI app: a large question's count goes in the YES line", async () => {
+test("their own AI app: a large question is a plain YES too", async () => {
   const { YES_MARK } = await import("../src/text-bot/app-link.js");
   const b = botWith(async (st, _t, api) => { const r = await swapTurn(st, "", api); r.pending!.count = 3; return { ...r, after: [{ text: `Or there. To make it here instead, reply ${YES_MARK}.`, buttons: [], own: [] }] }; });
   b.state.owner = "1";
   await b.bot.handle({ chat: "1", from: "1", text: "make it", private: true });
   const p = b.state.chats["1"].pending.live!;
-  assert.ok(b.sent.some((x) => x.text.endsWith(`reply YES ${p.code} 3.`)), b.sent.map((x) => x.text).join(" | "));
+  assert.ok(p && b.sent.some((x) => x.text.endsWith("reply YES.")), b.sent.map((x) => x.text).join(" | "));
 });
 
 test("their own AI app: every request the bot builds is one the app's set-up page accepts", async () => {
@@ -741,4 +728,108 @@ test("big files: Telegram over 20 MB comes over Telegram's own protocol; too big
   st.awaitUploads = Date.now(); b.tick(3 * 60 * 60_000);
   await b.bot.handle({ chat: "1", from: "1", text: "hi", private: true } as any);
   assert.equal(st.awaitUploads, undefined);
+});
+
+test("auto-replies by text: with posts (reply only, no DM), on an account by itself, paused; a plain YES; no 'confirm' echo", async () => {
+  const { prepareAutoReply, prepareAutoReplySwitch } = await import("../src/text-bot/actions.js");
+  const api = mockApi(), now = Date.parse("2026-11-26T13:00:00Z");
+  const said = ["set auto reply - just reply no dm and make it say \"website is called: Clone8.io\""];
+  // the owner's Nov 26 message: comment GO, reply only, on these posts
+  const p = await preparePost(ctxOf(api, { now, timezone: "America/Los_Angeles", recentUserText: said }), { videos: [{ asset_id: IDS.clipA, when: "2026-11-26T10:45:00-08:00", caption: "Comment GO for the full guide." }, { asset_id: IDS.clipB, when: "2026-11-26T14:15:00-08:00", caption: "Want the full guide? Comment GO." }],
+    account_ids: [IDS.insta], autoreply: { keywords: ["GO"], reply: "website is called: Clone8.io", dm: false } });
+  assert.deepEqual(p.steps[0].body.autoreply, { keywords: ["GO"], comment_reply: "website is called: Clone8.io", dm: false });
+  assert.match(p.question, /Auto-reply on the account \(one rule that answers on every post there, old and new\): anyone who comments "GO" gets the public reply "website is called: Clone8\.io" \(no DM\)\. It starts as the posts go out\./);
+  assert.ok(p.question.endsWith("Reply YES to go ahead, or NO."));
+  // a DM on Instagram needs its words; TikTok needs a public reply
+  await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.insta], autoreply: { keywords: ["GO"], dm: true } }), /what the DM should say/);
+  await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.tiktok], autoreply: { keywords: ["GO"] } }), /public reply/);
+  await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.tiktok], autoreply: { keywords: [], reply: "hi" } }), /word people comment/);
+  // on an account by itself, then paused: only after the YES
+  const a = await prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["LINK"], reply: "Sent you the link", dm: false });
+  assert.deepEqual(a.steps[0], { method: "POST", path: "/api/studio/autoreply", body: { account_id: IDS.insta, platform: "instagram", name: "Keyword LINK", keywords: ["LINK"], match: "word", active: true, comment_reply: "Sent you the link", dm: false }, label: "autoreply" });
+  assert.match(a.question, /on every post, old and new: anyone who comments "LINK" gets the public reply "Sent you the link" \(no DM\)/);
+  const off = await prepareAutoReplySwitch(ctxOf(api, { now }), { rule_id: "rule-go", on: false });
+  assert.deepEqual(off.steps[0], { method: "PATCH", path: "/api/studio/autoreply/rule-go", body: { active: false }, label: "autoreply" });
+  await assert.rejects(prepareAutoReplySwitch(ctxOf(api, { now }), { rule_id: "nope", on: false }), /No such auto-reply/);
+  // through the bot: a plain yes sets it; a "confirm with the code" line from the AI is not sent
+  const b = botWith(async (st, _t, api2) => ({ text: "Confirm in the chat with the code to set it up.", usd: 0, rounds: 1, pending: await prepareAutoReply(ctxOf(api2, { store: st.pending }), { account_id: IDS.insta, keywords: ["LINK"], reply: "Sent you the link", dm: false }) }));
+  b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "set an auto reply for LINK", private: true });
+  assert.ok(!b.sent.some((x) => /Confirm in the chat/.test(x.text)), b.sent.map((x) => x.text).join(" | "));
+  await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true });
+  assert.equal(b.api.acts.length, 1); assert.equal(b.api.acts[0].path, "/api/studio/autoreply"); assert.equal(b.sent.at(-1)!.text, "The auto-reply is on.");
+});
+
+test("texted videos are measured (length, size) so length-priced tools can use them", async () => {
+  const { intake } = await import("../src/text-bot/intake.js");
+  const bodies: any[] = [];
+  const api: any = { call: async (_m: string, p: string, body: any) => { if (p.endsWith("/upload-url")) return { status: 200, json: { asset_id: "a1", path: "u/a1.mov", token: "t", bucket: "studio-uploads" } }; bodies.push(body); return { status: 200, json: { asset: { name: "x.mov" } } }; } };
+  const sb: any = { storage: { from: () => ({ uploadToSignedUrl: async () => ({ data: {}, error: null }) }) } };
+  const f: any = async () => new Response(new Uint8Array(2048));
+  await intake({ api, sb, fetch: f, files: [{ url: "https://cdn.sendblue.co/files/IMG_1.MOV" }, { url: "https://cdn.sendblue.co/files/IMG_2.jpg" }], probe: async () => ({ duration: 31.5, width: 1080, height: 1920 }) });
+  assert.deepEqual(bodies, [{ probe: { duration: 31.5, width: 1080, height: 1920 } }, { probe: {} }], "a video is measured, a picture is not");
+});
+
+test("review fixes: a YES that crossed its question, new files with a YES, the AI's own question, a late YES after more talk", async () => {
+  // a YES that reached the server before the question was on screen does not release it
+  const b = botWith(swapTurn); b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "swap it", private: true });
+  const st = chatOf(b.state, "1"), p = st.pending.live!;
+  assert.ok(p.shown_at);
+  await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true, at: p.shown_at! - 2000 } as any);
+  assert.equal(b.api.acts.length, 0); assert.match(b.sent.at(-1)!.text, /A new question just came in above/);
+  assert.equal(st.pending.live?.id, p.id, "still waiting");
+  // new files sent with a yes: not read as the answer
+  await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true, at: p.shown_at! + 5000, files: [{ asset_id: IDS.clipB, name: "b.mov", kind: "video" }] } as any);
+  assert.equal(b.api.acts.length, 0); assert.match(b.sent.at(-1)!.text, /reply YES on its own/);
+  // a plain yes after it was shown releases it
+  await b.bot.handle({ chat: "1", from: "1", text: "yes", private: true, at: p.shown_at! + 6000 } as any);
+  assert.equal(b.api.acts.length, 1);
+  // the AI's own question beside a waiting one is not sent
+  const c = botWith(async (st2, t, api) => ({ ...(await swapTurn(st2, t, api)), text: "Should I add Instagram too?" })); c.state.owner = "1";
+  await c.bot.handle({ chat: "1", from: "1", text: "swap it", private: true });
+  assert.ok(!c.sent.some((x) => /Instagram too/.test(x.text)), c.sent.map((x) => x.text).join(" | "));
+  // a yes after the question ran out: told so, unless something was said since (then it answers that)
+  const e = botWith(swapTurn); e.state.owner = "1";
+  await e.bot.handle({ chat: "1", from: "1", text: "swap it", private: true });
+  e.tick(PENDING_TTL_MS + 1000);
+  await e.bot.handle({ chat: "1", from: "1", text: "yes", private: true });
+  assert.match(e.sent.at(-1)!.text, /ran out of time/);
+  const est = chatOf(e.state, "1"); est.history.push({ role: "assistant", text: "Set it up again?", at: Date.now() + PENDING_TTL_MS + 5000 });
+  e.tick(1000);
+  await e.bot.handle({ chat: "1", from: "1", text: "yes", private: true });
+  assert.ok(!/ran out of time/.test(e.sent.at(-1)!.text), "answered as a reply to what was said since");
+});
+
+test("review fixes: auto-replies check the network, the plan's room and the permission before the YES, and say what happened after it", async () => {
+  const { prepareAutoReply } = await import("../src/text-bot/actions.js");
+  const { execute } = await import("../src/text-bot/actions.js");
+  const api = mockApi(), now = Date.parse("2026-11-26T13:00:00Z");
+  api.data.accounts.push({ id: "acc-x-1", platform: "twitter", username: "c8x", display_name: "x", image_url: null, profile_url: null });
+  await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: ["acc-x-1"], autoreply: { keywords: ["GO"], reply: "hi" } }), /doesn't allow auto-replies/);
+  // the plan's room
+  for (let i = 0; i < 9; i++) api.data.autoreplies.push({ id: `r${i}`, keywords: [`K${i}`], active: true });
+  await assert.rejects(prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["LINK"], reply: "x", dm: false }), /runs 10 auto-replies/);
+  // the same keywords already on the account: reused (no room needed), and said
+  api.data.autoreplies[0].account_id = IDS.insta;
+  const re = await preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }, { asset_id: IDS.clipB }], account_ids: [IDS.insta], autoreply: { keywords: ["go"], reply: "new words", dm: false } });
+  assert.match(re.question, /already has a "go" auto-reply: it gets these words instead/);
+  api.data.autoreplies.splice(1);
+  // no permission yet: with posts it waits (and says so); by itself it is refused with the link
+  api.data.cannotReply = [IDS.insta];
+  const w = await preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.insta], autoreply: { keywords: ["GO"], reply: "x", dm: false } });
+  assert.match(w.question, /starts by itself once you allow it/);
+  await assert.rejects(prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["LINK"], reply: "x", dm: false }), /Allow it on the Post page first/);
+  api.data.cannotReply = [];
+  // one post: named from the account's own posts, never from the AI's words
+  await assert.rejects(prepareAutoReply(ctxOf(api, { now }), { account_id: IDS.insta, keywords: ["LINK"], reply: "x", dm: false, post_id: "nope" }), /recent posts/);
+  // no auto-reply asked: none is set (a group's own is not added)
+  const plain = await preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.tiktok] });
+  assert.equal(plain.steps[0].body.autoreply, null);
+  // after the YES: where it went and where it didn't
+  const orig = api.call.bind(api);
+  const posted = await preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA, when: "2026-11-26T18:00:00Z" }], account_ids: [IDS.insta], autoreply: { keywords: ["GO"], reply: "x", dm: false } });
+  (api as any).act = async (_c: string, m: string, p: string, body: any) => (p === "/api/studio/social/posts" ? { status: 201, json: { posts: [{ id: "p1", status: "scheduled", schedule_at: "2026-11-26T18:00:00Z", platforms: ["instagram"] }], autoreply: { on: [], skipped: [{ platform: "instagram", username: "clone8test", reason: "limit" }] } } } : orig(m, p, body));
+  const out = await execute(api as any, posted, { now, timezone: "America/Los_Angeles" } as any);
+  assert.match(out.text, /Auto-reply not set on instagram @clone8test: your plan's auto-replies are all in use\./);
 });

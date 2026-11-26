@@ -22,7 +22,7 @@ export const READ: Array<[Method, RegExp]> = [
   ["GET", rx("/live/lookup")], ["GET", rx("/live/search")], ["GET", rx("/live/streams")],
   ["GET", rx("/instruments")], ["GET", rx("/styles")], ["GET", rx("/trends")], ["GET", rx("/voices")], ["GET", rx("/kage-motion/presets")],
   ["GET", rx("/stunts/config")], ["GET", rx("/reshoot/config")], ["GET", rx("/splitscreen/config")], ["GET", rx("/blueprints/config")],
-  ["GET", rx("/autoreply")], ["GET", rx("/automations")], ["GET", rx(`/automations/${ID}`)],
+  ["GET", rx("/autoreply")], ["GET", rx("/autoreply/posts")], ["GET", rx("/automations")], ["GET", rx(`/automations/${ID}`)],
   // the editor: opening a clip's edit file (it is made the first time a captioned copy or a split screen is opened, as in the app)
   ["GET", rx(`/projects/by-asset/${ID}`)], ["GET", rx(`/projects/by-job/${ID}`)], ["GET", rx(`/projects/${ID}`)], ["GET", rx(`/projects/${ID}/words`)],
   // reads that happen to be POSTs
@@ -38,6 +38,7 @@ export const ACT: Array<[Method, RegExp]> = [
   ["POST", rx("/social/posts")], ["PATCH", rx(`/social/posts/${ID}`)], ["DELETE", rx(`/social/posts/${ID}`)], ["POST", rx(`/social/posts/${ID}/retry`)],
   ["POST", rx("/social/captions/batch")], ["POST", rx(`/automations/${ID}/run`)],
   ["PUT", rx(`/projects/${ID}`)], ["POST", rx(`/projects/${ID}/render`)],
+  ["POST", rx("/autoreply")], ["PATCH", rx("/autoreply/[A-Za-z0-9_-]{1,64}")],
 ];
 export type Level = "read" | "light" | "act";
 export const pathOnly = (p: string) => p.split("?")[0].replace(/\/+$/, "");

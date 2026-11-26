@@ -344,7 +344,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         void say.typing(u.chat).catch(() => undefined);
         took = await intake({ api: serverApi(link.user_id, { port, fetch: deps.fetch }), sb, files: u.files, telegramToken: ch.name === "telegram" ? env.TELEGRAM_BOT_TOKEN ?? null : null, telegramBig: ch.name === "telegram" ? big : null, fetch: deps.fetch, log: log3, lock: takeFileLock });
       }
-      await bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file, ...(saidFirst ? { said_first: saidFirst } : {}),
+      await bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file, ...(u.received_at ? { at: u.received_at } : {}), ...(saidFirst ? { said_first: saidFirst } : {}),
         ...(took ? { files: took.got, file_errors: took.failed.map((x) => `${x.name}: ${whyText(x.why)}`), too_big: took.failed.filter((x) => x.why === "too_big" || x.why === "telegram_too_big").length } : {}) });
     }))) return "busy";
   }
@@ -386,7 +386,7 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         const batchy = got.some((g) => g.u && !g.u.callback_id && (g.u.files?.length || BATCH_HINT.test(g.u.text)));
         if (settleMs > 0 && batchy && quiet < settleMs) { settleSoon(settleMs - quiet + 300); continue; }
         // in a batch, messages a few seconds apart go together; otherwise each is its own, as is a tap on a button and
-        // anything the gate answers by itself (YES with its code, NO, STOP, HELP)
+        // anything the gate answers by itself (YES, NO, STOP, HELP)
         const own = (g: Got) => !g.u || !!g.u.callback_id || classify(g.u.text).kind !== "text";
         const parts: Got[][] = [];
         for (const g of got) {
@@ -416,7 +416,9 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
           todo.forEach((g) => inflight.add(g.id));
           // one message from the parts: their words in order, every file
           const firstU = todo.find((g) => g.u)?.u ?? null;
-          const u: Incoming | null = firstU && todo.length > 1 ? { ...firstU, text: todo.map((g) => g.u?.text ?? "").filter((t) => t.trim()).join("\n"), files: todo.flatMap((g) => g.u?.files ?? []), has_file: todo.some((g) => g.u?.has_file) } : firstU;
+          const u0: Incoming | null = firstU && todo.length > 1 ? { ...firstU, text: todo.map((g) => g.u?.text ?? "").filter((t) => t.trim()).join("\n"), files: todo.flatMap((g) => g.u?.files ?? []), has_file: todo.some((g) => g.u?.has_file) } : firstU;
+          // when it arrived (the last part): a YES that came before its question was on screen does not release it
+          const u: Incoming | null = u0 ? { ...u0, received_at: todo[todo.length - 1].at } : null;
           const next: Promise<void> = (chains.get(chat) ?? Promise.resolve()).then(async () => {
             let busy = false;
             try { if (u) busy = (await handleUpdate(sb, u, ch.name)) === "busy"; }

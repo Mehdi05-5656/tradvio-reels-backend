@@ -29,6 +29,7 @@ export function mockApi(now: () => number = Date.now): MockApi {
     projects: { [IDS.projA]: { id: IDS.projA, asset_id: IDS.clipA, job_id: null, rev: 3, rendered_rev: 3, render_state: "done", source: { kept: true },
       doc: { kind: "clip", source: { seconds: 60 }, trim: { in: 10, out: 38, keep: null }, layout: { type: "stacked", divider: 0.32, panes: [], path: [] }, captions: { on: false, style: null, keywords: true, fillers: true, censor: false, fixes: [] }, extras: { title: null, punch_in: null, pause_trim: false, bottom_loop: null }, sound: { level: -14, limiter: true, muted: [], bleep: "off" } } } } as Record<string, any>,
     words: ["eight", "hundred", "dollars", "if", "I", "die", "I", "die", "clone", "eight"].map((text, i) => ({ text, start: i * 0.4, end: i * 0.4 + 0.35 })),
+    autoreplies: [{ id: "rule-go", name: "Keyword GO", keywords: ["GO"], active: true, platform: "instagram" }] as any[],
     posts: [{ id: IDS.post, job_id: null, output_key: null, asset_id: IDS.clipA, caption: "Desert well, one hand, $800", platforms: ["tiktok"], options: { accounts: [{ id: IDS.tiktok, platform: "tiktok", username: "clone8test" }] }, schedule_at: iso(180, t), status: "scheduled", results: [], error: null, created_at: iso(-60, t), updated_at: iso(-60, t), poster_url: null }],
   };
   const acts: MockApi["acts"] = [], calls: MockApi["calls"] = [];
@@ -38,6 +39,10 @@ export function mockApi(now: () => number = Date.now): MockApi {
     if (method === "GET" && p === `${S}/me`) return ok({ subscription: { plan: { name: "Creator" }, status: "active", parallel_jobs: 2 }, active: true, balance: data.balance, usage_30d: { jobs: 12, credits: 640 }, ledger: [], connector: { url: "https://mcp.clone8.io/api/studio/mcp" } });
     if (method === "GET" && p === `${S}/social`) return ok({ enabled: true, connected: true, accounts: data.accounts, groups: [{ id: "g1", name: "Group A", account_ids: [IDS.tiktok, IDS.insta], missing: 0, networks: ["tiktok", "instagram"], defaults: { times: ["09:00", "12:30", "18:00"], timezone: "America/Los_Angeles", per_day: 3 } }], usage_today: {}, per_account_daily: 15 });
     if (method === "GET" && p === `${S}/social/posts`) return ok({ posts: data.posts });
+    if (method === "GET" && p === `${S}/autoreply`) return ok({ enabled: true, reply_only: true, limit: 10, used: data.autoreplies.filter((r: any) => r.active).length, rules: data.autoreplies,
+      accounts: data.accounts.map((x: any) => ({ id: x.id, platform: x.platform, username: x.username, dm: x.platform === "instagram", can_reply: !(data.cannotReply ?? []).includes(x.id), can_dm: x.platform === "instagram" && !(data.cannotReply ?? []).includes(x.id) })) });
+    if (method === "POST" && p === `${S}/autoreply`) { const r = { id: `own-${data.autoreplies.length + 1}`, name: body?.name, keywords: body?.keywords, active: true }; data.autoreplies.push(r); return ok({ rule: r }, 201); }
+    if (method === "PATCH" && /\/autoreply\/[A-Za-z0-9_-]+$/.test(p)) { const r = data.autoreplies.find((x: any) => p.endsWith(`/${x.id}`)); if (!r) return ok({ error: "not_found" }, 404); r.active = body?.active !== false; return ok({ rule: r }); }
     if (method === "GET" && p === `${S}/jobs`) return ok({ jobs: data.jobs });
     if (method === "GET" && /\/jobs\/[0-9a-f-]{36}$/.test(p)) { const j = data.jobs.find((x: any) => p.endsWith(x.id)); return j ? ok({ job: j }) : ok({ error: "job_not_found" }, 404); }
     if (method === "GET" && p === `${S}/assets`) return ok({ assets: data.assets, next_before: null });

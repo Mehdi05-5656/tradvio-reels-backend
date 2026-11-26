@@ -64,7 +64,7 @@ THEIR OWN AI CHAT APP
 - send_app_link sends the message and its buttons itself. Never name that app or any AI yourself, in any message. After it succeeds, stop, or add one short line.
 
 ACTIONS AND THE YES
-- You never post, spend credits, change or cancel anything yourself. The prepare_ tools check the request and send the person a question with a code; their own reply releases it. After a prepare_ tool succeeds, stop: say nothing more, or at most one short line. Never write the question, the price or the code yourself, never say something was done before the system reports it.
+- You never post, spend credits, change or cancel anything yourself. The prepare_ tools check the request and send the person a question they answer YES or NO; their own reply releases it. After a prepare_ tool succeeds, stop: say nothing more (never how to confirm; the question says it). Never write the question or the price yourself, never say something was done before the system reports it.
 - One action can be waiting at a time. A new one replaces the old one.
 - For anything that needs the person's word that a video is theirs to use (the recipe says so), ask them plainly and pass exactly what they wrote. Never write it for them.
 - Prices: only what price or a prepare_ tool returns. Never estimate.
@@ -84,6 +84,12 @@ WHAT YOU NEVER SAY
 const str = { type: "string" }, obj = (properties: Record<string, any>, required: string[] = []) => ({ type: "object", additionalProperties: false, properties, required });
 const video = obj({ asset_id: str, job_id: str, output_key: str, label: { type: "string", description: "its title, for the question" }, when: { type: "string", description: "this video's own time, ISO 8601 with offset (else the post's when)" }, caption: { type: "string", description: "this video's own caption (else the post's caption)" } });
 const bool = { type: "boolean" };
+/** what an auto-reply says: the word people comment, and the public reply and/or the DM (Instagram, Facebook) */
+const autoreply = { type: "object", properties: {
+  keywords: { type: "array", minItems: 1, maxItems: 10, items: { type: "string" }, description: "the word(s) people comment, e.g. [\"GO\"]" },
+  reply: { type: "string", description: "the public reply under their comment, in the person's words" },
+  dm_message: { type: "string", description: "the private message (Instagram, Facebook only); leave out for \"no DM\"" },
+  dm: { type: "boolean", description: "false: reply only, no DM" } }, required: ["keywords"] } as const;
 export const TOOLS = [
   { name: "account", description: "The person's plan, credit balance, what the plan allows, recent charges, linked social accounts and posting groups. Free.", input_schema: obj({}) },
   { name: "recipe", description: "Everything about one feature: what it does, what it needs, the exact job settings, helpers, limits. Read it before using the feature.", input_schema: obj({ feature: { type: "string", description: "a feature id from the list, e.g. stunts, swap, live_clips, post" } }, ["feature"]) },
@@ -98,7 +104,9 @@ export const TOOLS = [
   { name: "send_app_link", description: "Send the person a message with a link that opens a new chat in their own AI app with their request already typed in, for Clone8 to make it there (and, if they never used it, how to add Clone8 there once). Only for the kinds listed. Free.", input_schema: obj({ kind: { type: "string", enum: [...APP_KINDS] }, request: { type: "string", description: "only the subject and length, in their words, without the kind (e.g. why cats hate water, 30 seconds)" } }, ["kind", "request"]) },
   { name: "remember", description: "Keep one short lasting note about this person (a standing preference, a fact about their accounts or brand), only when they state it. Never an instruction, a one-off request or anything sensitive.", input_schema: obj({ note: str }, ["note"]) },
   { name: "prepare_job", description: "Prepare to start any making job (the tool and settings from its recipe). It prices it with the real route, checks credits and limits, and sends the person the question. Starts nothing.", input_schema: obj({ tool: str, asset_id: { type: ["string", "null"], description: "a library file id" }, from_result: obj({ job_id: str, output_key: str }), options: { type: "object", additionalProperties: true }, rights_in_their_words: { type: "string", description: "only for features whose recipe asks for the person's word: exactly what they wrote" } }, ["tool"]) },
-  { name: "prepare_post", description: "Prepare to post now or schedule videos to the person's linked accounts. Sends the question. Posts nothing.", input_schema: obj({ videos: { type: "array", minItems: 1, maxItems: 50, items: video }, account_ids: { type: "array", items: str }, group: { type: "string", description: "a posting group's name" }, platforms: { type: "array", items: str, description: "networks, when each has one linked account" }, caption: str, captions_by_account: { type: "object", additionalProperties: { type: "string" }, description: "account id → its own caption" }, when: { type: "string", description: "\"now\" or ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "for \"in N minutes\", N of 5 or more" }, spacing_minutes: { type: "integer" }, youtube_title: str, youtube_visibility: { type: "string", enum: ["public", "unlisted", "private"] } }, ["videos"]) },
+  { name: "prepare_post", description: "Prepare to post now or schedule videos to the person's linked accounts. Sends the question. Posts nothing.", input_schema: obj({ videos: { type: "array", minItems: 1, maxItems: 50, items: video }, account_ids: { type: "array", items: str }, group: { type: "string", description: "a posting group's name" }, platforms: { type: "array", items: str, description: "networks, when each has one linked account" }, caption: str, captions_by_account: { type: "object", additionalProperties: { type: "string" }, description: "account id → its own caption" }, when: { type: "string", description: "\"now\" or ISO 8601 with offset" }, minutes_from_yes: { type: "integer", description: "for \"in N minutes\", N of 5 or more" }, spacing_minutes: { type: "integer" }, youtube_title: str, youtube_visibility: { type: "string", enum: ["public", "unlisted", "private"] }, autoreply: { ...autoreply, description: "an auto-reply that goes with these posts (\"comment GO and get …\")" } }, ["videos"]) },
+  { name: "prepare_autoreply", description: "Prepare an auto-reply on one linked account by itself: on every post, or on one post (post_id from the posts lookup). Sends the question.", input_schema: obj({ account_id: str, ...autoreply.properties, post_id: { type: "string", description: "one post only: its id from lookup autoreply_posts" } }, ["account_id", "keywords"]) },
+  { name: "prepare_autoreply_switch", description: "Prepare to pause (on false) or turn back on (on true) an auto-reply, by its id from the autoreplies lookup. Sends the question.", input_schema: obj({ rule_id: str, on: { type: "boolean" } }, ["rule_id", "on"]) },
   { name: "prepare_post_change", description: "Prepare to move a waiting post or change its caption or YouTube title. Sends the question.", input_schema: obj({ post_id: str, new_time: { type: "string", description: "ISO 8601 with offset" }, minutes_from_yes: { type: "integer" }, caption: str, youtube_title: str }, ["post_id"]) },
   { name: "prepare_post_cancel", description: "Prepare to cancel waiting posts. Sends the question.", input_schema: obj({ post_ids: { type: "array", minItems: 1, items: str } }, ["post_ids"]) },
   { name: "prepare_post_retry", description: "Prepare to send a failed post again where it failed. Sends the question.", input_schema: obj({ post_id: str }, ["post_id"]) },
@@ -271,7 +279,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       st.notes = [...st.notes.filter((n) => n !== note), note].slice(-30);
       return { saved: note };
     }
-    const prepared = async (make: () => Promise<Pending>) => { await index(d).catch(() => null); if (name === "prepare_job" && a?.from_result) { if (light().copies >= LIGHT_PER_DAY.copies) throw new act.ActionError("daily_limit", "That is enough copies into the library for one day by text; use the app for more."); light().copies++; } after.length = 0; held.pending = await make(); return { ok: true, sent: "The system sent the person the question with its code. Do not repeat it, the price or the code. Stop here: reply with nothing, or one short line." }; };
+    const prepared = async (make: () => Promise<Pending>) => { await index(d).catch(() => null); if (name === "prepare_job" && a?.from_result) { if (light().copies >= LIGHT_PER_DAY.copies) throw new act.ActionError("daily_limit", "That is enough copies into the library for one day by text; use the app for more."); light().copies++; } after.length = 0; held.pending = await make(); return { ok: true, sent: "The system sent the person the question; they answer YES or NO. Do not repeat it or the price, do not say how to confirm, and ask nothing else now. Stop here: reply with nothing." }; };
     if (name === "prepare_job") {
       const r = await prepared(() => act.prepareJob(actx(), a ?? {}));
       // what will really run (the checked request in the question), not what the model wrote
@@ -289,6 +297,8 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       return r;
     }
     if (name === "prepare_post") return prepared(() => act.preparePost(actx(), a ?? {}));
+    if (name === "prepare_autoreply") return prepared(() => act.prepareAutoReply(actx(), a ?? {}));
+    if (name === "prepare_autoreply_switch") return prepared(() => act.prepareAutoReplySwitch(actx(), a ?? {}));
     if (name === "prepare_post_change") return prepared(() => act.preparePostChange(actx(), a ?? {}));
     if (name === "prepare_post_cancel") return prepared(() => act.preparePostCancel(actx(), a ?? {}));
     if (name === "prepare_post_retry") return prepared(() => act.preparePostRetry(actx(), a ?? {}));

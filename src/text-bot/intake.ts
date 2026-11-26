@@ -9,6 +9,10 @@
 //             one comes over Telegram's own protocol (telegram-big.ts) when TELEGRAM_API_ID/HASH are set; without
 //             them the person gets the upload page.
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Api } from "./routes.js";
 import type { BigDownload } from "./telegram-big.js";
 
@@ -68,9 +72,34 @@ async function readCapped(r: Response, max: number): Promise<Buffer | "too_big" 
 }
 export const MAX_FILES = 20;
 
+export type Probe = { duration?: number; width?: number; height?: number };
+/** A video's length and size, measured on the server (the website's uploader measures them in the browser; a texted
+ *  file had none, so tools priced or cut by length could not use it). Null when it can't be read; never throws. */
+export async function probeVideo(bytes: Buffer, name: string): Promise<Probe | null> {
+  let dir: string | null = null;
+  try {
+    dir = await mkdtemp(join(tmpdir(), "text-probe-"));
+    const file = join(dir, /\.mov$/i.test(name) ? "in.mov" : "in.mp4");
+    await writeFile(file, bytes);
+    const raw = await new Promise<string>((res, rej) => {
+      const c = spawn("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:stream_side_data=rotation:format=duration", "-of", "json", file], { stdio: ["ignore", "pipe", "ignore"] });
+      let out = ""; const t = setTimeout(() => { c.kill("SIGKILL"); rej(new Error("probe_timeout")); }, 30_000);
+      c.stdout.on("data", (d) => { out += d; }); c.on("error", (e) => { clearTimeout(t); rej(e); }); c.on("close", (code) => { clearTimeout(t); code === 0 ? res(out) : rej(new Error(`ffprobe ${code}`)); });
+    });
+    const j = JSON.parse(raw), s = j?.streams?.[0] ?? {};
+    const rot = Math.abs(Number((s.side_data_list ?? []).find((x: any) => x?.rotation != null)?.rotation ?? 0)) % 180 === 90;
+    const out: Probe = {}, dur = Number(j?.format?.duration), w = Number(s.width), h = Number(s.height);
+    if (Number.isFinite(dur) && dur > 0) out.duration = Math.round(dur * 1000) / 1000;
+    if (w > 0 && h > 0) { out.width = rot ? h : w; out.height = rot ? w : h; }
+    return Object.keys(out).length ? out : null;
+  } catch { return null; }
+  finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
+}
+
 export async function intake(o: { api: Api; sb: SupabaseClient; files: InFile[]; telegramToken?: string | null; fetch?: typeof fetch; now?: Date; log?: (e: string, d?: Record<string, unknown>) => void;
   /** the server's file lock: one turn moves files at a time, so memory stays bounded */ lock?: () => Promise<() => void>;
-  /** Telegram files over 20 MB, fetched over Telegram's own protocol (telegram-big.ts); absent: they get the upload link */ telegramBig?: BigDownload | null }): Promise<Intake> {
+  /** Telegram files over 20 MB, fetched over Telegram's own protocol (telegram-big.ts); absent: they get the upload link */ telegramBig?: BigDownload | null;
+  /** measures a video (test seam; default ffprobe) */ probe?: (bytes: Buffer, name: string) => Promise<Probe | null> }): Promise<Intake> {
   const f = o.fetch ?? fetch, out: Intake = { got: [], failed: [] };
   for (const extra of o.files.slice(MAX_FILES)) out.failed.push({ name: extra.name || "a file", why: "too_many" });
   const free = o.lock ? await o.lock() : null;
@@ -123,7 +152,8 @@ export async function intake(o: { api: Api; sb: SupabaseClient; files: InFile[];
       if (up.json?.existing) { out.got.push({ asset_id: String(up.json.asset_id), name: String(up.json.existing.name ?? name), kind }); continue; }
       const put = await o.sb.storage.from(String(up.json.bucket ?? "studio-uploads")).uploadToSignedUrl(String(up.json.path), String(up.json.token), bytes, { contentType: typeOf(name), upsert: false });
       if (put.error) { out.failed.push({ name, why: "store_failed" }); o.log?.("intake_store_failed", { detail: String(put.error.message).slice(0, 160) }); continue; }
-      const done = await o.api.call("POST", `/api/studio/assets/${up.json.asset_id}/complete`, { probe: {} });
+      const measured = kind === "video" ? await (o.probe ?? probeVideo)(bytes, name).catch(() => null) : null;
+      const done = await o.api.call("POST", `/api/studio/assets/${up.json.asset_id}/complete`, { probe: measured ?? {} });
       if (done.status !== 200) { out.failed.push({ name, why: String(done.json?.error ?? `http_${done.status}`) }); continue; }
       out.got.push({ asset_id: String(up.json.asset_id), name: String(done.json?.asset?.name ?? name), kind });
     } catch (e: any) { out.failed.push({ name: label, why: /timeout|abort/i.test(String(e?.name ?? e?.message)) ? "too_slow" : "unreadable" }); }

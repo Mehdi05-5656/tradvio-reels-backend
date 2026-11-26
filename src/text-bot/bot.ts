@@ -18,7 +18,8 @@ export type Msg = { chat: string; from: string; text: string; private: boolean; 
   /** files sent with it, already in the library (src/text-bot/intake.ts), in the order sent; and those that could not be */
   files?: Array<{ asset_id: string; name: string; kind: string }>; file_errors?: string[];
   /** how many files were too big for the chat (the person is sent to the upload page, and their uploads picked up) */ too_big?: number;
-  /** what the server already said in the chat about these files ("Saving them…"), so the bot knows it was said */ said_first?: string };
+  /** what the server already said in the chat about these files ("Saving them…"), so the bot knows it was said */ said_first?: string;
+  /** when the message reached the server (ms): a YES sent before its question was on screen does not release it */ at?: number };
 export type BotDeps = {
   cfg: Config; api: Api; out: Transport; state: BotState; /** may be async (the backend writes to its database); awaited where it matters */ save: () => void | Promise<void>; now?: () => number;
   think: (st: ChatState, text: string, o?: { tap?: boolean }) => Promise<TurnResult>;
@@ -29,7 +30,7 @@ export type BotDeps = {
 
 export const HELP = [
   "I'm Clone8 in your texts. Tell me what you want to make, post or check, in your own words.",
-  "I ask before anything is posted, changed or costs credits: you answer YES with the code I give.",
+  "I ask before anything is posted, changed or costs credits: you answer YES or NO.",
   "NO leaves things as they are. STOP pauses the messages I'd send on my own (like results being ready); RESUME turns them back on.",
   "Plans, payments and linking accounts are in the app: https://app.clone8.io",
   "Help: support@clone8.io. Message frequency varies with what you ask; message and data rates may apply.",
@@ -69,12 +70,11 @@ export function makeBot(d: BotDeps) {
     // a question the person could not read in full must not be answerable: if the wording check would blank it, it is dropped
     const hit = blanked(p.question, p.own);
     if (hit) { decline(st.pending); d.log("pending_unsafe", { id: p.id, hit }); await say(st, "I couldn't set that one up from here. Start it in the app: https://app.clone8.io"); return; }
-    // a large action has no Yes button (its count must be typed)
-    await d.out.text(st.chat, p.question, p.count == null ? [{ label: "Yes, go ahead", data: `y:${p.id}` }, { label: "No", data: `n:${p.id}` }] : [{ label: "No", data: `n:${p.id}` }], p.own);
+    await d.out.text(st.chat, p.question, [{ label: "Yes, go ahead", data: `y:${p.id}` }, { label: "No", data: `n:${p.id}` }], p.own);
     // only now, with the question in the chat, can a reply release it
-    markShown(st.pending, p.id);
-    // the brain sees that a question is waiting and what it says, but not its code: it has no reason to repeat or reword it
-    note(st, `The system asked the person to confirm (the code is in their chat, not here): ${p.question.split("\n").slice(0, -1).join(" / ")}`);
+    markShown(st.pending, p.id, now());
+    // the brain sees that a question is waiting and what it says: it has no reason to repeat or reword it
+    note(st, `The system asked the person to confirm with YES or NO: ${p.question.split("\n").slice(0, -1).join(" / ")}`);
     d.log("pending", { id: p.id, kind: p.kind, credits: p.credits, posts: p.posts, question: p.question, steps: p.steps.map((s) => ({ method: s.method, path: s.path, body: s.body })) });
     await d.save();
   };
@@ -177,7 +177,7 @@ export function makeBot(d: BotDeps) {
         // while a question waits, a late file never withdraws it: it is added, and the person is told
         if (late && st.pending.live) {
           note(st, `${m.files!.length} more file${m.files!.length === 1 ? "" : "s"} arrived after the question was asked; now ${st.table.length} in all: ${m.files!.map((f) => `${JSON.stringify(f.name)} [f:${f.asset_id}]`).join("; ")}. The waiting question covers only the earlier ones.`);
-          await say(st, `Got ${m.files!.length} more (${st.table.length} in all). The question that's waiting covers the first ${st.table.length - m.files!.length}; reply YES with its code for those, or tell me to redo it with all ${st.table.length}.`);
+          await say(st, `Got ${m.files!.length} more (${st.table.length} in all). The question that's waiting covers the first ${st.table.length - m.files!.length}; reply YES for those, or tell me to redo it with all ${st.table.length}.`);
           return;
         }
         note(st, [m.files?.length ? `The person sent ${m.files.length} file${m.files.length === 1 ? "" : "s"} in the chat; ${m.files.length === 1 ? "it is" : "they are"} now in their library, numbered in the order sent: ${m.files.map((f, i) => `${i + 1}. ${JSON.stringify(f.name)} (${f.kind}) [f:${f.asset_id}]`).join("; ")}.` : "",
@@ -193,17 +193,24 @@ export function makeBot(d: BotDeps) {
       if (gate.kind === "stop" || gate.kind === "pause") { st.muted = true; d.log("muted", { from: m.from }); await d.out.text(m.chat, gate.kind === "stop" ? "Okay. I won't message you on my own (results, updates) until you say RESUME. If you text me, I'll still answer that message. Nothing that is running was cancelled." : "Quiet until you say RESUME: I'll only answer what you text me. Your runs keep going."); return; }
       if (gate.kind === "resume") { st.muted = false; const missed = st.missed ?? []; st.missed = []; await say(st, missed.length ? `I'm back. While I was quiet:\n${missed.join("\n")}` : "I'm back. What do you need?"); return; }
       if (gate.kind === "yes") {
-        if (!st.pending.live) { if (gate.code) { await say(st, "Nothing is waiting for a YES right now."); return; } return await talk(st, m.text); }
+        // a YES for a question that just ran out of time is told so (not read as a new request), unless something was
+        // said since (then the YES answers that)
+        if (!st.pending.live) {
+          const last = st.pending.past[0], saidSince = !!last && st.history.some((h) => h.role === "assistant" && h.at > last.created_at);
+          if (gone || (last?.status === "expired" && t - last.expires_at < 30 * 60_000 && !saidSince)) { await say(st, "That question ran out of time (10 minutes). Ask me again and I'll set it up."); return; }
+          return await talk(st, m.text);
+        }
+        const live = st.pending.live;
+        // new files with the YES: the question is about the earlier ones, so this YES can't be read as its answer
+        if (m.files?.length) { note(st, "The person sent new files with a YES while a question about earlier ones was waiting; nothing was released."); await say(st, `Got ${m.files.length === 1 ? "it" : `all ${m.files.length}`}. The question above is about the earlier ${live.posts === 1 ? "video" : "videos"}: reply YES on its own to go ahead with it, or tell me what to do with the new ${m.files.length === 1 ? "one" : "ones"}.`); return; }
+        // a YES typed before the question was on screen was meant for something else (it crossed in the chat)
+        if (m.at && live.shown_at && m.at < live.shown_at + 1500) { d.log("yes_before_question", { id: live.id }); await say(st, "A new question just came in above. Read it and reply YES if it's right, or NO."); return; }
         st.history.push({ role: "user", text: m.text, at: t });
         const r = claim(st.pending, { code: gate.code, count: gate.count }, t);
         if (r.ok) return await release(st, r.pending, "text");
         const p = r.pending;
         if (r.why === "too_many") d.log("pending_wrong_codes", { id: p?.id ?? null });
-        await say(st, r.why === "too_many" ? "That was the third wrong code, so I withdrew the question and nothing was done. Ask me again and I'll set it up with a new code."
-          : r.why === "expired" ? "That question ran out of time (10 minutes). Ask me again and I'll set it up."
-          : r.why === "no_code" && p ? `To be sure it's this one, include the code. ${howToAnswer(p)}`
-          : r.why === "wrong_code" && p ? `That code doesn't match the question that is waiting. ${howToAnswer(p)}`
-          : (r.why === "need_count" || r.why === "wrong_count") && p ? `This one is large, so the count goes with it. ${howToAnswer(p)}` : "Nothing is waiting for a YES right now.");
+        await say(st, r.why === "expired" ? "That question ran out of time (10 minutes). Ask me again and I'll set it up." : "Nothing is waiting for a YES right now.");
         return;
       }
       // "cancel" with nothing waiting reads as "stop texting me": honoured as STOP
@@ -243,12 +250,17 @@ export function makeBot(d: BotDeps) {
     // what the person typed and what is on the table are theirs: quoting them back is not a leak
     // (a short message is not: a one-word "Claude?" must not let the reply say it)
     const own = [...(text.trim().split(/\s+/).length >= 4 && text.length >= 20 ? [text] : []), ...st.table.map((x) => x.label)];
-    if (r.text) await say(st, r.text, undefined, own);
+    // with a question going out, a line that only says how to confirm repeats it ("Confirm in the chat with the code"): dropped
+    // with a question going out, the AI's own words go only if they neither repeat how to confirm nor ask anything
+    // (a YES meant for the AI's question would release the waiting one)
+    const echo = !!r.pending && !!r.text && ((r.text.length < 160 && /\b(confirm|reply|yes|code|go ahead)\b/i.test(r.text)) || /\?/.test(r.text));
+    if (echo) d.log("text_dropped_beside_question", { text: r.text!.slice(0, 300) });
+    if (r.text && !echo) await say(st, r.text, undefined, own);
     if (r.pending && st.pending.live?.id === r.pending.id) {
       await ask(st, r.pending);
       // what goes with the question (the "or make it in your own AI app" message), only if the question went out
       if (st.pending.live?.id === r.pending.id) for (const x of r.after ?? []) {
-        const p = r.pending!, fill = (s: string) => s.split(YES_MARK).join(`YES ${p.code}${p.count != null ? ` ${p.count}` : ""}`);
+        const fill = (s: string) => s.split(YES_MARK).join("YES");
         await d.out.text(st.chat, fill(x.text), x.buttons, x.own.map(fill)).catch(() => undefined);
       }
     } else if (!r.text) await say(st, "I didn't get that. Could you say it another way?");

@@ -9,7 +9,7 @@
 //   - the signing secret is sent as-is "in the request headers" (the header's name is not documented): any header whose
 //     value is exactly the secret is accepted, compared in constant time;
 //   - typing: POST /api/send-typing-indicator {number, from_number}.
-// iMessage has no buttons: a question already says "reply YES XM"; a link button becomes a line with the link; a copy
+// iMessage has no buttons: a question already says "Reply YES to go ahead, or NO."; a link button becomes a line with the link; a copy
 // button is dropped (its text is in the message). Every message goes through the supplier-word guard, as on Telegram.
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Button, Media, Transport } from "./brain.js";

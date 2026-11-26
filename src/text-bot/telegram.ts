@@ -5,7 +5,7 @@ import type { Button, Media, Transport } from "./brain.js";
 import { BUTTON_LINK, guard } from "./guard.js";
 import type { InFile } from "./intake.js";
 
-export type Incoming = { update_id: number; chat: string; from: string; name: string; text: string; message_id: number | null; callback_id?: string; private: boolean; has_file?: boolean;
+export type Incoming = { update_id: number; chat: string; from: string; name: string; text: string; message_id: number | null; callback_id?: string; private: boolean; has_file?: boolean; /** when the server got it (ms) */ received_at?: number;
   /** files that came with it (src/text-bot/intake.ts takes them into the library) */ files?: InFile[] };
 type Btn = Button;
 // (links only to Clone8's own app and the fixed AI-app links; a copy button puts its text on the person's clipboard)

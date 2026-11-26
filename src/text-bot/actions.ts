@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { Api, Reply } from "./routes.js";
 import { setPending, howToAnswer, spendRoom, type Check, type Pending, type PendingStore, type Spend, type Step } from "./gate.js";
 import { toolName } from "./account.js";
+import { REPLY_NETWORKS } from "../social-zernio.js";
 
 export class ActionError extends Error { constructor(public code: string, message: string) { super(message); } }
 export type VideoRef = { asset_id?: string; job_id?: string; output_key?: string; /** this video's own time and caption (else the post's) */ when?: string | null; caption?: string | null };
@@ -149,7 +150,7 @@ type Account = { id?: string; platform: string; username: string | null; refresh
 const handle = (a: Account) => `${a.platform}${a.username ? ` @${a.username}` : ""}`;
 
 export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids?: string[]; group?: string | null; platforms?: string[]; caption?: string | null; captions_by_account?: Record<string, string>;
-  when?: "now" | string | null; minutes_from_yes?: number | null; spacing_minutes?: number | null; youtube_title?: string | null; youtube_visibility?: string | null }): Promise<Pending> {
+  when?: "now" | string | null; minutes_from_yes?: number | null; spacing_minutes?: number | null; youtube_title?: string | null; youtube_visibility?: string | null; autoreply?: AutoReplyIn | null }): Promise<Pending> {
   const videos = (Array.isArray(a.videos) ? a.videos : []).filter((v) => (v.asset_id && UUID.test(v.asset_id)) || (v.job_id && UUID.test(v.job_id) && v.output_key)).slice(0, 50);
   if (!videos.length) throw new ActionError("no_video", "Say which video: a library file (asset_id) or a result (job_id and output_key) from find or item");
   // each video is named from the account's own records: a video the account does not have cannot be posted, and the
@@ -203,6 +204,11 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
     ...(perAccount.length ? { captions_by_account: Object.fromEntries(perAccount) } : {}), ...(gap ? { spacing_minutes: gap } : {}),
     ...(ytTitle || ytSee ? { options: { youtube: { ...(ytTitle ? { title: ytTitle } : {}), ...(ytSee ? { visibility: ytSee } : {}) } } } : {}),
     ...(at ? { schedule_at: new Date(at).toISOString() } : {}) };
+  // an auto-reply that goes with the posts (the website's own "auto-reply" on a post): set up as each one goes out
+  const ar = a.autoreply ? await autoReplyFor(ctx, a.autoreply, accounts, videos.length) : null;
+  if (ar) body.autoreply = ar.spec;
+  // none asked for: none set (a group's own auto-reply is not added by text, as the question says)
+  else body.autoreply = null;
   const whenWords = rel ? `${rel} minutes after your YES` : at ? when(at, ctx.timezone, ctx.now) : "now";
   // the wording check leaves alone only what is the person's own: titles from their account, and captions they typed
   // themselves (a caption the AI wrote is checked like any other words, so it can't carry a supplier's name out)
@@ -219,8 +225,9 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
       ...perAccount.map(([id, c]) => `${handle(accounts.find((x) => x.id === id)!)} gets its own caption on every one: "${c}"`),
       ...(hasYouTube ? [`YouTube: ${ytTitle ? `title "${ytTitle}", ` : ""}${ytSee ?? "public"}.`] : []),
       ...(viaGroup ? ["The group's own sign-off and spacing are not added by text yet."] : []),
+      ...(ar ? ar.lines : []),
       anyNow ? "It can't be pulled back once it is out." : "A time can shift a little later to keep 30 minutes between posts on one account."];
-    return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: mine, steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
+    return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: [...mine, ...(ar?.own ?? [])], steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
       checks: [{ kind: "accounts_linked", account_ids: accounts.map((x) => x.id!) }], meta: { minutes_from_yes: rel }, body: lines2.join("\n") });
   }
   const lines = [
@@ -230,10 +237,111 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
     ...perAccount.map(([id, c]) => `${handle(accounts.find((x) => x.id === id)!)} gets its own caption: "${c}"`),
     ...(hasYouTube ? [`YouTube: ${ytTitle ? `title "${ytTitle}", ` : ""}${ytSee ?? "public"}.`] : []),
     ...(viaGroup ? ["The group's own sign-off and spacing are not added by text yet."] : []),
+    ...(ar ? ar.lines : []),
     at || rel ? "A time can shift a little later to keep 30 minutes between posts on one account." : "It can't be pulled back once it is out.",
   ];
-  return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: mine, steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
+  return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: [...mine, ...(ar?.own ?? [])], steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
     checks: [{ kind: "accounts_linked", account_ids: accounts.map((x) => x.id!) }], meta: { minutes_from_yes: rel }, body: lines.join("\n") });
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Auto-replies: someone comments a keyword, they get a reply (owner, Nov 26 2026: "comment GO … set auto reply, just
+// reply no dm"). With posts (on those posts, as the Post page does) or on an account by itself (as the Auto-replies page
+// does). The same routes and rules as the website; the question shows the exact words before anything is set.
+// ---------------------------------------------------------------------------------------------------
+export type AutoReplyIn = { keywords: string[]; reply?: string | null; dm_message?: string | null; dm?: boolean | null };
+const DM_NETS = ["instagram", "facebook"];
+function cleanAutoReply(ctx: Ctx, a: AutoReplyIn) {
+  const keywords = [...new Set((Array.isArray(a?.keywords) ? a.keywords : []).map((k) => String(k ?? "").replace(/^["'“”]+|["'“”]+$/g, "").trim()).filter(Boolean))].slice(0, 10);
+  if (!keywords.length) throw new ActionError("keywords_required", "Say the word people comment (for example GO)");
+  if (keywords.some((k) => k.length > 40)) throw new ActionError("keyword_too_long", "A keyword can be 40 characters at most");
+  const reply = String(a?.reply ?? "").trim(), dmMessage = String(a?.dm_message ?? "").trim();
+  if (reply.length > 500) throw new ActionError("reply_too_long", "The public reply can be 500 characters at most");
+  if (dmMessage.length > 1000) throw new ActionError("dm_too_long", "The DM can be 1,000 characters at most");
+  // no DM unless a DM's words were given (the person's "just reply, no DM")
+  const dm = a?.dm === false ? false : a?.dm === true ? true : !!dmMessage;
+  const typed = (c: string) => !!c && (ctx.recentUserText ?? []).some((t) => t.replace(/\s+/g, " ").toLowerCase().includes(c.replace(/\s+/g, " ").toLowerCase()));
+  return { keywords, reply, dmMessage, dm, own: [...keywords, reply, dmMessage].filter((x) => x && typed(x)) };
+}
+const what = (c: { reply: string; dmMessage: string; dm: boolean }, net: string) => DM_NETS.includes(net) && c.dm
+  ? `gets the DM "${c.dmMessage}"${c.reply ? ` and the public reply "${c.reply}"` : ""}`
+  : `gets the public reply "${c.reply}"${DM_NETS.includes(net) ? " (no DM)" : ""}`;
+/** Whether each account can take it: the network has comment replies, Clone8 has been allowed to answer there, and
+ *  the plan has room (a rule with the same keywords already on the account is reused, as the server does). */
+async function autoReplyRoom(ctx: Ctx, accounts: Account[], c: { keywords: string[]; reply: string; dmMessage: string; dm: boolean }, o: { withPosts: boolean }) {
+  const r = await ctx.api.call("GET", "/api/studio/autoreply");
+  if (r.status !== 200 || !r.json?.enabled) throw new ActionError("autoreply_off", "Auto-replies are not available right now");
+  const rows: any[] = r.json.accounts ?? [], rules: any[] = r.json.rules ?? [];
+  const keys = c.keywords.map((k) => k.toLowerCase()).sort().join("|");
+  const notes: string[] = [], reused: Account[] = [];
+  for (const acc of accounts) {
+    const dmNet = DM_NETS.includes(acc.platform);
+    if (!REPLY_NETWORKS.includes(acc.platform)) throw new ActionError("autoreply_not_supported", `${handle(acc)}: that network doesn't allow auto-replies. They work on Instagram, Facebook, TikTok, YouTube, Threads and LinkedIn.`);
+    if (dmNet && !c.dm && !r.json.reply_only) throw new ActionError("reply_only_off", "On Instagram and Facebook an auto-reply sends a DM for now; give the DM's words");
+    if ((!dmNet || !c.dm) && !c.reply) throw new ActionError("reply_required", `Say what the public reply on ${handle(acc)} should say`);
+    if (dmNet && c.dm && !c.dmMessage) throw new ActionError("dm_required", "Say what the DM should say");
+    const row = rows.find((x) => x.id === acc.id);
+    if (row && (!row.can_reply || (dmNet && c.dm && !row.can_dm))) {
+      // with posts it waits on the post and starts once allowed; a rule by itself needs the permission first
+      if (!o.withPosts) throw new ActionError("needs_permission", `${handle(acc)} hasn't allowed Clone8 to answer comments yet. Allow it on the Post page first: https://app.clone8.io/#studio/publish?accounts`);
+      notes.push(`${handle(acc)} hasn't allowed Clone8 to answer comments yet: the auto-reply starts by itself once you allow it on the Post page (https://app.clone8.io/#studio/publish?accounts).`);
+    }
+    const same = rules.find((x) => String(x.account_id) === String(acc.id) && !x.post && (x.keywords ?? []).map((k: string) => String(k).toLowerCase()).sort().join("|") === keys);
+    if (same && o.withPosts) { reused.push(acc); notes.push(`${handle(acc)} already has a ${c.keywords.map((k) => `"${k}"`).join("/")} auto-reply: it gets these words instead.`); }
+  }
+  const limit = Number(r.json.limit ?? 0), room = limit - Number(r.json.used ?? 0);
+  if (limit && room < accounts.length - reused.length) throw new ActionError("autoreply_limit", `Your plan runs ${limit} auto-replies at once and ${Math.max(0, room)} ${room === 1 ? "is" : "are"} free. Pause one first (or upgrade).`);
+  return { notes };
+}
+async function autoReplyFor(ctx: Ctx, a: AutoReplyIn, accounts: Account[], videos: number) {
+  const c = cleanAutoReply(ctx, a);
+  const { notes } = await autoReplyRoom(ctx, accounts, c, { withPosts: true });
+  const words = c.keywords.map((k) => `"${k}"`).join(" or ");
+  const where = videos === 1 ? "on this post" : `on ${accounts.length === 1 ? "the account" : "each account"} (one rule that answers on every post there, old and new)`;
+  const lines = [`Auto-reply ${where}: anyone who comments ${words} ${accounts.length === 1 ? what(c, accounts[0].platform) : accounts.map((x) => `${handle(x)}: ${what(c, x.platform)}`).join("; ")}. It starts as ${videos === 1 ? "the post goes" : "the posts go"} out.`, ...notes];
+  return { spec: { keywords: c.keywords, ...(c.reply ? { comment_reply: c.reply } : {}), ...(c.dm && c.dmMessage ? { dm_message: c.dmMessage } : { dm: false }) }, lines, own: c.own };
+}
+
+/** An auto-reply on an account by itself (every post, or one post by its id from the account's recent posts). */
+export async function prepareAutoReply(ctx: Ctx, a: AutoReplyIn & { account_id: string; post_id?: string | null }): Promise<Pending> {
+  const s = await ctx.api.call("GET", "/api/studio/social");
+  const acc = ((s.json?.accounts ?? []) as Account[]).find((x) => x.id === a.account_id);
+  if (!acc) throw new ActionError("which_account", `Say which account. Linked: ${((s.json?.accounts ?? []) as Account[]).map((x) => `${handle(x)} (${x.id})`).join(", ") || "none"}`);
+  const c = cleanAutoReply(ctx, a);
+  await autoReplyRoom(ctx, [acc], c, { withPosts: false });
+  // one post: named by the account's own record of it, never by words the AI made up
+  let post: { id: string; title: string | null } | null = null;
+  if (a.post_id) {
+    const r = await ctx.api.call("GET", `/api/studio/autoreply/posts?account_id=${encodeURIComponent(acc.id!)}`);
+    const hit = ((r.json?.posts ?? []) as any[]).find((x) => x?.id && String(x.id) === String(a.post_id));
+    if (!hit) throw new ActionError("post_not_found", "That post isn't among the account's recent posts; use an id from them (lookup autoreply_posts)");
+    post = { id: String(hit.id), title: hit.title ? short(hit.title, 120) : null };
+  }
+  const words = c.keywords.map((k) => `"${k}"`).join(" or ");
+  const body = { account_id: acc.id, platform: acc.platform, name: `Keyword ${c.keywords[0]}`.slice(0, 60), keywords: c.keywords, match: "word", active: true,
+    ...(c.reply ? { comment_reply: c.reply } : {}), ...(DM_NETS.includes(acc.platform) ? (c.dm ? { dm_message: c.dmMessage } : { dm: false }) : {}), ...(post ? { post_id: post.id, ...(post.title ? { post_title: post.title } : {}) } : {}) };
+  return put(ctx, { kind: "autoreply", credits: 0, posts: 0, own: [...c.own, ...(post?.title ? [short(post.title, 60)] : [])], steps: [{ method: "POST", path: "/api/studio/autoreply", body, label: "autoreply" }], checks: [],
+    body: `Set an auto-reply on ${handle(acc)}, ${post ? `on the post${post.title ? ` "${short(post.title, 60)}"` : ""}` : "on every post, old and new"}: anyone who comments ${words} ${what(c, acc.platform)}.` });
+}
+
+/** Pause or turn back on an auto-reply (its id from the autoreplies lookup). */
+export async function prepareAutoReplySwitch(ctx: Ctx, a: { rule_id: string; on: boolean }): Promise<Pending> {
+  const r = await ctx.api.call("GET", "/api/studio/autoreply");
+  const rule = ((r.json?.rules ?? []) as any[]).find((x) => String(x.id) === String(a.rule_id));
+  if (!rule || !/^[A-Za-z0-9_-]{1,64}$/.test(String(rule.id))) throw new ActionError("rule_not_found", "No such auto-reply; use its id from the autoreplies lookup");
+  const name = short(rule.name ?? (rule.keywords ?? []).join(", "), 60);
+  return put(ctx, { kind: "autoreply_switch", credits: 0, posts: 0, own: [name, ...((rule.keywords ?? []) as string[])], steps: [{ method: "PATCH", path: `/api/studio/autoreply/${rule.id}`, body: { active: !!a.on }, label: "autoreply" }], checks: [],
+    meta: { on: !!a.on }, body: `${a.on ? "Turn back on" : "Pause"} the auto-reply "${name}"${rule.keywords?.length ? ` (keyword ${(rule.keywords as string[]).map((k) => `"${k}"`).join(", ")})` : ""}?` });
+}
+
+/** After the YES: where the auto-reply went with the posts, and where it didn't (and why), in plain words. */
+const SKIP: Record<string, string> = { needs_permission: "waits for your OK to answer comments there (Post page)", limit: "your plan's auto-replies are all in use", no_reply_text: "it needs a public reply there", not_linked: "that account isn't linked", failed: "it couldn't be set up" };
+function autoReplyLine(ar: any, asked: boolean, queued: boolean): string {
+  if (!asked) return "";
+  if (!ar) return queued ? "The auto-reply is set as they go out." : "";
+  const who = (x: any) => `${short(x.platform, 20)}${x.username ? ` @${short(x.username, 40)}` : ""}`;
+  const on = (ar.on ?? []) as any[], off = (ar.skipped ?? []) as any[];
+  return [on.length ? `Auto-reply on for ${on.map(who).join(", ")}.` : "", ...off.map((x) => `Auto-reply not set on ${who(x)}: ${SKIP[x.reason] ?? "it couldn't be set up"}${x.waiting ? "; it starts by itself once allowed" : ""}.`)].filter(Boolean).join(" ");
 }
 
 async function waitingPost(ctx: Ctx, id: string): Promise<any> {
@@ -365,11 +473,11 @@ export async function execute(api: Api, p: Pending, o: { now: number; timezone: 
       const times = posts.filter((x) => x.schedule_at).map((x) => when(x.schedule_at, o.timezone, o.now));
       const failed = posts.filter((x) => x.status === "failed");
       out.text = [posts.length ? (times.length ? `Scheduled: ${[...new Set(times)].slice(0, 8).join(", ")}${times.length > 8 ? ", …" : ""}.` : "On its way. Each network takes a minute or two.") : "Nothing was sent.",
-        r.json?.queued ? `${num(r.json.queued)} more are being sent in the background.` : "", failed.length ? `${failed.length} did not go out: ${short(failed[0].error, 120)}` : "", skipped.length ? `Left out: ${skipped.map((x) => `${short(x.platform ?? x.group ?? "an account", 30)} (${short(x.reason, 30)})`).join(", ")}.` : ""].filter(Boolean).join(" ");
+        r.json?.queued ? `${num(r.json.queued)} more are being sent in the background.` : "", failed.length ? `${failed.length} did not go out: ${short(failed[0].error, 120)}` : "", skipped.length ? `Left out: ${skipped.map((x) => `${short(x.platform ?? x.group ?? "an account", 30)} (${short(x.reason, 30)})`).join(", ")}.` : "", autoReplyLine(r.json?.autoreply, !!s.body?.autoreply, !!r.json?.queued)].filter(Boolean).join(" ");
     }
     if (p.kind === "edit" && s.method === "POST") out.project = { id: p.meta?.project_id, asset_id: p.meta?.asset_id ?? null, job_id: p.meta?.job_id ?? null, rev: Number(p.meta?.rev) || 0, name: String(p.meta?.name ?? "your clip") };
     if (p.kind === "post_change") { const at = r.json?.post?.schedule_at; out.text = `Changed.${at ? ` It now goes out ${when(at, o.timezone, o.now)}.` : ""}`; }
   }
-  if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "edit" ? "Saved. Making the edited clip now; I'll send it here when it's ready (usually under a minute)." : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : "Done.";
+  if (!out.text) out.text = p.kind === "job" ? `Started: ${p.meta?.summary ?? "your run"}. I'll send it here when it's ready.` : p.kind === "post_cancel" ? `Cancelled ${p.steps.length === 1 ? "it" : `all ${p.steps.length}`}.` : p.kind === "edit" ? "Saved. Making the edited clip now; I'll send it here when it's ready (usually under a minute)." : p.kind === "job_cancel" ? "Cancelled; the credits are back." : p.kind === "caption_read" ? "Watching now; ask me for the captions in a minute." : p.kind === "autoreply" ? "The auto-reply is on." : p.kind === "autoreply_switch" ? (p.meta?.on ? "It's back on." : "Paused.") : "Done.";
   return out;
 }
