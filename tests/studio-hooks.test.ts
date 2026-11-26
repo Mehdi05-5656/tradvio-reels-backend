@@ -77,3 +77,17 @@ test("a Best hook's own voice is laid where the rendered speech is: the lag is f
   const pcm = Buffer.alloc(16000 * 2); for (let i = 0; i < 8000; i++) pcm.writeInt16LE(i < 4000 ? 8000 : 0, i * 2);
   const env = envelope(pcm); assert.equal(env.length, 100); assert.ok(env[0] > 7000 && env[30] === 0);
 });
+
+test("a translated hook: the length follows the language's script, the prompt names the language, English stays as it was", async () => {
+  const { spokenUnits, languageName, HOOK_LANGUAGES } = await import("../src/studio-hooks.js");
+  assert.equal(languageName("es"), "Spanish"); assert.equal(languageName("xx"), null);
+  assert.ok(HOOK_LANGUAGES.length >= 12 && HOOK_LANGUAGES.some((l) => l.id === "ja"));
+  // Japanese has no spaces: counted by characters, not as one "word"
+  const ja = "このエナジードリンク、砂糖ゼロなんです。知ってました？";
+  assert.ok(spokenUnits(ja, "ja") > 8, "a Japanese line is not one word long");
+  assert.ok(hookSeconds(ja, "standard", "ja") >= 5);
+  assert.equal(spokenUnits("uno dos tres", "es"), 3);
+  const es = withHookRecipe({ line: "Todo el mundo cree que las bebidas energéticas necesitan azúcar.", tier: "best", language: "es" }, {});
+  assert.match(es.prompt, /says the Spanish words in <<<audio_1>>>/);
+  assert.match(withHookRecipe({ line: "Everyone thinks energy drinks need sugar.", tier: "standard" }, {}).prompt, /says the words in the voice recording/);
+});

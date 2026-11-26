@@ -82,11 +82,22 @@ export function hookStillRecipe(formatId: string, setting: string) {
   if (!f) throw new HookError("hook_format_unknown", "Pick a format");
   return { resolution: "2k", aspect_ratio: "9:16", prompt: `A vertical phone-camera selfie frame, filmed on a phone's front camera at arm's length, in ${clean(setting, 120) || "a bright everyday room"}. The person from the first picture ${f.scene}. Natural light, real skin texture, casual and believable like a TikTok creator's video. ${STILL_KEEP}` };
 }
+/** Languages a winning hook can be translated into: ElevenLabs v3 speaks them, and the lip-sync follows any speech. */
+export const HOOK_LANGUAGES: Array<{ id: string; name: string }> = [
+  { id: "en", name: "English" }, { id: "es", name: "Spanish" }, { id: "pt", name: "Portuguese (Brazil)" }, { id: "fr", name: "French" }, { id: "de", name: "German" },
+  { id: "it", name: "Italian" }, { id: "nl", name: "Dutch" }, { id: "pl", name: "Polish" }, { id: "tr", name: "Turkish" }, { id: "ar", name: "Arabic" },
+  { id: "hi", name: "Hindi" }, { id: "id", name: "Indonesian" }, { id: "vi", name: "Vietnamese" }, { id: "ja", name: "Japanese" }, { id: "ko", name: "Korean" }, { id: "zh", name: "Mandarin Chinese" },
+];
+const LANG = new Map(HOOK_LANGUAGES.map((l) => [l.id, l.name]));
+export const languageName = (id: unknown) => (typeof id === "string" ? LANG.get(id) ?? null : null);
+const CJK = new Set(["ja", "ko", "zh"]);
+/** How long a line is to say: words for most languages, characters for Japanese, Korean and Chinese. */
+export const spokenUnits = (line: string, language?: string | null) => CJK.has(String(language)) ? clean(line, 400).replace(/\s+/g, "").length / 2.4 : clean(line, 400).split(" ").filter(Boolean).length;
 export type HookTier = "standard" | "best";
 export const HOOK_ENGINE: Record<HookTier, string> = { best: "bytedance/seedance-2.5/reference-to-video", standard: "wan/v2.7/image-to-video" };
 /** Seconds of video a line needs: about 2.6 spoken words a second, a beat either side; inside each engine's range. */
-export function hookSeconds(line: string, tier: HookTier): number {
-  const words = clean(line, 400).split(" ").filter(Boolean).length;
+export function hookSeconds(line: string, tier: HookTier, language?: string | null): number {
+  const words = spokenUnits(line, language);
   const s = Math.ceil(words / 2.6 + 1);
   return tier === "best" ? Math.min(30, Math.max(4, s)) : Math.min(15, Math.max(3, s));
 }
@@ -94,9 +105,11 @@ const VIDEO_SAY = "talks straight into the lens and says the words in the voice 
 /** The video request a hook makes (the voice joins at run time, made from the line in the character's voice). */
 export function withHookRecipe(hook: any, params: Record<string, any>): Record<string, any> {
   const tier: HookTier = hook?.tier === "best" ? "best" : "standard";
-  const seconds = hookSeconds(String(hook?.line ?? ""), tier);
-  if (tier === "best") return { prompt: `Generate a new video. A vertical handheld selfie video filmed on a phone's front camera, in the setting of <<<image_1>>>. The person from <<<image_1>>> ${VIDEO_SAY.replace("the voice recording", "<<<audio_1>>>")}`, duration: seconds, resolution: "720p", aspect_ratio: "9:16", generate_audio: true };
-  return { prompt: `A vertical handheld selfie video. The person ${VIDEO_SAY}`, duration: seconds, resolution: "720p", ...(params?.seed ? { seed: params.seed } : {}) };
+  const seconds = hookSeconds(String(hook?.line ?? ""), tier, hook?.language);
+  const lang = languageName(hook?.language);
+  const say = lang && hook?.language !== "en" ? VIDEO_SAY.replace("says the words", `says the ${lang} words`) : VIDEO_SAY;
+  if (tier === "best") return { prompt: `Generate a new video. A vertical handheld selfie video filmed on a phone's front camera, in the setting of <<<image_1>>>. The person from <<<image_1>>> ${say.replace("the voice recording", "<<<audio_1>>>")}`, duration: seconds, resolution: "720p", aspect_ratio: "9:16", generate_audio: true };
+  return { prompt: `A vertical handheld selfie video. The person ${say}`, duration: seconds, resolution: "720p", ...(params?.seed ? { seed: params.seed } : {}) };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -137,6 +150,24 @@ export async function writeHooks(deps: Deps, input: { facts: ReturnType<typeof n
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Translating a winning hook (Claude, our cost): the same character, the same picture, the line in other languages
+// ---------------------------------------------------------------------------------------------------
+const TRANSLATE_SCHEMA = { type: "object", additionalProperties: false, required: ["lines"], properties: { lines: { type: "array", items: { type: "object", additionalProperties: false, required: ["language", "line"], properties: { language: { type: "string" }, line: { type: "string" } } } } } };
+export async function translateHook(deps: Deps, input: { line: string; product: string; languages: string[] }, userId?: string): Promise<Array<{ language: string; line: string }>> {
+  const env = deps.env ?? process.env;
+  const langs = [...new Set(input.languages)].filter((l) => languageName(l) && l !== "en").slice(0, 10);
+  if (!langs.length) throw new HookError("hook_languages_required", "Pick a language");
+  const out = await claudeJson({ env, log: deps.log, fetch: deps.fetch } as any, {
+    model: env.STUDIO_PRODUCTS_MODEL || "claude-sonnet-5-5", max_tokens: 2000,
+    system: "You localise the spoken hook of a short vertical video ad. Write what a native creator would actually say: the same meaning, energy and length (it must take about as long to say), natural spoken language, not a literal translation. Keep the product and brand names exactly as written. Add nothing: no new claims, prices or promises.",
+    output_config: { format: { type: "json_schema", schema: TRANSLATE_SCHEMA } },
+    messages: [{ role: "user", content: `Product: ${clean(input.product, 80)}\nThe line: ${clean(input.line, 200)}\nLanguages (codes): ${langs.map((l) => `${l} = ${languageName(l)}`).join(", ")}` }],
+  }, "hook_translate", userId);
+  const got = new Map<string, string>((Array.isArray(out?.lines) ? out.lines : []).map((x: any) => [String(x?.language ?? ""), clean(x?.line, 200)]));
+  return langs.map((l) => ({ language: l, line: got.get(l) ?? got.get(languageName(l)!) ?? "" })).filter((x) => x.line);
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Quotes: the picture step and the video step (called from quoteFor)
 // ---------------------------------------------------------------------------------------------------
 async function ownedImage(sb: SupabaseClient, u: string, id: unknown, what: string) {
@@ -163,16 +194,17 @@ export async function hookQuoteRequest(sb: SupabaseClient, u: string, options: a
   }
   const h = options?.hook ?? {};
   const line = clean(h.line, 200);
-  if (line.split(" ").filter(Boolean).length < 3) throw new HookError("hook_line_required", "Write the line they say");
+  const language = languageName(h.language) ? String(h.language) : "en";
+  if (spokenUnits(line, language) < 3) throw new HookError("hook_line_required", "Write the line they say");
   const tier: HookTier = h.tier === "best" ? "best" : "standard";
   const still = await ownedImage(sb, u, h.still, "the approved picture");
   const cast = castById(h.cast ?? still.probe?.cast_id);
   const voice = String(h.voice ?? cast?.voice.id ?? "");
   if (!voiceIds.has(voice)) throw new HookError("hook_voice_required", "Pick a voice");
-  const hook = { line, tier, voice, still: still.id, ...(cast ? { cast: cast.id } : {}) };
+  const hook = { line, tier, voice, still: still.id, ...(language !== "en" ? { language } : {}), ...(cast ? { cast: cast.id } : {}), ...(UUID_RE.test(String(h.from ?? "")) ? { from: String(h.from) } : {}) };
   const inputs = tier === "best" ? { image_urls: [still.id] } : { image_url: still.id };
   return { req: { endpoint: HOOK_ENGINE[tier], params: withHookRecipe(hook, {}), inputs },
-    keep: { params: {}, hook, look_title: `Hook · ${tier === "best" ? "Best" : "Standard"}`, product: product.id, ...(cast ? { cast: cast.id } : {}) }, facts };
+    keep: { params: {}, hook, look_title: `Hook · ${tier === "best" ? "Best" : "Standard"}${language !== "en" ? ` · ${languageName(language)}` : ""}`, product: product.id, ...(cast ? { cast: cast.id } : {}) }, facts };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -263,7 +295,7 @@ export function registerHooks(app: Express, sbFn: () => SupabaseClient, deps: De
     res.setHeader("Cache-Control", "private, no-store");
     try {
       const admin = await isStudioAdmin(req, sbFn(), env);
-      res.json({ cast: castFor({ admin }).map(publicCast), formats: HOOK_FORMATS.map(({ id, title, line, shop_safe }) => ({ id, title, line, shop_safe })), voices: HOOK_VOICES.map(({ id, name, gender, style }) => ({ id, name, gender, style })) });
+      res.json({ cast: castFor({ admin }).map(publicCast), formats: HOOK_FORMATS.map(({ id, title, line, shop_safe }) => ({ id, title, line, shop_safe })), voices: HOOK_VOICES.map(({ id, name, gender, style }) => ({ id, name, gender, style })), languages: HOOK_LANGUAGES });
     } catch (e) { fail(res, e); }
   });
 
@@ -284,6 +316,24 @@ export function registerHooks(app: Express, sbFn: () => SupabaseClient, deps: De
       const up = await sb.from("studio_assets").update({ probe: { cast_id: c.id, character: true } }).eq("id", id).eq("user_id", u);
       if (up.error) throw up.error;
       res.status(201).json({ asset_id: id, cast: c.id });
+    } catch (e) { fail(res, e); }
+  });
+
+  // a finished hook's line in other languages (no charge; each translated hook is priced as any hook)
+  app.post("/api/studio/hooks/translate", async (req, res) => {
+    const u = await gate(req, res); if (!u) return;
+    try {
+      const sb = sbFn();
+      const id = String(req.body?.job ?? "");
+      if (!UUID_RE.test(id)) throw new HookError("hook_not_found", "Pick a finished hook", 404);
+      const j = await sb.from("studio_jobs").select("id,status,options").eq("id", id).eq("user_id", u).maybeSingle();
+      if (j.error) throw j.error;
+      const h = j.data?.options?.hook;
+      if (!h || j.data?.status !== "done") throw new HookError("hook_not_found", "Pick a finished hook", 404);
+      const a = await sb.from("studio_assets").select("probe").eq("id", String(j.data!.options.product ?? "")).eq("user_id", u).maybeSingle();
+      const lines = await translateHook(d, { line: String(h.line ?? ""), product: normalFacts(a.data?.probe?.product ?? {}).name, languages: Array.isArray(req.body?.languages) ? req.body.languages.map(String) : [] }, u);
+      // what the page needs to make each one: the same picture, voice, character and tier
+      res.json({ lines, hook: { still: h.still, voice: h.voice, cast: h.cast ?? null, tier: h.tier, from: id }, product: j.data!.options.product });
     } catch (e) { fail(res, e); }
   });
 
