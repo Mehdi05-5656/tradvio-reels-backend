@@ -2,6 +2,7 @@
 // anything up, show pictures, and PREPARE actions. It cannot run one: the prepare tools store a pending action and the
 // gate releases it on the person's own YES. Raw HTTP to the Messages API, as the rest of this backend does
 // (src/studio-assistant.ts `claude`), so the test adds no dependency.
+import { claudeBody } from "../claude-body.js";
 import type { Api } from "./routes.js";
 import type { BotConfig as Config } from "./routes.js";
 import { find, history, loadIndex, view, type Card, type Filters, type Index } from "./account.js";
@@ -322,7 +323,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
       headers: { "x-api-key": d.cfg.anthropicKey, "anthropic-version": "2023-06-01", "content-type": "application/json", ...(fallback ? { "anthropic-beta": "server-side-fallback-2026-07-01" } : {}) },
       // cached twice over: the instructions and tools (the same for everyone, every message), and this answer's own
       // steps so far, so a bulky lookup is paid for in full once, not again on every step that follows it
-      body: JSON.stringify({ model: d.cfg.model, max_tokens: 16000, ...(fallback ? { fallbacks: "default" } : {}), cache_control: { type: "ephemeral" }, output_config: { effort: d.cfg.effort || "low" },
+      body: claudeBody({ model: d.cfg.model, max_tokens: 16000, ...(fallback ? { fallbacks: "default" } : {}), cache_control: { type: "ephemeral" }, output_config: { effort: d.cfg.effort || "low" },
         system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }, { type: "text", text: context }], tools: TOOLS, messages }),
     });
     const j: any = await r.json().catch(() => null);

@@ -5,6 +5,7 @@
 // (data/social-playbook.ts: what platform insiders have disclosed and what large studies measured, each with its
 // source), and the Clone8 tools it can point to. Every finding has to cite their numbers; every move maps to a tool.
 // The same analysis feeds the chat (a short performance brief in the system prompt) and the suggested prompts.
+import { claudeBody } from "./claude-body.js";
 import { logClaudeCost } from "./studio-pricing.js";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -90,7 +91,7 @@ export async function writeInsight(sb: SupabaseClient, u: string, a: Analysis, o
   const r = await f("https://api.anthropic.com/v1/messages", {
     method: "POST", redirect: "error",
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-    body: JSON.stringify({ model: env.STUDIO_INSIGHT_MODEL || INSIGHT_MODEL, max_tokens: 16000, system: SYSTEM, fallbacks: "default", output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content: [...images, { type: "text", text }] }] }),
+    body: claudeBody({ model: env.STUDIO_INSIGHT_MODEL || INSIGHT_MODEL, max_tokens: 16000, system: SYSTEM, fallbacks: "default", output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content: [...images, { type: "text", text }] }] }),
     signal: AbortSignal.timeout(120_000),
   });
   if (!r.ok) throw new Error(`insights_http_${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`);

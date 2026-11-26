@@ -13,6 +13,7 @@
 // Smart post: once the videos are watched, /smart/brief reads the notes (Sonnet, text only, free) and gives what they
 // are, three sample captions and two call-to-action lines; /smart/answer turns what the person typed into settings
 // the Post page fills in. Nothing posts from here: the person sees every setting and confirms on the Post page.
+import { claudeBody } from "./claude-body.js";
 import { withCostRun } from "./studio-costs.js";
 import { randomUUID } from "node:crypto";
 import type { Express, Request, Response } from "express";
@@ -183,7 +184,7 @@ async function askClaude(env: Record<string, string | undefined>, f: typeof fetc
   const r = await f("https://api.anthropic.com/v1/messages", {
     method: "POST", redirect: "error",
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-    body: JSON.stringify({ model, max_tokens: 3000, system, fallbacks: "default", output_config: { effort: "low", format: { type: "json_schema", schema } }, messages: [{ role: "user", content: [{ type: "text", text }] }] }),
+    body: claudeBody({ model, max_tokens: 3000, system, fallbacks: "default", output_config: { effort: "low", format: { type: "json_schema", schema } }, messages: [{ role: "user", content: [{ type: "text", text }] }] }),
     signal: AbortSignal.timeout(60_000),
   }).catch(() => { throw new SocialError("smart_unavailable", "The assistant did not answer; try again", 503); });
   if (!r.ok) { log(`[smart-post] ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`); throw new SocialError("smart_unavailable", "The assistant did not answer; try again", 503); }

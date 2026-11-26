@@ -8,6 +8,7 @@
 // Checked here, never trusted from the model: only posts in view and still waiting; times readable, at least 6
 // minutes ahead and within 90 days; every account kept 30+ minutes from its other posts (a time that would clash is
 // moved later in 30-minute steps, and the change says so).
+import { claudeBody } from "./claude-body.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logClaudeCost } from "./studio-pricing.js";
@@ -132,7 +133,7 @@ export function registerScheduleAi(app: Express, sbFn: () => SupabaseClient, dep
         const r = await f("https://api.anthropic.com/v1/messages", {
           method: "POST", redirect: "error",
           headers: { "x-api-key": env.ANTHROPIC_API_KEY!, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-          body: JSON.stringify({ model, max_tokens: 6000, system: SYSTEM, fallbacks: "default", output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] }),
+          body: claudeBody({ model, max_tokens: 6000, system: SYSTEM, fallbacks: "default", output_config: { effort: "medium", format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] }),
           signal: AbortSignal.timeout(90_000),
         }).catch(() => { throw new ScheduleAiError("ai_unavailable", "The assistant did not answer; try again", 503); });
         if (!r.ok) { log(`[schedule-ai] ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`); throw new ScheduleAiError("ai_unavailable", "The assistant did not answer; try again", 503); }

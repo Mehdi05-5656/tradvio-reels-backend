@@ -887,7 +887,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     await renew(sb, job, { stage: "transcribing", message: hearAll && cands.every((c) => c.source === "words") ? `Checking the ${Math.min(want, cands.length)} best moments it heard` : `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
     const baseAt = (abs: number) => { const bin = Math.floor(abs / 10); const h = signals.rate.slice(Math.max(0, bin - 60), Math.max(1, bin)).slice().sort((a, c) => a - c); return h.length ? h[Math.floor(h.length / 2)] : 0; };
-    const kept: Moment[] = []; let checked = 0, heardOk = 0, unsafe = 0; const tListen = Date.now(); let claudeCalls = 0;
+    const kept: Moment[] = []; let checked = 0, heardOk = 0, unsafe = 0, checkErrors = 0; const tListen = Date.now(); let claudeCalls = 0;
     const hear = deps.hear ?? ((f, d, sec) => hearWindow(deps, f, d, u, sec));
     const verify = deps.verify ?? ((input) => verifyWithClaude(deps, input, u));
     const stills = deps.stills ?? stillsFrom;
@@ -951,7 +951,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const frames = await stills(pl.video, times.map((t) => start + t), dir, `s${c.rank}`);
       let v: Verdict;
       try { v = await verify({ lines, stills: frames, head, body: body + context }); claudeCalls++; }
-      catch (err: any) { log(`[live] verify ${c.rank} of ${job.id} failed: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
+      // a check that never happened is not a verdict: it does not use up the budget or count as "checked" (Nov 26 2026:
+      // every check of a run failed on a broken request, and the person was told 4 moments did not stand alone)
+      catch (err: any) { checked--; checkErrors++; log(`[live] verify ${c.rank} of ${job.id} failed: ${String(err?.message ?? err).slice(0, 160)}`); continue; }
       const byI = new Map(lines.map((l) => [l.i, l]));
       const ls = byI.get(v.start_line), le = byI.get(v.end_line);
       const relStart = ls ? ls.start : lines[cut.s]?.start ?? 0, relEnd = le ? le.end : lines[cut.e]?.end ?? 0;
@@ -1016,6 +1018,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     }
     timing.listen_s = Math.round((Date.now() - tListen) / 1000); timing.checked = checked; timing.heard = heardOk; timing.verify_calls = claudeCalls; timing.unheard = unheard; timing.skipped_muted = skippedMuted; timing.deferred = deferred; timing.extended = extended;
     // (no clip at all: the reason still says when it was the stream's content, as the fewer-clips note does)
+    timing.check_errors = checkErrors;
+    // no moment could be judged at all (every check failed on our side): say so (the person runs it again; a retry here would pay for the hearing again) and never blame the stream
+    if (!kept.length && checkErrors && !checked) throw new ClipsError("clips_check_failed", "We could not check this stream's moments this time; that was on our side. Nothing was charged, so you can run it again", 502);
     if (!kept.length && hearAll && cands.every((c) => c.source === "words")) throw new ClipsError("clips_none_found", `${noChat ? `${noChatWords(b, part ? "that part of the stream" : "this stream")}, so we listened to all of it` : `The chat there was quiet, so we listened to all of it`}, but no moment stands alone as a clip.${unsafeNote(unsafe, checked)}`.replace(/\.$/, ""), 422);
     if (!kept.length) throw new ClipsError("clips_none_found", checked ? `The chat lit up ${checked === 1 ? "once" : `${checked} times`}, but none of those moments stands alone as a clip.${unsafeNote(unsafe, checked)}`.replace(/\.$/, "") : "No moment in this stream stands out enough to be a clip", 422);
     kept.sort((x, y) => y.score - x.score || x.start - y.start);

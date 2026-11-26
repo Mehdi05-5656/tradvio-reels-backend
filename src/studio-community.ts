@@ -13,6 +13,7 @@
 // written once (studio_community_items) and a later change of plan or setting never rewrites it: changes apply to
 // films made from then on, and to a single film when its maker says so.
 // Behind STUDIO_COMMUNITY_ENABLED (off): with it off no route answers and nothing is decided.
+import { claudeBody } from "./claude-body.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
@@ -88,7 +89,7 @@ export async function tidyPrompt(prompt: string, user: string | null, deps: Comm
   try {
     const r = await (deps.fetch ?? fetch)("https://api.anthropic.com/v1/messages", {
       method: "POST", redirect: "error", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model, max_tokens: 700, system: TIDY_SYSTEM, output_config: { format: { type: "json_schema", schema: TIDY_SCHEMA } }, messages: [{ role: "user", content: [{ type: "text", text: `The prompt:\n"""${prompt.slice(0, 1200)}"""` }] }] }),
+      body: claudeBody({ model, max_tokens: 700, system: TIDY_SYSTEM, output_config: { format: { type: "json_schema", schema: TIDY_SCHEMA } }, messages: [{ role: "user", content: [{ type: "text", text: `The prompt:\n"""${prompt.slice(0, 1200)}"""` }] }] }),
       signal: AbortSignal.timeout(30_000),
     });
     if (!r.ok) { (deps.log ?? console.log)(`[community] tidy ${r.status}: ${(await r.text().catch(() => "")).slice(0, 160)}`); return null; }

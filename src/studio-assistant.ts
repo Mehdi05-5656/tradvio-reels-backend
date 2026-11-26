@@ -6,6 +6,7 @@
 // The model is Claude (Anthropic Messages API, tool use). It knows only what studio-knowledge.ts tells it: the live
 // tools, prices, catalog and the person's own library. It never starts work: propose_plan returns a priced plan to
 // the person; confirm is a separate route the interface calls on their click.
+import { claudeBody } from "./claude-body.js";
 import { OVERHEAD } from "./studio-pricing.js";
 import { recordEvent } from "./studio-events.js";
 import type { Express, Request, Response } from "express";
@@ -265,7 +266,7 @@ export async function claude(deps: AssistantDeps, body: Record<string, any>, onT
       method: "POST", redirect: "error", signal: ctl.signal,
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       // no temperature: the current models reject the parameter ("deprecated for this model", seen live Oct 29 2026)
-      body: JSON.stringify({ model: env.STUDIO_ASSISTANT_MODEL || DEFAULT_MODEL, max_tokens: 1400, stream: !!onText, ...body }),
+      body: claudeBody({ model: env.STUDIO_ASSISTANT_MODEL || DEFAULT_MODEL, max_tokens: 1400, stream: !!onText, ...body }),
     }).catch(() => { throw deps.signal?.aborted ? aborted() : new AssistantError("assistant_unavailable", "The assistant did not answer", 503); });
     if (!r.ok) {
       const text = await r.text().catch(() => "");

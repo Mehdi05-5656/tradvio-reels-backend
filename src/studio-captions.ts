@@ -2,6 +2,7 @@
 // by Claude, which answers in a fixed JSON shape: the caption, a few hashtags and, when YouTube is in the mix, a title.
 // Used by the Publish page and the chat's publish card; the person can always write their own instead.
 // Raw HTTP to the Messages API like the assistant (studio-assistant.ts), so tests can swap fetch.
+import { claudeBody } from "./claude-body.js";
 import { recordScribe } from "./studio-stt.js";
 import { logClaudeCost } from "./studio-pricing.js";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -345,7 +346,7 @@ export async function draftCaption(sb: SupabaseClient, u: string, req: DraftRequ
     const r = await f("https://api.anthropic.com/v1/messages", {
       method: "POST", redirect: "error",
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-      body: JSON.stringify({
+      body: claudeBody({
         model, max_tokens: accounts.length ? 6000 : 4000, system, fallbacks: "default",
         output_config: { effort: "low", format: { type: "json_schema", schema: schemaFor({ watch, accounts: accounts.length > 0 }) } },
         messages: [{ role: "user", content: [...frames.map((data) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } })), { type: "text", text }] }],

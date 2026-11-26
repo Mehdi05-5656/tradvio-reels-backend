@@ -16,6 +16,7 @@
 //  - Price: reading the video (by its length) plus a price per clip, reserved for the clips asked for. A run is charged
 //    for the clips it makes; what it does not make goes back. About 2-2.5x OpusClip per video (CLIP_RATES), with
 //    safety nets so a vendor price change can never sell a run at a loss.
+import { claudeBody } from "./claude-body.js";
 import { withCostRun } from "./studio-costs.js";
 import { cutLines, qualityOf } from "./studio-quality.js";
 import { studioFail } from "./studio-fail.js";
@@ -681,7 +682,7 @@ export async function claudeJson(deps: ClipsDeps, body: Record<string, any>, fea
     const r = await (deps.fetch ?? fetch)("https://api.anthropic.com/v1/messages", {
       method: "POST", redirect: "error", signal: AbortSignal.timeout(600_000),
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: claudeBody(body),
     }).catch(() => null);
     if (r && r.ok) {
       const out: any = await r.json();

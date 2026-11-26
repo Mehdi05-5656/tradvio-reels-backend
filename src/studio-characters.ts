@@ -12,7 +12,7 @@ import { command } from "./video-render.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PLANS } from "./studio.js";
 import { CHARACTER_IMAGE_COST_USD, studioCosts } from "./studio-pricing.js";
-import { billedUsdOf, higgsfieldAuth, RecastError, HF_BASE } from "./studio-recast.js";
+import { billedUsdOf, failureCode, higgsfieldAuth, isGenericFailure, isTransientFailure, RecastError, HF_BASE } from "./studio-recast.js";
 import { PHOTO_ENDPOINT } from "./studio-influencer.js";
 import { claimJob } from "./studio-leases.js";
 
@@ -85,6 +85,9 @@ async function renew(sb: SupabaseClient, job: Job, progress: Record<string, any>
   job.progress = { ...(job.progress ?? {}), ...progress };
 }
 
+/** A new request per attempt: Higgsfield answers a repeated idempotency key with the request it already has (a failed
+ *  one would fail again). The first attempt keeps the job's own id, as before. */
+export const attemptKey = (job: { id: string; attempts?: number | null }) => ((job.attempts ?? 1) > 1 ? `${job.id}:${job.attempts}` : job.id);
 export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, job: Job): Promise<string> {
   const log = deps.log ?? (() => undefined), sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))), now = deps.now ?? Date.now;
   const fail = async (code: string, retry: boolean, detail?: unknown) => {
@@ -104,8 +107,8 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
         if (!a.data || a.data.status !== "ready" || a.data.kind !== "image") throw new RecastError("source_missing");
         const s = await sb.storage.from("studio-uploads").createSignedUrl(a.data.object_key, 7200);
         if (s.error || !s.data) throw s.error ?? new RecastError("source_missing");
-        sub = await submitFromPhoto(deps, { prompt: characterPrompt(job.options), photoUrl: s.data.signedUrl, idempotencyKey: job.id });
-      } else sub = await submitCharacter(deps, { prompt: characterPrompt(job.options), idempotencyKey: job.id, count: Number(job.options?.count) === 4 ? 4 : 1 });
+        sub = await submitFromPhoto(deps, { prompt: characterPrompt(job.options), photoUrl: s.data.signedUrl, idempotencyKey: attemptKey(job) });
+      } else sub = await submitCharacter(deps, { prompt: characterPrompt(job.options), idempotencyKey: attemptKey(job), count: Number(job.options?.count) === 4 ? 4 : 1 });
       requestId = sub.request_id;
       await renew(sb, job, { request_id: requestId, submitted_at: new Date(now()).toISOString(), note: "Drawing your character" });
       log(`[character] submitted ${JSON.stringify({ job: job.id, request: requestId })}`);
@@ -126,7 +129,19 @@ export async function runCharacterJob(sb: SupabaseClient, deps: CharacterDeps, j
           usd: billed ?? images * CHARACTER_IMAGE_COST_USD, basis: billed != null ? "metered" : "list", ref: `higgsfield:${requestId}` });
         break;
       }
-      if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") throw new RecastError(st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? "recast_failed" : "recast_canceled");
+      if (st.status === "failed" || st.status === "nsfw" || st.status === "canceled" || st.status === "cancelled") {
+        // the renderer's own words, so a failure can be explained afterwards (Nov 25 2026: a character failed in 6 s
+        // and the log said only "recast_failed"; the same prompt with another photo worked a minute later)
+        log(`[character] ${st.status} ${JSON.stringify({ job: job.id, request: requestId, attempt: job.attempts ?? 1, detail: JSON.stringify(st.raw ?? null).slice(0, 300) })}`);
+        const code = st.status === "nsfw" ? "recast_nsfw" : st.status === "failed" ? failureCode(st.raw) : "recast_canceled";
+        // failed with no reason, or busy / timed out: sent again as a new request (failed renders are not billed), as
+        // Swap and Recast do; the queue allows three attempts in all
+        if (code === "recast_failed" && (job.attempts ?? 1) < 3 && (isTransientFailure(st.raw) || isGenericFailure(st.raw))) {
+          await renew(sb, job, { request_id: null, submitted_at: null, note: "The renderer gave up once; trying again" });
+          throw new RecastError(code, "renderer failed without a reason, sending it again", true);
+        }
+        throw new RecastError(code);
+      }
       await renew(sb, job, { note: "Drawing your character" });
       await sleep(POLL_MS);
     }

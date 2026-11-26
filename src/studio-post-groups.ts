@@ -8,6 +8,7 @@
 //
 // Drafts keep what someone is putting together across pages and devices; the tray is the one draft that collects
 // videos from anywhere ("Add to tray") until they are posted.
+import { claudeBody } from "./claude-body.js";
 import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SocialError, type SocialAccount } from "./social-provider.js";
@@ -106,7 +107,7 @@ export async function varyCaptions(caption: string, n: number, deps: { env?: Rec
     const r = await f("https://api.anthropic.com/v1/messages", {
       method: "POST", redirect: "error",
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({
+      body: claudeBody({
         model: env.STUDIO_VARY_MODEL || "claude-haiku-5-5", max_tokens: 2000,
         system: "You lightly reword a social media caption so several accounts can post the same video without identical text. Keep the meaning, the language, every hashtag, every @mention, every link and any call to action word (like 'Comment GUIDE') exactly. Change the first line's wording and the sentence order a little. Never add claims, emoji walls or quotation marks. Keep each version about the same length.",
         output_config: { format: { type: "json_schema", schema: { type: "object", additionalProperties: false, required: ["versions"], properties: { versions: { type: "array", items: { type: "string" } } } } } },

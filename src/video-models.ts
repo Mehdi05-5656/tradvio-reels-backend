@@ -1,3 +1,4 @@
+import { claudeBody } from "./claude-body.js";
 import type {VideoPlan} from "./video-plan.js";
 export class PipelineError extends Error {
   constructor(public code:string,public retry=false){super(code);}
@@ -27,7 +28,7 @@ export function createModels(config:{key:string;plannerModel:string;reviewModel:
       response=await request("https://api.anthropic.com/v1/messages",{
         method:"POST",redirect:"error",signal:AbortSignal.any([signal,timeout]),
         headers:{"x-api-key":config.key,"anthropic-version":"2023-06-01","content-type":"application/json"},
-        body:JSON.stringify({model,max_tokens:2200,temperature:0,system,messages:[{role:"user",content}]}),
+        body:claudeBody({model,max_tokens:2200,temperature:0,system,messages:[{role:"user",content}]}),
       });
     } catch {throw new PipelineError("model_failed",!signal.aborted);}
     if(!response.ok)throw new PipelineError("model_failed",response.status===429 || response.status>=500);

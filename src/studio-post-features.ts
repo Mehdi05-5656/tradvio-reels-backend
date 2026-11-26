@@ -8,6 +8,7 @@
 // Cards compare the person's own posts with each other: each post's views against its own account's median (the
 // "multiple" from analyze()), one group against the rest, with a permutation test for how sure we are. YouTube posts
 // are left out of every derived number (YouTube's API terms; raw numbers only until its audit is passed).
+import { claudeBody } from "./claude-body.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logClaudeCost } from "./studio-pricing.js";
 import { median, type Analysis, type PerfDeps, type PostStats } from "./studio-performance.js";
@@ -74,7 +75,7 @@ export async function readCovers(posts: Array<{ id: string; caption: string | nu
   const r = await f("https://api.anthropic.com/v1/messages", {
     method: "POST", redirect: "error",
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-beta": "server-side-fallback-2026-07-01" },
-    body: JSON.stringify({ model, max_tokens: 3000, system: SYSTEM, fallbacks: "default", output_config: { format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content }] }),
+    body: claudeBody({ model, max_tokens: 3000, system: SYSTEM, fallbacks: "default", output_config: { format: { type: "json_schema", schema: SCHEMA } }, messages: [{ role: "user", content }] }),
     signal: AbortSignal.timeout(90_000),
   });
   if (!r.ok) throw new Error(`features_http_${r.status}: ${(await r.text().catch(() => "")).slice(0, 160)}`);

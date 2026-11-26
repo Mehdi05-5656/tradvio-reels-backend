@@ -142,3 +142,19 @@ test("the quote says, before anyone pays, that a part has no chat kept and that 
   await quoteStreamClips({ env: ENV, ...k } as any, PLANS, { url, scope: "range", from: 0, to: 7200, count: 5, length: "short" });
   assert.equal(k.paths.filter((p) => p.includes("/messages")).length, k.paths.slice(0, calls).filter((p) => p.includes("/messages")).length, "the same part asked again is remembered, not probed again");
 });
+
+test("a moment check that fails is not a verdict: it does not count, and a run where no check worked says it was our side (Nov 26 2026)", async () => {
+  // every check refused (the broken-emoji request): no clip, the run says so honestly, nothing is charged
+  const f = fakeSb();
+  const r = runDeps([], { verify: async () => { throw new Error("Claude 400: The request body is not valid JSON: unexpected end of hex escape"); } });
+  assert.equal(await runStreamClipsJob(f.sb, r.deps, job({ from: 0, to: 7200, scope: "range" })), "clips_check_failed");
+  const said = JSON.stringify(f.updates);
+  assert.match(said, /could not check this stream's moments this time; that was on our side/);
+  assert.doesNotMatch(said, /stands alone/, "the stream is not blamed");
+  assert.ok(!f.calls.some(([fn]: any) => fn === "studio_complete"));
+  // one check fails, the next works: the run goes on and makes its clip
+  let n = 0;
+  const g = runDeps([], { verify: async (i: any) => { if (n++ === 0) throw new Error("Claude 529 overloaded"); return graded(i); } });
+  assert.equal(await runStreamClipsJob(fakeSb().sb, g.deps, job({ from: 0, to: 7200, scope: "range" })), "done");
+  assert.ok(g.cuts.length >= 1);
+});
