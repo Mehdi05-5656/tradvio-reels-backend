@@ -16,7 +16,8 @@ import { recordCost } from "./studio-costs.js";
 import { assFilter } from "./studio-caption-video.js";
 import { creditValueFloor, creditsForCost, type PlanLike } from "./studio-pricing.js";
 import { normalFacts } from "./studio-products.js";
-import { CATEGORY_LABEL } from "./studio-product-looks.js";
+import { CATEGORY_LABEL, lookById } from "./studio-product-looks.js";
+import { SHOP_DISCLOSURE, shopIssues, type ShopIssue } from "./studio-shop.js";
 
 type Deps = { env?: Record<string, string | undefined>; log?: (line: string) => void; fetch?: typeof fetch; music?: typeof composeMusic; run?: (args: string[]) => Promise<unknown>; probe?: (file: string) => Promise<{ seconds: number; audio: boolean }> };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -60,7 +61,9 @@ async function loadParts(sb: SupabaseClient, u: string, req: AdRequest) {
     if (p.kind === "hook" && !(j.options?.hook && isVideo)) throw new AdError("ad_part_kind", "The hook has to be a finished hook video");
     if (p.kind === "clip" && !isVideo) throw new AdError("ad_part_kind", "A product clip has to be a video");
     if (p.kind === "shot" && isVideo) throw new AdError("ad_part_kind", "A product shot has to be a picture");
-    return { ...p, key: String(out.key), seconds: Number(out.duration) || (p.kind === "shot" ? AD_LIMITS.shot_seconds : 5) };
+    // a hook (a presenter, moving) is shop-safe; a look is as its catalog says
+    const shop_safe = p.kind === "hook" ? true : !!lookById(j.options?.look)?.shop_safe;
+    return { ...p, key: String(out.key), seconds: Number(out.duration) || (p.kind === "shot" ? AD_LIMITS.shot_seconds : 5), shop_safe };
   });
 }
 
@@ -76,13 +79,18 @@ export async function quoteAd(sb: SupabaseClient, u: string, raw: any, plans: Pl
   if (a.error) throw a.error;
   if (!a.data?.probe?.product) throw new AdError("product_not_found", "That product is not in your library", 404);
   const parts = await loadParts(sb, u, req);
-  const seconds = adSeconds(parts, !!req.end);
+  // Shop-safe mode (studio-shop.ts): what TikTok Shop would refuse stops it here, the rest is said beside the button
+  const shop = a.data.probe.product?.shop === true;
+  const issues: ShopIssue[] = shop ? shopIssues(parts, req.end) : [];
+  const stop = issues.find((i) => i.blocking);
+  if (stop) throw new AdError(stop.code, stop.text, 422);
+  const seconds = adSeconds(parts, !!req.end || shop);
   if (seconds > AD_LIMITS.seconds) throw new AdError("ad_too_long", `Keep the ad under ${AD_LIMITS.seconds} seconds`);
   const musicUsd = req.music ? Math.round((seconds / 60) * AD_LIMITS.music_usd_per_minute * 10000) / 10000 : 0;
   const credits = req.music ? creditsForCost(musicUsd, creditValueFloor(plans)) : 0;
   const name = normalFacts(a.data.probe.product).name;
   return { tool: "instrument" as const, credits,
-    options: { endpoint: "clone8/ad", ad: req, product: req.product, look_title: `Full ad · ${seconds} s`, usd: musicUsd, cost_usd: musicUsd, priced_by: "table" as const, units: seconds, output: "video" as const, params: {}, inputs: {} },
+    options: { endpoint: "clone8/ad", ad: req, product: req.product, shop, shop_notes: issues.map((i) => i.text), look_title: `Full ad · ${seconds} s`, usd: musicUsd, cost_usd: musicUsd, priced_by: "table" as const, units: seconds, output: "video" as const, params: {}, inputs: {} },
     summary: `Full ad · ${name} · ${seconds} s${req.music ? " · with music" : ""}` };
 }
 
@@ -101,14 +109,16 @@ export function partArgs(input: string, out: string, o: { still: boolean; second
     "-t", o.seconds.toFixed(2), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", String(FPS), "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "160k", out];
 }
 /** The end card's words as an ASS file: the line large, the offer under it, lower third, in our caption fonts. */
-export function endCardAss(line: string | null, offer: string | null, seconds: number): string {
+export function endCardAss(line: string | null, offer: string | null, seconds: number, note: string | null = null): string {
   const t = (s: number) => `0:00:${s.toFixed(2).padStart(5, "0")}`;
   const esc = (s: string) => s.replace(/[{}\\]/g, "");
-  const ev = [line ? `Dialogue: 0,${t(0)},${t(seconds)},Line,,0,0,0,,{\\fad(250,0)}${esc(line)}` : null, offer ? `Dialogue: 0,${t(0.25)},${t(seconds)},Offer,,0,0,0,,{\\fad(250,0)}${esc(offer)}` : null].filter(Boolean);
+  const ev = [line ? `Dialogue: 0,${t(0)},${t(seconds)},Line,,0,0,0,,{\\fad(250,0)}${esc(line)}` : null, offer ? `Dialogue: 0,${t(0.25)},${t(seconds)},Offer,,0,0,0,,{\\fad(250,0)}${esc(offer)}` : null,
+    note ? `Dialogue: 0,${t(0)},${t(seconds)},Note,,0,0,0,,${esc(note)}` : null].filter(Boolean);
   return ["[Script Info]", "ScriptType: v4.00+", `PlayResX: ${W}`, `PlayResY: ${H}`, "WrapStyle: 0", "",
     "[V4+ Styles]", "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     "Style: Line,Montserrat Black,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,6,2,90,90,430,1",
-    "Style: Offer,Montserrat ExtraBold,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,5,2,90,90,320,1", "",
+    "Style: Offer,Montserrat ExtraBold,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,5,2,90,90,320,1",
+    "Style: Note,Poppins SemiBold,34,&H33FFFFFF,&H33FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,3,2,90,90,120,1", "",
     "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text", ...ev, ""].join("\n");
 }
 async function probeFile(file: string): Promise<{ seconds: number; audio: boolean }> {
@@ -139,7 +149,11 @@ export async function runAdJob(sb: SupabaseClient, deps: Deps, job: any, h: { re
       await h.renew({ done: i + 1, note: "Framing the pieces" });
     }
     // the end card: the product picture on its own blurred copy, the person's words on it
-    if (req.end) {
+    const prod = await sb.from("studio_assets").select("probe").eq("id", req.product).eq("user_id", job.user_id).maybeSingle();
+    const shop = prod.data?.probe?.product?.shop === true;
+    const stop = shop ? shopIssues(parts, req.end).find((i) => i.blocking) : null;
+    if (stop) throw new AdError(stop.code, stop.text);
+    if (req.end || shop) {
       const a = await sb.from("studio_assets").select("object_key").eq("id", req.product).eq("user_id", job.user_id).maybeSingle();
       if (a.error || !a.data) throw new AdError("product_not_found", "The product picture is gone");
       const dl = await sb.storage.from("studio-uploads").download(a.data.object_key);
@@ -148,8 +162,9 @@ export async function runAdJob(sb: SupabaseClient, deps: Deps, job: any, h: { re
       await writeFile(pic, Buffer.from(await dl.data.arrayBuffer()));
       const base = join(dir, "card-base.mp4");
       await run(partArgs(pic, base, { still: true, seconds: AD_LIMITS.end_seconds, audio: false }));
-      if (req.end.line || req.end.offer) {
-        await writeFile(ass, endCardAss(req.end.line, req.end.offer, AD_LIMITS.end_seconds));
+      const line = req.end?.line ?? null, offer = req.end?.offer ?? null, note = shop ? SHOP_DISCLOSURE : null;
+      if (line || offer || note) {
+        await writeFile(ass, endCardAss(line, offer, AD_LIMITS.end_seconds, note));
         await run(["-v", "error", "-nostdin", "-y", "-i", base, "-vf", assFilter(ass, env), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", card]);
         pieces.push(card);
       } else pieces.push(base);

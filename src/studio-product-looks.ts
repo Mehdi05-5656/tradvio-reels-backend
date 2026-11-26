@@ -18,7 +18,7 @@ export const CATEGORY_LABEL: Record<ProductCategory, string> = {
   app: "App or software", other: "Something else",
 };
 /** What we keep about a product (on its picture's probe, `probe.product`). Read by Claude, corrected by the person. */
-export type ProductFacts = { name: string; category: ProductCategory; colour: string | null; label_text: string | null; line: string | null; source_url?: string | null; price?: string | null };
+export type ProductFacts = { name: string; category: ProductCategory; colour: string | null; label_text: string | null; line: string | null; source_url?: string | null; price?: string | null; shop?: boolean };
 
 export type LookKind = "shot" | "motion";
 export type LookInput = { field: string; label: string; hint: string; /** the picture this slot takes by default */ from: "product" | "exploded" };

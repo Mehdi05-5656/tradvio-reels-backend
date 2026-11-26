@@ -19,6 +19,7 @@ import { claudeJson } from "./studio-clips.js";
 import { checkUpload } from "./studio-limits.js";
 import { toJpeg } from "./studio-characters.js";
 import { safeUrl } from "./text-bot/intake.js";
+import { fetchTikTokShopProduct, isTikTokShopUrl, ShopError } from "./studio-shop.js";
 import { command } from "./video-render.js";
 import { soundEffect, replaceAudio } from "./studio-eleven.js";
 import { recordCost } from "./studio-costs.js";
@@ -44,6 +45,8 @@ export function normalFacts(raw: any): ProductFacts {
     line: clean(raw?.line, 140) || null,
     source_url: raw?.source_url ? clean(raw.source_url, 500) : null,
     price: raw?.price ? clean(raw.price, 30) : null,
+    // Shop-safe mode (studio-shop.ts): on for a TikTok Shop product or when the person ticks it
+    shop: raw?.shop === true,
   };
 }
 
@@ -210,6 +213,8 @@ export async function lookQuoteRequest(sb: SupabaseClient, u: string, options: a
   if (!a.data?.probe?.product) throw new LookError("product_not_found", "That product is not in your library", 404);
   const facts = normalFacts(a.data.probe.product);
   if (!fitsCategory(look, facts.category) && look.fits !== "all") throw new LookError("look_not_for_product", `${look.title} is not made for ${CATEGORY_LABEL[facts.category].toLowerCase()}`);
+  // Shop-safe mode: TikTok Shop refuses AI-animated products and exaggerated effects (studio-shop.ts)
+  if (facts.shop && !look.shop_safe) throw new LookError("look_not_shop_safe", `${look.title} isn't allowed for TikTok Shop videos. Turn off "For TikTok Shop" to make it for elsewhere.`);
   const start = options?.start && UUID_RE.test(String(options.start)) ? String(options.start) : productId;
   const exploded = options?.exploded && UUID_RE.test(String(options.exploded)) ? String(options.exploded) : null;
   const choices = lookChoices(look, facts, options?.params);
@@ -293,7 +298,7 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
     return u;
   };
   const fail = (res: Response, e: any) => {
-    if (e instanceof ProductError || e instanceof LookError) return res.status(e.status).json({ error: e.code, detail: e.message });
+    if (e instanceof ProductError || e instanceof LookError || e instanceof ShopError) return res.status(e.status).json({ error: e.code, detail: e.message });
     const code = e?.code ?? null;
     if (code && typeof e?.status === "number") return res.status(e.status).json({ error: code, detail: e.message });
     log(`[products] error ${String(e?.message ?? e).slice(0, 300)}`);
@@ -335,6 +340,18 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
     if (!safeUrl(url)) return res.status(400).json({ error: "product_link_invalid", detail: "Paste the full https link to the product page" });
     try {
       const f = deps.fetch ?? fetch;
+      // TikTok Shop blocks plain reads: its product comes through our scraping vendor (studio-shop.ts), Shop-safe on
+      if (isTikTokShopUrl(url)) {
+        const shop = await fetchTikTokShopProduct(d, url, u);
+        const pic = await getSafe(f, shop.images[0], IMAGE_MAX, "image/*");
+        if (!pic || !/^image\/(jpeg|png|webp)/i.test(pic.type)) throw new ProductError("product_link_no_picture", "We couldn't download the product picture from that listing. Upload a photo of it instead.", 422);
+        const sb = sbFn();
+        const id = await storeImage(sb, u, pic.bytes, shop.title ?? "TikTok Shop product");
+        const img = await loadImage(sb, u, id);
+        const facts = normalFacts({ ...(await describeProduct(d, { bytes: img.bytes, mediaType: img.mediaType }, { title: shop.title, text: shop.text }, u)), source_url: url, price: shop.price, shop: true });
+        await saveFacts(sb, u, img.row, facts);
+        return res.status(201).json({ product: await listOne(sb, { ...img.row, probe: { ...(img.row.probe ?? {}), product: facts } }) });
+      }
       const page = await getSafe(f, url, PAGE_MAX, "text/html,application/xhtml+xml");
       if (!page || !/html/i.test(page.type)) throw new ProductError("product_link_unreadable", "That page didn't let us read it. Save a photo of the product and upload it instead.", 422);
       const shop = readShopPage(page.bytes.toString("utf8"), page.url);
@@ -360,7 +377,7 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
       if (a.error) throw a.error;
       if (!a.data?.probe?.product) throw new ProductError("product_not_found", "No such product", 404);
       const cur = normalFacts(a.data.probe.product), b = req.body ?? {};
-      const next = normalFacts({ ...cur, ...(b.name != null ? { name: b.name } : {}), ...(isCategory(b.category) ? { category: b.category } : {}), ...(b.colour != null ? { colour: b.colour } : {}), ...(b.line != null ? { line: b.line } : {}), ...(b.label_text != null ? { label_text: b.label_text } : {}) });
+      const next = normalFacts({ ...cur, ...(b.name != null ? { name: b.name } : {}), ...(isCategory(b.category) ? { category: b.category } : {}), ...(b.colour != null ? { colour: b.colour } : {}), ...(b.line != null ? { line: b.line } : {}), ...(b.label_text != null ? { label_text: b.label_text } : {}), ...(typeof b.shop === "boolean" ? { shop: b.shop } : {}) });
       await saveFacts(sb, u, a.data, next);
       res.json({ product: await listOne(sb, { ...a.data, probe: { ...a.data.probe, product: next } }) });
     } catch (e) { fail(res, e); }
