@@ -9,6 +9,7 @@ import { BRIEF_PART_CHARS, briefParts, byoBusy, byoMaxLive, registerByo } from "
 import { BYO_MCP_TOOLS, MCP_TOOLS, mcpServer, runTool, studioRequest, type StudioCall } from "../src/studio-mcp.ts";
 import { MODEL_TOOLS } from "../src/studio-mcp-models.ts";
 import { SKILL_TOOLS } from "../src/studio-mcp-skills.ts";
+import { SOCIAL_TOOLS } from "../src/studio-mcp-social.ts";
 import { StoryError, parseStoryOptions, quoteStory, storyByoCostUsd, storyByoMargin, storyByoMinMargin } from "../src/studio-stories.ts";
 import { PLANS as LIVE_PLANS } from "../src/studio.ts";
 import { creditValueFloor, creditsForCost } from "../src/studio-pricing.ts";
@@ -119,7 +120,7 @@ test("routes: only the person's own in-chat job; the brief once it is posted; ca
 test("connector: the in-chat tools are listed only when allowed; the start tool prices first; scene tools pass pictures on", async () => {
   for (const t of BYO_MCP_TOOLS) { assert.ok((t as any).title, t.name); assert.equal(typeof (t as any).annotations.readOnlyHint, "boolean"); }
   const list = async (byo: boolean) => { const server = mcpServer((async () => ({ status: 200, json: {} })) as StudioCall, { base: "https://x", byo }); const h = (server as any)._requestHandlers.get("tools/list"); return (await h({ method: "tools/list", params: {} }, {})).tools.map((t: any) => t.name); };
-  assert.deepEqual(await list(false), [...MCP_TOOLS, ...MODEL_TOOLS, ...SKILL_TOOLS].map((t) => t.name)); assert.ok((await list(true)).includes("clone8_make_signature_in_chat"));
+  assert.deepEqual(await list(false), [...MCP_TOOLS, ...MODEL_TOOLS, ...SKILL_TOOLS, ...SOCIAL_TOOLS].map((t) => t.name)); assert.ok((await list(true)).includes("clone8_make_signature_in_chat"));
   assert.deepEqual((studioRequest("clone8_make_signature_in_chat", { topic: "Want a treehouse?" }) as any).options, { topic: "Want a treehouse?", seconds: 50, kind: "explainer", format: "auto", world: "auto", captions: "auto", sidekick: "", stage: "all", engine: "premium", byo: true });
   const calls: Array<{ method: string; path: string; body?: any }> = [];
   const call: StudioCall = async (method, path, body) => {

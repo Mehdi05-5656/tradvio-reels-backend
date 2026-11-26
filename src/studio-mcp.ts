@@ -18,6 +18,7 @@ import { storyByoEnabled, storyByoOpen } from "./studio-stories.js";
 import { STORY_TEMPLATES } from "./studio-story-templates.js";
 import { MODEL_TOOLS, runModelTool } from "./studio-mcp-models.js";
 import { SKILL_TOOLS, runSkillTool } from "./studio-mcp-skills.js";
+import { SOCIAL_TOOLS, runSocialTool } from "./studio-mcp-social.js";
 
 type Env = Record<string, string | undefined>;
 export const mcpEnabled = (env: Env = process.env) => env.STUDIO_MCP_ENABLED === "true";
@@ -236,10 +237,10 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
 /** The MCP server for one request, acting as one person. */
 /** `base`: the connector's own public address (where its logo is served). */
 export function mcpServer(call: StudioCall, o: { base: string; byo?: boolean } = { base: "https://mcp.clone8.io" }) {
-  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos and long films from an idea, and runs every top video, picture and sound model (clone8_models, clone8_generate) and ready-made presets (clone8_presets, clone8_run_preset); media comes from the person's library (clone8_library) or a public link (clone8_add_media). Skills are ready-made recipes run by their command, e.g. /product-ad (clone8_skills, clone8_skill); when the person names one, read it with clone8_skill and follow its steps; save a recipe as their own skill only when they ask (clone8_save_skill). Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...MCP_TOOLS, ...MODEL_TOOLS, ...SKILL_TOOLS, ...(o.byo ? BYO_MCP_TOOLS : [])] as any }));
+  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos and long films from an idea, and runs every top video, picture and sound model (clone8_models, clone8_generate) and ready-made presets (clone8_presets, clone8_run_preset); media comes from the person's library (clone8_library) or a public link (clone8_add_media). Skills are ready-made recipes run by their command, e.g. /product-ad (clone8_skills, clone8_skill); when the person names one, read it with clone8_skill and follow its steps; save a recipe as their own skill only when they ask (clone8_save_skill). Finished videos can be posted to the person's linked accounts (clone8_accounts, clone8_post): show them exactly what will be posted where and when, and post only after their yes. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...MCP_TOOLS, ...MODEL_TOOLS, ...SKILL_TOOLS, ...SOCIAL_TOOLS, ...(o.byo ? BYO_MCP_TOOLS : [])] as any }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    try { const args = req.params.arguments ?? {}; return ((await runModelTool(req.params.name, args, call)) ?? (await runSkillTool(req.params.name, args, call)) ?? (await runTool(req.params.name, args, call))) as any; }
+    try { const args = req.params.arguments ?? {}; return ((await runModelTool(req.params.name, args, call)) ?? (await runSkillTool(req.params.name, args, call)) ?? (await runSocialTool(req.params.name, args, call)) ?? (await runTool(req.params.name, args, call))) as any; }
     catch (e: any) { return err(`Clone8 could not do that just now (${String(e?.message ?? e).slice(0, 120)}).`) as any; }
   });
   return server;

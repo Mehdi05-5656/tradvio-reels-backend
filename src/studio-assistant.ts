@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PLANS, quote, StudioError, fetchStyles, toolsEnabled, costsFor, publicJob, withAssetNames, withPosterUrls, downloadBase, type StudioStyle } from "./studio.js";
 import { buildSystemPrompt, PRESET_CHARACTERS, type KnowledgeUser } from "./studio-knowledge.js";
+import { skillForChat } from "./studio-skills.js";
 import { quoteInstrument, instrumentById, tableUsd, tableUnits, instrumentCredits, InstrumentError, inputAssetIds } from "./studio-instruments.js";
 import { trendById } from "./studio-trends.js";
 import { probeSeconds, makePoster } from "./studio-recast.js";
@@ -673,7 +674,6 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
   const tools = toolsEnabled(env);
   const ctx: Ctx = { sb, u: convo.user_id, env, assets: new Map(assets.map((a) => [String(a.id).toLowerCase(), a])), styles, deps, tools };
   const system = buildSystemPrompt({ tools, costs: costsFor(env), plans: PLANS, env, styles, user: ku, memory: memory.map((m) => m.note), summary: convo.summary ?? null, social, performance: perf.brief });
-  const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
   let plan: Plan | null = null, choice: Choice | null = null, request: RequestCard | null = null, people: PeopleCard | null = null, voices: VoiceCard | null = null, setup: SetupCard | null = null, cast: CastCard | null = null, publish: PublishCard | null = null;
   // who is in a newly attached clip: found once (cached on the asset) and told to the model, so it can ask who changes
   const peopleNotes: string[] = [];
@@ -684,7 +684,13 @@ export async function runTurn(sb: SupabaseClient, deps: AssistantDeps, convo: Co
       if (found) peopleNotes.push(`[People seen in "${a.name}" (asset ${a.asset_id}): ${found.length ? found.map((p) => `${p.index}: ${p.label}${p.speaking ? ", speaking" : ""}`).join("; ") : "nobody with a visible face"}]`);
     } catch (e: any) { log(`[assistant] people ${a.asset_id} ${String(e?.message ?? e).slice(0, 120)}`); }
   }
-  if (peopleNotes.length) user.context = peopleNotes.join("\n").slice(0, 1200);
+  // a message that starts with a skill's command brings the skill's steps (studio-skills.ts skillForChat)
+  const skillNote = await skillForChat(sb, convo.user_id, input.text, env).catch((e: any) => { log(`[assistant] skill ${String(e?.message ?? e).slice(0, 120)}`); return null; });
+  const notes = [...(skillNote ? [skillNote] : []), ...(peopleNotes.length ? [peopleNotes.join("\n").slice(0, 1200)] : [])];
+  if (notes.length) user.context = notes.join("\n").slice(0, 8000);
+  // built after this message's notes are on it, so the model reads them in this turn (the people found in a new clip
+  // used to reach it only from the next message on)
+  const messages = modelMessages(convo.messages, convo.summary_through ?? 0);
   // every round's words are kept, in order: what it says before a tool runs stays above what it says after
   let text = "", streamed = "", interrupted = false;
   const said: string[] = [];
