@@ -31,10 +31,49 @@ export function nameFor(f: InFile, n: number, stamp: string): string | null {
 }
 const typeOf = (name: string) => (/\.mov$/i.test(name) ? "video/quicktime" : VIDEO.test(name) ? "video/mp4" : /\.png$/i.test(name) ? "image/png" : "image/jpeg");
 
-export async function intake(o: { api: Api; sb: SupabaseClient; files: InFile[]; telegramToken?: string | null; fetch?: typeof fetch; now?: Date; log?: (e: string, d?: Record<string, unknown>) => void }): Promise<Intake> {
+/** A file's address is fetched only when it is an https name on the public internet: no bare IP addresses, no
+ *  localhost or internal names. Redirects are followed by hand (three at most), each one checked the same way. */
+export function safeUrl(raw: string): boolean {
+  let u: URL; try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (/^[\d.]+$/.test(h) || h.includes(":")) return false; // an IP address (v4 or v6)
+  if (h === "localhost" || !h.includes(".") || /\.(local|internal|localhost|lan|home|corp|intranet)$/.test(h) || h === "metadata.google.internal") return false;
+  return true;
+}
+async function getSafe(f: typeof fetch, url: string, signal: AbortSignal): Promise<Response | null> {
+  let at = url;
+  for (let hop = 0; hop < 4; hop++) {
+    if (!safeUrl(at)) return null;
+    const r = await f(at, { redirect: "manual", signal });
+    if (r.status >= 300 && r.status < 400 && r.headers.get("location")) { at = new URL(r.headers.get("location")!, at).toString(); continue; }
+    return r;
+  }
+  return null;
+}
+/** The body, read as it comes, given up past `max` bytes (a missing or false length can't make it hold more). */
+async function readCapped(r: Response, max: number): Promise<Buffer | "too_big" | null> {
+  if (!r.body) return null;
+  const reader = r.body.getReader(), parts: Uint8Array[] = []; let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > max) { await reader.cancel().catch(() => undefined); return "too_big"; }
+    parts.push(value);
+  }
+  return Buffer.concat(parts);
+}
+export const MAX_FILES = 20;
+
+export async function intake(o: { api: Api; sb: SupabaseClient; files: InFile[]; telegramToken?: string | null; fetch?: typeof fetch; now?: Date; log?: (e: string, d?: Record<string, unknown>) => void;
+  /** the server's file lock: one turn moves files at a time, so memory stays bounded */ lock?: () => Promise<() => void> }): Promise<Intake> {
   const f = o.fetch ?? fetch, out: Intake = { got: [], failed: [] };
+  for (const extra of o.files.slice(MAX_FILES)) out.failed.push({ name: extra.name || "a file", why: "too_many" });
+  const free = o.lock ? await o.lock() : null;
+  try {
   const stamp = (o.now ?? new Date()).toISOString().slice(0, 16).replace("T", " ");
-  for (const [i, file] of o.files.slice(0, 20).entries()) {
+  for (const [i, file] of o.files.slice(0, MAX_FILES).entries()) {
     const label = file.name || `file ${i + 1}`;
     try {
       // where the bytes are
@@ -47,15 +86,18 @@ export async function intake(o: { api: Api; sb: SupabaseClient; files: InFile[];
         url = `https://api.telegram.org/file/bot${o.telegramToken}/${j.result.file_path}`;
         if (!file.name) file.name = String(j.result.file_path).split("/").pop();
       }
-      if (!url || !/^https:\/\//.test(url)) { out.failed.push({ name: label, why: "unreadable" }); continue; }
+      if (!url || !safeUrl(url)) { out.failed.push({ name: label, why: "unreadable" }); continue; }
+      if (/\.(heic|heif)(\?|$)/i.test(String(file.name ?? url))) { out.failed.push({ name: label, why: "heic" }); continue; }
       const name = nameFor(file, i + 1, stamp);
       if (!name) { out.failed.push({ name: label, why: "not_video_or_picture" }); continue; }
-      const res = await f(url, { signal: AbortSignal.timeout(300_000) });
-      if (!res.ok) { out.failed.push({ name, why: "unreadable" }); continue; }
+      const res = await getSafe(f, url, AbortSignal.timeout(300_000));
+      if (!res || !res.ok) { out.failed.push({ name, why: "unreadable" }); continue; }
       const len = Number(res.headers.get("content-length") ?? 0);
-      if (len > CHAT_MAX) { out.failed.push({ name, why: "too_big" }); continue; }
-      const bytes = Buffer.from(await res.arrayBuffer());
-      if (!bytes.length || bytes.length > CHAT_MAX) { out.failed.push({ name, why: bytes.length ? "too_big" : "unreadable" }); continue; }
+      if (len > CHAT_MAX) { await res.body?.cancel().catch(() => undefined); out.failed.push({ name, why: "too_big" }); continue; }
+      const read = await readCapped(res, CHAT_MAX);
+      if (read === "too_big") { out.failed.push({ name, why: "too_big" }); continue; }
+      const bytes = read;
+      if (!bytes || !bytes.length) { out.failed.push({ name, why: "unreadable" }); continue; }
       // the website's own upload: plan limits, the same file kept once
       const up = await o.api.call("POST", "/api/studio/assets/upload-url", { name, size: bytes.length, type: typeOf(name) });
       if (up.status !== 200) { out.failed.push({ name, why: String(up.json?.detail ?? up.json?.error ?? `http_${up.status}`).slice(0, 160) }); continue; }
@@ -68,6 +110,7 @@ export async function intake(o: { api: Api; sb: SupabaseClient; files: InFile[];
       out.got.push({ asset_id: String(up.json.asset_id), name: String(done.json?.asset?.name ?? name), kind });
     } catch (e: any) { out.failed.push({ name: label, why: /timeout|abort/i.test(String(e?.name ?? e?.message)) ? "too_slow" : "unreadable" }); }
   }
+  } finally { free?.(); }
   o.log?.("intake", { got: out.got.length, failed: out.failed.map((x) => x.why) });
   return out;
 }
@@ -77,6 +120,8 @@ export function whyText(why: string): string {
   return why === "telegram_too_big" ? "Telegram only lets me take files up to 20 MB. Send a link, or upload it on the Library page."
     : why === "too_big" ? "it's over 300 MB; upload it on the Library page"
     : why === "not_video_or_picture" ? "only videos (MP4, MOV) and pictures (JPG, PNG) can go in the library"
+    : why === "too_many" ? `only ${MAX_FILES} files can come in one go; send the rest after`
+    : why === "heic" ? "iPhone HEIC photos can't go in the library yet; send it as a JPG (Settings → Camera → Formats → Most Compatible) or as a video"
     : why === "too_slow" ? "it took too long to come through; send it again or use a link"
     : why === "store_failed" || why === "unreadable" ? "it didn't come through; send it again"
     : why;

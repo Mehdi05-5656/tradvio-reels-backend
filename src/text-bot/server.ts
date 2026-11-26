@@ -317,14 +317,17 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
     if (ch.startCode(u.text)) { await say.text(u.chat, "This chat is already connected to your Clone8 account. To connect a different account, remove this one first in the app (Account → Text Clone8)."); return; }
     if (ch.name === "imessage") shareProfile(u.chat);
     // files sent with it go into the person's library first (as an upload from the website would), then the bot reads
-    // the message with them numbered in the order sent
-    let took: Intake | null = null;
-    if (u.files?.length) {
-      void say.typing(u.chat).catch(() => undefined);
-      took = await intake({ api: serverApi(link.user_id, { port, fetch: deps.fetch }), sb, files: u.files, telegramToken: ch.name === "telegram" ? env.TELEGRAM_BOT_TOKEN ?? null : null, fetch: deps.fetch, log: logFor(link.user_id, u.chat, ch.name) });
-    }
-    if (!(await withBot(sb, link, u.chat, (bot) => bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file,
-      ...(took ? { files: took.got, file_errors: took.failed.map((x) => `${x.name}: ${whyText(x.why)}`) } : {}) })))) return "busy";
+    // the message with them numbered in the order sent. Only once this server holds the chat (a busy chat is tried again
+    // later, and must not download twice), and one turn at a time moves files (the server's file lock)
+    if (!(await withBot(sb, link, u.chat, async (bot) => {
+      let took: Intake | null = null;
+      if (u.files?.length) {
+        void say.typing(u.chat).catch(() => undefined);
+        took = await intake({ api: serverApi(link.user_id, { port, fetch: deps.fetch }), sb, files: u.files, telegramToken: ch.name === "telegram" ? env.TELEGRAM_BOT_TOKEN ?? null : null, fetch: deps.fetch, log: logFor(link.user_id, u.chat, ch.name), lock: takeFileLock });
+      }
+      await bot.handle({ chat: u.chat, from: u.from, text: u.text, private: u.private, tap: !!u.callback_id, has_file: u.has_file,
+        ...(took ? { files: took.got, file_errors: took.failed.map((x) => `${x.name}: ${whyText(x.why)}`) } : {}) });
+    }))) return "busy";
   }
 
   // ---- the inbox: written by the webhook, worked on in order, one chat at a time ----
@@ -369,7 +372,9 @@ export function registerTextBot(app: Express, sbFn: () => SupabaseClient, deps: 
         const parts: Got[][] = [];
         for (const g of got) {
           const prev = parts[parts.length - 1], tail = prev?.[prev.length - 1];
-          if (batchy && prev && tail && !own(tail) && !own(g) && g.at - tail.at <= MERGE_MS) prev.push(g); else parts.push([g]);
+          // (and never so that the words together read as YES, NO or STOP: "yes," then "kp" stay two messages)
+          const together = () => classify([...(prev ?? []).map((x) => x.u?.text ?? ""), g.u?.text ?? ""].filter((t) => t.trim()).join("\n")).kind === "text";
+          if (batchy && prev && tail && !own(tail) && !own(g) && g.at - tail.at <= MERGE_MS && together()) prev.push(g); else parts.push([g]);
         }
         for (const part of parts) {
           const mine: Got[] = [];

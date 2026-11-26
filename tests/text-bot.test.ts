@@ -603,11 +603,15 @@ test("files sent in the chat: both channels carry them; intake stores each as an
   const stored: any[] = [];
   const sb: any = { storage: { from: (b: string) => ({ uploadToSignedUrl: async (path: string, token: string, bytes: Buffer) => { stored.push({ b, path, token, n: bytes.length }); return { data: {}, error: null }; } }) } };
   const f: any = async (url: string) => (String(url).includes("getFile") ? new Response(JSON.stringify({ ok: true, result: { file_path: "videos/clip.mp4" } })) : new Response(new Uint8Array(1234)));
-  const r = await intake({ api, sb, fetch: f, telegramToken: "tok", files: [{ url: "https://cdn.sendblue.co/files/IMG_4410.MOV" }, { url: "https://x/same.mp4" }, { file_id: "big", size: TELEGRAM_MAX + 1 }, { url: "https://x/notes.pdf" }, { file_id: "small", size: 900 }] });
+  const r = await intake({ api, sb, fetch: f, telegramToken: "tok", files: [{ url: "https://cdn.sendblue.co/files/IMG_4410.MOV" }, { url: "https://cdn.example.com/same.mp4" }, { file_id: "big", size: TELEGRAM_MAX + 1 }, { url: "https://cdn.example.com/notes.pdf" }, { file_id: "small", size: 900 }] });
   assert.deepEqual(r.got.map((g) => g.asset_id), ["a-new", "a-same", "a-new"]);
   assert.deepEqual(stored.map((x) => [x.b, x.path, x.n]), [["studio-uploads", "u/a-new.mov", 1234], ["studio-uploads", "u/a-new.mov", 1234]], "the same file again is not stored twice");
   assert.deepEqual(r.failed.map((x) => x.why), ["telegram_too_big", "not_video_or_picture"]);
   assert.match(whyText("telegram_too_big"), /20 MB/);
+  // only https names on the public internet are fetched, redirects included
+  const { safeUrl } = await import("../src/text-bot/intake.js");
+  for (const bad of ["http://cdn.example.com/a.mov", "https://127.0.0.1/a.mov", "https://[::1]/a.mov", "https://localhost/a.mov", "https://metadata.google.internal/x", "https://intranet/a.mov", "https://user:pw@cdn.example.com/a.mov"]) assert.equal(safeUrl(bad), false, bad);
+  assert.equal(safeUrl("https://cdn.sendblue.co/files/IMG_1.MOV"), true);
   assert.ok(calls.filter((c) => c.endsWith("/complete")).length === 2);
 });
 
@@ -631,4 +635,30 @@ test("one post question can carry each video's own time and caption (3 today at 
   assert.match(p.question, /5\. ".+", tomorrow 12:00 PM\n {3}Caption: "Lunch one\."/);
   assert.equal(p.posts, 5);
   await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA, when: "2026-11-25T23:05:00Z" }], account_ids: [IDS.tiktok] }), /at least 12 minutes/);
+});
+
+test("files, review fixes: a late file joins the batch and never withdraws the waiting question; times in the question are exact", async () => {
+  // the question for the first files is waiting; one more file arrives on its own
+  const b = botWith(swapTurn); b.state.owner = "1";
+  await b.bot.handle({ chat: "1", from: "1", text: "post these", private: true, files: [{ asset_id: IDS.clipA, name: "a.mov", kind: "video" }, { asset_id: IDS.clipB, name: "b.mov", kind: "video" }] } as any);
+  const st = b.state.chats["1"], q = st.pending.live!;
+  await b.bot.handle({ chat: "1", from: "1", text: "", private: true, files: [{ asset_id: IDS.podcast, name: "c.mov", kind: "video" }] } as any);
+  assert.equal(st.pending.live?.id, q.id, "the question still waits");
+  assert.deepEqual(st.table.map((x) => x.label), ["a.mov", "b.mov", "c.mov"], "the late file joined the others");
+  assert.match(b.sent.at(-1)!.text, /Got 1 more \(3 in all\)/);
+  // a voice note: said plainly, not "send it again"
+  await b.bot.handle({ chat: "1", from: "1", text: "", private: true, has_file: true } as any);
+  assert.match(b.sent.at(-1)!.text, /videos and pictures/);
+  // some videos timed, others not, with no time for the rest: refused rather than guessed
+  const api = mockApi(), now = Date.parse("2026-11-25T23:00:00Z");
+  await assert.rejects(preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA, when: "2026-11-26T02:00:00Z" }, { asset_id: IDS.clipB }], account_ids: [IDS.tiktok] }), /every video its own time/);
+  // captions of their own, one time and a spacing: each line says exactly when
+  const p = await preparePost(ctxOf(api, { now, timezone: "America/Los_Angeles" }), { videos: [{ asset_id: IDS.clipA, caption: "one" }, { asset_id: IDS.clipB, caption: "two" }], account_ids: [IDS.tiktok], when: "2026-11-26T02:00:00Z", spacing_minutes: 90 });
+  assert.match(p.question, /1\. ".+", today 6:00 PM/); assert.match(p.question, /2\. ".+", today 7:30 PM/);
+  // an AI-written caption is checked like any other words; one the person typed is theirs
+  const ctxTyped = { ...ctxOf(api, { now }), recentUserText: ["caption: I asked ChatGPT for this one"] };
+  const mine = await preparePost(ctxTyped, { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.tiktok], caption: "I asked ChatGPT for this one" });
+  assert.ok(mine.own.includes("I asked ChatGPT for this one"));
+  const ai = await preparePost(ctxOf(api, { now }), { videos: [{ asset_id: IDS.clipA }], account_ids: [IDS.tiktok], caption: "Made with ChatGPT" });
+  assert.ok(!ai.own.includes("Made with ChatGPT"), "not exempt: the question would be refused rather than shown");
 });

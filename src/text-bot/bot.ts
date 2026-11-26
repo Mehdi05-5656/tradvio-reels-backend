@@ -132,15 +132,25 @@ export function makeBot(d: BotDeps) {
       if (m.tap) return; // a tap that is none of ours
       // files sent in the chat are in the library now: they are what "these", "the first one" mean
       if (m.files?.length || m.file_errors?.length) {
+        // a file that comes a little after the others (iMessage sends each on its own) joins them: "these" stays all of them
+        const late = !!m.files?.length && !m.text.trim() && !!st.filesAt && t - st.filesAt < 3 * 60_000 && st.table.length > 0 && st.table.every((x) => x.ref.startsWith("f:"));
         if (m.files?.length) {
-          st.table = m.files.map((f, i) => ({ n: i + 1, ref: `f:${f.asset_id}`, label: f.name }));
+          const from = late ? st.table.length : 0;
+          st.table = [...(late ? st.table : []), ...m.files.map((f, i) => ({ n: from + i + 1, ref: `f:${f.asset_id}`, label: f.name }))];
+          st.filesAt = t;
           d.forget?.();
+        }
+        // while a question waits, a late file never withdraws it: it is added, and the person is told
+        if (late && st.pending.live) {
+          note(st, `${m.files!.length} more file${m.files!.length === 1 ? "" : "s"} arrived after the question was asked; now ${st.table.length} in all: ${m.files!.map((f) => `${JSON.stringify(f.name)} [f:${f.asset_id}]`).join("; ")}. The waiting question covers only the earlier ones.`);
+          await say(st, `Got ${m.files!.length} more (${st.table.length} in all). The question that's waiting covers the first ${st.table.length - m.files!.length}; reply YES with its code for those, or tell me to redo it with all ${st.table.length}.`);
+          return;
         }
         note(st, [m.files?.length ? `The person sent ${m.files.length} file${m.files.length === 1 ? "" : "s"} in the chat; ${m.files.length === 1 ? "it is" : "they are"} now in their library, numbered in the order sent: ${m.files.map((f, i) => `${i + 1}. ${JSON.stringify(f.name)} (${f.kind}) [f:${f.asset_id}]`).join("; ")}.` : "",
           m.file_errors?.length ? `Files that could not be taken in: ${m.file_errors.join("; ")}.` : ""].filter(Boolean).join(" "));
         if (!m.text.trim()) return await talk(st, m.files?.length ? `(sent ${m.files.length} file${m.files.length === 1 ? "" : "s"})` : "(sent a file)");
       }
-      if (!m.text.trim()) { await d.out.text(m.chat, m.has_file ? "That file didn't come through. Send it again, or a link to it." : "I can read text, links, videos and pictures."); return; }
+      if (!m.text.trim()) { await d.out.text(m.chat, m.has_file ? "I can take videos and pictures. Voice notes and audio files can't be used here." : "I can read text, links, videos and pictures."); return; }
       if (gate.kind === "start" || gate.kind === "help") { await say(st, HELP); return; }
       if (gate.kind === "stop" || gate.kind === "pause") { st.muted = true; d.log("muted", { from: m.from }); await d.out.text(m.chat, gate.kind === "stop" ? "Okay. I won't message you on my own (results, updates) until you say RESUME. If you text me, I'll still answer that message. Nothing that is running was cancelled." : "Quiet until you say RESUME: I'll only answer what you text me. Your runs keep going."); return; }
       if (gate.kind === "resume") { st.muted = false; const missed = st.missed ?? []; st.missed = []; await say(st, missed.length ? `I'm back. While I was quiet:\n${missed.join("\n")}` : "I'm back. What do you need?"); return; }

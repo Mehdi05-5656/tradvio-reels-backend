@@ -24,7 +24,7 @@ export type Transport = {
   typing(chat: string): Promise<void>;
 };
 export type Turn = { role: "user" | "assistant" | "event"; text: string; at: number; /** a button tap, not typed words */ tap?: boolean };
-export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; light?: { day: string; links: number; copies: number; app_links?: number } };
+export type ChatState = { chat: string; history: Turn[]; table: Array<{ n: number; ref: string; label: string }>; notes: string[]; pending: PendingStore; spend?: Spend; watches: any[]; muted?: boolean; missed?: string[]; /** when files last came in the chat */ filesAt?: number; light?: { day: string; links: number; copies: number; app_links?: number } };
 export type BrainDeps = { cfg: Config; api: Api; out: Transport; fetch?: typeof fetch; now?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; index: { current: Index | null };
   /** the few facts nearly every answer needs (plan, balance, linked accounts), read once and kept a few minutes */
   basics?: { at: number; text: string } | null };
@@ -297,7 +297,7 @@ export async function think(d: BrainDeps, st: ChatState, userText: string, o: { 
     if (name === "prepare_automation_run") return prepared(() => act.prepareAutomationRun(actx(), a ?? {}));
     if (name === "prepare_edit") return prepared(() => prepareEdit(actx(), a ?? {}));
     // a reading helper called by its own name ("posts") is the lookup it meant
-    if (HELPERS[name]) return run("lookup", { name, args: a?.args && typeof a.args === "object" ? a.args : typeof a?.args === "string" ? (() => { try { return JSON.parse(a.args); } catch { return {}; } })() : a ?? {} });
+    if (Object.prototype.hasOwnProperty.call(HELPERS, name)) return run("lookup", { name, args: a?.args && typeof a.args === "object" ? a.args : typeof a?.args === "string" ? (() => { try { return JSON.parse(a.args); } catch { return {}; } })() : a ?? {} });
     return { error: "unknown_tool" };
   };
 

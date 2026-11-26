@@ -192,6 +192,11 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
     return { at: t, caption: c };
   });
   const each = own.some((x) => x.at != null || x.caption != null);
+  // with some videos timed and others not, every one needs a time the question can show exactly
+  if (own.some((x) => x.at != null) && own.some((x) => x.at == null)) {
+    if (a.when && a.when !== "now" && Number.isFinite(Date.parse(a.when))) { const base = Date.parse(a.when); own.forEach((x, i) => { if (x.at == null) x.at = base + i * Math.min(Math.max(Math.round(Number(a.spacing_minutes ?? 0)) || 0, 0), 10080) * 60_000; }); }
+    else throw new ActionError("mixed_times", "Give every video its own time (or none of them, with one time for all)");
+  }
   const hasYouTube = accounts.some((x) => x.platform === "youtube");
   const ytTitle = hasYouTube && a.youtube_title ? short(a.youtube_title, 100) : null, ytSee = hasYouTube && ["public", "unlisted", "private"].includes(String(a.youtube_visibility)) ? String(a.youtube_visibility) : null;
   const body: Record<string, any> = { items: videos.map((v, i) => ({ ...(v.asset_id ? { asset_id: v.asset_id } : { job_id: v.job_id, output_key: v.output_key }), ...(own[i].at != null ? { schedule_at: new Date(own[i].at!).toISOString() } : {}), ...(own[i].caption != null ? { caption: own[i].caption } : {}) })), accounts: accounts.map((x) => x.id), caption, via: "text-test",
@@ -199,15 +204,22 @@ export async function preparePost(ctx: Ctx, a: { videos: VideoRef[]; account_ids
     ...(ytTitle || ytSee ? { options: { youtube: { ...(ytTitle ? { title: ytTitle } : {}), ...(ytSee ? { visibility: ytSee } : {}) } } } : {}),
     ...(at ? { schedule_at: new Date(at).toISOString() } : {}) };
   const whenWords = rel ? `${rel} minutes after your YES` : at ? when(at, ctx.timezone, ctx.now) : "now";
-  const names = titles.map((t) => short(t, 60)), mine = [...names, caption, ...own.map((x) => x.caption ?? ""), ...perAccount.map(([, c]) => c), ...(ytTitle ? [ytTitle] : [])].filter(Boolean);
+  // the wording check leaves alone only what is the person's own: titles from their account, and captions they typed
+  // themselves (a caption the AI wrote is checked like any other words, so it can't carry a supplier's name out)
+  const typed = (c: string) => !!c && (ctx.recentUserText ?? []).some((t) => t.replace(/\s+/g, " ").toLowerCase().includes(c.replace(/\s+/g, " ").toLowerCase()));
+  const names = titles.map((t) => short(t, 60)), mine = [...names, ...[caption, ...own.map((x) => x.caption ?? ""), ...perAccount.map(([, c]) => c), ...(ytTitle ? [ytTitle] : [])].filter((c) => typed(c))].filter(Boolean);
   // with a time or caption of its own, every video is listed: what goes out when, with which words
   if (each) {
-    const list = videos.map((_, i) => `${i + 1}. "${names[i]}", ${own[i].at != null ? when(own[i].at!, ctx.timezone, ctx.now) : at ? when(at, ctx.timezone, ctx.now) : rel ? `${rel} minutes after your YES` : "now"}${(own[i].caption ?? caption) ? `\n   Caption: "${own[i].caption ?? caption}"` : "\n   No caption."}`);
+    // (no time of its own: the post's time, then the spacing, as the posting route lays them out)
+    const slot = (i: number) => own[i].at != null ? when(own[i].at!, ctx.timezone, ctx.now) : at ? when(at + i * gap * 60_000, ctx.timezone, ctx.now)
+      : rel ? `${rel + i * gap} minutes after your YES` : i === 0 || !gap ? "now" : `${i * gap} minutes after the first`;
+    const list = videos.map((_, i) => `${i + 1}. "${names[i]}", ${slot(i)}${(own[i].caption ?? caption) ? `\n   Caption: "${own[i].caption ?? caption}"` : "\n   No caption."}`);
+    const anyNow = own.every((x) => x.at == null) && !at && !rel;
     const lines2 = [`Post ${videos.length === 1 ? "this video" : `these ${videos.length} videos`} to ${accounts.map(handle).join(", ")}:`, ...list,
       ...perAccount.map(([id, c]) => `${handle(accounts.find((x) => x.id === id)!)} gets its own caption on every one: "${c}"`),
       ...(hasYouTube ? [`YouTube: ${ytTitle ? `title "${ytTitle}", ` : ""}${ytSee ?? "public"}.`] : []),
       ...(viaGroup ? ["The group's own sign-off and spacing are not added by text yet."] : []),
-      "A time can shift a little later to keep 30 minutes between posts on one account."];
+      anyNow ? "It can't be pulled back once it is out." : "A time can shift a little later to keep 30 minutes between posts on one account."];
     return put(ctx, { kind: "post", credits: 0, posts: videos.length * accounts.length, own: mine, steps: [{ method: "POST", path: "/api/studio/social/posts", body, save: "posts", label: "post" }],
       checks: [{ kind: "accounts_linked", account_ids: accounts.map((x) => x.id!) }], meta: { minutes_from_yes: rel }, body: lines2.join("\n") });
   }
