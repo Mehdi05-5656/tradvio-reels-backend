@@ -16,6 +16,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { storyByoEnabled, storyByoOpen } from "./studio-stories.js";
 import { STORY_TEMPLATES } from "./studio-story-templates.js";
+import { MODEL_TOOLS, runModelTool } from "./studio-mcp-models.js";
 
 type Env = Record<string, string | undefined>;
 export const mcpEnabled = (env: Env = process.env) => env.STUDIO_MCP_ENABLED === "true";
@@ -234,10 +235,10 @@ export async function runTool(name: string, a: any, call: StudioCall): Promise<R
 /** The MCP server for one request, acting as one person. */
 /** `base`: the connector's own public address (where its logo is served). */
 export function mcpServer(call: StudioCall, o: { base: string; byo?: boolean } = { base: "https://mcp.clone8.io" }) {
-  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos and long films from an idea. Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...MCP_TOOLS, ...(o.byo ? BYO_MCP_TOOLS : [])] as any }));
+  const server = new Server({ name: "clone8", title: "Clone8", version: "1.0.0", websiteUrl: "https://clone8.io", icons: [{ src: `${o.base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }, { src: `${o.base}/favicon-64.png`, mimeType: "image/png", sizes: ["64x64"] }] } as any, { capabilities: { tools: {} }, instructions: "Clone8 makes short videos and long films from an idea, and runs every top video, picture and sound model (clone8_models, clone8_generate) and ready-made presets (clone8_presets, clone8_run_preset); media comes from the person's library (clone8_library) or a public link (clone8_add_media). Always give the person the price (clone8_quote, or a make tool without confirm) and wait for their agreement before calling a make tool with confirm: true. Then follow the job with clone8_job and give them the link." });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...MCP_TOOLS, ...MODEL_TOOLS, ...(o.byo ? BYO_MCP_TOOLS : [])] as any }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    try { return (await runTool(req.params.name, req.params.arguments ?? {}, call)) as any; }
+    try { const args = req.params.arguments ?? {}; return ((await runModelTool(req.params.name, args, call)) ?? (await runTool(req.params.name, args, call))) as any; }
     catch (e: any) { return err(`Clone8 could not do that just now (${String(e?.message ?? e).slice(0, 120)}).`) as any; }
   });
   return server;
