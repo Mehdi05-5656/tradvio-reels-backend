@@ -58,10 +58,11 @@ test("the page never gets a recipe; a preset without an example is for admins on
   }
   const all = new Set(instrumentsEnabled(ENV, { preview: true }).map((m) => m.id));
   assert.equal(presetsOffered(all, { admin: true }).length, PRESETS.length);
-  assert.equal(presetsOffered(all).length, PRESETS.filter((p) => p.example).length, "only presets with a real example");
+  assert.equal(presetsOffered(all, { open: true }).length, PRESETS.filter((p) => p.example).length, "only presets with a real example");
   const publicOnly = new Set(instrumentsEnabled(ENV).map((m) => m.id));
   assert.ok(!publicOnly.has("kling-video/v4.0/image-to-video"), "the new models are preview-only until opened");
-  assert.equal(presetsOffered(publicOnly, { admin: true }).length, 0, "every phase-1 preset sits on a new model");
+  assert.equal(presetsOffered(publicOnly).length, 0, "customers see no preset until the preview models open, not even one on a public model");
+  assert.equal(presetsOffered(all).length, 0, "closed means closed");
 });
 
 test("the new models are preview-only: listed and quoted for admins, opened for all by STUDIO_INSTRUMENTS_PREVIEW_OPEN", async () => {

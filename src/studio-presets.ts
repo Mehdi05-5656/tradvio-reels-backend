@@ -63,8 +63,10 @@ export const PRESETS: Preset[] = [
   { id: "earth-zoom", title: "Earth zoom out", line: "From you to space in one move.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "Starting on the person in the photo, the camera rises straight up and pulls back in one continuous, seamless move: over the rooftops, through the clouds, until the whole Earth is visible from space, then it holds. Smooth, no cuts." },
     inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("earth-zoom", "woman"), added: "2026-11-25" },
-  { id: "street-interview", title: "Street interview", line: "Stopped on the street, mic in your face. You say the line.", output: "video", endpoint: "clone8/halo/image-to-video",
-    recipe: { duration: 6, aspect_ratio: "9:16", generate_audio: true, prompt: "The person from the photo is stopped on a busy city street by an interviewer who holds a microphone into the frame. They laugh, then answer straight to the camera, saying clearly: \"{text}\". Natural street sound and passing traffic, handheld vertical phone footage, like a viral street interview." },
+  // Nov 27 2026: from Clone8 Halo (refused by the supplier key since Nov 26 evening) to Kling 3.0 Pro, which spoke a
+  // script word for word in the Nov 26 talking-head test (docs/model-features/RESEARCH.md section 7)
+  { id: "street-interview", title: "Street interview", line: "Stopped on the street, mic in your face. You say the line.", output: "video", endpoint: "kling-video/v3.0/pro/image-to-video",
+    recipe: { duration: 6, sound: "on", prompt: "The person from the photo is stopped on a busy city street by an interviewer who holds a microphone into the frame. They laugh, then answer straight to the camera, saying clearly: \"{text}\". Natural street sound and passing traffic, handheld vertical phone footage, like a viral street interview. Their face and clothes stay the same." },
     inputs: [PHOTO], text: { label: "What you say", placeholder: "I quit my job to do this full time", max: 80 }, groups: ["personal", "ai"], added: "2026-11-25" },
   // ---- video, from a product photo ----
   { id: "product-spin", title: "Product hero", line: "Your product on a pedestal, lit like an ad.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
@@ -223,9 +225,10 @@ export const PRESETS: Preset[] = [
   { id: "channel-banner", title: "Channel banner", line: "A wide channel banner with your name.", output: "image", endpoint: "kling-image/v4.0/edit",
     recipe: K("A wide YouTube channel banner: the person in @image_1 on the right, smiling, cut out cleanly over a bold gradient background with subtle shapes, and the channel name \"{text}\" in big modern letters in the centre-left, all important content kept inside the middle third. Their face stays recognisably theirs. No other words, taglines or labels anywhere in the image.", "16:9"),
     inputs: [PHOTO_REF], text: { label: "Channel name", placeholder: "Maya Makes", max: 24 }, groups: ["personal"], example: picEx("channel-banner", "man2", "16:9"), added: "2026-11-26" },
-  { id: "quote-card", title: "Quote card", line: "Your words and your face on a share-ready card.", output: "image", endpoint: "kling-image/v4.0/edit",
-    recipe: K("A clean square social quote card: a soft black-and-white portrait of the person in @image_1 on the left third, and the quote \"{text}\" in large elegant serif type on the right on a warm off-white background, with generous margins. Every word spelled exactly. No other words, taglines or labels anywhere in the image.", "1:1"),
-    inputs: [PHOTO_REF], text: { label: "Your quote", placeholder: "Start before you feel ready", max: 60 }, groups: ["personal"], added: "2026-11-26" },
+  // Nov 27 2026: from Kling Image 4.0 (a 27-character quote came out garbled) to Seedream 5.0 Pro, quotes up to 40
+  { id: "quote-card", title: "Quote card", line: "Your words and your face on a share-ready card.", output: "image", endpoint: "bytedance/seedream/v5.0/pro/edit",
+    recipe: K("A clean square social quote card: a soft black-and-white portrait of the person in the first picture on the left third, and the quote \"{text}\" in large elegant serif type on the right on a warm off-white background, with generous margins. Every word spelled exactly as given, nothing else written anywhere.", "1:1"),
+    inputs: [PHOTO_REF], text: { label: "Your quote", placeholder: "Start before you feel ready", max: 40 }, groups: ["personal"], added: "2026-11-26" },
   { id: "event-poster", title: "Event poster", line: "A bold poster for your show, launch or night.", output: "image", endpoint: "kling-image/v4.0/edit",
     recipe: K("A bold event poster featuring the person in @image_1 as the headliner in dramatic stage light, with the event name \"{text}\" in huge display letters at the top, gig-poster style, grainy print texture. Their face stays recognisably theirs. Every word spelled exactly. No other words, taglines or labels anywhere in the image."),
     inputs: [PHOTO_REF], text: { label: "Event name", placeholder: "FRIDAY NIGHT LIVE", max: 24 }, groups: ["personal"], example: picEx("event-poster", "woman"), added: "2026-11-26" },
@@ -281,8 +284,11 @@ export function presetRequest(p: Preset, options: any): { endpoint: string; para
 }
 export class PresetError extends Error { constructor(public code: string, message = code, public status = 400) { super(message); } }
 
-/** The presets a person can see: those on an offered model, with a real example (admins also see the ones without). */
-export function presetsOffered(offered: Set<string>, opts: { admin?: boolean } = {}): Preset[] {
+/** The presets a person can see: those on an offered model, with a real example (admins also see the ones without).
+ *  Customers see them only once the preview models open (STUDIO_INSTRUMENTS_PREVIEW_OPEN), all together, even a preset
+ *  on a public model (street interview on Kling 3.0 Pro since Nov 27 2026). */
+export function presetsOffered(offered: Set<string>, opts: { admin?: boolean; open?: boolean } = {}): Preset[] {
+  if (!opts.admin && !opts.open) return [];
   return PRESETS.filter((p) => offered.has(p.endpoint) && (opts.admin || !!p.example));
 }
 /** What the page gets: never the recipe. */

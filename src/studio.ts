@@ -1234,7 +1234,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
       const admin = req.query.preview === "1" && (await isStudioAdmin(req, sbFn(), env).catch(() => false));
       const models = new Map(instrumentsEnabled(env, { preview: admin }).map((m) => [m.id, m]));
       res.setHeader("Cache-Control", admin ? "private, no-store" : "public, max-age=300");
-      res.json({ presets: presetsOffered(new Set(models.keys()), { admin }).map((p) => publicPreset(p, models.get(p.endpoint) ?? null)) });
+      res.json({ presets: presetsOffered(new Set(models.keys()), { admin, open: env.STUDIO_INSTRUMENTS_PREVIEW_OPEN === "true" }).map((p) => publicPreset(p, models.get(p.endpoint) ?? null)) });
     } catch (e) { fail(res, e); }
   });
   /** The person's assets as signed URLs for an instrument quote or estimate (10 minutes is plenty for an estimate). */
@@ -1266,7 +1266,7 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
         return q;
       }
       const preset = body?.options?.preset != null ? presetById(body.options.preset) : null;
-      if (body?.options?.preset != null && (!preset || (!preset.example && !o.owner))) throw new PresetError("preset_unknown", "That preset is not offered", 404);
+      if (body?.options?.preset != null && (!preset || (!o.owner && (!preset.example || env.STUDIO_INSTRUMENTS_PREVIEW_OPEN !== "true")))) throw new PresetError("preset_unknown", "That preset is not offered", 404);
       if (!preset) return await quoteInstrument({ env, log }, PLANS, body?.options, resolveAssets(sb, u), { preview: o.owner });
       const req = presetRequest(preset, body.options);
       const q: InstrumentQuote = await quoteInstrument({ env, log }, PLANS, req, resolveAssets(sb, u), { preview: o.owner });
