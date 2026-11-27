@@ -680,10 +680,12 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     res.json({ categories: KAGE_PRESET_CATEGORIES, presets: KAGE_PRESETS, max_variants: KAGE_MAX_VARIANTS, material: kageMotionMaterialOn(env) });
   });
 
-  app.get("/api/studio/trends", (_req, res) => {
-    res.setHeader("Cache-Control", "private, max-age=300");
+  app.get("/api/studio/trends", async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
     const base = env.STUDIO_PRESET_BASE ?? env.DASHBOARD_URL ?? "https://app.clone8.io";
-    res.json({ trends: STUDIO_TRENDS.map((t) => ({ ...t, video_url: trendClipUrl(base, t.id), poster_url: trendPosterUrl(base, t.id) })) });
+    // drafts (a new trend not yet run end to end) only for the owner's admin accounts
+    const admin = STUDIO_TRENDS.some((t) => t.draft) ? await isStudioAdmin(req, sbFn(), env).catch(() => false) : false;
+    res.json({ trends: STUDIO_TRENDS.filter((t) => !t.draft || admin).map((t) => ({ ...t, video_url: trendClipUrl(base, t.id, env), poster_url: trendPosterUrl(base, t.id) })) });
   });
 
   // Higgsfield's restyle presets, fetched with our key and cached for an hour. Empty without a key, never an error.
@@ -1277,6 +1279,8 @@ export function registerStudio(app: Express, sbFn: () => SupabaseClient, deps: {
     if (String(body?.tool ?? "") === "splitscreen") return quoteSplit(env, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
     if (String(body?.tool ?? "") === "reshoot") return quoteReshoot(env, PLANS, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
     if (String(body?.tool ?? "") === "blueprint_versions") return quoteBlueprints(env, PLANS, await loadAsset(sb, u, body?.asset_id), body?.options, { owner: o.owner });
+    // a trend still being tested is the owner's to run (studio-trends.ts: draft)
+    if (String(body?.tool ?? "") === "trend" && trendById(body?.options?.trend_id)?.draft && !o.owner) throw new StudioError("trend_required", "Pick a trend");
     const asset = await loadAsset(sb, u, body?.asset_id);
     if (String(body?.tool ?? "") === "clips" && !asset && isStreamLink(body?.options?.url)) return quoteStreamClips({ env, log, userId: u }, PLANS, body?.options, { owner: o.owner }); // Live Clips
     if (String(body?.tool ?? "") === "clips") {

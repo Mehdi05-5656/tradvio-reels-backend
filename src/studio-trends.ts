@@ -2,7 +2,7 @@
 // /trends/<id>.jpg, like the preset portraits); the person adds a character and Genjutsu motion transfer performs the
 // clip as them. The clips are ours or licensed, never another platform's community uploads. Seconds are the clip's
 // length after our 720p encode and decide the price (seconds × the Recast rate of the chosen model).
-export type StudioTrend = { id: string; name: string; lede: string; seconds: number; tags: string[]; /** people performing, left to right (1 when absent) */ people?: number };
+export type StudioTrend = { id: string; name: string; lede: string; seconds: number; tags: string[]; /** people performing, left to right (1 when absent) */ people?: number; /** not yet run end to end: the owner's admin accounts only */ draft?: boolean };
 
 // Clips: desk-talk and pitch-15 are a client's (used with permission); thumbs-up and dance-headphones are Pexels stock
 // (Tima Miroshnichenko 4994156, Polina Tankilevitch 6868300), free for commercial use and modification, no attribution required.
@@ -11,6 +11,16 @@ export const STUDIO_TRENDS: StudioTrend[] = [
   { id: "dance-headphones", name: "Headphones dance", lede: "Six seconds of a living-room dance with headphones on. Your character dances it.", seconds: 6, tags: ["dance", "home"] },
   { id: "desk-talk", name: "Desk talk", lede: "A seated talking-head take with hand gestures. Your character delivers it.", seconds: 5, tags: ["talking head", "office"] },
   { id: "pitch-15", name: "Fifteen-second pitch", lede: "A straight-to-camera pitch with cuts. Your character says every word.", seconds: 16, tags: ["talking head", "pitch"] },
+  // Made Nov 26 2026 on Kling 4.0 with invented performers (ours; docs/catalog/FILL_PLAN.md wave 3): drafts until one
+  // has been performed end to end by a character
+  { id: "heart-hands", name: "Heart hands", lede: "A smile, two hands make a heart, a tilt and a laugh. Your character does it.", seconds: 6, tags: ["gesture", "love"], draft: true },
+  { id: "mind-blown", name: "Mind blown", lede: "Hands to the temples, then the big burst open. Your character's mind is blown.", seconds: 6, tags: ["reaction", "gesture"], draft: true },
+  { id: "shrug", name: "Who knows?", lede: "Palms up, eyebrows up, a playful shrug. Your character doesn't know either.", seconds: 6, tags: ["reaction", "gesture"], draft: true },
+  { id: "victory-dance", name: "Victory dance", lede: "Fist pumps, a shoulder shimmy, a finger spin. Your character celebrates.", seconds: 6, tags: ["dance", "celebration"], draft: true },
+  { id: "point-up", name: "Point up", lede: "Both fingers point up at the words above, with an excited nod. Made for captions.", seconds: 6, tags: ["gesture", "captions"], draft: true },
+  { id: "slow-clap", name: "Slow clap", lede: "A slow, impressed clap and an approving thumbs up from your character.", seconds: 6, tags: ["reaction", "gesture"], draft: true },
+  { id: "chefs-kiss", name: "Chef's kiss", lede: "Fingertips to the lips, a kiss, and a delighted open hand. Perfection.", seconds: 6, tags: ["reaction", "food"], draft: true },
+  { id: "walk-in-wave", name: "Walk in and wave", lede: "Your character walks into frame, stops and waves hello. A perfect opener.", seconds: 6, tags: ["intro", "gesture"], draft: true },
 ];
 
 export const trendById = (id: unknown): StudioTrend | null => STUDIO_TRENDS.find((t) => t.id === id) ?? null;
