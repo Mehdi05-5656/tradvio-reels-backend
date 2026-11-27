@@ -43,6 +43,9 @@ const PET: PresetInput = { field: "image_url", kind: "image", label: "Your pet",
 // Drafts added Nov 26 2026 (docs/catalog/FILL_PLAN.md, batches A-E): no example yet, so admins only until each one is
 // tested on three inputs, its example is made and the owner approves it. Every person in an example is AI-made.
 const V = (prompt: string, extra: Record<string, any> = {}) => ({ duration: 5, resolution: "1080p", prompt, ...extra });
+/** Products only: a model once wrote a real luxury brand on a plain lipstick (Nov 26 2026 test), so every product
+ *  recipe says no new names or words. */
+const NO_BRANDS = " Do not add any brand name, logo, label or words that are not already on the product in the photo.";
 const K = (prompt: string, aspect = "3:4") => ({ resolution: "2k", aspect_ratio: aspect, prompt });
 
 export const PRESETS: Preset[] = [
@@ -130,34 +133,34 @@ export const PRESETS: Preset[] = [
     inputs: [{ ...PRODUCT, field: "image_urls" }], text: { label: "Headline", placeholder: "WALK SOFTLY", max: 24 }, groups: ["ads"], example: picEx("sneaker-ad", "sneaker"), added: "2026-11-25" },
   // ---- batch A: products and e-commerce (drafts) ----
   { id: "food-hero", title: "Food hero", line: "Your dish, steaming, with a slow sauce pour.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
-    recipe: V("The dish from the photo sits on a dark wooden table. Steam rises from it and a spoonful of glossy sauce drizzles over it in slow motion. Warm side light, the camera pushes in slowly, a premium food-commercial look. The plate, the food and its colours stay exactly as in the photo."),
+    recipe: V("The dish from the photo sits on a dark wooden table. Steam rises from it and a spoonful of glossy sauce drizzles over it in slow motion. Warm side light, the camera pushes in slowly, a premium food-commercial look. The plate, the food and its colours stay exactly as in the photo." + NO_BRANDS),
     inputs: [DISH], groups: ["ads"], added: "2026-11-26" },
   { id: "drink-pour", title: "Perfect pour", line: "Your drink poured in slow motion, ice and all.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
-    recipe: V("The drink from the photo is poured into a chilled glass in slow motion: the liquid curls, ice cubes tumble and bubbles rise, a few droplets run down the glass. Bright studio light on a clean background, a beverage-commercial look. The bottle or can keeps its label exactly."),
+    recipe: V("The drink from the photo is poured into a chilled glass in slow motion: the liquid curls, ice cubes tumble and bubbles rise, a few droplets run down the glass. Bright studio light on a clean background, a beverage-commercial look. The bottle or can keeps its label exactly." + NO_BRANDS),
     inputs: [PRODUCT], groups: ["ads"], added: "2026-11-26" },
   { id: "jewelry-macro", title: "Jewelry macro", line: "Your piece on velvet, every facet catching light.", output: "image", endpoint: "bytedance/seedream/v5.0/pro/edit",
-    recipe: K("A macro product photograph of the jewelry in the first picture resting on deep midnight-blue velvet. Tiny sparkles on every facet, a soft spotlight, shallow depth of field, luxury catalogue look. The piece keeps its exact design, metal colour and stones."),
+    recipe: K("A macro product photograph of the jewelry in the first picture resting on deep midnight-blue velvet. Tiny sparkles on every facet, a soft spotlight, shallow depth of field, luxury catalogue look. The piece keeps its exact design, metal colour and stones." + NO_BRANDS),
     inputs: [PRODUCT_REF], groups: ["ads"], added: "2026-11-26" },
   { id: "beauty-splash", title: "Beauty splash", line: "Your bottle in a crown of water on pastel.", output: "image", endpoint: "kling-image/v4.0/edit",
-    recipe: K("The skincare or beauty product in @image_1 stands in the middle of a perfect crown of clear water splash on a soft pastel background, droplets frozen in mid-air, clean high-key light, premium beauty advert. Its packaging and printed words stay exactly as in the photo."),
+    recipe: K("The skincare or beauty product in @image_1 stands in the middle of a perfect crown of clear water splash on a soft pastel background, droplets frozen in mid-air, clean high-key light, premium beauty advert. Its packaging and printed words stay exactly as in the photo." + NO_BRANDS),
     inputs: [PRODUCT_REF], groups: ["ads"], added: "2026-11-26" },
   { id: "perfume-mist", title: "Perfume mist", line: "Your bottle in drifting mist and light rays.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
-    recipe: V("The bottle from the photo stands on a reflective surface as soft mist drifts slowly around it and rays of light cut through the haze. The camera circles a quarter turn. Elegant fragrance-commercial look. The bottle keeps its exact shape and label."),
+    recipe: V("The bottle from the photo stands on a reflective surface as soft mist drifts slowly around it and rays of light cut through the haze. The camera circles a quarter turn. Elegant fragrance-commercial look. The bottle keeps its exact shape and label." + NO_BRANDS),
     inputs: [PRODUCT], groups: ["ads"], added: "2026-11-26" },
   { id: "flat-lay", title: "Styled flat-lay", line: "Your piece laid out with matching accessories.", output: "image", endpoint: "kling-image/v4.0/edit",
-    recipe: K("A styled overhead flat-lay of the garment in @image_1 on natural linen, neatly folded, with two or three matching accessories (sunglasses, a watch, a small bag) arranged around it, soft daylight, fashion-magazine styling. The garment keeps its exact colour, cut, print and logo.", "3:4"),
+    recipe: K("A styled overhead flat-lay of the garment in @image_1 on natural linen, neatly folded, with two or three matching accessories (sunglasses, a watch, a small bag) arranged around it, soft daylight, fashion-magazine styling. The garment keeps its exact colour, cut, print and logo." + NO_BRANDS, "3:4"),
     inputs: [GARMENT_REF], groups: ["ads"], added: "2026-11-26" },
   { id: "try-on", title: "On-model try-on", line: "Your garment worn by a model in a clean studio.", output: "image", endpoint: "kling-image/v4.0/edit",
-    recipe: K("A full-body fashion photograph of a model wearing the garment in @image_1 in a clean light-grey studio, natural pose, soft key light, e-commerce lookbook style. The model is an invented person, not anyone real. The garment keeps its exact colour, cut, fabric, print and logo, and fits naturally."),
+    recipe: K("A full-body fashion photograph of a model wearing the garment in @image_1 in a clean light-grey studio, natural pose, soft key light, e-commerce lookbook style. The model is an invented person, not anyone real. The garment keeps its exact colour, cut, fabric, print and logo, and fits naturally." + NO_BRANDS),
     inputs: [GARMENT_REF], groups: ["ads"], added: "2026-11-26" },
   { id: "white-background", title: "Marketplace white", line: "A clean white-background shot for any shop.", output: "image", endpoint: "kling-image/v4.0/edit",
-    recipe: K("A clean e-commerce product photo of the product in @image_1 centred on a pure white background with a soft natural shadow beneath it, evenly lit, sharp edges, nothing else in frame. The product keeps its exact shape, colour, logo and printed words.", "1:1"),
+    recipe: K("A clean e-commerce product photo of the product in @image_1 centred on a pure white background with a soft natural shadow beneath it, evenly lit, sharp edges, nothing else in frame. The product keeps its exact shape, colour, logo and printed words." + NO_BRANDS, "1:1"),
     inputs: [PRODUCT_REF], groups: ["ads"], added: "2026-11-26" },
   { id: "in-hand", title: "In hand", line: "Your product held up in a real moment.", output: "image", endpoint: "kling-image/v4.0/edit",
-    recipe: K("A natural lifestyle photo of a hand holding the product in @image_1 up toward the camera in a sunlit cafe, background softly blurred, phone-camera feel, authentic and warm. The product keeps its exact packaging and words; the hand holds it naturally.", "3:4"),
+    recipe: K("A natural lifestyle photo of a hand holding the product in @image_1 up toward the camera in a sunlit cafe, background softly blurred, phone-camera feel, authentic and warm. The product keeps its exact packaging and words; the hand holds it naturally." + NO_BRANDS, "3:4"),
     inputs: [PRODUCT_REF], groups: ["ads", "personal"], added: "2026-11-26" },
   { id: "turntable", title: "360 turntable", line: "A full turn on a white sweep, every side shown.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
-    recipe: V("The product from the photo turns one full slow rotation on a white turntable against a seamless white studio sweep, evenly lit, a soft shadow, the camera still. Clean e-commerce 360 view. The product keeps its exact shape, colour and logo."),
+    recipe: V("The product from the photo turns one full slow rotation on a white turntable against a seamless white studio sweep, evenly lit, a soft shadow, the camera still. Clean e-commerce 360 view. The product keeps its exact shape, colour and logo." + NO_BRANDS),
     inputs: [PRODUCT], groups: ["ads"], added: "2026-11-26" },
   // ---- batch B: effects on your photo (drafts) ----
   { id: "crash-zoom", title: "Crash zoom", line: "The camera slams in on your face.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
