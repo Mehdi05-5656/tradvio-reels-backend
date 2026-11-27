@@ -34,8 +34,9 @@ test("a person's line is cleaned and fills the prompt; only the settings a prese
   const full = withRecipe("action-figure", c);
   assert.match(full.prompt, /"Captain Alex the Great a"/);
   assert.equal(full.resolution, "2k");
+  // (no preset opens a setting since the Halo ones moved to Kling 4.0, Nov 26 2026: whatever is sent stays the recipe's)
   const walk = withRecipe("walk-away", { aspect_ratio: "16:9", duration: 30 });
-  assert.equal(walk.aspect_ratio, "16:9", "a chosen setting");
+  assert.equal(walk.aspect_ratio, undefined, "a setting it does not open is not taken");
   assert.equal(walk.duration, 5, "a setting it does not open stays the recipe's");
   assert.deepEqual(withRecipe("no-such-preset", { a: 1 }), { a: 1 }, "not a preset: the params as they are");
 });
