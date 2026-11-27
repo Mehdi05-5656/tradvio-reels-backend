@@ -16,7 +16,7 @@ import type { Express, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isStudioAdmin } from "./studio-admin-auth.js";
 import { claudeJson } from "./studio-clips.js";
-import { textToSpeech } from "./studio-eleven.js";
+import { extractAudio, replaceAudio, textToSpeech, voiceChange } from "./studio-eleven.js";
 import { recordCost } from "./studio-costs.js";
 import { CAST, castById, castFor, publicCast } from "./studio-cast.js";
 import { normalFacts, storeImage, ProductError } from "./studio-products.js";
@@ -229,6 +229,9 @@ export async function addHookVoice(sb: SupabaseClient, deps: Deps & { tts?: type
 // After a Best hook renders: our voice back on the clip. Seedance re-voices the line (test C, Nov 26 2026: same words,
 // its own voice, 0.36 s late; Wan plays ours through untouched), which would break "one character, one voice". The
 // lips follow Seedance's track, so our recording is laid on at the lag where the two tracks match best.
+// When Seedance speaks the line in its own rhythm (live check Nov 26 2026: pauses ours doesn't have, r 0.25), laying ours on
+// would put the lips out of sync, so its track is turned into the character's voice instead (ElevenLabs voice changer):
+// its timing exactly (every pause within 15 ms), the words exact, the character's voice (pitch back on ours).
 // ---------------------------------------------------------------------------------------------------
 /** Loudness every 10 ms of 16 kHz mono 16-bit PCM. */
 export function envelope(pcm: Buffer): number[] {
@@ -250,8 +253,9 @@ export function bestLag(clip: number[], voice: number[]): { lag: number; r: numb
   return best;
 }
 const pcmOf = (file: string) => command("ffmpeg", ["-v", "error", "-nostdin", "-i", file, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"], undefined, 120_000);
-/** Lays the character's own recording on a Best hook clip (in place). Never throws: on any doubt the clip keeps its sound. */
-export async function restoreHookVoice(sb: SupabaseClient, deps: Deps, job: any, file: string): Promise<{ lag_ms: number; r: number } | null> {
+/** Lays the character's own recording on a Best hook clip (in place), or turns the clip's speech into the character's voice
+ *  when Seedance re-paced it. Never throws: on any doubt the clip keeps its sound. */
+export async function restoreHookVoice(sb: SupabaseClient, deps: Deps & { voiceChange?: typeof voiceChange }, job: any, file: string): Promise<{ lag_ms: number; r: number; changed?: boolean } | null> {
   const log = deps.log ?? (() => undefined), h = job.options?.hook ?? {};
   if (h.tier !== "best") return null;
   const dir = await mkdtemp(join(tmpdir(), "studio-hook-"));
@@ -261,7 +265,19 @@ export async function restoreHookVoice(sb: SupabaseClient, deps: Deps, job: any,
     const voiceFile = join(dir, "voice.mp3"), out = join(dir, "out.mp4");
     await writeFile(voiceFile, Buffer.from(await dl.data.arrayBuffer()));
     const m = bestLag(envelope(await pcmOf(file)), envelope(await pcmOf(voiceFile)));
-    if (m.r < 0.35) { log(`[hooks] voice kept as rendered ${JSON.stringify({ job: job.id, r: Math.round(m.r * 100) / 100 })}`); return { lag_ms: m.lag * 10, r: m.r }; }
+    if (m.r < 0.35) {
+      const voiceId = String(h.voice ?? "");
+      if (!voiceIds.has(voiceId)) { log(`[hooks] voice kept as rendered ${JSON.stringify({ job: job.id, r: Math.round(m.r * 100) / 100 })}`); return { lag_ms: m.lag * 10, r: m.r }; }
+      const speech = join(dir, "speech.wav"), changedFile = join(dir, "changed.mp3");
+      await extractAudio(file, speech);
+      const seconds = (await readFile(speech)).length / (44_100 * 2);
+      await writeFile(changedFile, await (deps.voiceChange ?? voiceChange)({ env: deps.env ?? process.env, log: deps.log, fetch: deps.fetch } as any, { voice_id: voiceId, audio: await readFile(speech) }));
+      await replaceAudio(file, changedFile, out);
+      await writeFile(file, await readFile(out));
+      recordCost({ job_id: job.id, user_id: job.user_id ?? null, tool: "instrument", provider: "elevenlabs", product: "speech-to-speech", source: "hook_voice_change", units: { seconds: Math.round(seconds * 10) / 10 }, usd: Math.round((seconds / 60) * 0.12 * 10000) / 10000, basis: "estimated", note: "$0.12/min (eleven-catalog audio/voice-change)" });
+      log(`[hooks] voice changed to the character's ${JSON.stringify({ job: job.id, r: Math.round(m.r * 100) / 100, seconds: Math.round(seconds * 10) / 10 })}`);
+      return { lag_ms: m.lag * 10, r: m.r, changed: true };
+    }
     const ms = Math.max(0, m.lag * 10), trim = Math.max(0, -m.lag * 10) / 1000;
     await command("ffmpeg", ["-v", "error", "-nostdin", "-y", "-i", file, "-ss", trim.toFixed(2), "-i", voiceFile, "-filter_complex", `[1:a]adelay=${ms}|${ms},apad[a]`, "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", out], undefined, 120_000);
     await writeFile(file, await readFile(out));

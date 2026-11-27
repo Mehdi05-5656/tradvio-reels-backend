@@ -91,3 +91,30 @@ test("a translated hook: the length follows the language's script, the prompt na
   assert.match(es.prompt, /says the Spanish words in <<<audio_1>>>/);
   assert.match(withHookRecipe({ line: "Everyone thinks energy drinks need sugar.", tier: "standard" }, {}).prompt, /says the words in the voice recording/);
 });
+
+test("Best hook re-paced by the engine: its speech is turned into the character's voice, timing and picture kept", async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  try { execFileSync("ffmpeg", ["-version"], { stdio: "ignore" }); } catch { t.skip("no ffmpeg"); return; }
+  const { mkdtemp, readFile, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const { restoreHookVoice } = await import("../src/studio-hooks.js");
+  const dir = await mkdtemp(join(tmpdir(), "hook-test-"));
+  const clip = join(dir, "clip.mp4"), voice = join(dir, "voice.mp3"), swap = join(dir, "swap.mp3");
+  // the clip speaks in three bursts with pauses; our recording is one unbroken stretch (the live case: r 0.25)
+  const burst = (a: number, b: number) => `between(t,${a},${b})`;
+  execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=64x112:d=6:r=10", "-f", "lavfi", "-i", `aevalsrc='sin(2*PI*220*t)*(${burst(0.6, 3)}+${burst(3.5, 4.5)}+${burst(4.8, 5.1)})':s=16000:d=6`, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", clip]);
+  execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "aevalsrc='sin(2*PI*200*t)*(0.5+0.5*sin(2*PI*7*t))':s=16000:d=3.4", "-c:a", "libmp3lame", voice]);
+  execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "aevalsrc='0.5*sin(2*PI*880*t)':s=44100:d=6", "-c:a", "libmp3lame", swap]);
+  const voiceBytes = await readFile(voice), before = await readFile(clip);
+  const sb: any = { storage: { from: () => ({ download: async () => ({ data: new Blob([new Uint8Array(voiceBytes)]), error: null }) }) } };
+  const logs: string[] = []; let sent: { voice_id: string; bytes: number } | null = null;
+  const jessica = HOOK_VOICES[0].id;
+  const r = await restoreHookVoice(sb, { log: (l) => logs.push(l), voiceChange: async (_d: any, p: any) => { sent = { voice_id: p.voice_id, bytes: p.audio.length }; return readFile(swap); } }, { id: "j1", user_id: "u1", options: { hook: { tier: "best", voice: jessica, line: "x" } } }, clip);
+  assert.ok(r && r.changed, JSON.stringify(r)); assert.ok(r!.r < 0.35);
+  assert.equal(sent!.voice_id, jessica); assert.ok(sent!.bytes > 100_000, "the clip's own speech is what gets changed");
+  assert.ok(logs.some((l) => l.startsWith("[hooks] voice changed to the character's")));
+  const after = await readFile(clip); assert.notDeepEqual(after, before);
+  const dur = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", clip]).toString());
+  assert.ok(Math.abs(dur - 6) < 0.2, `length kept: ${dur}`);
+  await writeFile(join(dir, "done"), "");
+});
