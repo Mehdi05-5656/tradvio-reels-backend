@@ -10,6 +10,8 @@
 // Tested Nov 26 2026 on the owner account (docs/model-features/tests-2026-11-26): Kling 3.0 Pro does the actions,
 // Kling 4.0 the camera and light moves and the start-to-end-frame moves; Seedream 5.0 Pro edit makes the shots.
 
+import lookExamples from "./data/product-look-examples.json";
+
 export const PRODUCT_CATEGORIES = ["beverage", "beauty", "fragrance", "fashion", "footwear", "accessories", "jewellery", "tech", "food", "supplements", "home", "toys", "pets", "app", "other"] as const;
 export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number];
 export const CATEGORY_LABEL: Record<ProductCategory, string> = {
@@ -133,6 +135,10 @@ export const LOOKS: Look[] = [
   { id: "move-custom", kind: "motion", title: "Describe your own", line: "Say what should happen; we'll make it one clean shot.", group: "Yours", fits: NOT_APP, endpoint: KLING_ACT,
     recipe: action("Commercial product shot. {motion}"), inputs: [PRODUCT_IN], sfx: "{sfx}", shop_safe: false, added: "2026-11-26" },
 ];
+// Real examples, made with each look's own recipe on invented products (ugc-lab/look-examples, Nov 26 2026). A look with an
+// example is shown to everyone; one without stays an admin-only draft (Worn by air: both takes broke the recipe).
+const EXAMPLES = lookExamples as Record<string, { poster: string; clip?: string; aspect?: string }>;
+for (const l of LOOKS) if (!l.example && EXAMPLES[l.id]) l.example = EXAMPLES[l.id];
 
 const byId = new Map(LOOKS.map((l) => [l.id, l]));
 export const lookById = (id: unknown): Look | null => (typeof id === "string" ? byId.get(id) ?? null : null);
@@ -187,7 +193,11 @@ export function publicLook(l: Look) {
   return { id: l.id, kind: l.kind, title: l.title, line: l.line, group: l.group, fits: l.fits, output: l.kind === "shot" ? "image" : "video", shop_safe: l.shop_safe,
     needs: l.inputs.some((i) => i.from === "exploded") ? "exploded" : null, example: l.example ?? null, draft: !l.example, added: l.added };
 }
+/** Describe your own is a tool, not a preset: it has no example of its own to show and is offered to everyone. */
+const NEEDS_NO_EXAMPLE = new Set(["move-custom"]);
+/** Whether a person may see and run a look: it has a real example (or needs none); admins also get drafts. */
+export function lookOffered(l: Look, admin: boolean): boolean { return admin || !!l.example || NEEDS_NO_EXAMPLE.has(l.id); }
 /** The looks a person can see for a category: those with a real example (admins also see drafts). */
 export function looksFor(category: ProductCategory | null, opts: { admin?: boolean } = {}): Look[] {
-  return LOOKS.filter((l) => (category ? fitsCategory(l, category) : true) && (opts.admin || !!l.example));
+  return LOOKS.filter((l) => (category ? fitsCategory(l, category) : true) && lookOffered(l, !!opts.admin));
 }

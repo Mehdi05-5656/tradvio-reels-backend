@@ -24,7 +24,7 @@ import { productResults } from "./studio-product-results.js";
 import { command } from "./video-render.js";
 import { soundEffect, replaceAudio } from "./studio-eleven.js";
 import { recordCost } from "./studio-costs.js";
-import { CATEGORY_LABEL, LookError, PRODUCT_CATEGORIES, fitsCategory, lookById, lookChoices, lookRequest, lookSfx, looksFor, publicLook, type ProductCategory, type ProductFacts } from "./studio-product-looks.js";
+import { CATEGORY_LABEL, LookError, PRODUCT_CATEGORIES, fitsCategory, lookById, lookChoices, lookOffered, lookRequest, lookSfx, looksFor, publicLook, type ProductCategory, type ProductFacts } from "./studio-product-looks.js";
 
 type Deps = { env?: Record<string, string | undefined>; log?: (line: string) => void; fetch?: typeof fetch };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -208,7 +208,7 @@ export async function storeImage(sb: SupabaseClient, u: string, bytes: Buffer, n
 /** The request and what the job keeps, for a look on a product. Admin-only until looks have examples. */
 export async function lookQuoteRequest(sb: SupabaseClient, u: string, options: any, o: { admin: boolean }) {
   const look = lookById(options?.look);
-  if (!look || (!look.example && !o.admin)) throw new LookError("look_unknown", "That look is not offered", 404);
+  if (!look || !lookOffered(look, o.admin)) throw new LookError("look_unknown", "That look is not offered", 404);
   const productId = String(options?.product ?? "");
   if (!UUID_RE.test(productId)) throw new LookError("look_input_required", "Add your product first");
   const a = await sb.from("studio_assets").select("id,probe,status,kind").eq("id", productId).eq("user_id", u).maybeSingle();

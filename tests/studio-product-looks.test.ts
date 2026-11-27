@@ -33,7 +33,9 @@ test("looks follow the product's category: no pour for a sneaker, nothing physic
   const app = looksFor("app", { admin: true });
   assert.ok(app.every((l) => l.fits !== "all" ? (l.fits as string[]).includes("app") : false), "an app only gets looks made for apps");
   for (const c of PRODUCT_CATEGORIES.filter((x) => x !== "app")) assert.ok(looksFor(c, { admin: true }).some((l) => l.kind === "shot"), `${c} has no shot looks`);
-  assert.equal(looksFor("beverage").length, 0, "drafts (no example yet) are admins only");
+  // drafts (no example yet) are admins only; customers see exactly the looks with an example
+  assert.deepEqual(looksFor("beverage").map((l) => l.id), looksFor("beverage", { admin: true }).filter((l) => l.example || l.id === "move-custom").map((l) => l.id));
+  assert.ok(looksFor("beverage").some((l) => l.id === "move-custom"), "Describe your own is a tool: offered with no example");
 });
 
 test("the page never gets the recipe, the prompt or the sound words", () => {
@@ -88,4 +90,18 @@ test("TikTok Shop's own page: price from its page data when there is no JSON-LD"
   const r = readShopPage(html, "https://shop.tiktok.com/us/pdp/hydrojug/1729603435380839162");
   assert.equal(r.price, "$71.49");
   assert.equal(r.title, "HydroJug Sport");
+});
+
+test("look examples: 33 real examples on our own storage; motion ones play a clip; Worn by air and Describe your own stay drafts", () => {
+  const withEx = LOOKS.filter((l) => l.example);
+  assert.equal(withEx.length, 33);
+  for (const l of withEx) {
+    assert.match(l.example!.poster, /^https:\/\/n0vjuejp1iev9hnr\.public\.blob\.vercel-storage\.com\/looks\/.+\.jpg$/, l.id);
+    if (l.kind === "motion") assert.match(l.example!.clip ?? "", /\/looks\/.+\.mp4$/, l.id); else assert.equal(l.example!.clip, undefined, l.id);
+  }
+  assert.deepEqual(LOOKS.filter((l) => !l.example).map((l) => l.id).sort(), ["move-custom", "move-sway"]);
+  // a customer now sees every example look that suits their product; Worn by air only for admins
+  assert.ok(looksFor("fashion").every((l) => l.example || l.id === "move-custom"));
+  assert.ok(!looksFor("fashion").some((l) => l.id === "move-sway"));
+  assert.ok(looksFor("fashion", { admin: true }).some((l) => l.id === "move-sway"));
 });
