@@ -98,16 +98,28 @@ export async function quoteAd(sb: SupabaseClient, u: string, raw: any, plans: Pl
 // ---------------------------------------------------------------------------------------------------
 const FILL = `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=40:4,eq=brightness=-0.08`;
 const FIT = `scale=${W}:${H}:force_original_aspect_ratio=decrease`;
+/** A still's slow push toward its centre (zoompan's own default anchors at the top-left corner). */
+const SLOW_PUSH = (seconds: number) => `,zoompan=z='min(zoom+0.0009,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${Math.round(seconds * FPS)}:s=${W}x${H}:fps=${FPS}`;
+/** The end card's picture box: the product above, the words in the clear band under it (live check Nov 26 2026: white
+ *  words on a pale product, over the product itself, were hard to read). */
+export const END_CARD = { top: 170, height: 1140, side: 60 };
+/** The end card's frame: the product picture in the upper box on a darker blurred copy of itself, so the words below read. */
+export function endCardArgs(input: string, out: string, seconds: number): string[] {
+  const bw = W - 2 * END_CARD.side, bh = END_CARD.height;
+  const v = `[0:v]split=2[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=40:4,colorchannelmixer=rr=0.5:gg=0.5:bb=0.5[bg];[b]scale=${bw}:${bh}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:${END_CARD.top}+(${bh}-h)/2,setsar=1,fps=${FPS}${SLOW_PUSH(seconds)},format=yuv420p[v]`;
+  return ["-v", "error", "-nostdin", "-y", "-loop", "1", "-t", seconds.toFixed(2), "-i", input, "-f", "lavfi", "-t", seconds.toFixed(2), "-i", "anullsrc=r=44100:cl=stereo", "-filter_complex", v, "-map", "[v]", "-map", "1:a:0",
+    "-t", seconds.toFixed(2), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", String(FPS), "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "160k", out];
+}
 /** One piece onto the 9:16 frame: fills when it already is 9:16, otherwise sits on a blurred copy of itself. */
 export function partArgs(input: string, out: string, o: { still: boolean; seconds: number; audio: boolean }): string[] {
   const src = o.still ? ["-loop", "1", "-t", o.seconds.toFixed(2), "-i", input] : ["-i", input];
-  const zoom = o.still ? `,zoompan=z='min(zoom+0.0009,1.06)':d=${Math.round(o.seconds * FPS)}:s=${W}x${H}:fps=${FPS}` : "";
+  const zoom = o.still ? SLOW_PUSH(o.seconds) : "";
   const v = `[0:v]split=2[a][b];[a]${FILL}[bg];[b]${FIT}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=${FPS}${zoom},format=yuv420p[v]`;
   const silence = ["-f", "lavfi", "-t", o.seconds.toFixed(2), "-i", "anullsrc=r=44100:cl=stereo"];
   return ["-v", "error", "-nostdin", "-y", ...src, ...(o.audio ? [] : silence), "-filter_complex", v, "-map", "[v]", "-map", o.audio ? "0:a:0" : "1:a:0",
     "-t", o.seconds.toFixed(2), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", String(FPS), "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "160k", out];
 }
-/** The end card's words as an ASS file: the line large, the offer under it, lower third, in our caption fonts. */
+/** The end card's words as an ASS file: the line large, the offer under it, in the band under the picture (END_CARD), our caption fonts. */
 export function endCardAss(line: string | null, offer: string | null, seconds: number, note: string | null = null): string {
   const t = (s: number) => `0:00:${s.toFixed(2).padStart(5, "0")}`;
   const esc = (s: string) => s.replace(/[{}\\]/g, "");
@@ -115,9 +127,9 @@ export function endCardAss(line: string | null, offer: string | null, seconds: n
     note ? `Dialogue: 0,${t(0)},${t(seconds)},Note,,0,0,0,,${esc(note)}` : null].filter(Boolean);
   return ["[Script Info]", "ScriptType: v4.00+", `PlayResX: ${W}`, `PlayResY: ${H}`, "WrapStyle: 0", "",
     "[V4+ Styles]", "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    "Style: Line,Montserrat Black,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,6,2,90,90,430,1",
-    "Style: Offer,Montserrat ExtraBold,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,5,2,90,90,320,1",
-    "Style: Note,Poppins SemiBold,34,&H33FFFFFF,&H33FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,3,2,90,90,120,1", "",
+    "Style: Line,Montserrat Black,84,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,5,2,90,90,310,1",
+    "Style: Offer,Montserrat ExtraBold,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,4,2,90,90,225,1",
+    "Style: Note,Poppins SemiBold,34,&H33FFFFFF,&H33FFFFFF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,0,3,2,90,90,110,1", "",
     "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text", ...ev, ""].join("\n");
 }
 async function probeFile(file: string): Promise<{ seconds: number; audio: boolean }> {
@@ -159,7 +171,7 @@ export async function runAdJob(sb: SupabaseClient, deps: Deps, job: any, h: { re
       const pic = join(dir, "product.jpg"), card = join(dir, "card.mp4"), ass = join(dir, "end.ass");
       await writeFile(pic, Buffer.from(await dl.data.arrayBuffer()));
       const base = join(dir, "card-base.mp4");
-      await run(partArgs(pic, base, { still: true, seconds: AD_LIMITS.end_seconds, audio: false }));
+      await run(endCardArgs(pic, base, AD_LIMITS.end_seconds));
       const line = req.end?.line ?? null, offer = req.end?.offer ?? null, note = disclose ? SHOP_DISCLOSURE : null;
       if (line || offer || note) {
         await writeFile(ass, endCardAss(line, offer, AD_LIMITS.end_seconds, note));

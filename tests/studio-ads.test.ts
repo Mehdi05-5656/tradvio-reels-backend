@@ -41,3 +41,16 @@ test("the end card says only the person's words, in our caption fonts, with no o
   assert.match(a, /,Offer,.*20% off/);
   assert.ok(!/Dialogue.*Offer/.test(endCardAss("Only a line", null, 2.5)));
 });
+
+test("end card: the product sits in the upper box and the words in the band under it; the slow push is centred", async () => {
+  const { endCardArgs, END_CARD } = await import("../src/studio-ads.js");
+  const a = endCardArgs("p.jpg", "card.mp4", 2.5).join(" ");
+  assert.match(a, /overlay=\(W-w\)\/2:170\+\(1140-h\)\/2/);
+  assert.match(a, /x='iw\/2-\(iw\/zoom\/2\)':y='ih\/2-\(ih\/zoom\/2\)'/);
+  assert.match(a, /colorchannelmixer=rr=0.5:gg=0.5:bb=0.5/);
+  // the line (two rows at most: 40 characters) starts below the picture even at the push's full 1.06
+  const ass = endCardAss("Forty characters of end line, both rows!", "Free shipping today", 2.5);
+  const lineMargin = Number(/Style: Line,[^\n]*,(\d+),1\n/.exec(ass)![1]), size = Number(/Style: Line,[^,]+,(\d+)/.exec(ass)![1]);
+  const pictureBottom = 960 + (END_CARD.top + END_CARD.height - 960) * 1.06, lineTop = 1920 - lineMargin - 2 * size * 1.2;
+  assert.ok(lineTop > pictureBottom + 40, `${lineTop} vs ${pictureBottom}`);
+});
