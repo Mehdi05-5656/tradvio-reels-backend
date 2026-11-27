@@ -63,11 +63,11 @@ export const PRESETS: Preset[] = [
   { id: "earth-zoom", title: "Earth zoom out", line: "From you to space in one move.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "Starting on the person in the photo, the camera rises straight up and pulls back in one continuous, seamless move: over the rooftops, through the clouds, until the whole Earth is visible from space, then it holds. Smooth, no cuts." },
     inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("earth-zoom", "woman"), added: "2026-11-25" },
-  // Nov 27 2026: from Clone8 Halo (refused by the supplier key since Nov 26 evening) to Kling 3.0 Pro, which spoke a
-  // script word for word in the Nov 26 talking-head test (docs/model-features/RESEARCH.md section 7)
-  { id: "street-interview", title: "Mic in your face", line: "An interviewer's mic, a laugh, and you say the line.", output: "video", endpoint: "kling-video/v3.0/pro/image-to-video",
-    recipe: { duration: 6, sound: "on", prompt: "An interviewer's hand holds a microphone into the frame toward the person from the photo. They laugh, then answer straight to the camera, saying clearly: \"{text}\". Natural ambient sound, handheld vertical phone footage, like a viral interview clip. The place, their face and their clothes stay as in the photo." },
-    inputs: [PHOTO], text: { label: "What you say", placeholder: "I quit my job to do this full time", max: 80 }, groups: ["personal", "ai"], example: clipEx("street-interview", "man2"), added: "2026-11-25" },
+  // Nov 27 2026: from Clone8 Halo (refused by the supplier key since Nov 26 evening) to Wan 3.0 from references: the
+  // photo is a reference for the person, not the first frame, so they really are out on a street; it speaks the line
+  { id: "street-interview", title: "Street interview", line: "Stopped on the street, mic in your face. You say the line.", output: "video", endpoint: "alibaba/wan-3.0/reference-to-video",
+    recipe: { duration: 5, resolution: "1080p", aspect_ratio: "9:16", generate_audio: true, prompt: "The person from the reference picture stands on a busy city street at golden hour, shops and passers-by behind them. An interviewer's hand holds a microphone into the frame toward them. They laugh, then answer straight to the camera, saying clearly: \"{text}\". Natural street sound and passing traffic, handheld vertical phone footage, like a viral street interview. Keep their face, hair and clothes exactly as in the reference picture." },
+    inputs: [PHOTO_REF], text: { label: "What you say", placeholder: "I quit my job to do this full time", max: 80 }, groups: ["personal", "ai"], example: clipEx("street-interview", "man2", "9:16"), added: "2026-11-25" },
   // ---- video, from a product photo ----
   { id: "product-spin", title: "Product hero", line: "Your product on a pedestal, lit like an ad.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "The product from the photo turns slowly on a glossy black pedestal while a soft light sweeps across it. Tiny particles drift in the air. The camera orbits slowly. Studio commercial look, crisp reflections, premium." },
