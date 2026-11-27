@@ -59,7 +59,7 @@ export const PRESETS: Preset[] = [
   // Nov 26 2026: moved from Clone8 Halo (the supplier key is refused for it, 403) to Kling 4.0, without sound
   { id: "walk-away", title: "Don't look back", line: "A blockbuster explosion behind you. You don't flinch.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "The person from the photo walks calmly toward the camera without looking back as a huge fireball explosion erupts behind them in an abandoned industrial yard. Sparks and debris fly past. Slow push-in, blockbuster action-film look. Their face and clothes stay the same." },
-    inputs: [PHOTO], groups: ["ai", "characters", "personal"], added: "2026-11-25" },
+    inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("walk-away", "man2"), added: "2026-11-25" },
   { id: "earth-zoom", title: "Earth zoom out", line: "From you to space in one move.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "Starting on the person in the photo, the camera rises straight up and pulls back in one continuous, seamless move: over the rooftops, through the clouds, until the whole Earth is visible from space, then it holds. Smooth, no cuts." },
     inputs: [PHOTO], groups: ["ai", "characters", "personal"], example: clipEx("earth-zoom", "woman"), added: "2026-11-25" },
@@ -72,7 +72,7 @@ export const PRESETS: Preset[] = [
     inputs: [PRODUCT], groups: ["ads", "ai"], example: clipEx("product-spin", "can"), added: "2026-11-25" },
   { id: "product-splash", title: "Splash drop", line: "Your product hits the water in slow motion.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "The product from the photo drops into crystal-clear water in slow motion. A big splash and bubbles burst around it, droplets catch the light, bright clean background, premium drink-commercial look. The product keeps its exact shape, label and colours." + NO_BRANDS },
-    inputs: [PRODUCT], groups: ["ads", "ai"], added: "2026-11-25" },
+    inputs: [PRODUCT], groups: ["ads", "ai"], example: clipEx("product-splash", "juice"), added: "2026-11-25" },
   { id: "unboxing", title: "Unboxing", line: "Hands lift it out of the box: real, cosy, UGC.", output: "video", endpoint: "kling-video/v4.0/image-to-video",
     recipe: { duration: 5, resolution: "1080p", prompt: "Two hands slowly lift the product from the photo out of a minimal box on a wooden desk in soft morning window light, then turn it toward the camera. Authentic, cosy, phone-camera UGC feel." },
     inputs: [PRODUCT], groups: ["ads", "personal"], example: clipEx("unboxing", "sneaker"), added: "2026-11-25" },
