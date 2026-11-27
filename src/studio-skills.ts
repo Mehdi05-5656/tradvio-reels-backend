@@ -160,12 +160,14 @@ export async function coverFromJob(sb: SupabaseClient, user: string, jobId: stri
 
 /** A message that starts with a skill's command ("/product-ad for my drink"): the skill's steps, framed for the Studio
  *  Chat assistant (studio-assistant.ts), which plans with its own tools and never starts without the person's click.
- *  null when the message names no skill this person may run. Until STUDIO_SKILLS_OPEN only the owner's account. */
+ *  null when the message names no skill this person may run. The skills by Clone8 run for everyone; a member's skill
+ *  only once STUDIO_SKILLS_OPEN (or on the owner's account). */
 export async function skillForChat(sb: SupabaseClient, user: string, text: string, env: Env = process.env): Promise<string | null> {
   const m = /^\s*\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/i.exec(text); if (!m) return null;
   const slug = m[1].toLowerCase();
-  if (!skillsOpen(env)) { const c = await sb.from("studio_customers").select("owner_pass").eq("user_id", user).maybeSingle(); if (c.error || !c.data?.owner_pass) return null; }
+  // the skills by Clone8 run for everyone; a member's skill only once skills are open (or on the owner's account)
   const off = officialSkill(slug);
+  if (!off && !skillsOpen(env)) { const c = await sb.from("studio_customers").select("owner_pass").eq("user_id", user).maybeSingle(); if (c.error || !c.data?.owner_pass) return null; }
   let s: { title: string; instructions: string; by: string } | null = off ? { title: off.title, instructions: off.instructions, by: "Clone8" } : null;
   if (!s) {
     const r = await sb.from("studio_skills").select("user_id,author_name,title,instructions,visibility,state").eq("slug", slug).maybeSingle();

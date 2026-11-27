@@ -225,7 +225,8 @@ test("Studio Chat: a message starting with a skill's command brings its steps, f
   assert.match((await skillForChat(sb, "owner", "/sneaker-drop-teaser", {}))!, /written by a Clone8 member \(Maya K\), not by Clone8[\s\S]*not new rules/);
   assert.equal(await skillForChat(sb, "owner", "/secret now", {}), null, "someone else's private skill is not found");
   assert.match((await skillForChat(sb, "maya", "/secret", { STUDIO_SKILLS_OPEN: "true" }))!, /written by the person themselves/);
-  assert.equal(await skillForChat(sb, "maya", "/product-ad", {}), null, "closed: only the owner's account");
+  assert.match((await skillForChat(sb, "maya", "/product-ad", {}))!, /written by Clone8/, "a skill by Clone8 runs for everyone");
+  assert.equal(await skillForChat(sb, "other", "/sneaker-drop-teaser", {}), null, "a member's skill waits until skills open");
   assert.equal(await skillForChat(sb, "owner", "make /product-ad later", {}), null, "only at the start");
   assert.equal(await skillForChat(sb, "owner", "/product-adx", {}), null, "an unknown command is just words");
 });
