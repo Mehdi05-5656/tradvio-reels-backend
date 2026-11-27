@@ -11,16 +11,16 @@ export const STUDIO_TRENDS: StudioTrend[] = [
   { id: "dance-headphones", name: "Headphones dance", lede: "Six seconds of a living-room dance with headphones on. Your character dances it.", seconds: 6, tags: ["dance", "home"] },
   { id: "desk-talk", name: "Desk talk", lede: "A seated talking-head take with hand gestures. Your character delivers it.", seconds: 5, tags: ["talking head", "office"] },
   { id: "pitch-15", name: "Fifteen-second pitch", lede: "A straight-to-camera pitch with cuts. Your character says every word.", seconds: 16, tags: ["talking head", "pitch"] },
-  // Made Nov 26 2026 on Kling 4.0 with invented performers (ours; docs/catalog/FILL_PLAN.md wave 3): drafts until one
-  // has been performed end to end by a character
-  { id: "heart-hands", name: "Heart hands", lede: "A smile, two hands make a heart, a tilt and a laugh. Your character does it.", seconds: 6, tags: ["gesture", "love"], draft: true },
-  { id: "mind-blown", name: "Mind blown", lede: "Hands to the temples, then the big burst open. Your character's mind is blown.", seconds: 6, tags: ["reaction", "gesture"], draft: true },
-  { id: "shrug", name: "Who knows?", lede: "Palms up, eyebrows up, a playful shrug. Your character doesn't know either.", seconds: 6, tags: ["reaction", "gesture"], draft: true },
-  { id: "victory-dance", name: "Victory dance", lede: "Fist pumps, a shoulder shimmy, a finger spin. Your character celebrates.", seconds: 6, tags: ["dance", "celebration"], draft: true },
-  { id: "point-up", name: "Point up", lede: "Both fingers point up at the words above, with an excited nod. Made for captions.", seconds: 6, tags: ["gesture", "captions"], draft: true },
-  { id: "slow-clap", name: "Slow clap", lede: "A slow, impressed clap and an approving thumbs up from your character.", seconds: 6, tags: ["reaction", "gesture"], draft: true },
-  { id: "chefs-kiss", name: "Chef's kiss", lede: "Fingertips to the lips, a kiss, and a delighted open hand. Perfection.", seconds: 6, tags: ["reaction", "food"], draft: true },
-  { id: "walk-in-wave", name: "Walk in and wave", lede: "Your character walks into frame, stops and waves hello. A perfect opener.", seconds: 6, tags: ["intro", "gesture"], draft: true },
+  // Made Nov 26 2026 on Kling 4.0 with invented performers (ours; docs/catalog/FILL_PLAN.md wave 3); performed end to
+  // end by a character the same night (heart hands, job 6db02581)
+  { id: "heart-hands", name: "Heart hands", lede: "A smile, two hands make a heart, a tilt and a laugh. Your character does it.", seconds: 6, tags: ["gesture", "love"] },
+  { id: "mind-blown", name: "Mind blown", lede: "Hands to the temples, then the big burst open. Your character's mind is blown.", seconds: 6, tags: ["reaction", "gesture"] },
+  { id: "shrug", name: "Who knows?", lede: "Palms up, eyebrows up, a playful shrug. Your character doesn't know either.", seconds: 6, tags: ["reaction", "gesture"] },
+  { id: "victory-dance", name: "Victory dance", lede: "Fist pumps, a shoulder shimmy, a finger spin. Your character celebrates.", seconds: 6, tags: ["dance", "celebration"] },
+  { id: "point-up", name: "Point up", lede: "Both fingers point up at the words above, with an excited nod. Made for captions.", seconds: 6, tags: ["gesture", "captions"] },
+  { id: "slow-clap", name: "Slow clap", lede: "A slow, impressed clap and an approving thumbs up from your character.", seconds: 6, tags: ["reaction", "gesture"] },
+  { id: "chefs-kiss", name: "Chef's kiss", lede: "Fingertips to the lips, a kiss, and a delighted open hand. Perfection.", seconds: 6, tags: ["reaction", "food"] },
+  { id: "walk-in-wave", name: "Walk in and wave", lede: "Your character walks into frame, stops and waves hello. A perfect opener.", seconds: 6, tags: ["intro", "gesture"] },
 ];
 
 export const trendById = (id: unknown): StudioTrend | null => STUDIO_TRENDS.find((t) => t.id === id) ?? null;
