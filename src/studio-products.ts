@@ -19,7 +19,7 @@ import { claudeJson } from "./studio-clips.js";
 import { checkUpload } from "./studio-limits.js";
 import { toJpeg } from "./studio-characters.js";
 import { safeUrl } from "./text-bot/intake.js";
-import { fetchTikTokShopProduct, isTikTokShopUrl, ShopError } from "./studio-shop.js";
+import { fetchTikTokShopProduct, imageSize, isTikTokShopUrl, ShopError } from "./studio-shop.js";
 import { productResults } from "./studio-product-results.js";
 import { command } from "./video-render.js";
 import { soundEffect, replaceAudio } from "./studio-eleven.js";
@@ -347,7 +347,15 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
         let shop: Awaited<ReturnType<typeof fetchTikTokShopProduct>> | null = null;
         try { shop = await fetchTikTokShopProduct(d, url, u); }
         catch (e) { if (!(e instanceof ShopError)) throw e; console.warn(`[products] TikTok Shop vendor read failed (${e.code}); trying the page itself`); }
-        const pic = shop ? await getSafe(f, shop.images[0], IMAGE_MAX, "image/*") : null;
+        // the first real product photo: a shop logo or a thumbnail is small (live: the logo came first once)
+        let pic: Awaited<ReturnType<typeof getSafe>> = null;
+        for (const src of (shop?.images ?? []).slice(0, 5)) {
+          const got = await getSafe(f, src, IMAGE_MAX, "image/*");
+          if (!got || !/^image\/(jpeg|png|webp)/i.test(got.type)) continue;
+          const size = imageSize(got.bytes);
+          if (size && Math.min(size.w, size.h) < 400) continue;
+          pic = got; break;
+        }
         if (shop && pic && /^image\/(jpeg|png|webp)/i.test(pic.type)) {
           const sb = sbFn();
           const id = await storeImage(sb, u, pic.bytes, shop.title ?? "TikTok Shop product");

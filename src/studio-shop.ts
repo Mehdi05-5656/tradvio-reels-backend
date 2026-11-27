@@ -50,16 +50,49 @@ function findAll(o: any, want: RegExp, depth = 0, out: any[] = []): any[] {
   return out;
 }
 const firstString = (vals: any[], min = 2) => vals.map((v) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : null)).find((s) => !!s && s.trim().length >= min) ?? null;
-/** Picture URLs anywhere in the response: plain strings or url_list / url fields of image objects. */
+/** Branches of a listing that hold someone else's picture: the seller's logo, a reviewer's avatar, a related item. Live
+ *  check Nov 26 2026: the first picture found was the shop's logo, so it became "the product". */
+const NOT_PRODUCT = /seller|shop|store|brand|author|user|review|comment|avatar|logo|icon|related|recommend|similar|video|live|coupon|promotion/i;
+/** Picture URLs in the response, the product's own first (under product / images / main keys), never from NOT_PRODUCT branches. */
 export function productImages(o: any): string[] {
-  const urls = new Set<string>();
-  const add = (s: unknown) => { if (typeof s === "string" && /^https:\/\//.test(s) && !/\.(mp4|m3u8|webm)(\?|$)/i.test(s) && !/avatar|logo|icon/i.test(s)) urls.add(s); };
-  for (const v of findAll(o, /^(images?|main_images|product_images|img|cover|thumb_url|url_list)$/i)) {
-    for (const x of ([] as any[]).concat(v)) { if (typeof x === "string") add(x); else if (x && typeof x === "object") { for (const y of ([] as any[]).concat(x.url_list ?? x.urls ?? x.url ?? [])) add(y); } }
-  }
-  return [...urls].slice(0, 8);
+  const ranked: Array<{ url: string; rank: number }> = [];
+  const seen = new Set<string>();
+  const add = (s: unknown, rank: number) => { if (typeof s === "string" && /^https:\/\//.test(s) && !/\.(mp4|m3u8|webm)(\?|$)/i.test(s) && !/avatar|logo|icon/i.test(s) && !seen.has(s)) { seen.add(s); ranked.push({ url: s, rank }); } };
+  const walk = (x: any, path: string, depth: number) => {
+    if (!x || typeof x !== "object" || depth > 8) return;
+    for (const [k, v] of Object.entries(x)) {
+      if (NOT_PRODUCT.test(k)) continue;
+      const here = `${path}/${k}`;
+      if (/^(images?|main_images|product_images|img|cover|thumb_url|url_list)$/i.test(k)) {
+        const rank = /product|main_images|images?$/i.test(here) ? 0 : 1;
+        for (const y of ([] as any[]).concat(v)) { if (typeof y === "string") add(y, rank); else if (y && typeof y === "object") for (const z of ([] as any[]).concat(y.url_list ?? y.urls ?? y.url ?? [])) add(z, rank); }
+      }
+      if (v && typeof v === "object") walk(v, here, depth + 1);
+    }
+  };
+  walk(o, "", 0);
+  return ranked.sort((a, b) => a.rank - b.rank).map((r) => r.url).slice(0, 8);
 }
-/** What a ScrapeCreators product read gives us: the shop's own words and pictures. */
+/** Width and height of a JPEG, PNG or WebP from its bytes (no decoding); null when unknown. */
+export function imageSize(b: Buffer): { w: number; h: number } | null {
+  if (b.length > 24 && b.readUInt32BE(0) === 0x89504e47) return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  if (b.length > 30 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP") {
+    const kind = b.toString("ascii", 12, 16);
+    if (kind === "VP8X") return { w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3) };
+    if (kind === "VP8 ") return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+    if (kind === "VP8L") { const v = b.readUInt32LE(21); return { w: 1 + (v & 0x3fff), h: 1 + ((v >> 14) & 0x3fff) }; }
+  }
+  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) { i++; continue; }
+      const m = b[i + 1];
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+      i += 2 + b.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
 export function readTikTokProduct(o: any): { title: string | null; images: string[]; price: string | null; text: string | null } {
   const title = firstString(findAll(o, /^(title|product_name|name)$/i), 4);
   const price = firstString(findAll(o, /^(sale_price|real_price|price_str|format_price|min_price|price)$/i), 1);

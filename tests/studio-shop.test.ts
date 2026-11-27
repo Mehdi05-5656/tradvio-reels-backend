@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isTikTokShopUrl, tiktokShopCanonical, productImages, readTikTokProduct, shopIssues, SHOP_DISCLOSURE } from "../src/studio-shop.js";
+import { isTikTokShopUrl, tiktokShopCanonical, imageSize, productImages, readTikTokProduct, shopIssues, SHOP_DISCLOSURE } from "../src/studio-shop.js";
 import { endCardAss } from "../src/studio-ads.js";
 import { HOOK_FORMATS } from "../src/studio-hooks.js";
 import { LOOKS } from "../src/studio-product-looks.js";
@@ -57,4 +57,29 @@ test("TikTok Shop share links (tiktokshop.com, shop.tiktok.com/us/pdp) count, an
   assert.equal(tiktokShopCanonical("https://shop.tiktok.com/view/product/1729384756?region=US"), "https://www.tiktok.com/shop/pdp/1729384756");
   assert.equal(tiktokShopCanonical("https://vt.tiktok.com/ZSabc123/"), "https://vt.tiktok.com/ZSabc123/");
   assert.equal(tiktokShopCanonical("https://www.amazon.com/dp/B0X"), "https://www.amazon.com/dp/B0X");
+});
+
+test("the product's own pictures, never the seller's logo (live: the shop logo became the product once)", () => {
+  const body = { data: { seller_info: { shop_logo: { url_list: ["https://p16.example/shop-mark.jpeg"] }, seller_avatar: "https://p16.example/a.jpg" },
+    product_info: { product_base: { title: "HydroJug", images: [{ url_list: ["https://p16.example/bottle-1.webp"] }, { url_list: ["https://p16.example/bottle-2.webp"] }] } },
+    related_products: [{ cover: "https://p16.example/other.jpg" }], reviews: [{ images: ["https://p16.example/review.jpg"] }], thumb_url: "https://p16.example/thumb.jpg" } };
+  const imgs = productImages(body);
+  assert.deepEqual(imgs.slice(0, 2), ["https://p16.example/bottle-1.webp", "https://p16.example/bottle-2.webp"]);
+  for (const bad of ["shop-mark", "/a.jpg", "other.jpg", "review.jpg"]) assert.ok(!imgs.some((u) => u.includes(bad)), bad);
+});
+
+test("imageSize reads JPEG, PNG and WebP headers", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtemp, readFile } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  try { execFileSync("ffmpeg", ["-version"], { stdio: "ignore" }); } catch { return; }
+  const dir = await mkdtemp(join(tmpdir(), "imgsize-"));
+  // WebP (extended form), built by hand: this Mac's ffmpeg has no WebP encoder
+  const vp8x = Buffer.alloc(40); vp8x.write("RIFF", 0, "ascii"); vp8x.write("WEBP", 8, "ascii"); vp8x.write("VP8X", 12, "ascii"); vp8x.writeUIntLE(639, 24, 3); vp8x.writeUIntLE(359, 27, 3);
+  assert.deepEqual(imageSize(vp8x), { w: 640, h: 360 });
+  for (const [ext, w, h] of [["jpg", 800, 600], ["png", 120, 90]] as const) {
+    const f = join(dir, `x.${ext}`);
+    execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", `color=c=pink:s=${w}x${h}:d=1`, "-frames:v", "1", f]);
+    assert.deepEqual(imageSize(await readFile(f)), { w, h }, ext);
+  }
+  assert.equal(imageSize(Buffer.from("not an image at all, just words")), null);
 });
