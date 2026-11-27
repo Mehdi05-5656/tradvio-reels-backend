@@ -419,7 +419,7 @@ export async function runRecastJob(sb: SupabaseClient, deps: RecastDeps, job: Jo
     };
     if (trend) {
       const base = (deps.env?.STUDIO_PRESET_BASE ?? deps.env?.DASHBOARD_URL ?? process.env.STUDIO_PRESET_BASE ?? process.env.DASHBOARD_URL ?? "https://app.clone8.io");
-      drivingUrl = trendClipUrl(base, trend.id); sourceSeconds = trend.seconds;
+      drivingUrl = trendClipUrl(base, trend.id, deps.env ?? process.env); sourceSeconds = trend.seconds;
       const head = await (deps.fetch ?? fetch)(drivingUrl, { method: "HEAD", signal: AbortSignal.timeout(15_000) }).catch(() => null);
       if (!head || !head.ok) throw new RecastError("trend_unavailable", `trend ${trend.id} is not published`);
     } else {

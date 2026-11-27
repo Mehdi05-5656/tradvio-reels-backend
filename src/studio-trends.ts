@@ -14,5 +14,9 @@ export const STUDIO_TRENDS: StudioTrend[] = [
 ];
 
 export const trendById = (id: unknown): StudioTrend | null => STUDIO_TRENDS.find((t) => t.id === id) ?? null;
-export const trendClipUrl = (base: string, id: string) => `${base.replace(/\/+$/, "")}/trends/${id}.mp4`;
+/** The driving clips live in the public demo store (trends/<id>.mp4), not in the app: the app only ships the posters,
+ *  and a deploy from a checkout without the clips served its own page in their place (found Nov 26 2026: every trend
+ *  run was given HTML; none had been run since Oct 29). STUDIO_TREND_BASE can point elsewhere. */
+export const TREND_CLIP_BASE = "https://n0vjuejp1iev9hnr.public.blob.vercel-storage.com";
+export const trendClipUrl = (_base: string, id: string, env: Record<string, string | undefined> = process.env) => `${(env.STUDIO_TREND_BASE || TREND_CLIP_BASE).replace(/\/+$/, "")}/trends/${id}.mp4`;
 export const trendPosterUrl = (base: string, id: string) => `${base.replace(/\/+$/, "")}/trends/${id}.jpg`;
