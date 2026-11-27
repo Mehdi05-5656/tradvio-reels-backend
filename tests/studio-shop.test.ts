@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isTikTokShopUrl, productImages, readTikTokProduct, shopIssues, SHOP_DISCLOSURE } from "../src/studio-shop.js";
+import { isTikTokShopUrl, tiktokShopCanonical, productImages, readTikTokProduct, shopIssues, SHOP_DISCLOSURE } from "../src/studio-shop.js";
 import { endCardAss } from "../src/studio-ads.js";
 import { HOOK_FORMATS } from "../src/studio-hooks.js";
 import { LOOKS } from "../src/studio-product-looks.js";
@@ -44,4 +44,17 @@ test("what Shop-safe mode leaves: every hook format, realistic shots only, no pr
   assert.ok(LOOKS.filter((l) => l.kind === "motion").every((l) => !l.shop_safe));
   for (const id of ["shot-float", "shot-splash", "shot-exploded", "shot-billboard", "shot-powder", "shot-ice"]) assert.equal(LOOKS.find((l) => l.id === id)?.shop_safe, false, id);
   assert.equal(normalFacts({ shop: true }).shop, true); assert.equal(normalFacts({ shop: "yes" }).shop, false);
+});
+
+test("TikTok Shop share links (tiktokshop.com, shop.tiktok.com/us/pdp) count, and go to the vendor in its own form", () => {
+  const share = "https://www.tiktokshop.com/pdp/hydrojug-64oz-insulated-bottle/1729603435380839162";
+  const landed = "https://shop.tiktok.com/us/pdp/hydrojug-64oz-insulated-bottle/1729603435380839162?";
+  for (const u of [share, landed, "https://tiktokshop.com/pdp/x/1729603435380839162"]) assert.ok(isTikTokShopUrl(u), u);
+  assert.ok(!isTikTokShopUrl("https://www.tiktokshop.com/k/owala"));
+  assert.ok(!isTikTokShopUrl("https://tiktokshop.com.evil.example/pdp/x/1729603435380839162"));
+  assert.equal(tiktokShopCanonical(share), "https://www.tiktok.com/shop/pdp/hydrojug-64oz-insulated-bottle/1729603435380839162");
+  assert.equal(tiktokShopCanonical(landed), "https://www.tiktok.com/shop/pdp/hydrojug-64oz-insulated-bottle/1729603435380839162");
+  assert.equal(tiktokShopCanonical("https://shop.tiktok.com/view/product/1729384756?region=US"), "https://www.tiktok.com/shop/pdp/1729384756");
+  assert.equal(tiktokShopCanonical("https://vt.tiktok.com/ZSabc123/"), "https://vt.tiktok.com/ZSabc123/");
+  assert.equal(tiktokShopCanonical("https://www.amazon.com/dp/B0X"), "https://www.amazon.com/dp/B0X");
 });

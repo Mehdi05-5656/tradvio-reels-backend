@@ -184,6 +184,8 @@ export function readShopPage(html: string, base: string): { image: string | null
   title = title ?? meta("og:title") ?? (/<title[^>]*>([^<]+)<\/title>/i.exec(html)?.[1] ?? null);
   text = text ?? meta("og:description") ?? meta("description");
   price = price ?? (meta("product:price:amount") ? `${meta("product:price:amount")}${meta("product:price:currency") ? ` ${meta("product:price:currency")}` : ""}` : null);
+  // TikTok Shop's page carries no JSON-LD; its price sits in the page data as "real_price":"$71.49" (seen Nov 26 2026)
+  if (price == null) { const m = html.match(/"real_price":"([^"]{1,24})"/); if (m) price = m[1]; }
   if (image) { try { image = new URL(decode(image), base).toString(); } catch { image = null; } }
   return { image, title: title ? decode(title).trim() : null, text: text ? decode(text).trim() : null, price };
 }
@@ -339,17 +341,21 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
     if (!safeUrl(url)) return res.status(400).json({ error: "product_link_invalid", detail: "Paste the full https link to the product page" });
     try {
       const f = deps.fetch ?? fetch;
-      // TikTok Shop blocks plain reads: its product comes through our scraping vendor (studio-shop.ts), Shop-safe on
-      if (isTikTokShopUrl(url)) {
-        const shop = await fetchTikTokShopProduct(d, url, u);
-        const pic = await getSafe(f, shop.images[0], IMAGE_MAX, "image/*");
-        if (!pic || !/^image\/(jpeg|png|webp)/i.test(pic.type)) throw new ProductError("product_link_no_picture", "We couldn't download the product picture from that listing. Upload a photo of it instead.", 422);
-        const sb = sbFn();
-        const id = await storeImage(sb, u, pic.bytes, shop.title ?? "TikTok Shop product");
-        const img = await loadImage(sb, u, id);
-        const facts = normalFacts({ ...(await describeProduct(d, { bytes: img.bytes, mediaType: img.mediaType }, { title: shop.title, text: shop.text }, u)), source_url: url, price: shop.price, shop: true });
-        await saveFacts(sb, u, img.row, facts);
-        return res.status(201).json({ product: await listOne(sb, { ...img.row, probe: { ...(img.row.probe ?? {}), product: facts } }) });
+      // TikTok Shop: our scraping vendor first (price, shop); if it can't read the listing, TikTok's own page often can
+      const tiktok = isTikTokShopUrl(url);
+      if (tiktok) {
+        let shop: Awaited<ReturnType<typeof fetchTikTokShopProduct>> | null = null;
+        try { shop = await fetchTikTokShopProduct(d, url, u); }
+        catch (e) { if (!(e instanceof ShopError)) throw e; console.warn(`[products] TikTok Shop vendor read failed (${e.code}); trying the page itself`); }
+        const pic = shop ? await getSafe(f, shop.images[0], IMAGE_MAX, "image/*") : null;
+        if (shop && pic && /^image\/(jpeg|png|webp)/i.test(pic.type)) {
+          const sb = sbFn();
+          const id = await storeImage(sb, u, pic.bytes, shop.title ?? "TikTok Shop product");
+          const img = await loadImage(sb, u, id);
+          const facts = normalFacts({ ...(await describeProduct(d, { bytes: img.bytes, mediaType: img.mediaType }, { title: shop.title, text: shop.text }, u)), source_url: url, price: shop.price, shop: true });
+          await saveFacts(sb, u, img.row, facts);
+          return res.status(201).json({ product: await listOne(sb, { ...img.row, probe: { ...(img.row.probe ?? {}), product: facts } }) });
+        }
       }
       const page = await getSafe(f, url, PAGE_MAX, "text/html,application/xhtml+xml");
       if (!page || !/html/i.test(page.type)) throw new ProductError("product_link_unreadable", "That page didn't let us read it. Save a photo of the product and upload it instead.", 422);
@@ -360,7 +366,7 @@ export function registerProducts(app: Express, sbFn: () => SupabaseClient, deps:
       const sb = sbFn();
       const id = await storeImage(sb, u, pic.bytes, shop.title ?? "Product");
       const img = await loadImage(sb, u, id);
-      const facts = { ...(await describeProduct(d, { bytes: img.bytes, mediaType: img.mediaType }, { title: shop.title, text: shop.text }, u)), source_url: page.url, price: shop.price };
+      const facts = { ...(await describeProduct(d, { bytes: img.bytes, mediaType: img.mediaType }, { title: shop.title, text: shop.text }, u)), source_url: page.url, price: shop.price, ...(tiktok || isTikTokShopUrl(page.url) ? { shop: true } : {}) };
       await saveFacts(sb, u, img.row, normalFacts(facts));
       res.status(201).json({ product: await listOne(sb, { ...img.row, probe: { ...(img.row.probe ?? {}), product: normalFacts(facts) } }) });
     } catch (e) { fail(res, e); }

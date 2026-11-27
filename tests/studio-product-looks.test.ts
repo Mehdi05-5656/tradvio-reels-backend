@@ -82,3 +82,10 @@ test("a shop page: the product picture, name and price come from JSON-LD first, 
   assert.equal(b.image, "https://cdn.example.com/k.png"); assert.equal(b.title, "Kova Court & Street"); assert.equal(b.price, "89");
   assert.equal(readShopPage("<html></html>", "https://x.example.com").image, null);
 });
+
+test("TikTok Shop's own page: price from its page data when there is no JSON-LD", () => {
+  const html = `<meta property="og:title" content="HydroJug Sport"><meta property="og:image" content="https://p16.example/x.jpg"><script>{"price":{"real_price":"$71.49","currency":"USD"}}</script>`;
+  const r = readShopPage(html, "https://shop.tiktok.com/us/pdp/hydrojug/1729603435380839162");
+  assert.equal(r.price, "$71.49");
+  assert.equal(r.title, "HydroJug Sport");
+});

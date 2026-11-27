@@ -24,9 +24,19 @@ export function isTikTokShopUrl(raw: string): boolean {
   let u: URL; try { u = new URL(raw); } catch { return false; }
   const h = u.hostname.toLowerCase();
   if (h === "vt.tiktok.com" || h === "vm.tiktok.com") return true;
-  if (h === "shop.tiktok.com" && /\/view\/product\//.test(u.pathname)) return true;
+  // the public share link (www.tiktokshop.com/pdp/...) redirects to shop.tiktok.com/us/pdp/...; both seen live Nov 26 2026
+  if ((h === "tiktokshop.com" || h === "www.tiktokshop.com") && /^\/(?:[a-z]{2}\/)?(pdp|view\/product)\//.test(u.pathname)) return true;
+  if (h === "shop.tiktok.com" && /^\/(?:[a-z]{2}\/)?(pdp|view\/product)\//.test(u.pathname)) return true;
   if ((h === "www.tiktok.com" || h === "tiktok.com") && (/^\/shop\/(pdp|view\/product)\//.test(u.pathname) || /^\/view\/product\//.test(u.pathname))) return true;
   return false;
+}
+
+/** The form our scraping vendor reads (www.tiktok.com/shop/pdp/<slug>/<id>); short links and unknown shapes pass through. */
+export function tiktokShopCanonical(raw: string): string {
+  let u: URL; try { u = new URL(raw); } catch { return raw; }
+  const m = u.pathname.match(/\/(?:pdp|view\/product)\/(?:([^/]+)\/)?(\d{6,})\/?$/);
+  if (!m || !isTikTokShopUrl(raw) || /^v[mt]\.tiktok\.com$/i.test(u.hostname)) return raw;
+  return `https://www.tiktok.com/shop/pdp/${m[1] ? `${encodeURIComponent(decodeURIComponent(m[1]))}/` : ""}${m[2]}`;
 }
 
 const clean = (v: unknown, max: number) => String(v ?? "").replace(/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩]/g, "").replace(/\s+/g, " ").trim().slice(0, max);
@@ -63,7 +73,7 @@ export async function fetchTikTokShopProduct(deps: Deps, url: string, userId?: s
   const env = deps.env ?? process.env, key = env.SCRAPECREATORS_API_KEY;
   if (!key) throw new ShopError("shop_link_unavailable", "Reading TikTok Shop links isn't set up. Save a photo of the product and upload it instead.", 503);
   if (!safeUrl(url)) throw new ShopError("product_link_invalid", "Paste the full https link to the product");
-  const r = await (deps.fetch ?? fetch)(`https://api.scrapecreators.com/v1/tiktok/product?url=${encodeURIComponent(url)}&region=US`, { headers: { "x-api-key": key }, signal: AbortSignal.timeout(45_000) }).catch(() => null);
+  const r = await (deps.fetch ?? fetch)(`https://api.scrapecreators.com/v1/tiktok/product?url=${encodeURIComponent(tiktokShopCanonical(url))}&region=US`, { headers: { "x-api-key": key }, signal: AbortSignal.timeout(45_000) }).catch(() => null);
   recordCost({ job_id: null, user_id: userId ?? null, tool: "products", provider: "scrapecreators", product: "/v1/tiktok/product", source: "product_import", units: { calls: 1 }, usd: 0.0019, basis: "estimated", note: null });
   if (!r || !r.ok) throw new ShopError("shop_link_unreadable", "TikTok Shop didn't give us that product (US products only). Save a photo of it and upload it instead.", 422);
   const body = await r.json().catch(() => null);
