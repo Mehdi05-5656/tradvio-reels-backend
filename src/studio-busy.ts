@@ -19,6 +19,8 @@ const LABEL: Record<string, string> = {
 export function runLabel(tool: string, options: any): string {
   if (tool === "kage_motion" && options?.motivation) return "Motivation";
   if (tool === "kage_motion" && options?.story) return "Story";
+  // product pieces and presets run as instruments but have their own name ("Half turn", "Hook · Standard", a preset's title)
+  if (tool === "instrument" && typeof options?.look_title === "string" && options.look_title.trim()) return options.look_title.trim().slice(0, 60);
   return LABEL[tool] ?? tool.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
 

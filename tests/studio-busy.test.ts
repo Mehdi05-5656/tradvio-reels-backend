@@ -99,3 +99,9 @@ test("the busy answer: what takes the places, and the plan that would give more"
 test("the Clips queue estimate takes runs in the same order as the servers", () => {
   assert.deepEqual([queueRank({ plan_id: "studio" }), queueRank({ owner_pass: true }), queueRank({ plan_id: "creator" }), queueRank({ plan_id: "starter" }), queueRank(undefined)], [0, 0, 1, 2, 2]);
 });
+
+test("a product piece is named by its own title, not 'Instruments'", () => {
+  assert.equal(runLabel("instrument", { look: "move-turn", look_title: "Half turn" }), "Half turn");
+  assert.equal(runLabel("instrument", { hook: { tier: "standard" }, look_title: "Hook · Standard" }), "Hook · Standard");
+  assert.equal(runLabel("instrument", {}), "Instruments");
+});
