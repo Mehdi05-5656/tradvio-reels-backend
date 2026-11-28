@@ -201,12 +201,14 @@ test("events: buffered and written in one insert; page views bounded per person;
   recordEvent({ kind: "page", name: "home" }); // before init: dropped
   const inserted: any[] = [];
   initEvents(() => ({ from: (t: string) => ({ insert: async (rows: any[]) => { assert.equal(t, "studio_events"); inserted.push(...rows); return { error: null }; } }) }) as any);
-  assert.equal(recordPageViews(A, [{ page: "swap" }, { page: "nope" }, { page: "admin", tab: "money<script>" }]), 2);
+  assert.equal(recordPageViews(A, [{ page: "swap" }, { page: "Not A Page!" }, { page: "admin", tab: "money<script>" }]), 2, "a malformed name is dropped");
+  // pages shipped after the list was written are kept too (Nov 28 2026: Studios, Skills, Connect... showed zero views)
+  assert.equal(recordPageViews(B, [{ page: "studios" }, { page: "skills" }, { page: "connectors" }, { page: "town" }, { page: "live" }, { page: "x".repeat(40) }]), 5);
   assert.equal(recordPageViews(A, Array.from({ length: 40 }, () => ({ page: "home" }))), 20, "20 a request");
   assert.equal(recordPageViews(A, Array.from({ length: 20 }, () => ({ page: "home" }))), 8, "30 a minute");
   logClaudeCost(undefined, "caption", "claude-opus-5-5", { input_tokens: 1_000_000, output_tokens: 0 }, A);
   recordEvent({ kind: "email", name: "receipt", user_id: "not-a-uuid" });
-  assert.equal(await flushEvents(), 32);
+  assert.equal(await flushEvents(), 37);
   const claude = inserted.find((r) => r.kind === "claude");
   assert.deepEqual([claude.user_id, claude.name, claude.usd], [A, "caption", 4]);
   assert.equal(inserted.find((r) => r.name === "admin").props.tab, "moneyscript");

@@ -55,6 +55,11 @@ export async function flushEvents(): Promise<number> {
 export const TRACKED_PAGES = new Set(["home", "chat", "automations", "publish", "performance", "blueprint", "recast", "swap", "styles", "trends", "characters", "instruments", "instrument", "library", "pricing", "account", "onboarding", "managed", "admin",
   // added Nov 10 2026: every page that has shipped since the list was written was being dropped
   "clips", "captions", "accounts", "kage", "stories", "films", "influencer", "earn", "replies"]);
+/** Any page name the app can have (a short lowercase slug), not only the list above: every page shipped after a fixed
+ *  list was written was dropped without a trace, twice (Nov 10 2026; again Nov 28 2026: Studios, Skills, Connect,
+ *  Connectors, presets, In This Town, Live Clips, Split screen, Reshoot, Stunts, Motivation, Community, Editor all
+ *  showed zero views the day they opened to everyone). The per-person limit below still caps what one account sends. */
+export const PAGE_NAME_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const perMinute = new Map<string, { at: number; n: number }>();
 /** Accept up to 30 page views a minute per person; returns how many were kept. */
 export function recordPageViews(userId: string, items: unknown, now = Date.now()): number {
@@ -62,7 +67,7 @@ export function recordPageViews(userId: string, items: unknown, now = Date.now()
   let kept = 0;
   for (const it of items.slice(0, 20)) {
     const page = typeof (it as any)?.page === "string" ? (it as any).page : "";
-    if (!TRACKED_PAGES.has(page)) continue;
+    if (!TRACKED_PAGES.has(page) && !PAGE_NAME_RE.test(page)) continue;
     const w = perMinute.get(userId);
     if (w && now - w.at < 60_000 && w.n >= 30) break;
     if (!w || now - w.at >= 60_000) perMinute.set(userId, { at: now, n: 1 }); else w.n++;
