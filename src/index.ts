@@ -77,6 +77,7 @@ import { registerStudioAdmin } from "./studio-admin.js";
 import { registerCommunity } from "./studio-community.js";
 import { registerLiveClips } from "./studio-live-clips.js";
 import { registerAffiliates } from "./studio-affiliates.js";
+import { registerTracker } from "./tracker-routes.js";
 import { registerEditor } from "./studio-editor.js";
 import { flushCosts, initCosts, registerStudioCosts } from "./studio-costs.js";
 import { registerContentPerf, startContentPerfLoop } from "./studio-content-perf-routes.js";
@@ -151,6 +152,7 @@ async function main() {
   registerStudioCosts(app, getSb); // the admin panel's Money tab: what Clone8 paid, by vendor, tool and step
   registerContentPerf(app, getSb); // the admin panel's Content tab: the organic accounts posting for Clone8 (STUDIO_CONTENT_PERF_ENABLED)
   registerAffiliates(app, getSb); // the admin panel's Affiliate links tab, the site's click beacon and the sign-up claim (STUDIO_AFFILIATES_ENABLED)
+  registerTracker(app, getSb); // the admin panel's Tracker tab: the daily numbers and the tests registry, owner only (tracker-routes.ts)
   registerStoryExam(app, getSb, { plans: PLANS }); // the Stories practice exam (admin only; STORY_MASTER_PLAN.md phase 0)
   registerAssistant(app, getSb); // Studio assistant: chat that plans and runs Studio jobs; off without ANTHROPIC_API_KEY
   registerAutomations(app, getSb); // Studio automations: saved plans run again on new files
