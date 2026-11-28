@@ -102,7 +102,7 @@ export const CLONE8_SKILLS: OfficialSkill[] = [
   // ---- added Nov 26 2026 (docs/catalog/FILL_PLAN.md, wave 1): only tools Claude can reach; models named by family
   {
     slug: "food-menu-reel", title: "Food menu reel", line: "Every dish on your menu as a mouth-watering three-second hero shot.", category: "ads", kind: "use_case", minutes: 10,
-    example: "@Clone8 /food-menu-reel for my ramen shop: <links to three dish photos>", cover: clip("can-splash"), related: ["product-ad", "marketplace-set", "post-a-week"],
+    example: "@Clone8 /food-menu-reel for my ramen shop: <links to three dish photos>", cover: clip("food-hero"), related: ["product-ad", "marketplace-set", "post-a-week"],
     instructions: `1. ${GET_PHOTO("a photo of each dish (up to six), one plate per photo, from above or at the table's angle")}
 2. For each dish, make a 3-second vertical video with Kling 4.0's "Video from a picture" mode (find the id with clone8_models): a slow push-in, steam rising, a sauce or garnish landing, warm side light. Keep the plate, the food and the colours exactly as in the photo.
 3. Price all the dishes together, show the total, and make them on the person's yes. Follow each with clone8_job.
@@ -118,7 +118,7 @@ export const CLONE8_SKILLS: OfficialSkill[] = [
   },
   {
     slug: "beauty-launch", title: "Beauty launch", line: "A skincare or makeup product in splash, mist and texture shots.", category: "ads", kind: "skill", minutes: 6,
-    example: "@Clone8 /beauty-launch for my serum: <link>", cover: pic("sneaker-ad"), related: ["product-ad", "before-after-ad"],
+    example: "@Clone8 /beauty-launch for my serum: <link>", cover: pic("beauty-splash"), related: ["product-ad", "before-after-ad"],
     instructions: `1. ${GET_PHOTO("a sharp photo of the bottle or jar on its own")}
 2. Make three pictures with Seedream 5.0 Pro's "Edit a picture" mode, keeping the packaging and its words exactly: (a) the product in a crown of water splash on a soft pastel background; (b) in a cloud of fine mist with morning light; (c) beside a swatch of its texture on glass, macro.
 3. Price them together and make them on the person's yes; follow each with clone8_job.
