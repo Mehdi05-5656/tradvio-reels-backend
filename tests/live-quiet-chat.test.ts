@@ -163,7 +163,7 @@ test("a run handed back (a deploy, a lost lease) cuts the moments it chose befor
   const { ClipsError } = await import("../src/studio-clips.js");
   const store = new Map<string, string>();
   const withStore = () => { const f = fakeSb(); f.sb.storage = { from: () => ({
-    upload: async (k: string, buf: Buffer) => { store.set(k, buf.toString()); return { error: null }; },
+    upload: async (k: string, buf: Buffer, o: any) => { if (o?.contentType !== "text/plain") return { error: { message: `mime type ${o?.contentType} is not supported` } }; store.set(k, buf.toString()); return { error: null }; },
     download: async (k: string) => (store.has(k) ? { data: new Blob([store.get(k)!]), error: null } : { data: null, error: { message: "not found" } }) }) }; return f; };
   let chatReads = 0, checks = 0; const cut1: any[] = [], cut2: any[] = [];
   const first = runDeps([], { chat: async () => { chatReads++; return []; }, verify: async (i: any) => { checks++; return graded(i); },

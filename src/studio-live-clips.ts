@@ -789,11 +789,11 @@ export async function rerankWithClaude(deps: ClipsDeps, moments: Moment[], userI
 const clean = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
 /** Where a Live Clips run keeps its chosen moments (beside Clips' own plan for the same collection). */
-const livePlanKey = (u: string, collectionId: string) => `${u}/clips/${collectionId}/live-plan.json`;
+const livePlanKey = (u: string, collectionId: string) => `${u}/clips/${collectionId}/live-plan.txt`;
 type LivePlan = { job: string; kept: Moment[]; spares: Moment[]; checked: number; unsafe: number };
 async function saveLivePlan(sb: SupabaseClient, u: string, collectionId: string, plan: LivePlan, log: (l: string) => void): Promise<void> {
   try {
-    const up = await sb.storage.from("studio-outputs").upload(livePlanKey(u, collectionId), Buffer.from(JSON.stringify(plan)), { contentType: "application/json", upsert: true });
+    const up = await sb.storage.from("studio-outputs").upload(livePlanKey(u, collectionId), Buffer.from(JSON.stringify(plan)), { contentType: "text/plain", upsert: true }); // (the bucket refuses application/json: Nov 28 2026)
     if (up.error) log(`[live] plan not saved ${plan.job}: ${up.error.message}`);
   } catch (e: any) { log(`[live] plan not saved ${plan.job}: ${String(e?.message ?? e).slice(0, 120)}`); }
 }
