@@ -106,9 +106,15 @@ export async function bookOverheads(sb: SupabaseClient, day: string, deps: Deps 
   const env = deps.env ?? process.env, f = deps.fetch ?? fetch;
   const { from, to } = ptDayBounds(day);
   // what is already there for this day (refs), and what runs booked by provider and writer (for the bills' "minus")
-  const had = await sb.from("studio_costs").select("ref,provider,writer,usd").gte("spent_at", from).lt("spent_at", to).limit(50_000);
-  if (had.error) throw had.error;
-  const rows = (had.data ?? []) as Array<{ ref: string | null; provider: string; writer: string; usd: number }>;
+  // read in pages: the API answers at most 1,000 rows a request whatever limit is asked (Nov 28 2026: a busy day has
+  // more cost rows than that, so the day's own rows went unseen and were written again on every start, 70 times over)
+  const rows: Array<{ ref: string | null; provider: string; writer: string; usd: number }> = [];
+  for (let at = 0; at < 200_000; at += 1000) {
+    const had = await sb.from("studio_costs").select("ref,provider,writer,usd").gte("spent_at", from).lt("spent_at", to).order("id").range(at, at + 999);
+    if (had.error) throw had.error;
+    rows.push(...((had.data ?? []) as any[]));
+    if ((had.data ?? []).length < 1000) break;
+  }
   const refs = new Set(rows.map((r) => r.ref).filter(Boolean) as string[]);
   const bookedFor = (b: FixedBill) => rows.filter((r) => b.minus!.providers.includes(r.provider) && (!b.minus!.writer || r.writer === b.minus!.writer) && r.writer !== "cost-overheads").reduce((a, r) => a + (Number(r.usd) || 0), 0);
   const fixed = fixedBillRows(day, fixedBills(env), bookedFor);
@@ -120,7 +126,15 @@ export async function bookOverheads(sb: SupabaseClient, day: string, deps: Deps 
     if (customers.length) { const c = await sb.from("studio_customers").select("user_id,stripe_customer_id").in("stripe_customer_id", customers); for (const x of (c.data ?? []) as any[]) map.set(x.stripe_customer_id, x.user_id); }
     stripe = stripeFeeRows(txns, (c) => (c ? map.get(c) ?? null : null));
   }
-  const fresh = [...stripe, ...fixed].filter((r) => r.ref && !refs.has(r.ref)).map((r) => cleanCost(r));
+  // and each ref is looked up by name before it is written (a Stripe fee is dated when Stripe took it, which can fall
+  // outside the day read above)
+  const wanted = [...stripe, ...fixed].filter((r) => r.ref && !refs.has(r.ref));
+  for (let i = 0; i < wanted.length; i += 150) {
+    const seen = await sb.from("studio_costs").select("ref").eq("writer", "cost-overheads").in("ref", wanted.slice(i, i + 150).map((r) => r.ref!));
+    if (seen.error) throw seen.error;
+    for (const x of (seen.data ?? []) as any[]) refs.add(x.ref);
+  }
+  const fresh = wanted.filter((r) => !refs.has(r.ref!)).map((r) => cleanCost(r));
   if (fresh.length) { const ins = await sb.from("studio_costs").insert(fresh); if (ins.error) throw ins.error; }
   const usd = r6(fresh.reduce((a, r) => a + r.usd, 0));
   return { day, stripe: fresh.filter((r) => r.provider === "stripe").length, fixed: fresh.filter((r) => r.writer === "cost-overheads" && r.provider !== "stripe").length, usd };

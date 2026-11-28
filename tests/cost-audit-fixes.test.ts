@@ -103,3 +103,20 @@ test("Captions: words heard for the editor (no run) still count as Captions", ()
   assert.equal(r.tool, "captions"); assert.equal(r.job_id, null);
   assert.equal(r.usd, Math.round((36 / 3600) * STT_RATES.scribe * 1e6) / 1e6);
 });
+
+test("a busy day's rows are read in pages, so its fixed-bill rows are written once, not on every start (Nov 28 2026)", async () => {
+  const { bookOverheads } = await import("../src/cost-overheads.js");
+  // 2,500 run rows on the day, then the day's own overhead rows: the API gives 1,000 a request
+  const table: any[] = Array.from({ length: 2500 }, (_, i) => ({ id: i + 1, ref: null, provider: "claude", writer: "backend", usd: 0.01 }));
+  const sb: any = { from: () => ({
+    select: () => { let lo = 0, hi = 999, only: string[] | null = null;
+      const q: any = { gte: () => q, lt: () => q, order: () => q, eq: () => q, in: (_k: string, v: string[]) => { only = v; return q; }, range: (a: number, b: number) => { lo = a; hi = b; return q; },
+        then: (ok: any) => ok({ data: (only ? table.filter((r) => only!.includes(r.ref)) : table.slice(lo, hi + 1)).map((r) => ({ ...r })), error: null }) };
+      return q; },
+    insert: async (rows: any[]) => { for (const r of rows) table.push({ id: table.length + 1, ...r }); return { error: null }; } }) };
+  const first = await bookOverheads(sb, "2026-11-18", { env: {} });
+  assert.ok(first.fixed >= 4, "the day's fixed bills are written");
+  const again = await bookOverheads(sb, "2026-11-18", { env: {} });
+  assert.deepEqual([again.fixed, again.stripe, again.usd], [0, 0, 0], "a second run writes nothing");
+  assert.equal(table.filter((r) => r.writer === "cost-overheads").length, first.fixed);
+});
