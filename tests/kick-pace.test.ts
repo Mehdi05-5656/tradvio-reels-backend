@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { kickChatReplay, kickWeb, resetKickPace, KICK_CHAT_RETRIES, KICK_PACE } from "../src/live-sources.js";
+import { kickChatReplay, kickWeb, resetKickPace, resetKickProxy, kickStats, KICK_CHAT_RETRIES, KICK_PACE, KICK_PROXY_MS } from "../src/live-sources.js";
 
 const ok = (body: unknown) => ({ code: 0, so: `${JSON.stringify(body)}\n200`, se: "" });
 const status = (n: number) => ({ code: 0, so: `{}\n${n}`, se: "" });
@@ -51,4 +51,24 @@ test("an EMPTY page from Kick while the read is still inside the stream is waite
   const chat = await kickChatReplay(deps, "123", start, 60, { slices: 1 });
   assert.deepEqual(chat.map((m) => m.t), [20, 50], "the older page after the empty answers is read");
   assert.ok(waits.length >= 2);
+});
+
+test("a 403 from Kick (its shield refusing our address after a long chat read, Nov 27 2026) goes again through a fresh proxy session, which later calls keep for a while", async () => {
+  resetKickPace(); resetKickProxy();
+  const env = { STUDIO_YT_PROXY: "http://user:pw_session-abcd1234_lifetime-30m@proxy.example:12321" };
+  let t = 1_000_000; const seen: Array<string | null | undefined> = [];
+  const deps: any = { env, now: () => t, sleep: async () => undefined, log: () => {}, kickCurl: async (_p: string, proxy?: string | null) => { seen.push(proxy); return proxy ? ok({ source: "m3u8" }) : status(403); } };
+  assert.deepEqual(await kickWeb(deps, "api/v1/video/x"), { source: "m3u8" });
+  assert.equal(seen[0], null, "first straight from our server");
+  assert.ok(seen[1] && seen[1] !== env.STUDIO_YT_PROXY && /proxy\.example/.test(seen[1]!), "then a fresh session of the proxy");
+  assert.ok(kickStats.blocked >= 1);
+  await kickWeb(deps, "api/v1/video/y");
+  assert.equal(seen[2], seen[1], "the next call goes straight through the same session");
+  t += KICK_PROXY_MS + 1;
+  await kickWeb(deps, "api/v1/video/z");
+  assert.equal(seen[3], null, "after the window, back to our own address");
+  // no proxy set up: the 403 still fails the call, as before
+  resetKickProxy();
+  const plain: any = { env: {}, sleep: async () => undefined, log: () => {}, kickCurl: async () => status(403) };
+  await assert.rejects(kickWeb(plain, "api/v1/video/x"), (e: any) => e.code === "kick_blocked");
 });

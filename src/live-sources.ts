@@ -8,9 +8,9 @@
 // Neither needs the residential proxy from Render. Nothing here stores media: playlists are addresses, chat is counted
 // and dropped by the caller.
 import { spawn } from "node:child_process";
-import { ensureYtDlp } from "./studio-youtube.js";
+import { ensureYtDlp, youtubeProxy } from "./studio-youtube.js";
 
-export type LiveDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; /** tests: kick.com answers and waits without the network or the clock */ kickCurl?: (path: string) => Promise<{ code: number | null; so: string; se: string }>; sleep?: (ms: number) => Promise<void>;
+export type LiveDeps = { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (l: string) => void; /** tests: kick.com answers and waits without the network or the clock */ kickCurl?: (path: string, proxy?: string | null) => Promise<{ code: number | null; so: string; se: string }>; sleep?: (ms: number) => Promise<void>; /** tests: the clock for the Kick proxy window */ now?: () => number;
   /** tests: Twitch's chat replay through the proxy without the network */ twitchProxyCurl?: (body: string) => Promise<{ code: number | null; so: string; se: string }> };
 export class LiveSourceError extends Error { constructor(public code: string, message: string, public status = 400, public retry = false) { super(message); } }
 /** One chat message, reduced: seconds into the broadcast, who (an id), the text, how many emotes it carried. */
@@ -347,18 +347,36 @@ function kickTurn(deps: LiveDeps): Promise<void> {
 function kickBusy() { kickCool = Math.min(KICK_PACE.max_cool_ms, Math.max(KICK_PACE.cool_ms, kickCool * 2)); kickGap = Math.min(KICK_PACE.max_gap_ms, kickGap * 2); kickNextAt = Math.max(kickNextAt, Date.now() + kickCool); }
 function kickFine() { kickCool = 0; kickGap = Math.max(KICK_PACE.gap_ms, Math.round(kickGap * 0.9)); }
 /** Counts for the checks and the logs: calls made, 429s met. */
-export const kickStats = { calls: 0, busy: 0 };
+export const kickStats = { calls: 0, busy: 0, blocked: 0 };
 /** One call to kick.com, in turn (the pace above); a 429 is waited out and tried again here, up to KICK_PACE.tries times,
  *  so every caller (a lookup, a list, the chat reader) rides out Kick slowing us down. */
 export async function kickWeb(deps: LiveDeps, path: string): Promise<any> {
-  for (let k = 1; ; k++) {
-    try { return await kickOnce(deps, path); }
-    catch (e: any) { if (e?.code !== "kick_busy" || k >= KICK_PACE.tries) throw e; }
+  for (let k = 1, blocked = 0; ; k++) {
+    try { return await kickOnce(deps, path, kickProxyNow(deps)); }
+    catch (e: any) {
+      // Kick's shield refuses our server's own address after a long chat read (Nov 27 2026: 6,535 messages read, then
+      // the recording's lookup answered 403 on all three attempts of a run): the call goes again through a fresh
+      // residential proxy session, and Kick's calls keep using it for a while
+      if (e?.code === "kick_blocked" && blocked < KICK_BLOCKED_TRIES && kickUseProxy(deps)) { blocked++; kickStats.blocked++; continue; }
+      if (e?.code !== "kick_busy" || k >= KICK_PACE.tries) throw e;
+    }
   }
 }
-async function kickOnce(deps: LiveDeps, path: string): Promise<any> {
+/** A 403 from kick.com: how many fresh proxy sessions one call may try, and how long Kick's calls stay on the proxy. */
+export const KICK_BLOCKED_TRIES = 2, KICK_PROXY_MS = 30 * 60_000;
+let kickProxy: { proxy: string; until: number } | null = null;
+const kickProxyNow = (deps: LiveDeps) => (kickProxy && kickProxy.until > (deps.now?.() ?? Date.now()) ? kickProxy.proxy : null);
+function kickUseProxy(deps: LiveDeps): boolean {
+  const fresh = youtubeProxy(deps.env ?? process.env, true).proxy;
+  if (!fresh) return false;
+  kickProxy = { proxy: fresh, until: (deps.now?.() ?? Date.now()) + KICK_PROXY_MS };
+  (deps.log ?? console.log)("[live] kick refused our address (403): its calls go through a fresh proxy session for 30 min");
+  return true;
+}
+export const resetKickProxy = () => { kickProxy = null; };
+async function kickOnce(deps: LiveDeps, path: string, proxy: string | null = null): Promise<any> {
   await kickTurn(deps); kickStats.calls++;
-  const r = deps.kickCurl ? await deps.kickCurl(path) : await run("curl", ["-sS", "-m", "25", "-w", "\n%{http_code}", "-A", UA, "-H", "Accept: application/json", "-H", "Accept-Language: en-US,en;q=0.9", `https://kick.com/${path.replace(/^\//, "")}`], 40_000);
+  const r = deps.kickCurl ? await deps.kickCurl(path, proxy) : await run("curl", ["-sS", "-m", "25", ...(proxy ? ["-x", proxy] : []), "-w", "\n%{http_code}", "-A", UA, "-H", "Accept: application/json", "-H", "Accept-Language: en-US,en;q=0.9", `https://kick.com/${path.replace(/^\//, "")}`], 40_000);
   const lines = r.so.trim().split("\n"); const status = Number(lines.pop()); const body = lines.join("\n");
   if (r.code !== 0 && !status) throw new LiveSourceError("kick_down", "Kick did not answer", 502, true);
   if (status === 429) { kickBusy(); kickStats.busy++; throw new LiveSourceError("kick_busy", "Kick is asking us to slow down; try again in a few minutes", 503, true); }
