@@ -60,6 +60,9 @@ export function clipsNotice(j: any, env: Record<string, string | undefined>, uns
   // a run we made again for the person, on us, after theirs stopped on our side (options.house, set by the owner: Nov 25
   // 2026, a new customer's first Live Clips run): says what happened, that nothing was used, and where the clips are
   if (o.house && typeof o.house === "object") return houseNotice(j, title, url);
+  // a remake or re-run on us (Nov 28 2026: the night's remakes of short and failed clipping runs went out with the
+  // ordinary email, "you started a Clips run ... charged 0 credits", to people who had started nothing that night)
+  if (o.via === "remake" || o.remake_of || o.rerun_of) return remakeNotice(j, title, url);
   if (j.status !== "done") return { subject: `Your clips from "${title}" did not finish`, heading: "Your clips did not finish", paragraphs: [`The run on "${title}" stopped before it made any clips, so nothing was charged: the ${n(reserved)} credits it held are back on your balance.`, "You can start it again from the Clips page. If it stops again, reply to this email and we will look at it with you."], button: { label: "Open Clips", url }, footer };
   if (p.outcome === "needs_file") return { subject: `One step left for your clips from "${title}"`, heading: "One step left", paragraphs: [`YouTube would not let our servers download "${title}". We read it anyway and picked ${n(Number(p.total) || 0)} moments.`, "Upload the same video file on the run's page and we will cut them right away. Choosing them is already paid; the clips are charged when they are cut."], button: { label: "Upload the video", url }, footer };
   const made = Number(p.made_count ?? p.done ?? 0), asked = Number(p.asked ?? o.count ?? 0);
@@ -70,6 +73,24 @@ export function clipsNotice(j: any, env: Record<string, string | undefined>, uns
   paragraphs.push(`Charged: ${n(charged)} credits.${back ? ` The other ${n(back)} credits set aside for clips not made are back on your balance.` : ""}`);
   paragraphs.push("From the run's page you can post them or schedule them to your socials in one go.");
   return { subject: `Your ${word(made)} from "${title}" ${made === 1 ? "is" : "are"} ready`, heading: `Your ${word(made)} ${made === 1 ? "is" : "are"} ready`, paragraphs, button: { label: "See your clips", url }, footer };
+}
+
+/** The email for a run we made again on us after fixing problems on our side, whatever the first run came to (it
+ *  failed, or made fewer clips than it could have). Never says it was started by the person, never mentions a charge. */
+function remakeNotice(j: any, title: string, url: string): { subject: string; heading: string; paragraphs: string[]; button: { label: string; url: string }; footer: string[] } {
+  const o = j.options ?? {}, p = j.progress ?? {};
+  const footer = [`You are getting this because you ran Clips on "${title}" on Clone8, and we made that run again for you.`];
+  const find = `To find them later: open Clone8, go to Library, then open "${title}".`;
+  if (j.status !== "done") return { subject: `About your clips from "${title}"`, heading: "We tried your clips again", paragraphs: [`We fixed a few clipping problems on our side and tried your run on "${title}" again, on us. This time it could not make any clips from it.`, "Nothing was used from your balance. Reply to this email if you would like us to look at it with you."], button: { label: "Open Clone8", url }, footer };
+  const made = Number(p.made_count ?? p.done ?? 0), asked = Number(p.asked ?? o.count ?? 0);
+  const word = (x: number) => `${n(x)} ${x === 1 ? "clip" : "clips"}`;
+  const paragraphs = [
+    `We fixed a few clipping problems on our side, then made your run on "${title}" again for you, on us.`,
+    `${word(made)} ${made === 1 ? "is" : "are"} in your library, best first, ready for TikTok, Reels and Shorts. No credits were used; anything you were charged for the first run stays as it was.`,
+  ];
+  if (p.outcome === "fewer" && asked > made) paragraphs.push(`You asked for ${n(asked)}; it had ${word(made)} strong enough to post, so that is what we made.`);
+  paragraphs.push(find);
+  return { subject: `Your ${word(made)} from "${title}" ${made === 1 ? "is" : "are"} ready (made again, on us)`, heading: `Your ${word(made)} ${made === 1 ? "is" : "are"} ready`, paragraphs, button: { label: "See your clips", url }, footer };
 }
 
 /** The email for a Clips run made again on us (options.house). The library is where the person finds it by hand. */

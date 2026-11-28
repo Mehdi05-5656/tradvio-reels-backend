@@ -163,3 +163,17 @@ test("a Clips run made again on us says what happened, that nothing was used, an
   const plain = jobsNotice([{ ...job, options: { ...job.options, house: undefined } }], {}, undefined);
   assert.match(plain.text, /Charged: 0 credits/, "every other run keeps its email");
 });
+
+test("a remake on us gets its own email: made again on us, no 'you started', no charge line; a failed one says it plainly", async () => {
+  const { jobsNotice } = await import("../src/studio-notices.js");
+  const base = { id: "j", user_id: "u", tool: "clips", status: "done", credits_reserved: 0, credits_charged: 0,
+    options: { count: 5, via: "remake", remake_of: "0dd01e15", source: { title: "Who Can Make The Most Money In GTA 6?" }, collection_id: "c" }, progress: { made_count: 5, asked: 5, outcome: "done" } };
+  const ok = jobsNotice([base], {}, undefined);
+  assert.match(ok.subject, /Your 5 clips .* ready \(made again, on us\)/);
+  assert.ok(!/you started|Charged: 0/i.test(ok.html), "never 'you started', never 'Charged: 0'");
+  assert.match(ok.html, /No credits were used/);
+  const fail = jobsNotice([{ ...base, status: "failed", progress: {} }], {}, undefined);
+  assert.match(fail.subject, /About your clips/); assert.ok(!/0 credits it held/.test(fail.html));
+  const rerun = jobsNotice([{ ...base, options: { ...base.options, via: "connector", remake_of: undefined, rerun_of: "x" } }], {}, undefined);
+  assert.match(rerun.subject, /made again, on us/);
+});
