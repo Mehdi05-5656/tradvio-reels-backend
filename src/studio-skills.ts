@@ -121,7 +121,7 @@ const COLS = "id,slug,user_id,author_name,title,line,category,instructions,examp
 
 export function officialView(s: OfficialSkill, saved: boolean, withSteps = false): SkillView {
   return { slug: s.slug, title: s.title, line: s.line, category: s.category, kind: s.kind, minutes: s.minutes, example: s.example, by: "clone8", author: "Clone8", mine: false, visibility: "public", state: "live", note: null,
-    runs: null, saves: null, saved, cover: { poster_url: s.cover.poster, clip_url: s.cover.clip ?? null, aspect: s.cover.aspect ?? null }, related: s.related, created_at: null, ...(withSteps ? { instructions: s.instructions } : {}) };
+    runs: null, saves: null, saved, cover: { poster_url: s.cover.poster, clip_url: s.cover.clip ?? null, aspect: s.cover.aspect ?? null }, related: s.related, created_at: null, bring: s.bring ?? null, gets: s.gets ?? [], ...(withSteps ? { instructions: s.instructions } : {}) };
 }
 function rowView(r: Row, viewer: string, saved: boolean, urls: Map<string, string>, withSteps = false): SkillView {
   const cover = r.cover_key ? { poster_url: (r.cover_poster_key && urls.get(r.cover_poster_key)) || (r.cover_kind === "image" ? urls.get(r.cover_key) ?? null : null), clip_url: r.cover_kind === "video" ? urls.get(r.cover_key) ?? null : null, aspect: null } : null;
