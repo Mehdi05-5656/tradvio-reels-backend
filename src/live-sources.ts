@@ -374,6 +374,8 @@ function kickUseProxy(deps: LiveDeps): boolean {
   return true;
 }
 export const resetKickProxy = () => { kickProxy = null; };
+/** A Kick video that only its channel's subscribers can watch (or one its streamer made private). */
+export const kickRestricted = (v: any): boolean => !!v && (v.is_private === true || /subscriber/i.test(String(v.status ?? "")));
 async function kickOnce(deps: LiveDeps, path: string, proxy: string | null = null): Promise<any> {
   await kickTurn(deps); kickStats.calls++;
   const r = deps.kickCurl ? await deps.kickCurl(path, proxy) : await run("curl", ["-sS", "-m", "25", ...(proxy ? ["-x", proxy] : []), "-w", "\n%{http_code}", "-A", UA, "-H", "Accept: application/json", "-H", "Accept-Language: en-US,en;q=0.9", `https://kick.com/${path.replace(/^\//, "")}`], 40_000);
@@ -381,7 +383,14 @@ async function kickOnce(deps: LiveDeps, path: string, proxy: string | null = nul
   if (r.code !== 0 && !status) throw new LiveSourceError("kick_down", "Kick did not answer", 502, true);
   if (status === 429) { kickBusy(); kickStats.busy++; throw new LiveSourceError("kick_busy", "Kick is asking us to slow down; try again in a few minutes", 503, true); }
   if (status === 404) throw new LiveSourceError("kick_not_found", "Nothing is at that Kick link", 404);
-  if (status === 403) throw new LiveSourceError("kick_blocked", "Kick refused our servers for the moment; try again in a minute", 503, true);
+  if (status === 403) {
+    // Kick answers 403 with the video's own JSON when its recording is for subscribers only (Nov 27 2026: a broadcast
+    // turned subscriber-only after a run had read it; the remake was told "Kick refused our servers" three times). That
+    // is final, never a block to wait out; a block from Kick's shield is a page, not that JSON.
+    let j: any = null; try { j = JSON.parse(body); } catch { /* not JSON: the shield */ }
+    if (j && typeof j === "object" && kickRestricted(j)) throw new LiveSourceError("vod_restricted", "That broadcast's recording is for subscribers only on Kick, so it can't be clipped", 400);
+    throw new LiveSourceError("kick_blocked", "Kick refused our servers for the moment; try again in a minute", 503, true);
+  }
   if (status !== 200) throw new LiveSourceError("kick_error", `Kick answered ${status}`, 502, status >= 500);
   kickFine();
   try { return JSON.parse(body); } catch { throw new LiveSourceError("kick_error", "Kick sent something that is not JSON", 502, true); }
@@ -398,11 +407,13 @@ export async function kickBroadcasts(deps: LiveDeps, slug: string, ch?: KickChan
   const b = await kickWeb(deps, `api/v2/channels/${encodeURIComponent(slug)}/videos`);
   const list: any[] = Array.isArray(b) ? b : Array.isArray(b?.data) ? b.data : [];
   const c = ch ?? (await kickChannel(deps, slug));
-  return list.filter((v) => v?.video?.uuid && Number(v.duration) > 0).map((v) => ({ platform: "kick" as const, id: String(v.video.uuid), url: `https://kick.com/${c.slug}/videos/${v.video.uuid}`, title: String(v.session_title ?? "").slice(0, 160), channel: c.channel, login: c.slug, /* Kick's chat replay is asked by the channel's id, not its chat room's (the room's id answers an empty list: every Kick run read no chat until Nov 22 2026) */ channel_id: c.id, seconds: Math.round(Number(v.duration) / 1000), started_at: new Date(kickStart(String(v.start_time))).toISOString(), views: Number.isFinite(Number(v.views)) ? Number(v.views) : null, thumbnail_url: v.thumbnail?.src ?? v.thumbnail ?? null }));
+  // a subscriber-only recording cannot be read by anyone outside (Nov 27 2026: 7 of a streamer's last 8 were), so it is not offered
+  return list.filter((v) => v?.video?.uuid && Number(v.duration) > 0 && !kickRestricted(v.video)).map((v) => ({ platform: "kick" as const, id: String(v.video.uuid), url: `https://kick.com/${c.slug}/videos/${v.video.uuid}`, title: String(v.session_title ?? "").slice(0, 160), channel: c.channel, login: c.slug, /* Kick's chat replay is asked by the channel's id, not its chat room's (the room's id answers an empty list: every Kick run read no chat until Nov 22 2026) */ channel_id: c.id, seconds: Math.round(Number(v.duration) / 1000), started_at: new Date(kickStart(String(v.start_time))).toISOString(), views: Number.isFinite(Number(v.views)) ? Number(v.views) : null, thumbnail_url: v.thumbnail?.src ?? v.thumbnail ?? null }));
 }
 /** One past broadcast by its uuid: the master playlist of its recording and when it started. */
 export async function kickBroadcastSource(deps: LiveDeps, uuid: string): Promise<{ master: string; started_at: string; livestream_id: string | null }> {
   const b = await kickWeb(deps, `api/v1/video/${encodeURIComponent(uuid)}`);
+  if (kickRestricted(b)) throw new LiveSourceError("vod_restricted", "That broadcast's recording is for subscribers only on Kick, so it can't be clipped", 400);
   if (!b?.source) throw new LiveSourceError("vod_unreadable", "That broadcast's recording is not available", 404);
   const started = b?.livestream?.start_time ?? b?.livestream?.created_at ?? b?.created_at ?? null;
   return { master: String(b.source), started_at: started ? new Date(kickStart(String(started))).toISOString() : "", livestream_id: b?.livestream?.id != null ? String(b.livestream.id) : b?.live_stream_id != null ? String(b.live_stream_id) : null };

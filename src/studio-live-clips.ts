@@ -81,6 +81,15 @@ const partWords = (p: Part | null, seconds: number, channel: string, live: boole
 /** A broadcast of any length the platform still keeps (Twitch keeps up to 48 hours): the reading is by windows, so
  *  length only adds chat pages; the model checks are capped by verify_max whatever the length. */
 export const LIVE_LIMITS = { min_seconds: 600, max_seconds: 48 * 3600, max_clips: 50, min_chat_per_minute: 15, verify_per_clip: 4, verify_extra: 8, verify_max: 60 };
+/** How many moments a run may check: per clip asked plus a few, up to a ceiling. A check costs about $0.022 (measured
+ *  Nov 27 2026: $0.012 the check, $0.009 the hearing) and about 1 in 7 passes on a busy stream, so a 20-clip run on a
+ *  4-hour stream ran out at 60 with 28 moments unchecked. STUDIO_LIVE_VERIFY_PER_CLIP / STUDIO_LIVE_VERIFY_MAX raise it
+ *  without a deploy; unset, the budget is as before. */
+export function checkBudget(count: number, env: Record<string, string | undefined> = process.env): number {
+  const per = Math.max(1, Number(env.STUDIO_LIVE_VERIFY_PER_CLIP) || LIVE_LIMITS.verify_per_clip);
+  const max = Math.max(1, Math.min(300, Number(env.STUDIO_LIVE_VERIFY_MAX) || LIVE_LIMITS.verify_max));
+  return Math.min(max, count * per + LIVE_LIMITS.verify_extra);
+}
 /** Prices (RESEARCH.md 6.5, revised with experiment 1): reading a past stream by the hour (the chat, and about four
  *  candidate windows an hour heard and checked), at least the minimum; and each clip, which carries the two or three
  *  extra windows it took to find it (experiment 1: a third to a half of the checked windows become clips), so a stream
@@ -216,7 +225,7 @@ export async function quoteStreamClips(deps: ClipsDeps & LiveDeps, plans: PlanLi
   const warning = [noChat, countWarning].filter(Boolean).join(" ") || null;
   // how long, from the Nov 18 2026 live runs (a 7.8 h stream: chat in 15 s, 34 checks in 666 s, 5 cuts in 157 s; the
   // old formula promised 42 min for that 14-min run): the chat, then each candidate heard and checked, then the cuts
-  const cands = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
+  const cands = checkBudget(count, deps.env ?? process.env);
   // Kick's chat replay is read 25 messages a call at Kick's pace (~2 calls a second): a 3.4 h stream took 84 s (Nov 22
   // 2026); a busier chat takes longer; Twitch's comes in a few big pages
   const eta_seconds = Math.round(45 + (b.platform === "kick" ? b.seconds / 120 : b.seconds * 0.004) + cands * 22 + count * 35 + ((deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off" && span >= HYBRID.min_heard_s ? (part ? 60 + span * 0.03 : 240) : 0));
@@ -833,7 +842,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     // the run may make this many verdicts; a window that cannot be heard (muted on the platform, unreadable) is not one
     // of them (the first 35-hour run, Nov 19 2026: 10 of its 21 checks were muted windows, and 2 clips came of 5 asked;
     // most of those were likely past the 26.5-hour timestamp wrap, not muted: see hls-stretch.ts)
-    const want = Math.min(LIVE_LIMITS.verify_max, count * LIVE_LIMITS.verify_per_clip + LIVE_LIMITS.verify_extra);
+    const want = checkBudget(count, env);
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), read: chatRead, candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     // a part is read whole below, so a quiet chat there does not end the run (the chat replay runs ~4 min behind live)
     if (!cands.length && !(listenPart && (deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off")) throw new ClipsError("clips_none_found", part ? "The chat never lit up in that part of the stream: no moment stands out enough to clip" : "The chat never lit up: no moment in this stream stands out enough to clip", 422);
@@ -1106,7 +1115,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const asked = Number(o.count ?? o.max_clips) || kept.length;
     const word = (n: number) => `${n} ${n === 1 ? "clip" : "clips"}`;
     const note = made.length < kept.length && skipped.length ? `${word(made.length)} made; ${kept.length - made.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
-      : made.length < asked ? `The chat pointed at ${checked} moments and ${word(made.length)} stood alone as clips, of the ${asked} you asked for.${unsafeNote(unsafe, checked)} You were charged for ${word(made.length)}; the rest went back.` : null;
+      : made.length < asked ? `The chat pointed at ${checked === 1 ? "1 moment" : `${checked} moments`} and ${made.length === 1 ? "1 stood alone as a clip" : `${made.length} stood alone as clips`}, of the ${asked} you asked for.${unsafeNote(unsafe, checked)} You were charged for ${word(made.length)}; the rest went back.` : null;
     await setCollection({ status: "ready", note });
     await renew(sb, job, { stage: "done", outcome: made.length < asked ? "fewer" : "done", made_count: made.length, asked, charged }).catch(() => undefined);
     const done = await sb.rpc("studio_complete", { p_job: job.id, p_token: job.lease_token, p_outputs: [], p_credits_charged: charged });

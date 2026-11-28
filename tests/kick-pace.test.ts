@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { kickChatReplay, kickWeb, resetKickPace, resetKickProxy, kickStats, KICK_CHAT_RETRIES, KICK_PACE, KICK_PROXY_MS } from "../src/live-sources.js";
+import { kickChatReplay, kickWeb, kickBroadcasts, kickBroadcastSource, resetKickPace, resetKickProxy, kickStats, KICK_CHAT_RETRIES, KICK_PACE, KICK_PROXY_MS } from "../src/live-sources.js";
 
 const ok = (body: unknown) => ({ code: 0, so: `${JSON.stringify(body)}\n200`, se: "" });
 const status = (n: number) => ({ code: 0, so: `{}\n${n}`, se: "" });
@@ -71,4 +71,28 @@ test("a 403 from Kick (its shield refusing our address after a long chat read, N
   resetKickProxy();
   const plain: any = { env: {}, sleep: async () => undefined, log: () => {}, kickCurl: async () => status(403) };
   await assert.rejects(kickWeb(plain, "api/v1/video/x"), (e: any) => e.code === "kick_blocked");
+});
+
+test("a Kick recording made subscriber-only is final: no proxy tries, no retries, an honest message; the picker never offers one", async () => {
+  resetKickPace(); resetKickProxy();
+  const env = { STUDIO_YT_PROXY: "http://user:pw_session-abcd1234_lifetime-30m@proxy.example:12321" };
+  let calls = 0;
+  const subOnly = { id: 1, uuid: "227bf0a5", is_private: true, status: "subscriber_only", source: "", livestream: { start_time: "2026-11-24T20:21:29+00:00" } };
+  const deps: any = { env, sleep: async () => undefined, log: () => {}, kickCurl: async () => { calls++; return { code: 0, so: `${JSON.stringify(subOnly)}\n403`, se: "" }; } };
+  await assert.rejects(kickBroadcastSource(deps, "227bf0a5"), (e: any) => e.code === "vod_restricted" && /subscribers only/.test(e.message) && !e.retry);
+  assert.equal(calls, 1, "asked once: a 403 with the video's own JSON is not a block");
+  // the shield's page (not JSON) is still a block, tried again on the proxy
+  resetKickProxy(); let n = 0;
+  const shield: any = { env, sleep: async () => undefined, log: () => {}, kickCurl: async (_p: string, proxy?: string | null) => { n++; return proxy ? ok({ source: "m3u8", livestream: { start_time: "2026-11-24T20:21:29+00:00" } }) : { code: 0, so: "<html>Just a moment...</html>\n403", se: "" }; } };
+  assert.equal((await kickBroadcastSource(shield, "x")).master, "m3u8");
+  // the list: public recordings only
+  resetKickProxy();
+  const list = [
+    { duration: 3600000, session_title: "Public", source: "m3u8", video: { uuid: "pub", is_private: false, status: "public" }, created_at: "2026-11-24 20:21:34", start_time: "2026-11-24 20:21:34" },
+    { duration: 3600000, session_title: "Subs", source: null, video: { uuid: "sub", is_private: true, status: "subscriber_only" }, created_at: "2026-11-24 20:21:34", start_time: "2026-11-24 20:21:34" },
+  ];
+  const ch = { id: "1", chat_id: "2", slug: "c", channel: "C", followers: 1, live: false, title: null, category: null, viewers: null, playback_url: null } as any;
+  const lister: any = { env: {}, sleep: async () => undefined, log: () => {}, kickCurl: async () => ok(list) };
+  const got = await kickBroadcasts(lister, "c", ch);
+  assert.deepEqual(got.map((b: any) => b.id), ["pub"]);
 });

@@ -190,7 +190,7 @@ test("a run: chat read, candidates heard and checked, the kept moment cut and ch
   assert.match(verifyInputs[0].body, /chat burst begins/); assert.match(verifyInputs[0].head, /CaseOh_ on Twitch/);
   const complete = calls.find((c) => c[0] === "studio_complete");
   assert.equal(complete[1].p_credits_charged, 30 + 10);
-  assert.equal(updates.at(-1).status, "ready"); assert.match(updates.at(-1).note, /1 clip stood alone/);
+  assert.equal(updates.at(-1).status, "ready"); assert.match(updates.at(-1).note, /pointed at 1 moment and 1 stood alone as a clip,/);
   // nothing kept: the run fails without a charge
   const { sb: sb2, calls: calls2 } = fakeSb();
   const out2 = await runStreamClipsJob(sb2, { ...deps, verify: async () => ({ keep: false, score: 40, standalone: false, start_line: 0, end_line: 0, title: "", hook: "", why: "", why_not: "needs context", tags: [] }) }, { ...job, progress: {} });
@@ -521,4 +521,12 @@ test("the Clips hub: creators by name, their followers, and any stretch of a pas
   const q = await quoteStreamClips(deps, PLANS, { url: "https://www.twitch.tv/videos/2932003293", scope: "range", from: 3600, to: 7200, count: 2 }, {});
   assert.deepEqual(q.options.part, { from: 3600, to: 7200, scope: "range" }); assert.equal(q.options.price.analysis, 30);
   assert.match(q.summary, /1 h of CaseOh_, from 1:00 · up to 2 clips/);
+});
+
+test("the check budget is as before unless the switches raise it (Nov 27 2026: a 20-clip run ran out at 60)", async () => {
+  const { checkBudget } = await import("../src/studio-live-clips.js");
+  assert.equal(checkBudget(5, {}), 28);
+  assert.equal(checkBudget(20, {}), 60);
+  assert.equal(checkBudget(20, { STUDIO_LIVE_VERIFY_PER_CLIP: "7", STUDIO_LIVE_VERIFY_MAX: "150" }), 148);
+  assert.equal(checkBudget(50, { STUDIO_LIVE_VERIFY_MAX: "9999" }), 208, "per clip still 4; the ceiling is capped at 300");
 });
