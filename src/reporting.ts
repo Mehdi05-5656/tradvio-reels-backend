@@ -247,7 +247,9 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:
   // today, an hour for closed past ranges. Identical concurrent requests share one computation.
   // ?fresh=1 bypasses the cache (the Refresh button). The cache lives per app instance.
   const cache=new Map<string,{at:number;ttl:number;body:any}>(),inflight=new Map<string,Promise<any>>();
+  let askedAt=0; // when someone last opened a report: the warmer only works while the screens are in use
   app.get("/api/v2/report",async(req,res)=>{
+    askedAt=Date.now();
     try{
       const range=resolveRange(req.query),sb=sbFn();
       const visible=filterVisibleSlots(req,await loadSlots(sb));
@@ -274,8 +276,13 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:
   // Warmer: the operator's screens open with today, 7 and 30 days over every account, plus the previous
   // periods for the comparison. Recomputing those every 4 minutes keeps first loads at cache speed.
   // Warm entries live 6 minutes; closed past ranges an hour. Off in tests (options.warm).
+  // Only while someone has opened a report in the last REPORT_WARM_IDLE_MS, and never at boot (Nov 28 2026): the 30-day
+  // build reads ~250k analytics rows (8.4k more a day) in 6-8 s calls that hit the 8 s statement limit and split; every
+  // 8 minutes all day, and after every restart, it held the shared database long enough that job claims, balances and
+  // sign-up answers waited 14-30 s and Render answered 502. Nobody had opened a report in the week before.
   if(options.warm){
     const warmOnce=async()=>{
+      if(!reportInUse(askedAt,Date.now()))return;
       try{
         const sb=sbFn(),slots=await loadSlots(sb);if(!slots.length)return;
         const ids=slots.map((s:any)=>s.phone_slot),today=ptNow().ymd;
@@ -292,10 +299,13 @@ export function registerReportingRoutes(app:Express,sbFn:()=>any,options:{warm?:
         }
       }catch(e:any){console.warn("[report] warm failed:",e?.message??e);}
     };
-    setTimeout(warmOnce,15_000).unref();
     setInterval(warmOnce,4*60_000).unref();
   }
 }
+/** How long after the last report request the warmer keeps the operator's ranges warm. */
+export const REPORT_WARM_IDLE_MS=2*3600_000;
+/** Whether the warmer should work: a report was asked for within REPORT_WARM_IDLE_MS. */
+export function reportInUse(askedAt:number,now:number):boolean{return askedAt>0&&now-askedAt<REPORT_WARM_IDLE_MS;}
 /** The Pacific midnight nearest the middle of [start,end), as an ISO instant; null when none lies strictly inside. */
 export function ptMidnightBetween(startMs:number,endMs:number):string|null{
   const day=ptNow(new Date((startMs+endMs)/2)).ymd;

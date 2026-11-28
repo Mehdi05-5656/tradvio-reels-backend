@@ -72,3 +72,11 @@ test("ptMidnightBetween returns a Pacific midnight strictly inside the window", 
   assert.equal(mid, "2026-10-10T07:00:00.000Z");
   assert.equal(ptMidnightBetween(Date.parse("2026-10-10T07:00:00Z"), Date.parse("2026-10-11T07:00:00Z")), null);
 });
+
+test("the report warmer only works while the report is in use (Nov 28 2026: its 30-day builds held the database every 8 minutes, unopened for a week)", async () => {
+  const { reportInUse, REPORT_WARM_IDLE_MS } = await import("../src/reporting.js");
+  const now = Date.parse("2026-11-28T10:00:00Z");
+  assert.equal(reportInUse(0, now), false, "never asked since boot: no warming");
+  assert.equal(reportInUse(now - 60_000, now), true);
+  assert.equal(reportInUse(now - REPORT_WARM_IDLE_MS - 1, now), false, "idle for two hours: stops");
+});
