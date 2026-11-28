@@ -788,6 +788,24 @@ export async function rerankWithClaude(deps: ClipsDeps, moments: Moment[], userI
 }
 const clean = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
+/** Where a Live Clips run keeps its chosen moments (beside Clips' own plan for the same collection). */
+const livePlanKey = (u: string, collectionId: string) => `${u}/clips/${collectionId}/live-plan.json`;
+type LivePlan = { job: string; kept: Moment[]; spares: Moment[]; checked: number; unsafe: number };
+async function saveLivePlan(sb: SupabaseClient, u: string, collectionId: string, plan: LivePlan, log: (l: string) => void): Promise<void> {
+  try {
+    const up = await sb.storage.from("studio-outputs").upload(livePlanKey(u, collectionId), Buffer.from(JSON.stringify(plan)), { contentType: "application/json", upsert: true });
+    if (up.error) log(`[live] plan not saved ${plan.job}: ${up.error.message}`);
+  } catch (e: any) { log(`[live] plan not saved ${plan.job}: ${String(e?.message ?? e).slice(0, 120)}`); }
+}
+/** The plan this same job saved on an earlier attempt, or null (none, unreadable, or another job's). */
+export async function loadLivePlan(sb: SupabaseClient, u: string, collectionId: string, jobId: string): Promise<LivePlan | null> {
+  try {
+    const r = await sb.storage.from("studio-outputs").download(livePlanKey(u, collectionId));
+    if (r.error || !r.data) return null;
+    const p = JSON.parse(await r.data.text());
+    return p?.job === jobId && Array.isArray(p.kept) && p.kept.length && Array.isArray(p.spares) ? { job: p.job, kept: p.kept, spares: p.spares, checked: Number(p.checked) || 0, unsafe: Number(p.unsafe) || 0 } : null;
+  } catch { return null; }
+}
 export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, job: Job): Promise<string> {
   const env = deps.env ?? process.env, log = deps.log ?? ((l: string) => console.log(l));
   const o = job.options ?? {}, u = job.user_id, st = o.stream ?? {};
@@ -810,6 +828,20 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const inPart = (t: number) => !part || (t >= part.from && t <= part.to);
     if (part) timing.part = [part.from, part.to, part.scope];
     const b: Broadcast = { platform: st.platform, id: String(st.vod_id), url: String(o.url), title: String(o.source?.title ?? ""), channel: String(o.source?.channel ?? st.login ?? ""), login: String(st.login ?? ""), channel_id: String(st.channel_id ?? ""), seconds: Number(o.seconds) || 0, started_at: String(st.started_at ?? ""), views: null, thumbnail_url: null };
+    // The run's choice, kept once made: a run handed back (a deploy, a lost lease) cuts the same moments instead of
+    // reading the chat and checking every moment again. Nov 28 2026: a 20-clip run with 3 clips made was handed back
+    // by a deploy and started over; the made clips were matched to a new list by rank, which can repeat or skip one.
+    const playlistsOf = (x: Broadcast) => (deps.playlists ?? (async (y: Broadcast) => y.platform === "twitch" ? twitchVodPlaylists(deps, y.id, lines) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, y.id)).master), lines)))(x);
+    const stills = deps.stills ?? stillsFrom;
+    let pl: { audio: string; video: string }, kept: Moment[], spares: Moment[], checked = 0, unsafe = 0;
+    const saved = await loadLivePlan(sb, u, collectionId, job.id);
+    if (saved) {
+      ({ kept, spares, checked, unsafe } = saved);
+      spares = spares.filter((m) => !made.some((x) => x.rank === m.rank));
+      pl = await playlistsOf(b);
+      log(`[live] resumed ${JSON.stringify({ job: job.id, kept: kept.length, spares: spares.length, made: made.length })}`);
+    } else {
+    // (the choosing, A and B, left at its old indent so its history reads)
     // A. the chat replay, reduced to signals; the broadcast's playlists
     await renew(sb, job, { collection_id: collectionId, stage: "reading", done: 0, total: 0, message: "Reading the chat replay" });
     const tChat = Date.now(); let lastSaid = 0;
@@ -846,7 +878,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     log(`[live] chat ${JSON.stringify({ job: job.id, platform: b.platform, messages: chat.length, per_minute: Math.round(signals.perMinute), read: chatRead, candidates: cands.length, checking: want, top: cands.slice(0, 5).map((c) => [c.t_event, c.score]) })}`);
     // a part is read whole below, so a quiet chat there does not end the run (the chat replay runs ~4 min behind live)
     if (!cands.length && !(listenPart && (deps.env ?? process.env).STUDIO_LIVE_HYBRID !== "off")) throw new ClipsError("clips_none_found", part ? "The chat never lit up in that part of the stream: no moment stands out enough to clip" : "The chat never lit up: no moment in this stream stands out enough to clip", 422);
-    const pl = await (deps.playlists ?? (async (x) => x.platform === "twitch" ? twitchVodPlaylists(deps, x.id, lines) : pickRungs(await hlsVariants(deps, (await kickBroadcastSource(deps, x.id)).master), lines)))(b);
+    pl = await playlistsOf(b);
     // the stretches the platform muted (music it recognised): their moments cannot be heard or posted, so they are not checked
     const muted = deps.muted ?? (b.platform === "twitch" ? await mutedRanges(deps, pl.audio).catch(() => [] as Array<[number, number]>) : []);
     const mutedShare = (from: number, to: number) => muted.reduce((acc, [x, y]) => acc + Math.max(0, Math.min(to, y) - Math.max(from, x)), 0) / Math.max(1, to - from);
@@ -898,10 +930,9 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     await renew(sb, job, { stage: "transcribing", message: hearAll && cands.every((c) => c.source === "words") ? `Checking the ${Math.min(want, cands.length)} best moments it heard` : `Listening to the ${want} moments the chat pointed at` });
     const chatAt = (abs: number) => { const bin = Math.floor(abs / 10); return bin >= 0 && bin < signals.bins ? signals.rate[bin] : 0; };
     const baseAt = (abs: number) => { const bin = Math.floor(abs / 10); const h = signals.rate.slice(Math.max(0, bin - 60), Math.max(1, bin)).slice().sort((a, c) => a - c); return h.length ? h[Math.floor(h.length / 2)] : 0; };
-    const kept: Moment[] = []; let checked = 0, heardOk = 0, unsafe = 0, checkErrors = 0; const tListen = Date.now(); let claudeCalls = 0;
+    kept = []; let heardOk = 0, checkErrors = 0; const tListen = Date.now(); let claudeCalls = 0;
     const hear = deps.hear ?? ((f, d, sec) => hearWindow(deps, f, d, u, sec));
     const verify = deps.verify ?? ((input) => verifyWithClaude(deps, input, u));
-    const stills = deps.stills ?? stillsFrom;
     const windowOf = deps.fetchWindow ?? fetchSound;
     let skippedMuted = 0, unheard = 0, deferred = 0, extended = 0;
     // the order is the detector's, except that an hour gone cold (COLD) waits behind everyone else
@@ -1042,9 +1073,11 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       log(`[live] rerank ${JSON.stringify({ job: job.id, kept: kept.length, count, order: kept.map((m) => m.title.slice(0, 30)) })}`);
     }
     // the ones past the count stay as spares: cut only when a clip cannot be (Nov 27 2026, the same promise as Clips)
-    const spares = kept.splice(count);
+    spares = kept.splice(count);
     kept.forEach((m, k) => { m.rank = k + 1; });
     spares.forEach((m, k) => { m.rank = kept.length + k + 1; });
+    await saveLivePlan(sb, u, collectionId, { job: job.id, kept, spares, checked, unsafe }, log);
+    }
     // C. the cuts: each moment's stretch fetched from the recording, then the Clips cutter
     const todo = kept.filter((m) => !made.some((x) => x.rank === m.rank));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: kept.length, message: `Cutting clip ${Math.min(made.length + 1, kept.length)} of ${kept.length}`, made });

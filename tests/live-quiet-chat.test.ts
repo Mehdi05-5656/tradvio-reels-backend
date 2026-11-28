@@ -158,3 +158,31 @@ test("a moment check that fails is not a verdict: it does not count, and a run w
   assert.equal(await runStreamClipsJob(fakeSb().sb, g.deps, job({ from: 0, to: 7200, scope: "range" })), "done");
   assert.ok(g.cuts.length >= 1);
 });
+
+test("a run handed back (a deploy, a lost lease) cuts the moments it chose before: no second chat read or checks, no clip twice", async () => {
+  const { ClipsError } = await import("../src/studio-clips.js");
+  const store = new Map<string, string>();
+  const withStore = () => { const f = fakeSb(); f.sb.storage = { from: () => ({
+    upload: async (k: string, buf: Buffer) => { store.set(k, buf.toString()); return { error: null }; },
+    download: async (k: string) => (store.has(k) ? { data: new Blob([store.get(k)!]), error: null } : { data: null, error: { message: "not found" } }) }) }; return f; };
+  let chatReads = 0, checks = 0; const cut1: any[] = [], cut2: any[] = [];
+  const first = runDeps([], { chat: async () => { chatReads++; return []; }, verify: async (i: any) => { checks++; return graded(i); },
+    cut: async (_c: any, m: any) => { if (cut1.length >= 1) throw new ClipsError("lease_lost", "lease lost"); cut1.push(m); return { asset_id: `a${m.rank}`, bytes: 1, seconds: m.end - m.start }; } });
+  const j = job({ from: 0, to: 7200, scope: "range" });
+  j.options.count = 2;
+  assert.equal(await runStreamClipsJob(withStore().sb, first.deps, j), "lease_lost");
+  assert.equal(cut1.length, 1); const readsBefore = chatReads, checksBefore = checks;
+  assert.ok(store.size === 1, "the choice was kept");
+  // the next attempt: the same job, with what the first one made in its progress
+  const again = { ...j, progress: { made: [{ rank: cut1[0].rank, asset_id: "a1", seconds: 30 }] } };
+  const second = runDeps([], { chat: async () => { chatReads++; return []; }, verify: async (i: any) => { checks++; return graded(i); },
+    cut: async (_c: any, m: any) => { cut2.push(m); return { asset_id: `b${m.rank}`, bytes: 1, seconds: m.end - m.start }; } });
+  assert.equal(await runStreamClipsJob(withStore().sb, second.deps, again), "done");
+  assert.equal(chatReads, readsBefore, "the chat is not read again"); assert.equal(checks, checksBefore, "no moment is checked again");
+  assert.ok(cut2.every((m) => m.rank !== cut1[0].rank), "the clip already made is not cut twice");
+  assert.ok(second.logs.some((l) => l.startsWith("[live] resumed")));
+  // another job's plan is never taken
+  const other = runDeps([], { chat: async () => { chatReads++; return []; } });
+  await runStreamClipsJob(withStore().sb, other.deps, { ...j, id: "job-other" });
+  assert.equal(chatReads, readsBefore + 1, "a different job reads its own chat");
+});
