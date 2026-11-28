@@ -15,6 +15,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isInternalEmail } from "./studio-admin-auth.js";
 import { ptDay, ptDayBounds } from "./proxy-reconcile.js";
+import { loadTests, refreshTests, testCuts, type TestRow } from "./tests-registry.js";
 
 type Env = Record<string, string | undefined>;
 export const VALUED = new Set(["US", "CA", "GB", "AU", "NZ", "IE", "DE", "FR", "NL", "BE", "LU", "AT", "CH", "SE", "NO", "DK", "FI", "IS", "ES", "PT", "IT"]);
@@ -27,7 +28,7 @@ export const RECOMPUTE_DAYS = 7;
 export type Person = { user_id: string; created_at: string; country: string | null; role: string | null; heard: string | null };
 export type Ev = { user_id: string | null; kind: string; name: string; created_at: string; props?: any };
 export type DayInput = {
-  day: string; people: Person[]; events: Ev[]; /** first subscription payment per person (their ledger grant) */ paidAt: Map<string, string>;
+  day: string; people: Person[]; events: Ev[]; /** the registry's tests (tests-registry.ts): each adds its groups as cuts */ tests?: TestRow[]; /** first subscription payment per person (their ledger grant) */ paidAt: Map<string, string>;
   activity?: { invoices: Array<{ reason: string; cents: number }>; dayEvents: Ev[]; jobs: Array<{ tool: string; status: string; credits_charged: number | null; error_code: string | null }>;
     costs: Array<{ provider: string; usd: number }>; payersNow?: { paying: number; set_to_cancel: number; comped: number } | null };
 };
@@ -61,6 +62,7 @@ export function computeDay(inp: DayInput): Row[] {
     put("all", "", f); put("valued", VALUED.has(f.p.country ?? "") ? "yes" : "no", f); put("geo", geoOf(f.p.country), f);
     put("role", f.p.role ?? "?", f); put("heard", f.p.heard ?? "?", f); put("first_tool", f.first_tool, f); put("ab", abOf(f.p), f);
     // the cuts that matter most, inside the countries that buy
+    for (const [cut, value] of testCuts(inp.tests ?? [], f.p, { valued: VALUED.has(f.p.country ?? ""), role: f.p.role ?? "?", first_tool: f.first_tool })) put(cut, value, f);
     if (VALUED.has(f.p.country ?? "")) { put("valued_role", f.p.role ?? "?", f); put("valued_first_tool", f.first_tool, f); put("valued_ab", abOf(f.p), f); put("valued_heard", f.p.heard ?? "?", f); }
   }
   const rows: Row[] = [];
@@ -145,8 +147,8 @@ export async function loadDay(sb: SupabaseClient, day: string, internal: Set<str
     dayEvents: dayEvents.filter((e) => keep(e.user_id)), jobs: jobs.filter((j) => keep(j.user_id)), costs, payersNow } };
 }
 
-export async function writeDay(sb: SupabaseClient, day: string, internal: Set<string>, o: { latest?: boolean } = {}): Promise<number> {
-  const rows = computeDay(await loadDay(sb, day, internal, o)).map((r) => ({ ...r, computed_at: new Date().toISOString() }));
+export async function writeDay(sb: SupabaseClient, day: string, internal: Set<string>, o: { latest?: boolean; tests?: TestRow[] } = {}): Promise<number> {
+  const rows = computeDay({ ...(await loadDay(sb, day, internal, o)), tests: o.tests }).map((r) => ({ ...r, computed_at: new Date().toISOString() }));
   // a group that no longer exists for the day (nobody left in it) must not keep an old row
   const del = await sb.from("studio_daily_metrics").delete().eq("day", day); if (del.error) throw del.error;
   for (let i = 0; i < rows.length; i += 500) { const ins = await sb.from("studio_daily_metrics").insert(rows.slice(i, i + 500)); if (ins.error) throw ins.error; }
@@ -173,8 +175,10 @@ export function startDailyMetrics(sbFn: () => SupabaseClient, deps: { env?: Env;
       const first = (had.data ?? []).length ? ptDay(now(), 1 + RECOMPUTE_DAYS) : TRACKER_START;
       const days = daysBetween(first < TRACKER_START ? TRACKER_START : first, yesterday);
       const internal = await internalIds(sb, env); let rows = 0;
-      for (const d of days) rows += await writeDay(sb, d, internal, { latest: d === yesterday });
-      doneFor = yesterday; log(`[daily-metrics] ${JSON.stringify({ days: days.length, from: days[0], to: yesterday, rows })}`);
+      const tests = await loadTests(sb);
+      for (const d of days) rows += await writeDay(sb, d, internal, { latest: d === yesterday, tests });
+      const read = await refreshTests(sb, tests).catch((e: any) => { log(`[daily-metrics] tests not read: ${String(e?.message ?? e).slice(0, 160)}`); return 0; });
+      doneFor = yesterday; log(`[daily-metrics] ${JSON.stringify({ days: days.length, from: days[0], to: yesterday, rows, tests: read })}`);
     } catch (e: any) { log(`[daily-metrics] failed: ${String(e?.message ?? e).slice(0, 200)}`); }
     finally { busy = false; }
   };
