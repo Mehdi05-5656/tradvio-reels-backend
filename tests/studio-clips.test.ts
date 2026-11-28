@@ -6,7 +6,7 @@ import {
   linesFromSegments, linesFromWords, windows, finalizeMoments, buildClipFilter, outputSize, shotsFrom, trackPath, sampleTimes, quoteClips, clipsPrice, clipsCharge,
   likelyClips, countCap, parseMeta, parseTranscript, isLongSource, runClipsJob, keepVideo, cachedVideo, heardKey, settledAnalysis, clipsPrice, inputArgs, chooseMessage, CLIP_LIMITS, CLIP_LENGTHS, ClipsError, quoteCut,
   parseLoudness, loudnessExcess, loudPeaks, annotateLines, analysisUsd, perClipUsd, CLIP_RATES, CLIPS_SAFETY_MARGIN, frameUsdPerSecond, lengthWords,
-  timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, cutRateOf, mezzFps, sourceFps, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
+  lastPictureTime, spareCount, timingFrom, remainingSeconds, remainingParts, etaFor, DEFAULT_TIMING, cutRateOf, mezzFps, sourceFps, captionsPerClip, LEAN_RATES, DOWNLOAD_TRIES, noteLeanOutcome, leanPaused, leanEnv, resetLeanBreaker, LEAN_BREAKER,
 } from "../src/studio-clips.js";
 import { creditValueFloor } from "../src/studio-pricing.js";
 import { parseStreams, LinkError, downloadFormat, downloadSort, stretchProblem } from "../src/studio-youtube.js";
@@ -887,4 +887,56 @@ test("a stretch is usable only if it starts in place, has a picture and reaches 
   assert.match(stretchProblem({ start: 99.6, w: 1280, h: 720, seconds: 12 }, 100, 131)!, /stops short/);
   assert.match(stretchProblem({ start: 2.72, w: 1280, h: 720, seconds: 32 }, 520, 551)!, /does not start/, "the Nov 15 seek failure");
   assert.match(stretchProblem(null, 100, 131)!, /could not be read/);
+});
+
+// Nov 27 2026: 5 of 17 runs came out short. A stretch as webm reports its END time as its duration, so one that
+// stopped short passed the reach check and the cut came out as sound only; and a clip that could not be made was
+// never replaced, while stronger moments than the run's last clip sat unused.
+const choose4 = async () => [
+  { start_line: 10, end_line: 11, title: "First", hook: "h", why: "w", score: 90, tags: [] },
+  { start_line: 60, end_line: 61, title: "Second", hook: "h", why: "w", score: 80, tags: [] },
+  { start_line: 30, end_line: 31, title: "Third", hook: "h", why: "w", score: 75, tags: [] },
+  { start_line: 80, end_line: 81, title: "Fourth", hook: "h", why: "w", score: 70, tags: [] },
+];
+
+test("a picture's real end comes from its last frame, so a webm stretch's end time is never taken for its length", () => {
+  assert.equal(lastPictureTime("691.433,0.033\n745.0,0.04\n700.1,0.033\n"), 745.04);
+  assert.equal(lastPictureTime(""), null);
+  assert.equal(lastPictureTime("N/A,N/A\n"), null);
+  // a stretch from 691.4 s whose picture stops at 725 s, for a clip to 745 s: refused (it was taken as reaching 1436 s)
+  assert.match(stretchProblem({ start: 691.4, w: 854, h: 480, seconds: 725 - 691.4 }, 698, 745)!, /stops short/);
+  assert.ok(spareCount(2) === 2 && spareCount(10) === 3 && spareCount(50) === 5);
+});
+
+test("lean: a clip whose stretch fails every try is replaced by the next spare, so the run still makes every clip asked for", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  let whole = 0; const cut: number[] = []; const logs: string[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: (l: string) => logs.push(l), meta: META,
+    download: async (_u: string, target: string) => { whole++; await writeFile(target, "mp4"); },
+    sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
+    stretch: async (_u: string, a: number, _b: number, t: string) => { if (t.endsWith("lean-1")) throw new LinkError("link_fetch_failed", "YouTube took too long to send the video"); await writeFile(`${t}.webm`, "vp9"); return { file: `${t}.webm`, t0: a - 0.5 }; },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose: choose4,
+    cut: async (_ctx: any, m: any) => { cut.push(m.rank); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800, count: 2 }) as any), "done");
+  assert.equal(whole, 0, "no whole download");
+  assert.deepEqual(cut.sort(), [2, 3], logs.filter((l) => /clips\]/.test(l)).join("\n"));
+  assert.ok(logs.some((l) => /clip 1 of job1 replaced by spare 3/.test(l)));
+  assert.equal(sb.t.studio_collections[0].note ?? null, null, "nothing to apologise for: both clips came");
+});
+
+test("a cut that came out without its picture: the stretch is fetched again once; if it fails again, a spare takes the clip's place", async () => {
+  const sb = fakeSb(); sb.t.studio_collections.push({ id: "col1", user_id: U, status: "processing" });
+  const { writeFile } = await import("node:fs/promises");
+  const fetched: Record<string, number> = {}; const made: number[] = []; const logs: string[] = [];
+  const deps: any = { env: { ...ENV, STUDIO_CLIPS_LEAN: "on" }, plans: PLANS, log: (l: string) => logs.push(l), meta: META,
+    download: async () => { throw new Error("never the whole video"); },
+    sound: async (_u: string, t: string) => { await writeFile(`${t}.webm`, "opus"); return `${t}.webm`; },
+    stretch: async (_u: string, a: number, _b: number, t: string) => { const k = t.split("/").pop()!; fetched[k] = (fetched[k] ?? 0) + 1; await writeFile(`${t}.webm`, "vp9"); return { file: `${t}.webm`, t0: a - 0.5 }; },
+    extractAudio: writeStub, loudness: async () => [], words: async () => ({ words: WORDS, events: [] }), choose: choose4,
+    cut: async (_ctx: any, m: any) => { if (m.rank === 1) throw new ClipsError("clip_no_picture", "the clip's part of the video came without its picture", 502, true); made.push(m.rank); return { asset_id: `clip${m.rank}`, bytes: 1e6, seconds: m.end - m.start }; } };
+  assert.equal(await runClipsJob(sb, deps, JOB({ platform: "youtube", url: "https://www.youtube.com/watch?v=L_Guz73e6fw", seconds: 1800, count: 2 }) as any), "done");
+  assert.equal(fetched["lean-1"], 2, "the bad stretch fetched once more, not on and on");
+  assert.deepEqual(made.sort(), [2, 3]);
+  assert.ok(logs.some((l) => /clip 1 of job1 fetched again/.test(l)) && logs.some((l) => /replaced by spare 3/.test(l)));
 });

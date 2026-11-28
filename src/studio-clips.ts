@@ -50,6 +50,8 @@ export const CLIP_LENGTHS = {
 export type ClipLength = keyof typeof CLIP_LENGTHS;
 export type ClipFormat = "vertical" | "original";
 export const CLIP_LIMITS = { min_source: 120, max_source: 3 * 3600, max_clips: 50, min_score: 60 };
+/** Spare moments chosen past the count asked for: cut only when a clip cannot be (2 to 5, about a third of the count). */
+export const spareCount = (cap: number) => Math.min(5, Math.max(2, Math.ceil(cap * 0.3)));
 /** A video only Clips takes: over 10 minutes or 512 MB. Every other tool reads its source whole. */
 export const LONG_SOURCE = { seconds: 600, bytes: 536_870_912 };
 export const isLongSource = (a: { bytes?: number | null; probe?: any } | null | undefined): boolean =>
@@ -1033,16 +1035,45 @@ export function trimPlan(words: Array<{ start: number; end: number }>, dur: numb
 /** One clip run and one captions run never render at once on a server (one CPU, 2 GB). */
 export const busy = { clips: false, captions: false };
 export type CutResult = { asset_id: string; bytes: number; seconds: number };
-export async function probeLocal(file: string): Promise<{ w: number; h: number; fps: number | null; seconds: number; start: number | null }> {
+/** Where a file's picture really ends (its last video frame's time plus that frame's length), or null when unknown.
+ *  A stretch copied with its own timestamps (-copyts) as webm reports its END time as its "duration" (Nov 27 2026: a
+ *  stretch from 691.4 s said 745.0, so `start + duration` reached 1436 s and a stretch that stopped short passed the
+ *  reach check; the cut then seeked past its picture and the clip came out as sound only). Packets are read, not decoded. */
+export async function pictureEnd(file: string): Promise<number | null> {
   const raw = await new Promise<string>((resolve, reject) => {
-    const c = spawn("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate:format=duration,start_time", "-of", "json", file], { stdio: ["ignore", "pipe", "pipe"] });
+    const c = spawn("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", file], { stdio: ["ignore", "pipe", "pipe"] });
+    let o = ""; c.stdout.on("data", (b) => { o += b.toString(); }); c.on("error", reject); c.on("close", (code) => (code === 0 ? resolve(o) : reject(new Error(`ffprobe ${code}`))));
+  });
+  return lastPictureTime(raw);
+}
+/** The end of the last packet in ffprobe's "pts_time,duration_time" lines (packets can come out of order). */
+export function lastPictureTime(csv: string): number | null {
+  let end: number | null = null;
+  for (const line of csv.split("\n")) {
+    if (!line.trim()) continue;
+    const [a, b] = line.split(",").map((x) => Number(x));
+    if (!Number.isFinite(a)) continue;
+    const e = a + (Number.isFinite(b) && b > 0 ? b : 0);
+    if (end == null || e > end) end = e;
+  }
+  return end;
+}
+/** A stretch's start, size and how many seconds of picture it really holds (from its start to its last frame). */
+export async function probeStretch(file: string): Promise<{ w: number; h: number; fps: number | null; seconds: number; start: number | null }> {
+  const info = await probeLocal(file);
+  const end = await pictureEnd(file).catch(() => null);
+  return end != null && info.start != null ? { ...info, seconds: Math.max(0, end - info.start) } : info;
+}
+export async function probeLocal(file: string): Promise<{ w: number; h: number; fps: number | null; seconds: number; start: number | null; vSeconds?: number }> {
+  const raw = await new Promise<string>((resolve, reject) => {
+    const c = spawn("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate,duration:format=duration,start_time", "-of", "json", file], { stdio: ["ignore", "pipe", "pipe"] });
     let o = ""; c.stdout.on("data", (b) => { o += b.toString(); }); c.on("error", reject); c.on("close", (code) => (code === 0 ? resolve(o) : reject(new ClipsError("clip_media_failed", "the stretch could not be read", 502, true))));
   });
   const j = JSON.parse(raw);
   const v = (j.streams ?? []).find((s: any) => s.codec_type === "video") ?? {};
   const [n, d] = String(v.avg_frame_rate ?? "0/1").split("/").map(Number);
   const st = Number(j.format?.start_time);
-  return { w: Number(v.width) || 0, h: Number(v.height) || 0, fps: d ? n / d : null, seconds: Number(j.format?.duration) || 0, start: Number.isFinite(st) ? st : null };
+  return { w: Number(v.width) || 0, h: Number(v.height) || 0, fps: d ? n / d : null, seconds: Number(j.format?.duration) || 0, start: Number.isFinite(st) ? st : null, vSeconds: Number(v.duration) || 0 };
 }
 async function sceneCutsLocal(file: string): Promise<number[]> {
   const err = await ffmpeg(["-v", "info", "-nostdin", "-threads", "2", "-i", file, "-an", "-filter_threads", "1", "-vf", "scale=320:-2,select='gt(scene,0.3)',showinfo", "-f", "null", "-"], { timeoutMs: 120_000 });
@@ -1103,6 +1134,12 @@ export async function cutClip(ctx: CutCtx, m: Moment): Promise<CutResult> {
     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-threads", "2", "-c:a", "aac", "-b:a", "192k", "-ac", "2", mezz], { timeoutMs: 8 * 60_000, proxy: ctx.src.proxy });
   const info = await probeLocal(mezz);
   const dur = info.seconds || seconds;
+  // the cut must hold its picture (Nov 27 2026: 3 clips of 2 runs came out as sound only, then failed in the framing
+  // with "[0:v] matches no streams"; two were the runs' best clips): the worker fetches that stretch again
+  if (!(info.w > 0 && info.h > 0) || (info.vSeconds && info.vSeconds < Math.min(seconds, dur) - 2)) {
+    await rm(mezz, { force: true }).catch(() => undefined);
+    throw new ClipsError("clip_no_picture", info.w > 0 ? `the clip's picture stops ${(Math.min(seconds, dur) - (info.vSeconds ?? 0)).toFixed(1)} s early` : "the clip's part of the video came without its picture", 502, true);
+  }
   if (ctx.length === "minute" && dur < CLIP_LENGTHS.minute.min - 0.5) throw new ClipsError("clip_too_short", `the cut came out at ${dur.toFixed(1)} s, under a minute`, 502);
   // 2. framing: only needed when a wide picture becomes a tall one
   let segs: Seg[] = [{ start: 0, end: dur, mode: "crop", x0: 0.5, x1: 0.5 }];
@@ -1347,7 +1384,7 @@ async function signedSource(sb: SupabaseClient, u: string, assetId: string): Pro
   if (s.error || !s.data?.signedUrl) throw new ClipsError("source_missing", "The video could not be read", 502, true);
   return { video: s.data.signedUrl, audio: null, proxy: null, width: Number(a.data.probe?.width) || 0, height: Number(a.data.probe?.height) || 0, fps: null };
 }
-type Plan = { moments: Moment[]; seconds: number; transcribed: boolean; title: string | null; downloaded?: boolean; language?: string | null };
+type Plan = { moments: Moment[]; /** the next strongest moments, cut only when one of `moments` cannot be */ spares?: Moment[]; seconds: number; transcribed: boolean; title: string | null; downloaded?: boolean; language?: string | null };
 const blockedByYouTube = (e: any) => e instanceof LinkError && (e.code === "link_blocked" || e.code === "link_fetch_failed");
 /** The price a run settles on: the one quoted when it was started (kept in its options), or worked out again for a run
  *  started before prices were kept. */
@@ -1556,7 +1593,11 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         }));
         picks.push(...batch.flat());
       }
-      let moments = finalizeMoments(picks, lines, words, length, cap, CLIP_LIMITS.min_score, events);
+      // a few spares past the count, strongest first, for any clip that cannot be cut (Nov 27 2026: 5 of 17 runs came
+      // out short while unused moments of 66-83 sat in the same run)
+      const room = cap + spareCount(cap);
+      let pool = finalizeMoments(picks, lines, words, length, room, CLIP_LIMITS.min_score, events);
+      let moments = pool.slice(0, cap);
       // Fewer than asked: one more look at the stretches no pick covers, for the next strongest moments (still 60+).
       if (moments.length < cap && lines.length > 40) {
         const covered = (l: Line) => moments.some((m) => l.end > m.start - 2 && l.start < m.end + 2);
@@ -1564,7 +1605,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
         if (rest.length > 20) {
           await renew(sb, job, { message: `Found ${moments.length}; looking for ${cap - moments.length} more` });
           const more = (await Promise.all(windows(rest).slice(0, 3).map((w) => (deps.choose ?? ((x) => chooseWithClaude(deps, x, u)))({ lines: w, meta, length, peaks, wanted: cap - moments.length + 2, second: true })))).flat();
-          if (more.length) moments = finalizeMoments([...picks, ...more], lines, words, length, cap, CLIP_LIMITS.min_score, events);
+          if (more.length) { pool = finalizeMoments([...picks, ...more], lines, words, length, room, CLIP_LIMITS.min_score, events); moments = pool.slice(0, cap); }
         }
       }
       if (!moments.length) throw new ClipsError("clips_none_found", "No moment in this video stands out enough to be a clip", 422);
@@ -1572,7 +1613,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
       // run whose clips bunch in one part of the video can be checked (Nov 16 2026: 4 of 5 came from one 11-minute scene)
       { const at = new Map(lines.map((l) => [l.i, l.start]));
         log(`[clips] candidates ${JSON.stringify({ job: job.id, video_s: Math.round(seconds), kept: moments.map((m) => Math.round(m.start)), offered: picks.map((r) => [Math.round(at.get(Number(r.start_line)) ?? -1), Math.round(Number(r.score))]).sort((a, b) => a[0] - b[0]) })}`); }
-      plan = { moments, seconds, transcribed, title: meta.title ?? o.source?.title ?? null, downloaded: !blocked, language: heardLanguage };
+      plan = { moments, spares: pool.slice(cap), seconds, transcribed, title: meta.title ?? o.source?.title ?? null, downloaded: !blocked, language: heardLanguage };
       if (heardLanguage) log(`[clips] language ${JSON.stringify({ job: job.id, heard: heardLanguage, asked: o.language ?? "original" })}`);
       const up = await sb.storage.from("studio-outputs").upload(planKey(u, collectionId), Buffer.from(JSON.stringify(plan)), { contentType: "text/plain", upsert: true });
       if (up.error) log(`[clips] plan not saved ${job.id}: ${up.error.message}`);
@@ -1580,6 +1621,9 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const p = plan!;
     const price = priceOf(o, plans, env, p.seconds);
     const todo = p.moments.filter((m) => !made.some((x) => x.rank === m.rank));
+    // the spares not yet used (a retry keeps what an earlier attempt made from them); the run never makes more than asked
+    const spares = (p.spares ?? []).filter((m) => !made.some((x) => x.rank === m.rank));
+    const target = p.moments.length;
     // B. The source for cutting: the YouTube file (fetched above, or again on a retry), or the upload.
     let src: SourceInput;
     if (youtube) {
@@ -1609,7 +1653,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const cutOne = async (m: Moment, from: SourceInput) => {
       for (let attempt = 0; ; attempt++) {
         try { return await (deps.cut ?? cutClip)(from === src ? ctx : { ...ctx, src: from }, m); } catch (e: any) {
-          if (e instanceof ClipsError && (e.code === "storage_full" || e.code === "too_many_files" || e.code === "clip_too_short")) throw e;
+          if (e instanceof ClipsError && (e.code === "storage_full" || e.code === "too_many_files" || e.code === "clip_too_short" || e.code === "clip_no_picture")) throw e;
           if (attempt >= 1) throw e;
         }
       }
@@ -1626,7 +1670,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
           const began = Date.now();
           // (YouTube refuses a request now and then and lets the same one through seconds later: through the real proxy
           // on Nov 15 2026, 4 of ~30 calls were refused once and every retry went through; two more tries, 3 s and 8 s apart)
-          const once = (fresh = false) => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeLocal(f).catch(() => null) })))(
+          const once = (fresh = false) => (deps.stretch ?? ((x, a, b, t, so) => youtubeStretch(x, a, b, t, { env, fetch: deps.fetch, ...so, probe: (f) => probeStretch(f).catch(() => null) })))(
             o.url, Math.max(0, m.start - 1), m.end + 1, join(dir!, `lean-${m.rank}`), { maxHeight: stretchHeight, sharp, signal: job.signal, fresh });
           try {
             // (each retry on a fresh proxy session, Nov 15 2026: the first live run's session went bad and every retry on it
@@ -1674,10 +1718,14 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     };
     if (!leanOff) for (const m of queue.slice(0, LEAN.ahead + 1)) void stretchOf(m);
     const skipped: number[] = [];
+    const replaced: Array<[number, number]> = [];
+    const refetched = new Set<number>();
+    // a clip that cannot be made: the next spare takes its place (its stretch fetched like any other)
+    const replace = (m: Moment) => { const s = spares.shift(); if (!s) return; replaced.push([m.rank, s.rank]); queue.push(s); if (!leanOff) void stretchOf(s); log(`[clips] clip ${m.rank} of ${job.id} replaced by spare ${s.rank} (${Math.round(s.start)} s, score ${s.score})`); };
     const madeNow: number[] = [];
     const clipTimes: Array<[number, number]> = [];
     const worker = async () => {
-      while (queue.length && !full) {
+      while (queue.length && !full && made.length < target) {
         const m = queue.shift()!;
         if (!leanOff) for (const next of queue.slice(0, LEAN.ahead)) void stretchOf(next);
         try {
@@ -1701,14 +1749,25 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
           if (e instanceof ClipsError && (e.code === "storage_full" || e.code === "too_many_files")) { full = e; break; }
           if (e instanceof ClipsError && e.code === "lease_lost") throw e;
           if (e instanceof ClipsError && e.code === "clip_stretch_failed") { setAside.push(m); log(`[clips] clip ${m.rank} of ${job.id} set aside: its stretch could not be fetched`); continue; }
+          // a stretch whose picture did not reach the cut: fetched again once, on a fresh proxy session, then cut again
+          if (e instanceof ClipsError && e.code === "clip_no_picture" && lean && !refetched.has(m.rank) && stretches.has(m.rank)) {
+            refetched.add(m.rank); stretches.delete(m.rank); queue.unshift(m);
+            log(`[clips] clip ${m.rank} of ${job.id} fetched again: ${e.message}`); continue;
+          }
           skipped.push(m.rank);
           sLeft = Math.max(0, sLeft - Math.round(m.end - m.start));
           log(`[clips] clip ${m.rank} of ${job.id} skipped: ${String(e?.message ?? e).slice(0, 200)}`);
+          replace(m);
         }
       }
     };
     await worker();
-    // a single failed stretch: its clip is not made (the whole video for one clip would cost more than the run earns)
+    // a single failed stretch: its clip is not made (the whole video for one clip would cost more than the run earns);
+    // a spare takes its place, and a second failed stretch sends the rest to the whole video as before
+    while (setAside.length && spares.length && !full && made.length < target) {
+      for (const m of setAside.splice(0)) { skipped.push(m.rank); sLeft = Math.max(0, sLeft - Math.round(m.end - m.start)); log(`[clips] clip ${m.rank} of ${job.id} skipped: its stretch failed every try`); replace(m); }
+      await worker();
+    }
     for (const m of setAside.splice(0)) { skipped.push(m.rank); sLeft = Math.max(0, sLeft - Math.round(m.end - m.start)); log(`[clips] clip ${m.rank} of ${job.id} skipped: its stretch failed every try`); }
     if (!made.length) throw new ClipsError(full ? (full as ClipsError).code : "clips_cut_failed", full ? (full as ClipsError).message : "None of the clips could be cut.", full ? 409 : 502, !full);
     // D. Settle on what was made: reading once (at the video's real size), and each clip made. What was reserved for
@@ -1722,7 +1781,7 @@ export async function runClipsJob(sb: SupabaseClient, deps: ClipsDeps, job: Job)
     const asked = Number(o.count ?? o.max_clips) || p.moments.length;
     const word = (n: number) => `${n} ${n === 1 ? "clip" : "clips"}`;
     const note = full ? `${made.length} of ${p.moments.length} clips made: ${(full as ClipsError).message}. You were charged for the ${word(made.length)} made; the rest went back.`
-      : skipped.length ? `${word(made.length)} made; ${skipped.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
+      : made.length < target && skipped.length ? `${word(made.length)} made; ${target - made.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
       : made.length < asked && !o.plan_from ? `This video had ${word(made.length)} strong enough to post, of the ${asked} you asked for. You were charged for ${word(made.length)}; the rest went back.`
       : null;
     await setCollection({ status: "ready", note, ...(p.language ? { source: { ...(o.source ?? {}), format, length, language: p.language } } : {}) });

@@ -1031,9 +1031,11 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       const order = await (deps.rerank ?? ((ms) => rerankWithClaude(deps, ms, u)))(kept).catch((err: any) => { log(`[live] rerank of ${job.id} failed: ${String(err?.message ?? err).slice(0, 160)}`); return null; });
       if (order && order.length) { const by = new Map(kept.map((m, i) => [i, m])); const picked = [...new Set(order)].map((i) => by.get(i as number)).filter((m): m is Moment => !!m); for (const m of kept) if (!picked.includes(m)) picked.push(m); kept.splice(0, kept.length, ...picked); }
       log(`[live] rerank ${JSON.stringify({ job: job.id, kept: kept.length, count, order: kept.map((m) => m.title.slice(0, 30)) })}`);
-      kept.splice(count);
     }
+    // the ones past the count stay as spares: cut only when a clip cannot be (Nov 27 2026, the same promise as Clips)
+    const spares = kept.splice(count);
     kept.forEach((m, k) => { m.rank = k + 1; });
+    spares.forEach((m, k) => { m.rank = kept.length + k + 1; });
     // C. the cuts: each moment's stretch fetched from the recording, then the Clips cutter
     const todo = kept.filter((m) => !made.some((x) => x.rank === m.rank));
     await renew(sb, job, { collection_id: collectionId, stage: "cutting", done: made.length, total: kept.length, message: `Cutting clip ${Math.min(made.length + 1, kept.length)} of ${kept.length}`, made });
@@ -1093,6 +1095,8 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
       } catch (err: any) {
         if (err instanceof ClipsError && (err.code === "storage_full" || err.code === "too_many_files" || err.code === "lease_lost")) throw err;
         skipped.push(m.rank); log(`[live] clip ${m.rank} of ${job.id} skipped: ${String(err?.message ?? err).slice(0, 200)}`);
+        const spare = made.length + (todo.length - todo.indexOf(m) - 1) < kept.length ? spares.shift() : undefined;
+        if (spare) { todo.push(spare); log(`[live] clip ${m.rank} of ${job.id} replaced by spare ${spare.rank} (${Math.round(spare.start)} s, score ${spare.score})`); }
       } finally { await rm(file, { force: true }).catch(() => undefined); }
     }
     if (!made.length) throw new ClipsError("clips_cut_failed", "None of the clips could be cut.", 502, true);
@@ -1101,7 +1105,7 @@ export async function runStreamClipsJob(sb: SupabaseClient, deps: StreamDeps, jo
     const charged = Math.min(job.credits_reserved, clipsCharge(price, made.length));
     const asked = Number(o.count ?? o.max_clips) || kept.length;
     const word = (n: number) => `${n} ${n === 1 ? "clip" : "clips"}`;
-    const note = skipped.length ? `${word(made.length)} made; ${skipped.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
+    const note = made.length < kept.length && skipped.length ? `${word(made.length)} made; ${kept.length - made.length} could not be cut. You were charged for the ${word(made.length)} made; the rest went back.`
       : made.length < asked ? `The chat pointed at ${checked} moments and ${word(made.length)} stood alone as clips, of the ${asked} you asked for.${unsafeNote(unsafe, checked)} You were charged for ${word(made.length)}; the rest went back.` : null;
     await setCollection({ status: "ready", note });
     await renew(sb, job, { stage: "done", outcome: made.length < asked ? "fewer" : "done", made_count: made.length, asked, charged }).catch(() => undefined);
