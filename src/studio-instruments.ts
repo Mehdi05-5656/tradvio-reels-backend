@@ -62,9 +62,17 @@ const KIND_SUMMARY: Record<InstrumentKind, string> = {
 const VENDOR_PATH = /^higgsfield(?:-ai)?\//;
 const VENDOR_TEXT = /higgsfiel|documentation index|llms\.txt|https?:\/\//i;
 const DEV_NOTE = /higgsfiel|https?:\/\/|\b(GET|POST) \/|endpoint|integration|preset\\?_id|UUID/i;
+// The supplier's own model names are its brand: a person sees ours (owner, Nov 28 2026, UI audit). Internal code and
+// the HTTP calls keep the real paths; only the family and title a person or Claude reads change.
+export const OWN_NAMES: Record<string, string> = {
+  "Cinema Studio 4.0": "Clone8 Director", "Soul 2": "Clone8 Portrait", "Soul Cinema": "Clone8 Film Still", "Soul": "Clone8 Portrait Classic",
+  "Marketing Studio Image": "Clone8 Campaign", "Ads Studio": "Clone8 Ad Maker",
+};
+const ownTitle = (m: Instrument, name: string) => `${name}${m.title.includes(" — ") ? ` — ${m.title.split(" — ").slice(1).join(" — ")}` : ""}`;
 export function cleanInstrument(m: Instrument): Instrument {
+  const own = OWN_NAMES[m.family];
   return {
-    ...m, id: VENDOR_PATH.test(m.id) ? m.id.replace(VENDOR_PATH, "clone8/") : m.id, api_path: m.api_path ?? m.id,
+    ...m, ...(own ? { family: own, title: ownTitle(m, own) } : {}), id: VENDOR_PATH.test(m.id) ? m.id.replace(VENDOR_PATH, "clone8/") : m.id, api_path: m.api_path ?? m.id,
     provider: /higgsfield/i.test(m.provider) ? "Clone8" : m.provider, summary: !m.summary || VENDOR_TEXT.test(m.summary) ? KIND_SUMMARY[m.kind] : m.summary,
     notes: m.notes.filter((n) => !DEV_NOTE.test(n)), docs: "",
   };
@@ -76,6 +84,8 @@ const CATALOG: Catalog = { ...RAW_CATALOG, models: RAW_CATALOG.models.map(cleanI
 const ELEVEN = elevenJson as unknown as Catalog;
 
 /** Endpoints our first-class tools already own; they are not offered twice. */
+/** Kept for old jobs but not offered: the supplier's ad maker duplicates our own Products and Ads Studio (Nov 28 2026). */
+export const NOT_OFFERED = new Set(["higgsfield/ads-studio/v1.0"]);
 export const FIRST_CLASS = new Set(["higgsfield/genjutsu/motion-transfer/v1.0", "higgsfield/genjutsu/object-swap/v1.0", "higgsfield/genjutsu/restyle/v1.0"]);
 /** Audio references need an asset kind the library does not keep yet; those fields are hidden until it does. */
 const UNSUPPORTED_MEDIA: MediaKind[] = ["audio"];
@@ -96,7 +106,7 @@ export function instrumentsEnabled(env: Record<string, string | undefined> = pro
   if (env.STUDIO_INSTRUMENTS_ENABLED !== "true") return [];
   const allow = split(env.STUDIO_INSTRUMENTS_ALLOW), hide = new Set(split(env.STUDIO_INSTRUMENTS_HIDDEN));
   const previews = opts.preview || env.STUDIO_INSTRUMENTS_PREVIEW_OPEN === "true";
-  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!m.preview || previews) && (!allow.length || allow.includes(m.id) || allow.includes(apiPath(m))) && !hide.has(m.id) && !hide.has(apiPath(m)));
+  return allInstruments().filter((m) => (m.provider === "elevenlabs" ? elevenEnabled(env) : !!env.HIGGSFIELD_API_KEY) && (!m.preview || previews) && (!allow.length || allow.includes(m.id) || allow.includes(apiPath(m))) && !hide.has(m.id) && !hide.has(apiPath(m)) && !NOT_OFFERED.has(apiPath(m)));
 }
 const split = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 export const instrumentById = (id: unknown, env?: Record<string, string | undefined>, opts: { preview?: boolean } = {}): Instrument | null => instrumentsEnabled(env, opts).find((m) => m.id === id || apiPath(m) === id) ?? null;

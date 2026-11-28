@@ -143,7 +143,7 @@ export const CLONE8_SKILLS: OfficialSkill[] = [
     slug: "try-on-haul", title: "Try-on haul", line: "Three outfits on the same AI model, ready for a haul video.", category: "ugc", kind: "use_case", minutes: 8,
     example: "@Clone8 /try-on-haul with these three tops: <links>", cover: clip("paparazzi"), related: ["fashion-drop", "ugc-unboxing"],
     instructions: `1. ${GET_PHOTO("a photo of each garment (up to three)")}
-2. First make one AI-made model with a picture model (Soul 2 or Seedream 5.0 Pro, "Picture from words"): a friendly creator in a bright bedroom, mirror selfie framing. Show it and ask the person to keep it or try again (priced first).
+2. First make one AI-made model with a picture model (Clone8 Portrait or Seedream 5.0 Pro, "Picture from words"): a friendly creator in a bright bedroom, mirror selfie framing. Show it and ask the person to keep it or try again (priced first).
 3. For each garment, use Kling Image 4.0 "Edit a picture" with the model's picture and the garment to dress the same model, same room and pose. Price all together; make them on the person's yes.
 4. Offer a 5-second clip per outfit (Kling 4.0 "Video from a picture": a turn and a smile), priced first.`,
   },
@@ -228,7 +228,7 @@ export const CLONE8_SKILLS: OfficialSkill[] = [
     slug: "brand-mascot", title: "Brand mascot", line: "A friendly mascot for your brand, in a character sheet and an intro clip.", category: "characters", kind: "use_case", minutes: 8,
     example: "@Clone8 /brand-mascot for a coffee shop called Bean There", cover: pic("cartoon-3d"), related: ["character-pack", "one-character-five-looks"],
     instructions: `1. Agree the mascot: what it is (an animal, an object, a creature), its personality and the brand's colours. Free.
-2. Make the mascot with a picture model ("Picture from words"; Seedream 5.0 Pro or Soul 2): front view, friendly, simple shapes, on white. Offer two tries priced together; let the person pick.
+2. Make the mascot with a picture model ("Picture from words"; Seedream 5.0 Pro or Clone8 Portrait): front view, friendly, simple shapes, on white. Offer two tries priced together; let the person pick.
 3. From the picked one, make a character sheet with Kling Image 4.0 "Edit a picture" (front, side, back, three expressions) and a 5-second intro clip with Kling 4.0 "Video from a picture" (a wave and a bounce). Price both together; make them on the person's yes.`,
   },
   {
