@@ -8,7 +8,7 @@ import { ensureRenewalAlerts } from "./client-orgs.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig, loadSlots, ptNow, ptDateTimeToUtc } from "./publer-schedule";
 import { filterVisibleSlots, assertCanReadSlot, isAdmin, isOperator } from "./auth.js";
-import { registerReportingRoutes, shiftDay, publerThumbnail, paged } from "./reporting.js";
+import { registerReportingRoutes, shiftDay, publerThumbnail, paged, reportInUse } from "./reporting.js";
 import { sumLatest, effectiveStaleMinutes, interactions, engagementRatePct, fetchWindowSnapshots, type SnapshotRow } from "./analytics-util.js";
 import { memo } from "./cache.js";
 
@@ -39,14 +39,19 @@ export function registerV2Routes(app: Express, sbFn: SbGetter, options: {
 } = {}): void {
   const warm = process.env.REPORT_WARM !== "0" && process.env.NODE_ENV !== "test";
   registerReportingRoutes(app,sbFn,{warm});
+  // when the hashtags screen was last opened: its warmer works only while the screen is in use (Nov 28 2026: every
+  // 10 minutes, and 3 minutes after every boot, it read every account's whole history since launch, one account at a
+  // time, holding the shared database with the report warmer; nobody had opened the screen in a week)
+  let tagsAskedAt = 0;
+  app.use("/api/v2/hashtags", (_req, _res, next) => { tagsAskedAt = Date.now(); next(); });
   if (warm) {
     const warmTags = async () => {
+      if (!reportInUse(tagsAskedAt, Date.now())) return;
       try {
         const sb = sbFn(); const slots = (await loadSlots(sb)).map((s: any) => s.phone_slot); if (!slots.length) return;
         await memo(hashtagKey(slots, HASHTAG_MIN_DATE), HASHTAG_TTL_MS, () => computeHashtags(sb, slots, ptDateTimeToUtc(HASHTAG_MIN_DATE, "00:00").toISOString()));
       } catch (e: any) { console.warn("[hashtags] warm failed:", e?.message ?? e); }
     };
-    setTimeout(warmTags, 3 * 60_000).unref(); // after the report warmer's first pass, never alongside a deploy
     setInterval(warmTags, 10 * 60_000).unref();
   }
   // ==================== DEVICES ====================
