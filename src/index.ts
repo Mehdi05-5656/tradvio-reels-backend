@@ -36,6 +36,7 @@ import { registerClipsHealth, startClipsWatch } from "./clips-watch.js";
 import { startProxyReconcile } from "./proxy-reconcile.js";
 import { startCostOverheads } from "./cost-overheads.js";
 import { startCheckoutWatch } from "./checkout-watch.js";
+import { startDailyMetrics } from "./daily-metrics.js";
 import { registerFailures, startFailureWatch } from "./failure-watch.js";
 import { startSourceCheck } from "./source-check.js";
 import { startRecastLoop } from "./studio-recast.js";
@@ -186,6 +187,7 @@ async function main() {
   startProxyReconcile(getSb); // squares the YouTube proxy's cost with IPRoyal's own daily count (off without IPROYAL_API_TOKEN)
   startCostOverheads(getSb); // Stripe's real fees and the fixed monthly bills, a row each per day (cost-overheads.ts)
   startCheckoutWatch(getSb); // how each Stripe checkout ended and why cards were declined, hourly, read-only (checkout-watch.ts)
+  startDailyMetrics(getSb); // the daily tracker: each Pacific day's funnel, sales, cancels, runs and cost in studio_daily_metrics (daily-metrics.ts)
   startFailureWatch(getSb); // emails the owner about every customer failure in any tool (with the full reason and repeats); a daily summary at 07:30 PT
   startSourceCheck(); // every Clips source (Twitch, Kick, YouTube) walked from this server every 6 hours; the owner is emailed when one fails (src/source-check.ts)
   startAssistantLoop(getSb); // Studio assistant runs: chains one job per confirmed step
