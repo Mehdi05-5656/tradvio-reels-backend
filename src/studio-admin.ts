@@ -534,6 +534,13 @@ export function featureOf(j: any): string {
   if (j.tool === "kage_motion" && j.options?.motivation) return "Motivation";
   return TOOL_LABEL[j.tool] ?? String(j.tool);
 }
+/** A run Clone8 made on the person's behalf for free, to make up for one that failed or came out short (owner, Nov 28
+ *  2026): a remake (via "remake" / remake_of), a re-run (rerun_of), a goodwill run or one marked on_us, charged 0 credits.
+ *  Its cost is real, but it is not a sale: the log tags it "on us" and keeps it out of the margin. */
+export function isOnUs(j: { options?: any; credits_charged?: unknown }): boolean {
+  const o = j.options ?? {};
+  return num(j.credits_charged) === 0 && (o.via === "remake" || o.on_us === true || !!o.remake_of || !!o.rerun_of || !!o.goodwill_of);
+}
 function logRows(d: AdminData, q: LogQuery, env: Env) {
   const email = new Map(d.users.map((u) => [u.id, u.email]));
   const internal = new Set(d.users.filter((u) => isInternalEmail(u.email, env)).map((u) => u.id));
@@ -554,13 +561,15 @@ function logRows(d: AdminData, q: LogQuery, env: Env) {
       const worth = credits * creditValueFor(cust.get(j.user_id));
       // a finished job with no cost on record at all has no honest profit figure
       const known = c.source !== "none" || j.status !== "done";
+      const onUs = isOnUs(j);
       let label = String(j.tool);
       try { label = jobLabel(j); } catch { /* the tool's own name */ }
       return {
         id: String(j.id), at: String(j.created_at), user_id: String(j.user_id), email: email.get(j.user_id) ?? null, country: countries.get(j.user_id) ?? null,
         tool: String(j.tool), feature: featureOf(j), detail: label, status: String(j.status), via: jobVia(j, chatJobs, autoJobs),
         credits, worth_usd: r4(worth), cost_usd: known ? r4(c.usd) : null, cost_source: c.source,
-        profit_usd: known ? r4(worth - c.usd) : null, margin: known && worth > 0 ? r4((worth - c.usd) / worth) : null,
+        // on us: no sale, so no profit or margin of its own; the cost stands (and is totalled apart)
+        profit_usd: known && !onUs ? r4(worth - c.usd) : null, margin: known && !onUs && worth > 0 ? r4((worth - c.usd) / worth) : null, on_us: onUs,
         render_s: j.started_at && j.finished_at ? Math.max(0, Math.round((Date.parse(j.finished_at) - Date.parse(j.started_at)) / 1000)) : null,
       };
     });
@@ -571,14 +580,16 @@ export function adminLog(d: AdminData, q: LogQuery = {}, env: Env = process.env)
   const per = Math.min(200, Math.max(1, Math.round(q.per ?? LOG_PAGE)));
   const pages = Math.max(1, Math.ceil(rows.length / per));
   const page = Math.min(pages, Math.max(1, Math.round(q.page ?? 1) || 1));
-  const priced = rows.filter((r) => r.cost_usd != null);
-  const worth = rows.reduce((n, r) => n + r.worth_usd, 0), cost = priced.reduce((n, r) => n + (r.cost_usd ?? 0), 0);
+  // runs made on us stay out of the margin; their cost is shown on its own
+  const sold = rows.filter((r) => !r.on_us), onUs = rows.filter((r) => r.on_us);
+  const priced = sold.filter((r) => r.cost_usd != null);
+  const worth = sold.reduce((n, r) => n + r.worth_usd, 0), cost = priced.reduce((n, r) => n + (r.cost_usd ?? 0), 0);
   const pricedWorth = priced.reduce((n, r) => n + r.worth_usd, 0);
   const who = q.user ? d.users.find((u) => u.id === q.user) : null;
   return {
     user: q.user ? { user_id: q.user, email: who?.email ?? null } : null, from: q.from ?? null, to: q.to ?? null,
     page, pages, per, total: rows.length,
-    totals: { jobs: rows.length, done: rows.filter((r) => r.status === "done").length, failed: rows.filter((r) => r.status === "failed").length, credits: rows.reduce((n, r) => n + r.credits, 0), worth_usd: r2(worth), cost_usd: r2(cost), profit_usd: r2(pricedWorth - cost), margin: pricedWorth > 0 ? r4((pricedWorth - cost) / pricedWorth) : null, unpriced: rows.length - priced.length },
+    totals: { jobs: rows.length, done: rows.filter((r) => r.status === "done").length, failed: rows.filter((r) => r.status === "failed").length, credits: rows.reduce((n, r) => n + r.credits, 0), worth_usd: r2(worth), cost_usd: r2(cost), profit_usd: r2(pricedWorth - cost), margin: pricedWorth > 0 ? r4((pricedWorth - cost) / pricedWorth) : null, unpriced: sold.length - priced.length, on_us: { jobs: onUs.length, cost_usd: r2(onUs.reduce((n, r) => n + (r.cost_usd ?? 0), 0)) } },
     rows: rows.slice((page - 1) * per, page * per),
   };
 }
@@ -586,8 +597,8 @@ export type AdminLog = ReturnType<typeof adminLog>;
 /** Every matching row as a spreadsheet. Cells that a spreadsheet would run as a formula are made plain text. */
 export function adminLogCsv(d: AdminData, q: LogQuery = {}, env: Env = process.env): string {
   const cell = (v: unknown) => { let s = v == null ? "" : String(v); if (/^[=+\-@\t\r]/.test(s) && typeof v !== "number") s = `'${s}`; return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-  const head = ["time_utc", "email", "country", "feature", "detail", "status", "started_from", "credits_charged", "worth_usd", "our_cost_usd", "cost_basis", "profit_usd", "margin_pct", "render_seconds", "job_id"];
-  const lines = logRows(d, q, env).slice(0, 50_000).map((r) => [r.at, r.email, r.country, r.feature, r.detail, r.status, r.via, r.credits, r.worth_usd, r.cost_usd, r.cost_source === "none" ? (r.cost_usd == null ? "not recorded" : "") : r.cost_source, r.profit_usd, r.margin != null ? Math.round(r.margin * 1000) / 10 : null, r.render_s, r.id].map(cell).join(","));
+  const head = ["time_utc", "email", "country", "feature", "detail", "status", "started_from", "credits_charged", "worth_usd", "our_cost_usd", "cost_basis", "profit_usd", "margin_pct", "render_seconds", "job_id", "on_us"];
+  const lines = logRows(d, q, env).slice(0, 50_000).map((r) => [r.at, r.email, r.country, r.feature, r.detail, r.status, r.via, r.credits, r.worth_usd, r.cost_usd, r.cost_source === "none" ? (r.cost_usd == null ? "not recorded" : "") : r.cost_source, r.profit_usd, r.margin != null ? Math.round(r.margin * 1000) / 10 : null, r.render_s, r.id, r.on_us ? "yes" : ""].map(cell).join(","));
   return [head.join(","), ...lines].join("\r\n") + "\r\n";
 }
 

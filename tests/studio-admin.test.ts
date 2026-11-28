@@ -416,3 +416,21 @@ test("a job's measured cost wins over its estimate, failed or not; Stories, Moti
   assert.equal(row("kage_motion").jobs, 0, "a Story is not counted under Kage");
   assert.ok(m.notes.some((n: string) => /measured cost/.test(n)));
 });
+
+test("runs made on us (a remake or re-run of a failed or short run, 0 credits) are tagged and kept out of the margin; their cost is totalled apart", async () => {
+  const { isOnUs } = await import("../src/studio-admin.js");
+  const d = data();
+  const sold = adminLog(d, {}, ENV);
+  d.jobs.push({ id: "rm1", user_id: A, tool: "kage_motion", status: "done", options: { story: {}, cost_usd: 1.1, via: "remake", remake_of: "x" }, credits_reserved: 0, credits_charged: 0, outputs: [], progress: {}, created_at: ago(1) } as any);
+  d.jobs.push({ id: "rr1", user_id: A, tool: "kage_motion", status: "done", options: { story: {}, cost_usd: 0.73, via: "connector", rerun_of: "y" }, credits_reserved: 0, credits_charged: 0, outputs: [], progress: {}, created_at: ago(1) } as any);
+  const log = adminLog(d, {}, ENV);
+  const rm = log.rows.find((r) => r.id === "rm1")!, rr = log.rows.find((r) => r.id === "rr1")!;
+  assert.ok(rm.on_us && rr.on_us, "both tagged");
+  assert.equal(rm.profit_usd, null); assert.equal(rm.margin, null); assert.equal(rm.cost_usd, 1.1, "the cost stays visible");
+  assert.equal(log.totals.cost_usd, sold.totals.cost_usd, "not in the margin's cost");
+  assert.equal(log.totals.margin, sold.totals.margin);
+  assert.deepEqual(log.totals.on_us, { jobs: 2, cost_usd: 1.83 });
+  assert.equal(isOnUs({ options: { via: "remake" }, credits_charged: 50 }), false, "a charged run is a sale, whatever it is called");
+  assert.equal(isOnUs({ options: { via: "tool" }, credits_charged: 0 }), false, "an ordinary run that charged nothing is not on us");
+  assert.match(adminLogCsv(d, {}, ENV).split("\r\n")[0], /,on_us$/);
+});
