@@ -1,7 +1,7 @@
 // The daily tracker's numbers (src/daily-metrics.ts), Nov 28 2026.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeDay, geoOf, type DayInput, type Ev, type Person } from "../src/daily-metrics.js";
+import { computeDay, geoOf, payingNow, type DayInput, type Ev, type Person } from "../src/daily-metrics.js";
 
 const T0 = "2026-11-26T18:00:00.000Z";
 const at = (min: number) => new Date(Date.parse(T0) + min * 60_000).toISOString();
@@ -33,13 +33,19 @@ test("the day's activity sits on the all row: sales, cancels with reasons, runs,
     dayEvents: [ev(a, "checkout", "plan", 1), ev(a, "checkout", "topup", 5, { credits: 250 }), ev(a, "checkout", "payment_declined", 6),
       ev(a, "feature", "plan_cancel", 120, { started: at(0) }), ev(a, "feature", "plan_cancel_reason", 121, { feedback: "too_expensive" })],
     jobs: [{ tool: "clips", status: "done", credits_charged: 122, error_code: null }, { tool: "clips", status: "failed", credits_charged: 0, error_code: "chat_too_quiet" }, { tool: "kage_motion", status: "done", credits_charged: 130, error_code: null }],
-    costs: [{ provider: "claude", usd: 0.4 }, { provider: "claude", usd: 0.25 }, { provider: "stripe", usd: 1.14 }], payersNow: 61 } });
+    costs: [{ provider: "claude", usd: 0.4 }, { provider: "claude", usd: 0.25 }, { provider: "stripe", usd: 1.14 }], payersNow: { paying: 47, set_to_cancel: 13, comped: 2 } } });
   const m = rows.find((r) => r.cut === "all")!.metrics;
   assert.deepEqual([m.new_subs, m.new_subs_usd, m.renewals, m.plan_changes_usd], [2, 108, 1, 18.99]);
   assert.deepEqual([m.topups, m.topup_credits, m.declines, m.checkouts_opened], [1, 250, 1, 1]);
   assert.deepEqual([m.cancels, m.cancel_hours_after_paying, m.cancel_reasons], [1, [2], { too_expensive: 1 }]);
   assert.deepEqual(m.runs, { clips: 2, kage_motion: 1 }); assert.deepEqual(m.runs_failed, { clips: 1 }); assert.deepEqual(m.failure_reasons, { "clips:chat_too_quiet": 1 });
-  assert.equal(m.credits_charged, 252); assert.equal(m.cost_usd, 1.79); assert.deepEqual(m.cost_by_supplier, { claude: 0.65, stripe: 1.14 }); assert.equal(m.payers_now, 61);
+  assert.equal(m.credits_charged, 252); assert.equal(m.cost_usd, 1.79); assert.deepEqual(m.cost_by_supplier, { claude: 0.65, stripe: 1.14 }); assert.deepEqual([m.payers_now, m.payers_set_to_cancel, m.comped_plans], [47, 13, 2]);
   // a day with no sign-ups still has its all row
   assert.equal(computeDay({ day: "2026-11-01", people: [], events: [], paidAt: new Map(), activity: { invoices: [], dayEvents: [], jobs: [], costs: [] } }).find((r) => r.cut === "all")!.metrics.signups, 0);
+});
+
+test("who pays now leaves out plans set to cancel and comped plans (the owner's Stripe count, Nov 28 2026: 47 of 62 active)", () => {
+  const active = [...Array(47).fill({ stripe_subscription_id: "sub_x", cancel_at_period_end: false }), ...Array(13).fill({ stripe_subscription_id: "sub_y", cancel_at_period_end: true }), ...Array(2).fill({ stripe_subscription_id: null })];
+  assert.deepEqual(payingNow(active), { paying: 47, set_to_cancel: 13, comped: 2 });
+  assert.equal(payingNow([{ billing_source: "apple", stripe_subscription_id: null }]).paying, 1, "a plan billed by Apple is a real one");
 });

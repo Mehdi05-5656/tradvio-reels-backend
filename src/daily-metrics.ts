@@ -29,10 +29,15 @@ export type Ev = { user_id: string | null; kind: string; name: string; created_a
 export type DayInput = {
   day: string; people: Person[]; events: Ev[]; /** first subscription payment per person (their ledger grant) */ paidAt: Map<string, string>;
   activity?: { invoices: Array<{ reason: string; cents: number }>; dayEvents: Ev[]; jobs: Array<{ tool: string; status: string; credits_charged: number | null; error_code: string | null }>;
-    costs: Array<{ provider: string; usd: number }>; payersNow?: number | null };
+    costs: Array<{ provider: string; usd: number }>; payersNow?: { paying: number; set_to_cancel: number; comped: number } | null };
 };
 export type Row = { day: string; cut: string; value: string; metrics: Record<string, any> };
 
+/** Active plans split three ways: paying and renewing, paid but set to cancel, and comped (no subscription behind it). */
+export function payingNow(active: Array<{ stripe_subscription_id?: string | null; cancel_at_period_end?: boolean | null; billing_source?: string | null }>): { paying: number; set_to_cancel: number; comped: number } {
+  const real = active.filter((c) => !!c.stripe_subscription_id || c.billing_source === "apple");
+  return { paying: real.filter((c) => !c.cancel_at_period_end).length, set_to_cancel: real.filter((c) => !!c.cancel_at_period_end).length, comped: active.length - real.length };
+}
 export const geoOf = (c: string | null) => (c === "US" ? "US" : c && VALUED.has(c) ? "west" : c && SOUTH.has(c) ? "south" : "other");
 const abOf = (p: Person) => (Date.parse(p.created_at) < Date.parse(SIM_LAUNCH) ? null : parseInt(p.user_id.slice(-1), 16) % 2 === 1 ? "walk-through" : "control");
 const bump = (o: Record<string, number>, k: string, n = 1) => { o[k] = Math.round(((o[k] ?? 0) + n) * 1e6) / 1e6; };
@@ -88,7 +93,7 @@ export function computeDay(inp: DayInput): Row[] {
     const cost: Record<string, number> = {}; for (const c of a.costs) bump(cost, c.provider, Number(c.usd) || 0);
     m.cost_usd = Math.round(Object.values(cost).reduce((s, x) => s + x, 0) * 100) / 100;
     m.cost_by_supplier = Object.fromEntries(Object.entries(cost).map(([k, v]) => [k, Math.round(v * 100) / 100]));
-    if (a.payersNow != null) m.payers_now = a.payersNow;
+    if (a.payersNow != null) { m.payers_now = a.payersNow.paying; m.payers_set_to_cancel = a.payersNow.set_to_cancel; m.comped_plans = a.payersNow.comped; }
   }
   return rows;
 }
@@ -128,10 +133,12 @@ export async function loadDay(sb: SupabaseClient, day: string, internal: Set<str
     all<any>((a, b) => sb.from("studio_jobs").select("user_id,tool,status,credits_charged,error_code").gte("created_at", from).lt("created_at", to).range(a, b)),
     all<any>((a, b) => sb.from("studio_costs").select("user_id,provider,usd").gte("spent_at", from).lt("spent_at", to).range(a, b)),
   ]);
-  let payersNow: number | null = null;
+  // who pays now (owner, Nov 28 2026: the number that matches Stripe leaves out plans set to cancel): a real Stripe or
+  // Apple subscription that will renew; apart from those set to cancel (paid, ending) and comped plans (no subscription)
+  let payersNow: { paying: number; set_to_cancel: number; comped: number } | null = null;
   if (o.latest) {
-    const pay = await all<any>((a, b) => sb.from("studio_customers").select("user_id,owner_pass").in("status", ["active", "trialing"]).not("plan_id", "is", null).range(a, b));
-    payersNow = pay.filter((c) => !internal.has(c.user_id) && !c.owner_pass).length;
+    const pay = await all<any>((a, b) => sb.from("studio_customers").select("user_id,owner_pass,stripe_subscription_id,cancel_at_period_end,billing_source").in("status", ["active", "trialing"]).not("plan_id", "is", null).range(a, b));
+    payersNow = payingNow(pay.filter((c) => !internal.has(c.user_id) && !c.owner_pass));
   }
   return { day, people, events, paidAt, activity: {
     invoices: inv.map((s) => ({ reason: String(s.payload?.data?.object?.billing_reason ?? ""), cents: Number(s.payload?.data?.object?.amount_paid) || 0 })),
